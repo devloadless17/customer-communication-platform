@@ -145,6 +145,7 @@ export class TicketsService {
       ...(query.contactId ? { contactId: query.contactId } : {}),
       ...(query.conversationId ? { conversationId: query.conversationId } : {}),
       ...(query.channel ? { channel: query.channel } : {}),
+      ...(query.accountId ? { accountId: query.accountId } : {}),
       ...(query.tagIds ? { tagIds: query.tagIds } : {}),
       ...(query.breached ? { breachedOnly: true } : {}),
       ...(query.cursorCreatedAt && query.cursorId

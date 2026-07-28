@@ -74,6 +74,8 @@ export type UpdatePolicyInput = z.infer<typeof UpdatePolicySchema>;
 export const RuleConditionsSchema = z
   .object({
     channels: z.array(z.string().min(1)).max(20).optional(),
+    /** ChannelConnection ids — a specific number / Page / handle. */
+    channelAccountIds: z.array(id).max(50).optional(),
     tagIds: z.array(id).max(50).optional(),
     stageIds: z.array(id).max(50).optional(),
     sources: z.array(AssignmentSourceSchema).max(ASSIGNMENT_SOURCES.length).optional(),

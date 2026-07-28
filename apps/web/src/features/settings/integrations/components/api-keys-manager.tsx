@@ -51,6 +51,7 @@ const SCOPE_LABELS: Record<string, string> = {
   "write:catalog": "Write tags / stages / fields",
   "read:broadcasts": "Read broadcast campaigns + reports",
   "read:calls": "Read call history + calling permission",
+  "read:reports": "Read performance reports",
   "write:calls": "Request calling permission / send call buttons",
   "write:users": "Legacy — grants nothing (availability moved to Admin settings)",
   "write:workflows": "Fire manual-trigger workflows (runs can send messages)",

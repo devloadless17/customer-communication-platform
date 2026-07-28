@@ -63,6 +63,7 @@ export async function SectionShell({
         team={{ id: team.id, name: team.name }}
         canManageAvailability={permissions["availability:manage"]}
         canManageWorkflows={canManageUsers(user.role)}
+        canViewReports={permissions["teamActivity:view"]}
         subSidebar={subSidebar}
       />
       {subSidebar}

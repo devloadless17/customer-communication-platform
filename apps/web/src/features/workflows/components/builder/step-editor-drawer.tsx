@@ -196,9 +196,26 @@ function EditorForNode({
   const c = node.config as any;
   switch (node.type) {
     case "send_message":
-      return <SendMessageEditor config={c} onChange={onChangeConfig} fields={catalogs.fields} trigger={trigger} />;
+      return (
+        <SendMessageEditor
+          config={c}
+          onChange={onChangeConfig}
+          fields={catalogs.fields}
+          channelAccounts={catalogs.channelAccounts}
+          trigger={trigger}
+        />
+      );
     case "send_template":
-      return <SendTemplateEditor config={c} onChange={onChangeConfig} templates={catalogs.templates} fields={catalogs.fields} trigger={trigger} />;
+      return (
+        <SendTemplateEditor
+          config={c}
+          onChange={onChangeConfig}
+          templates={catalogs.templates}
+          fields={catalogs.fields}
+          channelAccounts={catalogs.channelAccounts}
+          trigger={trigger}
+        />
+      );
     case "add_comment":
       return <AddCommentEditor config={c} onChange={onChangeConfig} fields={catalogs.fields} trigger={trigger} />;
     case "assign_to":

@@ -357,11 +357,13 @@ export function SendMessageEditor({
   config,
   onChange,
   fields,
+  channelAccounts,
   trigger,
 }: {
-  config: { body?: string; target?: StepTarget };
+  config: { body?: string; target?: StepTarget; accountId?: string };
   onChange: (c: Record<string, unknown>) => void;
   fields: BuilderCatalogs["fields"];
+  channelAccounts: BuilderCatalogs["channelAccounts"];
   trigger: Trigger;
 }) {
   return (
@@ -385,12 +387,68 @@ export function SendMessageEditor({
         onChange={(target) => onChange({ ...config, target })}
         extraHint="Free-form sends require the contact to have messaged you in the last 24h. For cold reachout, use a Send Template step."
       />
-      {/* Sender-identity honesty for multi-account workspaces: workflows have
-          no account picker (deliberately — automation follows the thread), so
-          state the routing rule instead of leaving it implicit. */}
+      {/* Sender identity. A reply always follows the thread — moving a live
+          conversation to another number mid-flight would reach the customer
+          from a sender they never messaged. The picker therefore governs only
+          the case where this step OPENS a thread, and hides itself when there
+          is nothing to choose between. */}
+      <SendAccountPicker
+        accounts={channelAccounts}
+        value={config.accountId}
+        onChange={(accountId) => onChange({ ...config, accountId })}
+      />
+    </div>
+  );
+}
+
+/**
+ * Which account a send-step OPENS a conversation on.
+ *
+ * Hidden entirely when the workspace has fewer than two accounts: there is
+ * nothing to disambiguate, and the old copy ("a workflow that starts a
+ * brand-new conversation uses the channel's default") was honest but described
+ * a limitation rather than offering a choice.
+ *
+ * Deliberately does NOT govern replies. An existing thread always sends from
+ * its own account — re-pointing a live conversation would reach the customer
+ * from a number they never messaged, with no service window and an unknown
+ * sender.
+ */
+function SendAccountPicker({
+  accounts,
+  value,
+  onChange,
+}: {
+  accounts: BuilderCatalogs["channelAccounts"];
+  value: string | undefined;
+  onChange: (accountId: string | undefined) => void;
+}) {
+  if (accounts.length < 2) {
+    return (
       <p className="text-2xs text-muted-foreground">
-        Sends go out on the conversation&apos;s own number/account; a workflow
-        that starts a brand-new conversation uses the channel&apos;s default.
+        Sends go out on the conversation&apos;s own number/account.
+      </p>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label className="text-xs font-medium">
+        When this starts a new conversation, send from
+      </label>
+      <Select
+        value={value ?? ""}
+        onChange={(e) => onChange(e.target.value || undefined)}
+      >
+        <option value="">The channel&apos;s default account</option>
+        {accounts.map((a) => (
+          <option key={a.id} value={a.id}>
+            {a.name} · {a.channel}
+          </option>
+        ))}
+      </Select>
+      <p className="text-2xs text-muted-foreground">
+        Replies always go out on the conversation&apos;s own account — this only
+        applies when the step opens a brand-new thread.
       </p>
     </div>
   );
@@ -411,12 +469,19 @@ export function SendTemplateEditor({
   onChange,
   templates,
   fields,
+  channelAccounts,
   trigger,
 }: {
-  config: { templateId?: string; variables?: { body?: string[]; header?: string }; target?: StepTarget };
+  config: {
+    templateId?: string;
+    variables?: { body?: string[]; header?: string };
+    target?: StepTarget;
+    accountId?: string;
+  };
   onChange: (c: Record<string, unknown>) => void;
   templates: BuilderCatalogs["templates"];
   fields: BuilderCatalogs["fields"];
+  channelAccounts: BuilderCatalogs["channelAccounts"];
   trigger: Trigger;
 }) {
   const approved = templates.filter((t) => t.status === "approved");
@@ -490,6 +555,14 @@ export function SendTemplateEditor({
         target={config.target}
         onChange={(target) => onChange({ ...config, target })}
         phoneMode="free"
+      />
+      {/* Especially load-bearing for templates: a template belongs to ONE
+          WhatsApp Business Account, so a cold reachout opened on the wrong
+          number is refused at send time with `template_wrong_account`. */}
+      <SendAccountPicker
+        accounts={channelAccounts}
+        value={config.accountId}
+        onChange={(accountId) => onChange({ ...config, accountId })}
       />
     </div>
   );

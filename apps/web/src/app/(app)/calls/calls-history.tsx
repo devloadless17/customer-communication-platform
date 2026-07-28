@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useMemo } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   AudioLines,
@@ -25,6 +25,8 @@ import {
 } from "@/features/calls/call-artifacts";
 import { toast } from "@/lib/toast";
 import { useCallApi } from "@/features/calls/call-provider";
+import { AccountLabel } from "@/features/channels/components/account-label";
+import type { Channel } from "@ccp/shared/types";
 
 /** Mirrors TeamCallRow in apps/api/src/calls/calls.service.ts. */
 interface CallRow {
@@ -38,6 +40,10 @@ interface CallRow {
   initiatedByName: string | null;
   answeredByName: string | null;
   ringingAt: string;
+  /** The call's channel — lets the row apply the standard "only show the
+   *  account when this CHANNEL has more than one" rule, instead of guessing
+   *  from whichever accounts appear in the current page. */
+  channel: Channel;
   durationSeconds: number | null;
   connected: boolean;
   /** Opaque payload from the call button that produced an inbound call. */
@@ -62,15 +68,13 @@ const PAGE = 25;
 
 export function CallsHistory({ canCall }: { canCall: boolean }) {
   const [rows, setRows] = useState<CallRow[]>([]);
-  // Derived, not fetched: if any two rows name different accounts the workspace
-  // is multi-account for the purposes of this log. Avoids a second request just
-  // to decide whether to render one label, and it is self-correcting — a
-  // workspace that adds a number starts showing it as soon as it appears.
-  const multiAccount = useMemo(() => {
-    const seen = new Set<string>();
-    for (const r of rows) if (r.accountId) seen.add(r.accountId);
-    return seen.size > 1;
-  }, [rows]);
+  // NOTE: this used to derive "is the workspace multi-account?" from whichever
+  // accounts appeared in the CURRENT page of 25 rows. A page whose calls all
+  // happened to be on one number rendered no attribution at all, so the label
+  // vanished and reappeared as you paged — and a page from a genuinely
+  // single-account workspace was indistinguishable from one that just hadn't
+  // shown the second number yet. `AccountLabel` now answers it from the
+  // workspace directory, which doesn't change per page.
   const [page, setPage] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -151,6 +155,10 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
       const res = await call.initiateOutbound(
         row.conversationId,
         row.contactName ?? "Customer",
+        // The row knows both, so the live panel can name the number this call
+        // goes out FROM without waiting on a frame.
+        row.channel,
+        row.accountId,
       );
       if (!res.ok) {
         toast.error(
@@ -269,7 +277,6 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
               first={i === 0}
               canCall={canCall}
               calling={callingId === row.id}
-              multiAccount={multiAccount}
               onCallBack={() => void callBack(row)}
             />
           ))}
@@ -357,7 +364,6 @@ function CallRowItem({
   first,
   canCall,
   calling,
-  multiAccount,
   onCallBack,
 }: {
   row: CallRow;
@@ -366,7 +372,6 @@ function CallRowItem({
   calling: boolean;
   /** Does this workspace hold more than one account on the channel? Drives
    *  whether the "via <number>" fact is worth the pixels. */
-  multiAccount: boolean;
   onCallBack: () => void;
 }) {
   const { Icon, label, tone, actor } = describe(row);
@@ -416,17 +421,19 @@ function CallRowItem({
               <span className="tabular-nums">{formatDuration(row.durationSeconds)}</span>
             </>
           )}
-          {/* WHICH of our numbers. Only shown when the workspace actually has
-              more than one account on the channel — on a single-number
-              workspace it is noise, and on a multi-number one two calls from
-              the same customer to two different numbers were indistinguishable
-              in this log. */}
-          {multiAccount && row.accountName && (
-            <>
-              <span className="opacity-50">·</span>
-              <span className="truncate">via {row.accountName}</span>
-            </>
-          )}
+          {/* WHICH of our numbers. Renders only when the CHANNEL actually has
+              more than one account — on a single-number workspace it is noise,
+              and on a multi-number one two calls from the same customer to two
+              different numbers were indistinguishable in this log.
+              `fallbackName` keeps a since-disconnected account named rather
+              than silently re-attributing the call. */}
+          <AccountLabel
+            channel={row.channel}
+            accountId={row.accountId}
+            fallbackName={row.accountName}
+            variant="inline"
+            verb="Received on"
+          />
           {row.status === "failed" && row.errorTitle && (
             <>
               <span className="opacity-50">·</span>

@@ -1152,6 +1152,14 @@ export interface ContactListItem {
   contact: Contact;
   /** Latest non-closed conversation for this contact, if any. */
   activeConversationId: string | null;
+  /**
+   * WHICH of the workspace's accounts that conversation is on.
+   *
+   * The directory could already FILTER by account but the rows never showed
+   * it, so clearing the filter made two people who message two different
+   * numbers look identical again.
+   */
+  channelConnectionId: string | null;
   /** Most recent message timestamp across all conversations — for sorting / "last seen". */
   lastMessageAt: string | null;
   /**

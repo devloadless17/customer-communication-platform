@@ -56,6 +56,17 @@ export const ListTicketsQuerySchema = z.object({
   contactId: z.string().optional(),
   conversationId: z.string().optional(),
   channel: z.string().optional(),
+  /**
+   * One channel ACCOUNT (`ChannelConnection.id`) — "tickets raised on the
+   * Support line".
+   *
+   * Filtered THROUGH the conversation relation rather than a denormalized
+   * column on Ticket. `Ticket.channel` is safe to copy because
+   * `Conversation.channel` never changes; `channelConnectionId` is re-stamped
+   * whenever the customer messages a different number of ours, so a copy would
+   * drift and §7 would demand a reconciler for it.
+   */
+  accountId: z.string().min(1).optional(),
   tagIds: csv(z.string()),
   breached: z
     .enum(["true", "false"])

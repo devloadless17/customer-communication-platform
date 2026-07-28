@@ -143,6 +143,7 @@ export class CallsController {
       from: query.from,
       to: query.to,
       page: query.page,
+      accountId: query.accountId,
     });
   }
 

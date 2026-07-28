@@ -813,6 +813,27 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     workspaceId: string,
     raw: Record<string, unknown>,
   ): Promise<string | null> {
+    // A MESSAGE event's account is a fact about the PAST — which of our numbers
+    // actually carried it. Prefer the message's own stamp over the conversation
+    // pointer, which ingest re-stamps whenever the customer writes to a
+    // different number of ours: that rewrote history for `message.sent` and
+    // `message.status_changed`, so a partner saw a send that genuinely went out
+    // from Sales reported under Support.
+    //
+    // Resolved HERE, in the one place, rather than threading the field onto the
+    // ~20 publish sites — missing one there silently reintroduces the bug,
+    // which is how this whole class started (see deriveEventAccountId).
+    const messageId = raw.messageId;
+    if (typeof messageId === "string" && messageId) {
+      // workspaceId stays in the WHERE — the id arrives on an event payload.
+      const msg = await this.db.message.findFirst({
+        where: { id: messageId, workspaceId },
+        select: { channelConnectionId: true },
+      });
+      // Null means a row written before the column existed; fall through to the
+      // conversation pointer, which is exactly the previous behaviour.
+      if (msg?.channelConnectionId) return msg.channelConnectionId;
+    }
     const carried = deriveEventAccountId(raw);
     if (carried) return carried;
     const conversationId = raw.conversationId;

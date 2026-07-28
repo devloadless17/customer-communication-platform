@@ -18,6 +18,7 @@ import {
   Inbox,
   LogOut,
   type LucideIcon,
+  BarChart3,
   Megaphone,
   MessageSquareText,
   Ticket as TicketIcon,
@@ -215,6 +216,15 @@ const WORKFLOWS_ITEM: RailItem = {
   icon: Workflow,
 };
 
+// Reports is gated by the `teamActivity:view` capability (same switch as the
+// team-activity settings page — both answer "how is the team performing").
+// Appended conditionally for the same bounce-avoidance reason as Workflows.
+const REPORTS_ITEM: RailItem = {
+  href: "/reports",
+  label: "Reports",
+  icon: BarChart3,
+};
+
 export function AppRail({
   currentUser,
   team,
@@ -223,6 +233,7 @@ export function AppRail({
   connected,
   onlineUserIds,
   canManageAvailability,
+  canViewReports,
   initialCollapsed,
 }: {
   currentUser: User;
@@ -238,6 +249,10 @@ export function AppRail({
   /** Resolved `availability:manage` capability. When false the picker is
    *  shown read-only so the user still sees their status but can't change it. */
   canManageAvailability: boolean;
+  /** Resolved `teamActivity:view` capability — surfaces the Reports entry.
+   *  The /reports page + endpoint enforce it too; hiding the icon just spares
+   *  a bounce. */
+  canViewReports: boolean;
   /** Server-read cookie value so SSR renders the persisted state (no flash). */
   initialCollapsed: boolean;
 }) {
@@ -324,6 +339,9 @@ export function AppRail({
   const canManageWorkflows = canManageUsers(currentUser.role);
   const items = useMemo<RailItem[]>(() => {
     const out = [...PRIMARY_ITEMS];
+    // Reports sits with the analytics-adjacent surfaces (after Broadcasts),
+    // before the admin-only Workflows entry.
+    if (canViewReports) out.push(REPORTS_ITEM);
     // Workflows is admin-only — see WORKFLOWS_ITEM. Appended right after the
     // primary items (its prior position) so the layout is unchanged for admins.
     if (canManageWorkflows) out.push(WORKFLOWS_ITEM);
@@ -336,7 +354,7 @@ export function AppRail({
     // No platform-admin entry here: super-admins are redirected out of the
     // (app) shell entirely (→ /platform), so they never render this rail.
     return out;
-  }, [canManageWorkflows]);
+  }, [canManageWorkflows, canViewReports]);
 
   const railStyle: React.CSSProperties = {
     width: collapsed ? COLLAPSED_WIDTH : EXPANDED_WIDTH,

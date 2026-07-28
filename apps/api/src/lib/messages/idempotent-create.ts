@@ -64,6 +64,27 @@ export async function createOutboundMessageIdempotentDetailed(
   data: Prisma.MessageUncheckedCreateInput,
   txOrDb?: TxOrDb,
 ): Promise<IdempotentCreateResult> {
+  // Stamp WHICH account carried this send, once, HERE.
+  //
+  // There are ~14 outbound call sites. Threading the field onto each is the
+  // exact shape that produced this bug class in the first place (see
+  // `deriveEventAccountId` — miss one site and it silently reports the wrong
+  // number forever). So the choke point derives it instead, and a caller that
+  // genuinely knows better — the broadcast runner, whose campaign account is
+  // authoritative and can differ from the thread's pointer — passes it
+  // explicitly and wins.
+  //
+  // At send time the conversation's pointer IS the account just used to send,
+  // so reading it here is correct. What it does NOT do is move afterwards:
+  // that is the whole point (§ Message.channelConnectionId in schema.prisma).
+  if (data.channelConnectionId === undefined && data.conversationId) {
+    const conv = await (txOrDb ?? db).conversation.findFirst({
+      where: { id: data.conversationId, workspaceId: data.workspaceId },
+      select: { channelConnectionId: true },
+    });
+    data = { ...data, channelConnectionId: conv?.channelConnectionId ?? null };
+  }
+
   // Tx path: single attempt, P2002 still returns existing row, no retry.
   // The drain-parked-status fire-and-forget normally happens here too,
   // but inside a tx it could try to drain BEFORE the row commits — and a

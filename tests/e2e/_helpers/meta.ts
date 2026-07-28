@@ -39,7 +39,9 @@ export const APP_SECRET = "e2e_meta_app_secret_0123456789abcdef";
 export const VERIFY_TOKEN = "e2e_meta_verify_token_fedcba9876543210";
 const SYSTEM_USER_TOKEN = "e2e_meta_system_user_token";
 
-// Per-channel identity + token fixtures.
+// Per-channel identity + token fixtures. Account 1 is the DEFAULT on each
+// channel; account 2 exists so every spec can assert the thing the product
+// promises — that two accounts are cleanly seen as two.
 export const WA_PHONE_NUMBER_ID = "e2e_wa_phone_1";
 export const WA_WABA_ID = "e2e_wa_waba_1";
 export const WA_ACCESS_TOKEN = "e2e_wa_access_token";
@@ -48,6 +50,18 @@ export const MSGR_PAGE_TOKEN = "e2e_msgr_page_token";
 export const IG_ID = "e2e_ig_1";
 export const IG_PAGE_ID = "e2e_ig_page_1";
 export const IG_ACCESS_TOKEN = "e2e_ig_access_token";
+
+/**
+ * Deterministic ChannelConnection row ids, so a spec can bind a conversation or
+ * a broadcast to a specific account without a lookup — and so a mid-suite
+ * wipe + re-seed reproduces them byte-identically (see the `id:` comment in the
+ * seed below for why that is load-bearing).
+ */
+export const CONN_ID = {
+  whatsapp: `${META_TEST_TEAM_ID}_conn_whatsapp`,
+  messenger: `${META_TEST_TEAM_ID}_conn_messenger`,
+  instagram: `${META_TEST_TEAM_ID}_conn_instagram`,
+} as const;
 
 export interface MetaTestTeam {
   workspaceId: string;
@@ -139,24 +153,41 @@ export async function seedMetaTestTeam(): Promise<MetaTestTeam> {
     channel: "whatsapp" | "messenger" | "instagram";
     /** The provider's own account id — the key a workspace's accounts differ by. */
     accountId: string;
+    /** Deterministic row id, so specs can bind to an account without a lookup. */
+    connId: string;
+    /** Exactly one per channel. The rest exist to prove they stay separate. */
+    isDefault: boolean;
+    /** WhatsApp only — the template-catalog scope. */
+    wabaId?: string;
+    label: string;
     config: Prisma.InputJsonObject;
     secrets: Prisma.InputJsonObject;
   }> = [
     {
       channel: "whatsapp",
       accountId: WA_PHONE_NUMBER_ID,
+      connId: CONN_ID.whatsapp,
+      isDefault: true,
+      wabaId: WA_WABA_ID,
+      label: "Sales line",
       config: { phoneNumberId: WA_PHONE_NUMBER_ID, wabaId: WA_WABA_ID, verifyToken: VERIFY_TOKEN },
       secrets: { accessToken: encryptSecret(WA_ACCESS_TOKEN), appSecret: encryptSecret(APP_SECRET) },
     },
     {
       channel: "messenger",
       accountId: MSGR_PAGE_ID,
+      connId: CONN_ID.messenger,
+      isDefault: true,
+      label: "Main Page",
       config: { pageId: MSGR_PAGE_ID, pageName: "Mock Page", verifyToken: VERIFY_TOKEN },
       secrets: { pageAccessToken: encryptSecret(MSGR_PAGE_TOKEN), appSecret: encryptSecret(APP_SECRET) },
     },
     {
       channel: "instagram",
       accountId: IG_ID,
+      connId: CONN_ID.instagram,
+      isDefault: true,
+      label: "Main IG",
       config: { igId: IG_ID, pageId: IG_PAGE_ID, igUsername: "mock_ig", verifyToken: VERIFY_TOKEN },
       secrets: { igAccessToken: encryptSecret(IG_ACCESS_TOKEN), appSecret: encryptSecret(APP_SECRET) },
     },
@@ -168,15 +199,20 @@ export async function seedMetaTestTeam(): Promise<MetaTestTeam> {
     // an earlier spec turns this seed into a P2002 — and a seed that throws
     // fails every test downstream of it with an error about channel accounts.
     await d.$transaction(async (tx) => {
-      await tx.channelConnection.updateMany({
-        where: {
-          workspaceId: META_TEST_TEAM_ID,
-          channel: c.channel,
-          isDefault: true,
-          NOT: { externalAccountId: c.accountId },
-        },
-        data: { isDefault: false },
-      });
+      // Only the default-claiming account demotes siblings. A NON-default
+      // account must never touch the default flag, or seeding account 2 would
+      // silently leave the channel with no default at all.
+      if (c.isDefault) {
+        await tx.channelConnection.updateMany({
+          where: {
+            workspaceId: META_TEST_TEAM_ID,
+            channel: c.channel,
+            isDefault: true,
+            NOT: { externalAccountId: c.accountId },
+          },
+          data: { isDefault: false },
+        });
+      }
       await tx.channelConnection.upsert({
         where: {
           workspaceId_channel_externalAccountId: {
@@ -195,20 +231,47 @@ export async function seedMetaTestTeam(): Promise<MetaTestTeam> {
           // meta-suite flake). With a fixed id, wipe + re-seed reproduces the
           // row byte-identically and a stale cache is indistinguishable from
           // a fresh one.
-          id: `${META_TEST_TEAM_ID}_conn_${c.channel}`,
+          id: c.connId,
           workspaceId: META_TEST_TEAM_ID,
           channel: c.channel,
           externalAccountId: c.accountId,
-          isDefault: true,
-          ...(c.channel === "whatsapp" ? { wabaId: WA_WABA_ID } : {}),
+          isDefault: c.isDefault,
+          label: c.label,
+          ...(c.wabaId ? { wabaId: c.wabaId } : {}),
           config: c.config,
           secrets: c.secrets,
           isActive: true,
         },
-        update: { isDefault: true, config: c.config, secrets: c.secrets, isActive: true },
+        update: {
+          isDefault: c.isDefault,
+          label: c.label,
+          ...(c.wabaId ? { wabaId: c.wabaId } : {}),
+          config: c.config,
+          secrets: c.secrets,
+          isActive: true,
+        },
       });
     });
   }
+
+  // PRUNE accounts this fixture no longer declares.
+  //
+  // The upserts above converge the rows they name but say nothing about rows
+  // they don't, so the fixture could never shrink: an experiment that added a
+  // second account per channel left those rows behind after the code was
+  // reverted, and the shared team silently stayed MULTI-account. Every spec
+  // that creates a conversation without binding one then failed
+  // `account-unresolved` — a correct refusal, blamed on the wrong change.
+  //
+  // This fixture is deliberately SINGLE-account (it is the control that proves
+  // the one-account experience never regressed); the multi-account workspace
+  // lives in `_helpers/multi-account.ts`.
+  await d.channelConnection.deleteMany({
+    where: {
+      workspaceId: META_TEST_TEAM_ID,
+      NOT: { externalAccountId: { in: channels.map((c) => c.accountId) } },
+    },
+  });
 
   // Deterministic DEFAULT STAGE — same reasoning as the fixed connection ids
   // above, and the actual root of the historical "posted 200, row never
@@ -475,6 +538,29 @@ export async function mockCalls(): Promise<MockCall[]> {
 /** The recorded Graph `/messages` sends (the outbound wire shapes). */
 export async function mockSends(): Promise<MockCall[]> {
   return (await mockCalls()).filter((c) => c.method === "POST" && c.path.endsWith("/messages"));
+}
+
+/**
+ * WHICH account a recorded Graph call went out on.
+ *
+ * Meta's send path is `/{version}/{account-id}/messages` — the phone-number id
+ * for WhatsApp, the Page id for Messenger/Instagram. So the account is already
+ * on the wire and needs no extra instrumentation: this just names it, because
+ * "the send used the right number" is the single assertion every multi-account
+ * spec needs and reading `path.split("/")[2]` inline in twenty places would
+ * make each of them quietly wrong the day the path shape changes.
+ */
+export function sendAccountId(call: MockCall): string | null {
+  const segments = call.path.split("/").filter(Boolean);
+  // [version, accountId, "messages"] — the id sits second from the end.
+  return segments.length >= 2 ? (segments[segments.length - 2] ?? null) : null;
+}
+
+/** Every account id that a send actually went out on, in call order. */
+export async function sendAccountIds(): Promise<string[]> {
+  return (await mockSends())
+    .map(sendAccountId)
+    .filter((id): id is string => typeof id === "string");
 }
 
 // ─── /v1 send driver (API-key auth, session-independent) ───────────────────

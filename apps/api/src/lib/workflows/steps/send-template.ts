@@ -37,6 +37,16 @@ export interface SendTemplateStepConfig {
    *  target reaches ANY number (auto-creates the contact + conversation) —
    *  templates are the cold-reachout path, so out-of-24h-window is fine. */
   target?: StepTarget;
+  /**
+   * Which of the workspace's accounts to send FROM when this step OPENS a
+   * conversation. An existing thread keeps its own account. Absent = the
+   * channel's default (the pre-existing behaviour).
+   *
+   * Especially load-bearing here: a template belongs to ONE WhatsApp Business
+   * Account, so a cold reachout opened on the wrong number is refused at send
+   * time with `template_wrong_account`.
+   */
+  accountId?: string;
 }
 
 export const sendTemplateStepHandler: StepHandler<SendTemplateStepConfig> = {
@@ -86,6 +96,7 @@ export const sendTemplateStepHandler: StepHandler<SendTemplateStepConfig> = {
       }
     }
     const target = parseStepTarget(r.target);
+    const accountId = typeof r.accountId === "string" && r.accountId ? r.accountId : undefined;
     return {
       templateId: r.templateId,
       variables: {
@@ -94,6 +105,7 @@ export const sendTemplateStepHandler: StepHandler<SendTemplateStepConfig> = {
         ...(headerMedia ? { headerMedia } : {}),
       },
       ...(target ? { target } : {}),
+      ...(accountId ? { accountId } : {}),
     };
   },
   describeConfig(config) {
@@ -107,6 +119,10 @@ export const sendTemplateStepHandler: StepHandler<SendTemplateStepConfig> = {
     try {
       resolved = await resolveStepTarget(config.target, envelope, ctx.workspaceId, {
         createConversation: true,
+        // Only used when the step OPENS a thread. An existing conversation
+        // keeps its own account — a workflow must never move a live thread to
+        // a different number mid-flight.
+        accountId: config.accountId,
       });
     } catch (err) {
       if (err instanceof StepConfigError) return advanceWithError(400, err.message);

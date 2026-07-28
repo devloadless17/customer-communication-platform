@@ -958,6 +958,11 @@ export interface ServerToClientEvents {
     /** Drives the browser answer signaling (WhatsApp consumes the webhook SDP
      *  offer; social generates the offer locally) + the toast copy. */
     channel: Channel;
+    /** WHICH of our accounts on that channel was dialled. The channel alone
+     *  makes the toast say "on WhatsApp" for both of a workspace's numbers, so
+     *  an agent cannot tell which business identity to answer as. Null when the
+     *  thread is not bound to an account. */
+    channelConnectionId: string | null;
     contactId: string;
     contactName: string;
     ringingAt: string;

@@ -27,6 +27,7 @@ import {
   usesUnifiedCalling,
 } from "@/lib/messaging/call-actions";
 import { normalizeMetaSendError } from "@/lib/providers/meta";
+import { channelAccountDisplayName } from "@/lib/channel-accounts/display";
 import {
   getBusinessNumberCountry,
   invalidateProviderConfig,
@@ -2338,7 +2339,7 @@ export class CallsService {
     session: ApiSession,
     take: number,
     cursor: string | undefined,
-    filters: { q?: string; from?: string; to?: string; page?: number } = {},
+    filters: { q?: string; from?: string; to?: string; page?: number; accountId?: string } = {},
   ): Promise<{ items: TeamCallRow[]; cursor: string | null; totalCount?: number }> {
     const perms = resolvePermissions(session.role, session.rolePermissions);
     if (
@@ -2395,6 +2396,21 @@ export class CallsService {
       baseWhere.conversation = conversation;
     }
 
+    // Account narrow. MERGED into the same `conversation` filter for exactly
+    // the reason spelled out above: reassigning it would drop the visibility
+    // restriction and hand a restricted agent every teammate's calls the
+    // moment they picked a number. Composes with `q` too — both write through
+    // the same object rather than each owning it.
+    if (filters.accountId) {
+      const conversation: Prisma.ConversationWhereInput = {
+        ...((baseWhere.conversation as Prisma.ConversationWhereInput | undefined) ??
+          visibility.conversation ??
+          {}),
+        channelConnectionId: filters.accountId,
+      };
+      baseWhere.conversation = conversation;
+    }
+
     // Date range on ringingAt (the user-visible "when the call happened" time).
     // `from`/`to` are ISO instants the client already widened to the local-day
     // boundaries, so we just clamp; invalid strings are ignored (never throw).
@@ -2429,6 +2445,10 @@ export class CallsService {
         transcriptKey: true,
         transcriptLanguage: true,
         errorTitle: true,
+        // The call's medium — lets the UI apply the same "only show the account
+        // when this CHANNEL has more than one" rule as every other surface,
+        // instead of inferring it from the current page of rows.
+        channel: true,
         initiatedBy: { select: { id: true, name: true } },
         answeredBy: { select: { id: true, name: true } },
         conversation: {
@@ -2441,7 +2461,7 @@ export class CallsService {
             // every call action already resolves credentials through it.
             channelConnectionId: true,
             channelConnection: {
-              select: { id: true, label: true, config: true },
+              select: { id: true, label: true, config: true, externalAccountId: true },
             },
           },
         },
@@ -2470,15 +2490,12 @@ export class CallsService {
       hasTranscript: c.transcriptKey !== null,
       transcriptLanguage: c.transcriptLanguage,
       errorTitle: c.errorTitle,
+      channel: c.channel,
       accountId: c.conversation.channelConnectionId,
       // Prefer the operator's label, fall back to the number itself — the row
       // needs something a human recognises, not a cuid. Null on a thread whose
       // account was disconnected (SetNull) or that predates account binding.
-      accountName:
-        c.conversation.channelConnection?.label ||
-        (c.conversation.channelConnection?.config as { displayPhoneNumber?: string } | null)
-          ?.displayPhoneNumber ||
-        null,
+      accountName: channelAccountDisplayName(c.conversation.channelConnection),
     }));
     const last = page.at(-1);
     // Offset mode uses page numbers (from totalCount), not a cursor. The count
@@ -2547,6 +2564,16 @@ export interface TeamCallRow {
   transcriptLanguage: string | null;
   /** Why a FAILED call failed, from the provider's terminate webhook. */
   errorTitle: string | null;
+  /**
+   * The call's channel.
+   *
+   * Needed so the UI can ask "does THIS channel have more than one account?"
+   * — the same rule every other account label follows. Without it the calls
+   * page had to infer multi-account from whichever accounts happened to appear
+   * in the current page of 25 rows, so the attribution vanished and reappeared
+   * as you paginated.
+   */
+  channel: Channel;
   /** WHICH of the workspace's accounts on this channel the call happened on —
    *  the thread's `channelConnectionId`. Null when the thread's account was
    *  disconnected (SetNull) or predates account binding. */

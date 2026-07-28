@@ -1,4 +1,6 @@
-import { Body, Controller, Delete, Get, Post } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Post,
+  Query,
+} from "@nestjs/common";
 
 import { CurrentSession } from "../../auth/current-session.decorator";
 import { RequireRole } from "../../auth/role.guard";
@@ -37,9 +39,16 @@ export class InstagramController {
     return { ok: true, ...out };
   }
 
+  /**
+   * Removes EVERY account on this channel. `?confirmAll=1` is required when
+   * the workspace holds more than one — see assertChannelDisconnectConfirmed.
+   */
   @Delete()
-  async disconnect(@CurrentSession() session: ApiSession) {
-    await this.instagram.disconnect(session.workspaceId);
+  async disconnect(
+    @CurrentSession() session: ApiSession,
+    @Query("confirmAll") confirmAll?: string,
+  ) {
+    await this.instagram.disconnect(session.workspaceId, confirmAll === "1" || confirmAll === "true");
     return { ok: true };
   }
 }

@@ -226,6 +226,15 @@ export class WhatsappTemplatesController {
     @CurrentSession() session: ApiSession,
     @UploadedFile() file: Express.Multer.File | undefined,
     @Query("accountId") accountId?: string,
+    /**
+     * EDIT flow: the template being edited. Preferred over `accountId` because
+     * the server can then resolve the WABA from the template row itself,
+     * instead of trusting a query param that any link is free to drop — and
+     * the edit page's Edit link did drop it, so a header asset was minted
+     * through the DEFAULT account's app and then attached to another WABA's
+     * template.
+     */
+    @Query("templateId") templateId?: string,
   ) {
     if (!file) {
       throw new BadRequestException({ error: "file_part_missing" });
@@ -237,6 +246,7 @@ export class WhatsappTemplatesController {
         session.workspaceId,
         fileWithBuffer,
         accountId || null,
+        templateId || null,
       );
       return { ok: true, ...out };
     } finally {

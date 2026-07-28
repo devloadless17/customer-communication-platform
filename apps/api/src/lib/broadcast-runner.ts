@@ -2595,6 +2595,11 @@ async function processOneRecipient(
         direction: "out",
         channel: sendChannel,
         status: "sent",
+        // The CAMPAIGN's account, explicitly — not the choke point's derivation
+        // from the thread. A recipient with an existing conversation keeps that
+        // thread's pointer, which may name a different number than the campaign
+        // sent from; the campaign's account is what actually carried this row.
+        channelConnectionId: broadcast.channelConnectionId ?? null,
         // Durable campaign link. `rawPayload.broadcastId` below is kept for
         // back-compat + the historical backfill, but the rawPayload-retention
         // sweeper COLLAPSES that blob to {"sentVia":"broadcast"} after its
@@ -3792,6 +3797,8 @@ export async function reconcileCanceledMarkerRecipients(): Promise<void> {
             direction: "out",
             channel: contact.identityChannel,
             status: "sent",
+            // The campaign's own account — see the send path above.
+            channelConnectionId: broadcast.channelConnectionId ?? null,
             rawPayload: {
               sentVia: "broadcast",
               broadcastId: broadcast.id,

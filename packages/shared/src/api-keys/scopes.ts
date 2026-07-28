@@ -97,6 +97,13 @@ export const API_KEY_SCOPES = [
   // an auth-boundary action with its own email flow and seat-cap enforcement.
   "write:users",
 
+  // Workspace performance reports — the aggregates behind the /reports
+  // dashboard (volume, response/resolution times, per-agent, ticket SLA, AI
+  // share). Read-only by nature; its own scope so a BI integration can pull
+  // metrics without being able to read message CONTENT (read:messages) or
+  // anything else.
+  "read:reports",
+
   // Connected channel accounts — which WhatsApp numbers / Pages / IG handles a
   // workspace has, which is the default, and their health. Read-only on
   // purpose: adding or disconnecting an account moves real credentials and

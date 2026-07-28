@@ -359,6 +359,17 @@ export const ListContactsQuerySchema = z.object({
   /** Free-text search across name / phone / email / customFields. */
   search: z.string().trim().min(1).optional(),
   stageId: z.string().min(1).optional(),
+  /**
+   * One channel ACCOUNT — a specific WhatsApp number, Facebook Page or
+   * Instagram handle (`ChannelConnection.id`, from `GET /v1/channel-accounts`).
+   *
+   * Parity with the contacts browser's account filter, which is a locked rule
+   * (§12): the UI can narrow to "people who message the Sales number", so a
+   * partner must be able to as well. ANDed with the other filters rather than
+   * replacing them. An unknown id simply matches nothing — validating it would
+   * leak whether the id exists.
+   */
+  accountId: z.string().min(1).optional(),
   /** Comma-separated tag id list, ANY-match. */
   tagIds: z.string().optional(),
   cursor: z.string().optional(),
@@ -710,6 +721,13 @@ export type ExternalSendInteractiveInput = z.infer<typeof ExternalSendInteractiv
 export const ListBroadcastsQuerySchema = z.object({
   cursor: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
+  /**
+   * One channel ACCOUNT (`ChannelConnection.id`) — which number/Page the
+   * campaign SENT FROM. The history already displays it; without this you can
+   * read it but not narrow by it, so "what did the Sales line send last month?"
+   * needs a client-side scan of every campaign.
+   */
+  accountId: z.string().min(1).optional(),
   status: z
     .enum([
       "scheduled",
@@ -784,6 +802,13 @@ export const ExternalListCallsQuerySchema = z
     cursor: z.string().optional(),
     /** Restrict to one conversation's calls. */
     conversationId: z.string().min(1).optional(),
+    /**
+     * One channel ACCOUNT (`ChannelConnection.id`) — which of your numbers the
+     * call happened on. Parity with the internal calls filter (§12). Matched
+     * through the conversation, since `Call` deliberately has no account column
+     * (the thread owns it, and every call action resolves credentials there).
+     */
+    accountId: z.string().min(1).optional(),
     /** ISO instants bounding `ringingAt`. */
     from: z.string().datetime().optional(),
     to: z.string().datetime().optional(),

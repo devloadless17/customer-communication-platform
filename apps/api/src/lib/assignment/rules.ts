@@ -33,6 +33,8 @@ export function parseConditions(raw: unknown): AssignmentRuleConditions {
   const out: AssignmentRuleConditions = {};
   const channels = strList(r.channels);
   if (channels?.length) out.channels = channels as AssignmentRuleConditions["channels"];
+  const channelAccountIds = strList(r.channelAccountIds);
+  if (channelAccountIds?.length) out.channelAccountIds = channelAccountIds;
   const tagIds = strList(r.tagIds);
   if (tagIds?.length) out.tagIds = tagIds;
   const stageIds = strList(r.stageIds);
@@ -58,6 +60,13 @@ export function matchesConditions(
   if (conditions.channels?.length) {
     if (!ctx.channel) return false; // fail closed
     if (!conditions.channels.includes(ctx.channel)) return false;
+  }
+
+  if (conditions.channelAccountIds?.length) {
+    // Fail closed, like `channels`: a rule keyed to the Sales number must never
+    // fire on a thread whose account we couldn't see.
+    if (!ctx.channelAccountId) return false;
+    if (!conditions.channelAccountIds.includes(ctx.channelAccountId)) return false;
   }
 
   if (conditions.tagIds?.length) {

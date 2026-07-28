@@ -588,7 +588,14 @@ export function TemplateForm({
       try {
         const fd = new FormData();
         fd.append("file", file);
-        const res = await apiFetch(`/api/workspace/whatsapp/templates/upload-media${templateAccountQuery}`, {
+        // On an EDIT, name the template instead of the account: the asset must
+        // upload through the app that owns THAT template's WABA, and the server
+        // reads it from the row rather than trusting a query param a link is
+        // free to drop (this one used to be dropped by the Edit link).
+        const uploadQuery = editing
+          ? `?templateId=${encodeURIComponent(editing.id)}`
+          : templateAccountQuery;
+        const res = await apiFetch(`/api/workspace/whatsapp/templates/upload-media${uploadQuery}`, {
           method: "POST",
           body: fd,
           signal: abort.signal,
@@ -616,7 +623,7 @@ export function TemplateForm({
         setUploadingHeader(false);
       }
     },
-    [headerPreviewUrl, templateAccountQuery],
+    [headerPreviewUrl, templateAccountQuery, editing],
   );
 
   const submit = useCallback(async () => {

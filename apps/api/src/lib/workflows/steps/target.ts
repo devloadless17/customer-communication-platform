@@ -130,7 +130,20 @@ export interface ResolvedTarget {
 async function resolveCustomerBestChannel(
   workspaceId: string,
   customerId: string,
-  opts: { createConversation: boolean },
+  opts: {
+    createConversation: boolean;
+    /**
+     * Which account a NEWLY created conversation binds to.
+     *
+     * A workflow-opened thread is outbound-first: there is no webhook to learn
+     * the account from, so without this it always took the channel DEFAULT.
+     * That is a sensible fallback but a poor rule — an automation that greets
+     * new leads from the Support number, because Support happens to be the
+     * default, is not what anyone configured. Undefined keeps the old
+     * behaviour exactly.
+     */
+    accountId?: string | null;
+  },
 ): Promise<ResolvedTarget> {
   // Rank only over the channels the team can actually send on right now — else a
   // person reachable on a connected channel could be picked onto an unconnected
@@ -181,7 +194,9 @@ async function resolveCustomerBestChannel(
         // Bind the account too — a workflow-opened thread is outbound-first, so
         // there is no webhook to learn it from, and an unbound thread cannot
         // send at all in a multi-account workspace.
-        channelConnectionId: (await resolveOutboundAccountId(db, workspaceId, best.channel)).accountId,
+        channelConnectionId: (
+          await resolveOutboundAccountId(db, workspaceId, best.channel, opts.accountId ?? undefined)
+        ).accountId,
         status: "open",
       },
       select: { id: true },
@@ -208,7 +223,12 @@ export async function resolveStepTarget(
   target: StepTarget | undefined,
   envelope: WorkflowEventEnvelope,
   workspaceId: string,
-  opts: { createConversation: boolean },
+  opts: {
+    createConversation: boolean;
+    /** Which account a NEWLY created conversation binds to — see the private
+     *  helper below for why a workflow-opened thread needs to be told. */
+    accountId?: string | null;
+  },
 ): Promise<ResolvedTarget> {
   // Default: trigger contact + conversation from the envelope (existing
   // behavior). Returns the snapshot ids verbatim; the caller is
@@ -363,7 +383,9 @@ export async function resolveStepTarget(
         // the right channel — named explicitly here only so the account
         // resolved beside it is provably for the same channel.
         channel: "whatsapp",
-        channelConnectionId: (await resolveOutboundAccountId(db, workspaceId, "whatsapp")).accountId,
+        channelConnectionId: (
+          await resolveOutboundAccountId(db, workspaceId, "whatsapp", opts.accountId ?? undefined)
+        ).accountId,
         status: "open",
       },
       select: { id: true },

@@ -5,6 +5,7 @@ import { Mic, MicOff, PhoneOff } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import type { LiveCallState } from "@/features/calls/hooks/use-call";
+import { AccountLabel } from "@/features/channels/components/account-label";
 
 /**
  * In-call overlay. Renders fixed bottom-right while a call is active.
@@ -72,11 +73,25 @@ export function CallPanel({
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold">{liveCall.contactName}</div>
-          <div className="text-xs text-muted-foreground">
-            {liveCall.status === "ringing" &&
-              (liveCall.direction === "out" ? "Calling…" : "Incoming call…")}
-            {liveCall.status === "in_progress" && formatDuration(duration)}
-            {liveCall.status === "ending" && "Hanging up…"}
+          <div className="flex items-center gap-1.5 truncate text-xs text-muted-foreground">
+            <span className="shrink-0">
+              {liveCall.status === "ringing" &&
+                (liveCall.direction === "out" ? "Calling…" : "Incoming call…")}
+              {liveCall.status === "in_progress" && formatDuration(duration)}
+              {liveCall.status === "ending" && "Hanging up…"}
+            </span>
+            {/* WHICH of our numbers this call is on. Appended to the existing
+                status line rather than added as a row, so the panel's height
+                is identical on a single-account workspace (where this renders
+                nothing at all). Until now the panel showed only the contact,
+                so an agent mid-call could not tell which business they were
+                representing. */}
+            <AccountLabel
+              channel={liveCall.channel ?? undefined}
+              accountId={liveCall.accountId}
+              variant="inline"
+              verb={liveCall.direction === "out" ? "Calling from" : "Received on"}
+            />
           </div>
         </div>
         <div

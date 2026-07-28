@@ -107,6 +107,7 @@ export async function buildAssignmentContext(
     select: {
       assignedUserId: true,
       channel: true,
+      channelConnectionId: true,
       contact: {
         select: {
           stageId: true,
@@ -124,6 +125,9 @@ export async function buildAssignmentContext(
     ctx: {
       source,
       channel: conv.channel,
+      // Which of the workspace's numbers/Pages this thread is on, so a rule can
+      // route "the Sales number" separately from "WhatsApp".
+      channelAccountId: conv.channelConnectionId,
       tagIds: conv.contact?.tags.map((t) => t.id) ?? [],
       stageId: conv.contact?.stageId ?? null,
       language: conv.contact?.language ?? null,

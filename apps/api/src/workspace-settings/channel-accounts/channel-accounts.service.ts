@@ -7,6 +7,11 @@ import {
 } from "@/lib/providers/meta-health";
 import { invalidateMessengerConfig } from "@/lib/providers/messenger-config";
 import { invalidateInstagramConfig } from "@/lib/providers/instagram-config";
+import {
+  channelAccountDisplayName,
+  channelAccountProviderName,
+} from "@/lib/channel-accounts/display";
+import { EventBus } from "../../events/event-bus.module";
 import type { Channel } from "@ccp/shared/types";
 
 import { DbService } from "../../db/db.service";
@@ -96,7 +101,24 @@ export interface ChannelAccountDirectoryEntry {
 
 @Injectable()
 export class ChannelAccountsService {
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly bus: EventBus,
+  ) {}
+
+  /**
+   * Tell every tab the account catalog moved.
+   *
+   * The directory is SSR-seeded once in the APP layout and never refetched, so
+   * without this a renamed number — or a new default — stays stale on every
+   * other open tab until someone hard-navigates. The connect/disconnect paths
+   * in the per-channel services already publish this; the per-account mutators
+   * never did, which only stopped mattering the moment the directory went
+   * app-wide. Existing event, existing fanout rule, no new plumbing.
+   */
+  private async announce(workspaceId: string): Promise<void> {
+    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "channels" });
+  }
 
   /** Every account a workspace has connected on `channel`, default first. */
   async list(workspaceId: string, channel: AccountChannel): Promise<ChannelAccountDto[]> {
@@ -209,6 +231,57 @@ export class ChannelAccountsService {
     return { conversations, openConversations, scheduledBroadcasts };
   }
 
+  /**
+   * The same three counts for EVERY account on a channel — what the
+   * channel-level "Disconnect" actually destroys.
+   *
+   * That button deletes every `ChannelConnection` on the channel, not one. With
+   * `onDelete: SetNull` on both pointers, it strands every thread on the channel
+   * (`account-unresolved` on the next reply) and nulls every scheduled
+   * campaign's sender. The per-account `remove()` has had a preflight since
+   * multi-account shipped; this route had none, and is strictly more
+   * destructive.
+   */
+  async channelRemovalImpact(
+    workspaceId: string,
+    channel: AccountChannel,
+  ): Promise<{
+    accounts: number;
+    conversations: number;
+    openConversations: number;
+    scheduledBroadcasts: number;
+  }> {
+    const ids = (
+      await this.db.channelConnection.findMany({
+        where: { workspaceId, channel },
+        select: { id: true },
+      })
+    ).map((c) => c.id);
+    if (ids.length === 0) {
+      return { accounts: 0, conversations: 0, openConversations: 0, scheduledBroadcasts: 0 };
+    }
+    const [conversations, openConversations, scheduledBroadcasts] = await Promise.all([
+      this.db.conversation.count({
+        where: { workspaceId, channelConnectionId: { in: ids } },
+      }),
+      this.db.conversation.count({
+        where: {
+          workspaceId,
+          channelConnectionId: { in: ids },
+          status: { not: "closed" },
+        },
+      }),
+      this.db.broadcast.count({
+        where: {
+          workspaceId,
+          channelConnectionId: { in: ids },
+          status: { in: ["scheduled", "materializing", "queued", "running", "paused"] },
+        },
+      }),
+    ]);
+    return { accounts: ids.length, conversations, openConversations, scheduledBroadcasts };
+  }
+
   /** Rename an account (display only — never touches credentials or routing). */
   async rename(
     workspaceId: string,
@@ -221,6 +294,9 @@ export class ChannelAccountsService {
       data: { label: label?.trim() || null },
     });
     if (res.count === 0) throw new NotFoundException({ error: "account_not_found" });
+    // The label IS what agents see in the inbox chip — a rename nobody sees is
+    // a rename that didn't happen.
+    await this.announce(workspaceId);
   }
 
   /**
@@ -248,6 +324,7 @@ export class ChannelAccountsService {
       this.db.channelConnection.update({ where: { id }, data: { isDefault: true } }),
     ]);
     this.bustCache(workspaceId, channel);
+    await this.announce(workspaceId);
   }
 
   /**
@@ -310,6 +387,7 @@ export class ChannelAccountsService {
     // numbers" framing reads the stale count). GC any now-orphaned rows.
     if (channel === "whatsapp") await gcOrphanWhatsappPortfolios(workspaceId);
     this.bustCache(workspaceId, channel);
+    await this.announce(workspaceId);
   }
 
   /**
@@ -349,23 +427,14 @@ export class ChannelAccountsService {
       // normalizeDefaultAccount.
       .filter((r) => r.externalAccountId.length > 0)
       .map((r) => {
-        const cfg = (r.config ?? {}) as {
-          displayPhoneNumber?: string;
-          pageName?: string;
-          igUsername?: string;
-        };
-        const providerName =
-          cfg.displayPhoneNumber ??
-          cfg.pageName ??
-          (cfg.igUsername ? `@${cfg.igUsername}` : undefined) ??
-          null;
+        const providerName = channelAccountProviderName(r.config);
         return {
           id: r.id,
           channel: r.channel,
           // What an agent should SEE. The admin's label wins when set (that is
           // the whole point of labelling "Sales line"), then the provider's own
           // human name, then the raw id as a last resort — never blank.
-          name: r.label ?? providerName ?? r.externalAccountId,
+          name: channelAccountDisplayName(r)!,
           /** The provider's human identifier, shown as the subtitle when a label
            *  is set so "Sales line" is still traceable to a real number. */
           providerName,

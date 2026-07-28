@@ -1249,6 +1249,29 @@ async function ingestTemplateStatusUpdate(
   } else if (evt.name) {
     where.name = evt.name;
     if (evt.language) where.language = evt.language;
+    // NEITHER a globally-unique externalId NOR a WABA in the payload, so the
+    // only identity left is (name, language) — which is unique PER WABA, not
+    // per workspace. Unbounded, one WABA's rejection would flip every
+    // same-named row in the workspace and halt all of their campaigns via the
+    // pause below. Restrict to the legacy `""` rows (which belong to no WABA
+    // in particular) and say so, rather than guess which real WABA meant it.
+    if (!evt.wabaId) {
+      const wabas = await db.channelConnection.findMany({
+        where: { workspaceId, channel: "whatsapp" },
+        select: { wabaId: true },
+        distinct: ["wabaId"],
+      });
+      const distinctWabas = wabas
+        .map((w) => w.wabaId)
+        .filter((w): w is string => typeof w === "string" && w.length > 0);
+      if (distinctWabas.length > 1) {
+        where.wabaId = "";
+        console.warn(
+          `[ingest] template status for "${evt.name}" carried no WABA in a ` +
+            `${distinctWabas.length}-WABA workspace ${workspaceId}; limited to legacy rows`,
+        );
+      }
+    }
   } else {
     return; // no identity to match on (parser already guards, belt-and-braces)
   }
@@ -2246,6 +2269,11 @@ async function ingestInboundMessage(
           direction: "in",
           channel,
           status: "delivered",
+          // WHICH of our numbers/Pages this actually arrived on. Stamped from
+          // the resolved inbound account — the same value the conversation
+          // pointer is re-stamped to just above. The conversation's moves on
+          // the next inbound to a different account; this one never does.
+          channelConnectionId: channelConnectionId ?? conversation.channelConnectionId ?? null,
           rawPayload: evt.rawPayload as Prisma.InputJsonValue,
           timestamp: evt.timestamp,
           // Structured non-media content (location pin / contact card) → rich bubble.

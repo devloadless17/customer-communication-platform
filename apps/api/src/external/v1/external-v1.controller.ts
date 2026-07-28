@@ -24,7 +24,12 @@ import { tmpdir } from "node:os";
 import type { Response } from "express";
 
 import { CallsService } from "@/calls/calls.service";
+import { getWorkspaceReport, ReportRangeError } from "@/lib/analytics/reports";
 import { streamBlob } from "@/media/stream-blob";
+import {
+  ReportOverviewQuerySchema,
+  type ReportOverviewQuery,
+} from "@/reports/reports.schemas";
 
 import { TRANSFER_MAX_UPLOAD_BYTES } from "@ccp/shared/contacts/transfer-columns";
 
@@ -2172,6 +2177,35 @@ export class ExternalV1Controller {
   // call needs an SDP offer from a live WebRTC peer and a browser to carry the
   // audio, so an API client has nothing to place one with. What's here is the
   // part an integration can genuinely drive.
+
+  /**
+   * Workspace performance report — same aggregates and SAME response shape as
+   * the internal /api/reports/overview (WorkspaceReport in @ccp/shared/dtos).
+   * One source of truth on purpose: a separate v1 mapper is how the calls
+   * artifact fields silently went missing from this API (2026-07-28).
+   */
+  @Get("reports/overview")
+  @RequireScope("read:reports")
+  async reportOverview(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query(zQuery(ReportOverviewQuerySchema)) query: ReportOverviewQuery,
+  ) {
+    try {
+      return await getWorkspaceReport(auth.workspaceId, {
+        from: new Date(query.from),
+        to: new Date(query.to),
+        tz: query.tz,
+        // Shares the internal schema, so account scoping is parity by
+        // construction rather than a second implementation to keep in sync.
+        accountId: query.accountId,
+      });
+    } catch (err) {
+      if (err instanceof ReportRangeError) {
+        throw new BadRequestException({ error: "invalid_range", detail: err.message });
+      }
+      throw err;
+    }
+  }
 
   @Get("calls")
   @RequireScope("read:calls")

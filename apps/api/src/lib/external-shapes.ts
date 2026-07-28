@@ -63,6 +63,15 @@ export interface ExternalContact {
   phoneNumber: string | null;
   identityChannel: Channel | null;
   externalContactId: string | null;
+  /**
+   * WHICH of the workspace's channel accounts this contact's thread is on — a
+   * specific WhatsApp number, Page or Instagram handle
+   * (`ChannelConnection.id`, resolvable via `GET /v1/channel-accounts`).
+   *
+   * Null when the contact has no thread yet, or when the account it belonged to
+   * was disconnected (`onDelete: SetNull`).
+   */
+  channelConnectionId: string | null;
   /** Canonical display name. Derived from firstName + lastName when both set. */
   name: string;
   /** Split off `name` on first space at create/migration time. */
@@ -140,6 +149,17 @@ export interface ExternalMessage {
  */
 export const EXTERNAL_CONTACT_INCLUDE = {
   tags: { select: { id: true } },
+  /**
+   * The contact's thread, purely to name WHICH of the workspace's accounts it
+   * is on. `take: 1` because a contact has at most one conversation
+   * (`@@unique([workspaceId, contactId])`) — this is a bounded nested read, not
+   * an unbounded join.
+   *
+   * Needed for UI↔/v1 parity (§12): the contacts directory shows the account on
+   * every row and can filter by it, so a partner integrating against `/v1` must
+   * be able to see the same thing rather than inferring it from a second call.
+   */
+  conversations: { select: { channelConnectionId: true }, take: 1 },
 } as const;
 
 export const EXTERNAL_CONVERSATION_INCLUDE = {
@@ -157,12 +177,16 @@ export function toExternalAssignee(u: AssigneeRow): ExternalAssignee | null {
 export function toExternalContact(
   c: DbContact,
   tagIds: string[] = [],
+  /** The thread's account, when the caller fetched with
+   *  `EXTERNAL_CONTACT_INCLUDE`. Absent on the paths that don't. */
+  channelConnectionId: string | null = null,
 ): ExternalContact {
   return {
     id: c.id,
     phoneNumber: c.phoneNumber,
     identityChannel: c.identityChannel,
     externalContactId: c.externalContactId,
+    channelConnectionId,
     name: c.name,
     firstName: c.firstName ?? null,
     lastName: c.lastName ?? null,
@@ -184,9 +208,16 @@ export function toExternalContact(
  * sites don't repeat `.tags.map(...)`.
  */
 export function contactRowToExternal(
-  r: DbContact & { tags?: { id: string }[] },
+  r: DbContact & {
+    tags?: { id: string }[];
+    conversations?: { channelConnectionId: string | null }[];
+  },
 ): ExternalContact {
-  return toExternalContact(r, (r.tags ?? []).map((t) => t.id));
+  return toExternalContact(
+    r,
+    (r.tags ?? []).map((t) => t.id),
+    r.conversations?.[0]?.channelConnectionId ?? null,
+  );
 }
 
 /**
@@ -235,6 +266,13 @@ export function redactExternalContactPii(c: ExternalContact): ExternalContact {
     id: c.id,
     name: maskPhoneLikeName(c.name, c.phoneNumber),
     identityChannel: c.identityChannel,
+    // KEPT, deliberately. This is not the contact's data — it names one of OUR
+    // accounts, and a caller who reaches an embedded contact does so through a
+    // conversation or message read, whose own payload already carries the
+    // account. Redacting it here would hide nothing while making the embedded
+    // shape disagree with its parent. Same reasoning that keeps
+    // `identityChannel`: the account is the finer-grained version of that fact.
+    channelConnectionId: c.channelConnectionId,
     phoneNumber: null,
     externalContactId: null,
     firstName: null,

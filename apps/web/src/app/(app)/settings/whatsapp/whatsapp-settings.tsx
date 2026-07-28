@@ -22,6 +22,10 @@ import { PageHeader } from "@/components/layouts/page-header";
 import { apiFetch } from "@/lib/api/client-fetch";
 import type { ChannelAccountView } from "@/lib/api/queries";
 import { ChannelAccountsPanel } from "@/features/channels/components/channel-accounts-panel";
+import {
+  channelDisconnectCopy,
+  fetchChannelRemovalImpact,
+} from "@/features/channels/lib/channel-disconnect";
 import { CallingSettings } from "./calling-settings";
 import { MessagingHealthPanel } from "./messaging-health-panel";
 import { BusinessProfilePanel } from "./business-profile-panel";
@@ -145,18 +149,26 @@ export function WhatsappSettings({
   }
 
   async function disconnect() {
+    // Read the blast radius FIRST. This page already said "EVERY number", but
+    // not how many, nor how many live threads and scheduled campaigns it
+    // strands — and both pointers are `onDelete: SetNull`, so the next reply on
+    // each of those threads fails `account-unresolved`.
+    const impact = await fetchChannelRemovalImpact("whatsapp");
+    const { description, confirmLabel } = channelDisconnectCopy(
+      "number",
+      "numbers",
+      impact,
+    );
     const ok = await confirm({
       title: "Disconnect WhatsApp?",
-      description:
-        "This disconnects EVERY WhatsApp number in this workspace, not just one. " +
-        "Your conversations will stay, but no new messages will flow until you " +
-        "reconnect. To remove a single number, use its row in the connected-numbers " +
-        "list instead.",
-      confirmLabel: "Disconnect all",
+      description,
+      confirmLabel,
       destructive: true,
     });
     if (!ok) return;
-    const res = await apiFetch("/api/workspace/whatsapp", { method: "DELETE" });
+    // The server refuses an unconfirmed multi-account disconnect (409); the
+    // dialog above IS that confirmation.
+    const res = await apiFetch("/api/workspace/whatsapp?confirmAll=1", { method: "DELETE" });
     if (!res.ok) {
       setError("Failed to disconnect");
       return;

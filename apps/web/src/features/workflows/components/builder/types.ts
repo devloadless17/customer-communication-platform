@@ -51,6 +51,7 @@ export type ConditionField =
   | "body" | "body_lower" | "direction" | "option_id" | "session_kind"
   | "status_from" | "status_to" | "assigned_user_id" | "conversation_status"
   | "contact_phone" | "contact_name" | "contact_email" | "contact_stage_id"
+  | "channel_account_id"
   | "tag_id" | "tag_change_kind"
   | "field_key" | "field_new_value"
   | "stage_from" | "stage_to";
@@ -104,6 +105,11 @@ export interface BuilderCatalogs {
   workflows: Array<{ id: string; name: string; trigger: Trigger }>;
   /** Named assignment policies, for the `assign_to` step's policy mode. */
   assignmentPolicies: Array<{ id: string; name: string; isDefault: boolean }>;
+  /**
+   * Connected channel accounts — a specific WhatsApp number, Page or Instagram
+   * handle. Sourced from the app-wide directory, not a workflow-specific fetch.
+   */
+  channelAccounts: Array<{ id: string; name: string; channel: string }>;
 }
 
 // Trigger + step metadata --------------------------------------------------
@@ -269,13 +275,19 @@ export const FIELDS_BY_TRIGGER: Record<Trigger, ConditionField[]> = {
   message_received: [
     "body", "body_lower", "direction", "option_id", "session_kind",
     "contact_phone", "contact_name", "contact_email", "contact_stage_id",
-    "conversation_status", "assigned_user_id",
+    "conversation_status", "assigned_user_id", "channel_account_id",
   ],
-  conversation_created: ["contact_phone", "contact_name", "contact_email", "contact_stage_id"],
-  conversation_opened: ["status_from", "contact_phone", "contact_name", "contact_email", "assigned_user_id"],
-  conversation_closed: ["status_from", "contact_phone", "contact_name", "contact_email", "assigned_user_id"],
-  conversation_assigned: ["assigned_user_id", "contact_phone", "contact_name", "contact_email"],
-  conversation_status_changed: ["status_from", "status_to", "contact_phone", "contact_name", "contact_email"],
+  // Every trigger that carries a conversation snapshot can condition on the
+  // ACCOUNT — the resolver reads `conversation.channelConnectionId`. Kept in
+  // lockstep with FIELDS_BY_TRIGGER in apps/api/src/lib/workflows/conditions.ts:
+  // this list is a MIRROR, and a field the server accepts but this omits is
+  // simply unreachable in the builder (which is what "channel_account_id
+  // exists" meant in practice until now).
+  conversation_created: ["contact_phone", "contact_name", "contact_email", "contact_stage_id", "channel_account_id"],
+  conversation_opened: ["status_from", "contact_phone", "contact_name", "contact_email", "assigned_user_id", "channel_account_id"],
+  conversation_closed: ["status_from", "contact_phone", "contact_name", "contact_email", "assigned_user_id", "channel_account_id"],
+  conversation_assigned: ["assigned_user_id", "contact_phone", "contact_name", "contact_email", "channel_account_id"],
+  conversation_status_changed: ["status_from", "status_to", "contact_phone", "contact_name", "contact_email", "channel_account_id"],
   contact_tag_updated: ["tag_id", "tag_change_kind", "contact_phone", "contact_name", "contact_email"],
   contact_field_updated: ["field_key", "field_new_value", "contact_phone", "contact_name", "contact_email"],
   contact_lifecycle_updated: ["stage_from", "stage_to", "contact_phone", "contact_name", "contact_email"],
@@ -297,6 +309,7 @@ export const FIELD_LABELS: Record<ConditionField, string> = {
   contact_name: "Contact name",
   contact_email: "Contact email",
   contact_stage_id: "Contact stage",
+  channel_account_id: "Account (number / Page)",
   tag_id: "Tag",
   tag_change_kind: "Tag change",
   field_key: "Field",
@@ -321,6 +334,7 @@ export type FieldValueKind =
   | "direction"
   | "tag_change_kind"
   | "session_kind"
+  | "channel_account"
   | "field_key";
 
 export const FIELD_VALUE_KIND: Record<ConditionField, FieldValueKind> = {
@@ -337,6 +351,7 @@ export const FIELD_VALUE_KIND: Record<ConditionField, FieldValueKind> = {
   contact_name: "text",
   contact_email: "text",
   contact_stage_id: "stage",
+  channel_account_id: "channel_account",
   tag_id: "tag",
   tag_change_kind: "tag_change_kind",
   field_key: "field_key",

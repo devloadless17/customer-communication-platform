@@ -1150,7 +1150,7 @@ export class ExternalV1MessagingService {
     let conv = await this.db.conversation.findFirst({
       where: { workspaceId, contactId },
       orderBy: { lastMessageAt: "desc" },
-      select: { id: true, status: true },
+      select: { id: true, status: true, channelConnectionId: true },
     });
     // A closed thread is reopened ONLY after a fresh send actually lands (the
     // template branch below, and the text branch via sendMessage's
@@ -1194,7 +1194,7 @@ export class ExternalV1MessagingService {
             lastMessageAt: new Date(),
             lastMessagePreview: "",
           },
-          select: { id: true, status: true },
+          select: { id: true, status: true, channelConnectionId: true },
         });
       } catch (err) {
         // Lost the race for this contact's single conversation (unique
@@ -1204,7 +1204,7 @@ export class ExternalV1MessagingService {
           conv = await this.db.conversation.findFirstOrThrow({
             where: { workspaceId, contactId },
             orderBy: { lastMessageAt: "desc" },
-            select: { id: true, status: true },
+            select: { id: true, status: true, channelConnectionId: true },
           });
         } else throw err;
       }
@@ -1215,10 +1215,42 @@ export class ExternalV1MessagingService {
     // Templates DON'T need the 24h customer-service window — that's their
     // whole point (cold outbound + re-engagement).
     if (input.template) {
-      const template = await this.db.messageTemplate.findFirst({
-        where: { workspaceId, name: input.template.name, language: input.template.language },
-        select: { id: true },
-      });
+      // Scope the name lookup to the WABA this thread actually sends from.
+      // `(name, language)` is NOT unique across a workspace — the catalog is
+      // keyed `(workspaceId, wabaId, name, language)` — so once a workspace
+      // runs two WABAs, an unscoped findFirst picks between two legitimately
+      // distinct templates by row order. `sendTemplateInternal` would then
+      // refuse it as `template_wrong_account`, which is correct but reads to
+      // the partner as "your own template is wrong". Resolve it properly here.
+      const account = conv.channelConnectionId
+        ? await this.db.channelConnection.findFirst({
+            where: { id: conv.channelConnectionId, workspaceId },
+            select: { wabaId: true },
+          })
+        : null;
+      const accountWaba = account?.wabaId ?? "";
+      const byName = {
+        workspaceId,
+        name: input.template.name,
+        language: input.template.language,
+      };
+      // Prefer this account's own catalog; fall back to the legacy `""`
+      // sentinel (pre-multi-account rows, which belong to no WABA in
+      // particular). With no account WABA known there is nothing to scope by,
+      // so keep the original behaviour and let the send-time guard decide.
+      const template = accountWaba
+        ? ((await this.db.messageTemplate.findFirst({
+            where: { ...byName, wabaId: accountWaba },
+            select: { id: true },
+          })) ??
+          (await this.db.messageTemplate.findFirst({
+            where: { ...byName, wabaId: "" },
+            select: { id: true },
+          })))
+        : await this.db.messageTemplate.findFirst({
+            where: byName,
+            select: { id: true },
+          });
       if (!template) {
         throw new NotFoundException({
           error: "template_not_found",

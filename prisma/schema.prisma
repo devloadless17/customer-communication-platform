@@ -2026,6 +2026,32 @@ model Message {
   // breaks once a 2nd channel exists; lose Conversation.channel and empty
   // threads (no messages yet) have no channel.
   channel               Channel
+  // WHICH of the workspace's accounts on that channel actually carried this
+  // message — the number/Page it went out from, or arrived on.
+  //
+  // NOT redundant with `Conversation.channelConnectionId`, because those two
+  // answer different questions. The conversation pointer answers "where does
+  // the NEXT reply go", and it is deliberately MUTABLE: ingest re-stamps it
+  // whenever the customer writes to a different number of ours. That makes it
+  // wrong for history — a message genuinely sent from Sales started reporting
+  // as Support the moment the customer messaged Support, including in the
+  // outbound-webhook payload partners consume. A send's identity is a fact
+  // about the past; this column records it and never moves.
+  //
+  // Plain id, NO FK — same reasoning as `Conversation.lastAssignedUserId`, and
+  // stronger: the conversation's FK is `onDelete: SetNull`, which is exactly
+  // wrong for a historical stamp (disconnecting a number would erase the
+  // record of everything it ever sent).
+  //
+  // NULL = "not recorded" (every row written before this column existed).
+  // Deliberately NOT backfilled: filling it from the conversation's CURRENT
+  // pointer would write the wrong answer for precisely the rows this exists to
+  // fix. Readers fall back to the conversation pointer when null, which is
+  // exactly the old behaviour — so nothing regresses.
+  //
+  // No index yet: nothing filters Message by account today (§7 — add one when
+  // a real query needs it, i.e. when per-account reporting ships).
+  channelConnectionId   String?
   status                MessageStatus    @default(sent)
   // Delivery-failure diagnostics from Meta's async `status: "failed"` webhook.
   // Meta surfaces post-acceptance failures (131047 outside-window on an
@@ -5280,9 +5306,13 @@ model AssignmentRule {
   // Match conditions — ALL present clauses must match (AND); within a clause,
   // ANY value matches (OR). Absent/empty clause = "don't care". Shape mirrors
   // `AssignmentRuleConditions` in packages/shared/src/assignment/types.ts:
-  //   { channels?: Channel[]; tagIds?: string[]; stageIds?: string[];
+  //   { channels?: Channel[]; channelAccountIds?: string[]; tagIds?: string[];
+  //     stageIds?: string[];
   //     sources?: ("inbound"|"ai_handoff"|"broadcast"|"workflow"|"api")[];
   //     keywords?: string[]; languages?: string[]; isNewContact?: boolean }
+  // `channelAccountIds` is finer than `channels` — it names specific
+  // ChannelConnection ids, so "chats on the Sales number" routes separately
+  // from "chats on WhatsApp". Fails closed: an unbound thread matches none.
   // JSON (not columns) because the clause set is expected to grow and each
   // clause is a pure list — there is no query that filters ON a clause.
   conditions Json @default("{}")

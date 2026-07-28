@@ -166,6 +166,104 @@ export interface PlatformAnalytics {
   pendingOrgs: Array<{ id: string; name: string; createdAt: string }>;
 }
 
+/**
+ * Operational snapshot for the super-admin Platform page
+ * (`GET /api/admin/analytics/ops`). The durable half — per-queue counts read
+ * from Redis — survives api restarts, unlike the in-process
+ * `jobFailuresSinceBoot` counters, which is exactly why both are shown.
+ */
+export interface PlatformOpsSnapshot {
+  db: boolean;
+  redis: boolean;
+  uptimeSec: number;
+  /** Breached health thresholds — empty when healthy (mirrors /health). */
+  degraded: string[];
+  outboxLag: { pendingCount: number; oldestPendingSec: number | null; stale: boolean };
+  /** queue name → counts; null = that probe failed/timed out. */
+  queues: Record<
+    string,
+    { failed: number; waiting: number; delayed: number; active: number } | null
+  >;
+  jobFailuresSinceBoot: Record<
+    string,
+    { failedLastHour: number; failedTotal: number; lastError?: string; lastFailureAt?: string }
+  >;
+}
+
+// ---------------------------------------------------------------------------
+// Workspace performance report (`GET /api/reports/overview`, /v1 parity at
+// `GET /v1/reports/overview`). Metric definitions live on
+// apps/api/src/lib/analytics/reports.ts — durations in SECONDS, null when the
+// range holds no qualifying rows (render as "—", never as 0: "no data" and
+// "instant" must not look alike).
+// ---------------------------------------------------------------------------
+
+export interface WorkspaceReport {
+  range: {
+    from: string;
+    to: string;
+    tz: string;
+    /** The account every panel was scoped to, or null for the whole workspace. */
+    accountId: string | null;
+  };
+  volume: {
+    inbound: number;
+    outbound: number;
+    conversationsOpened: number;
+    conversationsClosed: number;
+    /** Per-day buckets in the requested timezone; days with no traffic are
+     *  absent (the chart fills gaps client-side). */
+    daily: Array<{ day: string; inbound: number; outbound: number }>;
+  };
+  channels: Array<{ channel: string; inbound: number; outbound: number }>;
+  /**
+   * Volume per ACCOUNT — which specific number / Page / handle did the work.
+   *
+   * Finer than `channels`, and the grain an operator running two numbers on one
+   * medium actually asks about. `accountId: null` = traffic whose account can't
+   * be resolved (a since-disconnected number); reported rather than dropped.
+   * `name` is the account's label, else its provider id — null when the account
+   * row is gone.
+   */
+  accounts: Array<{
+    accountId: string | null;
+    channel: string;
+    name: string | null;
+    inbound: number;
+    outbound: number;
+  }>;
+  firstResponse: {
+    answeredConversations: number;
+    avgSec: number | null;
+    medianSec: number | null;
+  };
+  resolution: {
+    closedConversations: number;
+    avgSec: number | null;
+    medianSec: number | null;
+  };
+  agents: Array<{
+    userId: string;
+    /** Resolved at read time; null = the member has since left the workspace. */
+    name: string | null;
+    messagesSent: number;
+    conversationsClosed: number;
+    answeredConversations: number;
+    medianFirstResponseSec: number | null;
+  }>;
+  sla: {
+    ticketsCreated: number;
+    firstResponse: { withSla: number; breached: number };
+    resolution: { withSla: number; breached: number };
+  };
+  ai: {
+    aiMessages: number;
+    aiConversations: number;
+    /** Threads whose every outbound in range was AI (broadcasts excluded). */
+    aiOnlyConversations: number;
+  };
+}
+
 // ---------------------------------------------------------------------------
 // In-conversation message search.
 // ---------------------------------------------------------------------------

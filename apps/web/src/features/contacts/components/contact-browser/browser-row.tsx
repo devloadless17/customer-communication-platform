@@ -6,6 +6,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { ChannelBadge } from "@/features/inbox/components/channel-badge";
 import { WindowBadge } from "@/features/inbox/components/window-badge";
 import { TagChip } from "@/features/tags/components/tag-chip";
+import { AccountLabel } from "@/features/channels/components/account-label";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
@@ -71,6 +72,15 @@ export const BrowserRow = memo(function BrowserRow({
               className="size-3.5 shrink-0"
             />
           )}
+          {/* WHICH of our numbers this person talks to. The directory could
+              already FILTER by account, but the rows never SHOWED it — so
+              clearing the filter made two people who message two different
+              numbers look identical again. Hidden on single-account channels. */}
+          <AccountLabel
+            channel={contact.identityChannel ?? undefined}
+            accountId={item.channelConnectionId}
+            verb="Received on"
+          />
           <span className="hidden shrink-0 whitespace-nowrap font-mono text-2xs tabular-nums text-muted-foreground sm:inline">
             {formatPhone(contact.phoneNumber)}
           </span>

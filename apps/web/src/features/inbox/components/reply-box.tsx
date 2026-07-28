@@ -53,7 +53,7 @@ import { computeWindowStatus, effectiveSendWindowMs } from "@ccp/shared/utils/wi
 import { CHANNEL_CAPABILITIES, supportsInlineCaption } from "@ccp/shared/providers/capabilities";
 import { mediaSizeCap, channelSupportsMediaKind } from "@ccp/shared/providers/media-caps";
 import { CHANNEL_LABEL } from "./channel-badge";
-import { useChannelAccounts } from "@/features/inbox/contexts/channel-accounts-context";
+import { useChannelAccounts } from "@/features/channels/contexts/channel-accounts-context";
 import type { Channel } from "@ccp/shared/types";
 import { resolveFieldTokens } from "@ccp/shared/field-tokens";
 import { useNow } from "@/hooks/use-now";

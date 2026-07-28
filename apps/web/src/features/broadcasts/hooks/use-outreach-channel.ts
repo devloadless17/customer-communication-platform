@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-import { apiFetch } from "@/lib/api/client-fetch";
+import { useChannelAccounts } from "@/features/channels/contexts/channel-accounts-context";
 
 /**
  * Which channel the Outreach section is scoped to.
@@ -60,34 +60,20 @@ export function useOutreachChannel(): {
     if (stored) setChannelState(stored);
   }, []);
 
+  // Which channels this workspace actually has a live account on. Read from the
+  // app-wide directory (seeded once in the (app) layout) instead of a third
+  // client refetch of the same rows.
+  const { all: accounts } = useChannelAccounts();
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await apiFetch("/api/workspace/channel-accounts");
-        if (!res.ok) return;
-        const data = (await res.json()) as {
-          accounts?: Array<{ channel: string; isActive: boolean }>;
-        };
-        const live = ORDER.filter((c) =>
-          (data.accounts ?? []).some((a) => a.channel === c && a.isActive),
-        );
-        if (cancelled) return;
-        // Never render an EMPTY switcher: a workspace mid-onboarding has no
-        // connected channel yet, and an empty select is worse than showing
-        // WhatsApp (where the connect flow lives).
-        setAvailable(live.length > 0 ? live : ["whatsapp"]);
-        // A stored preference for a channel that has since been disconnected
-        // would scope the section to a dead end.
-        setChannelState((cur) => (live.length > 0 && !live.includes(cur) ? live[0]! : cur));
-      } catch {
-        // Leave the default — the nav must render regardless.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    const live = ORDER.filter((c) => accounts.some((a) => a.channel === c && a.isActive));
+    // Never render an EMPTY switcher: a workspace mid-onboarding has no
+    // connected channel yet, and an empty select is worse than showing
+    // WhatsApp (where the connect flow lives).
+    setAvailable(live.length > 0 ? live : ["whatsapp"]);
+    // A stored preference for a channel that has since been disconnected would
+    // scope the section to a dead end.
+    setChannelState((cur) => (live.length > 0 && !live.includes(cur) ? live[0]! : cur));
+  }, [accounts]);
 
   const setChannel = useCallback((next: OutreachChannel) => {
     setChannelState(next);

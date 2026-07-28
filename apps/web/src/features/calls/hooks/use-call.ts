@@ -47,6 +47,15 @@ export interface LiveCallState {
   callId: string;
   conversationId: string;
   contactName: string;
+  /**
+   * WHICH of our accounts this call is on, so the live panel can say it.
+   *
+   * The channel is not enough: a workspace running a Sales and a Support number
+   * saw "WhatsApp" on both, and the agent picked up without knowing which
+   * business to answer as. Null when the thread isn't bound to an account.
+   */
+  channel: Channel | null;
+  accountId: string | null;
   direction: "in" | "out";
   status: "ringing" | "in_progress" | "ending";
   startedAt: number;
@@ -150,10 +159,15 @@ export function useCall(): {
     contactName: string,
     conversationId: string,
     channel: Channel,
+    /** The account being called — from the `call:incoming` frame. */
+    accountId?: string | null,
   ) => Promise<void>;
   initiateOutbound: (
     conversationId: string,
     contactName: string,
+    /** The thread's account — the number this call goes out FROM. */
+    channel?: Channel | null,
+    accountId?: string | null,
   ) => Promise<{ ok: true } | { ok: false; reason: string }>;
   reject: (callId: string) => Promise<void>;
   hangup: () => Promise<void>;
@@ -965,6 +979,7 @@ export function useCall(): {
       contactName: string,
       conversationId: string,
       channel: Channel,
+      accountId?: string | null,
     ) => {
       setError(null);
       // Single peer connection (1:1, see the contract note up top). Answering
@@ -1018,6 +1033,8 @@ export function useCall(): {
           callId,
           conversationId,
           contactName,
+          channel,
+          accountId: accountId ?? null,
           direction: "in",
           status: "in_progress",
           startedAt,
@@ -1102,6 +1119,8 @@ export function useCall(): {
     async (
       conversationId: string,
       contactName: string,
+      channel?: Channel | null,
+      accountId?: string | null,
     ): Promise<{ ok: true } | { ok: false; reason: string }> => {
       // Fresh call ⇒ fresh pickup gate (teardown also resets it; this covers
       // any path that reaches a new dial without a clean teardown between).
@@ -1157,6 +1176,8 @@ export function useCall(): {
           callId: tempCallId,
           conversationId,
           contactName,
+          channel: channel ?? null,
+          accountId: accountId ?? null,
           direction: "out",
           status: "ringing",
           startedAt: Date.now(),

@@ -152,14 +152,57 @@ export async function refreshTemplateAnalytics(
   // loads as "not-connected" and failed EVERY refresh for a synced template.
   // That was the real bug behind the report's unexplained "Couldn't fetch
   // from Meta".
-  const accountId = opts.wabaId
-    ? (
+  //
+  // A legacy `""`-WABA template names no catalog, so there is nothing to
+  // resolve the owning account FROM. Passing `null` straight through made
+  // `getSendConfig` refuse with ACCOUNT_UNRESOLVED on any multi-account
+  // workspace — and the capture sweeper's per-WABA catch turned that throw into
+  // a console line, so read/click counts for every pre-multi-account template
+  // expired UNFETCHED at Meta's ~7-day horizon. That loss is permanent.
+  //
+  // So resolve it whenever the answer is unambiguous, and when it genuinely
+  // isn't, say THAT — not "whatsapp not configured", which sends an admin to
+  // reconnect a healthy integration.
+  let accountId: string | null = null;
+  if (opts.wabaId) {
+    accountId =
+      (
         await db.channelConnection.findFirst({
           where: { workspaceId, channel: "whatsapp", wabaId: opts.wabaId },
           select: { id: true },
         })
-      )?.id ?? null
-    : null;
+      )?.id ?? null;
+  } else {
+    const active = await db.channelConnection.findMany({
+      where: { workspaceId, channel: "whatsapp", isActive: true },
+      select: { id: true, wabaId: true, isDefault: true },
+    });
+    const distinctWabas = new Set(
+      active.map((a) => a.wabaId).filter((w): w is string => typeof w === "string" && w !== ""),
+    );
+    if (active.length === 1) {
+      // One number: it owns every legacy row by construction.
+      accountId = active[0]!.id;
+    } else if (distinctWabas.size <= 1) {
+      // Several numbers sharing ONE catalog — any of them reads the same
+      // analytics, so the default is not a guess.
+      accountId = (active.find((a) => a.isDefault) ?? active[0])?.id ?? null;
+    } else {
+      console.warn(
+        `[template-analytics] cannot attribute ${ids.length} legacy ""-WABA template(s) ` +
+          `for workspace=${workspaceId}: ${distinctWabas.size} WABAs connected. ` +
+          `Run a template catalog sync to stamp their wabaId, or their metrics ` +
+          `expire unfetched at Meta's ~7-day horizon.`,
+      );
+      throw new BadRequestException({
+        error: "template_waba_unresolved",
+        detail:
+          "These templates were synced before this workspace had more than one WhatsApp " +
+          "Business Account, so we can't tell which catalog they belong to. Run a template " +
+          "sync to stamp them, then retry.",
+      });
+    }
+  }
   // Config resolution fails for reasons the operator can fix (missing WABA id
   // on the connection, undecryptable token) — but ProviderNotConfiguredError is
   // a plain Error, and unwrapped it surfaced as a bare 500 whose toast could

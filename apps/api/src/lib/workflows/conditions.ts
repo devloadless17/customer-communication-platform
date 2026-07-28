@@ -99,17 +99,19 @@ export const FIELDS_BY_TRIGGER: Record<WorkflowTriggerEvent, ConditionField[]> =
   ],
   conversation_opened: [
     "status_from", "contact_phone", "contact_name", "contact_email",
-    "assigned_user_id",
+    "assigned_user_id", "channel_account_id",
   ],
   conversation_closed: [
     "status_from", "contact_phone", "contact_name", "contact_email",
-    "assigned_user_id",
+    "assigned_user_id", "channel_account_id",
   ],
   conversation_assigned: [
     "assigned_user_id", "contact_phone", "contact_name", "contact_email",
+    "channel_account_id",
   ],
   conversation_status_changed: [
     "status_from", "status_to", "contact_phone", "contact_name", "contact_email",
+    "channel_account_id",
   ],
   contact_tag_updated: [
     "tag_id", "tag_change_kind", "contact_phone", "contact_name", "contact_email",

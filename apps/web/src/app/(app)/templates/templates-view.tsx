@@ -33,6 +33,7 @@ import type { TemplateComponent } from "@ccp/shared/providers/types";
 import { parseVariableBindings, type VariableBindings } from "@ccp/shared/template-bindings";
 import { TemplateInsights } from "@/features/broadcasts/charts/template-insights";
 import { TemplateComparison } from "@/features/templates/components/template-comparison";
+import { useChannelAccounts } from "@/features/channels/contexts/channel-accounts-context";
 import {
   TEMPLATE_AUTO_ARCHIVE_MONTHS,
   templateArchivalRisk,
@@ -105,41 +106,34 @@ export function TemplatesView({
   // surface still showing a single workspace-level list, so a template visible
   // here could be absent in the composer with no explanation. With one number
   // there is nothing to pick and the legacy unscoped requests stay.
-  const [whatsappAccounts, setWhatsappAccounts] = useState<
-    Array<{ id: string; name: string; isDefault: boolean }>
-  >([]);
   const [templatesAccountId, setTemplatesAccountId] = useState<string | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await apiFetch("/api/workspace/channel-accounts");
-        if (!res.ok) return;
-        const data = (await res.json()) as {
-          accounts?: Array<{
-            id: string;
-            channel: string;
-            name: string;
-            isDefault: boolean;
-            isActive: boolean;
-          }>;
-        };
-        if (cancelled) return;
-        setWhatsappAccounts(
-          (data.accounts ?? [])
-            .filter((a) => a.channel === "whatsapp" && a.isActive)
-            .map((a) => ({ id: a.id, name: a.name, isDefault: a.isDefault })),
-        );
-      } catch {
-        // No switcher, unscoped list — the pre-multi-account behaviour.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-  const accountQuery = templatesAccountId
-    ? `?accountId=${encodeURIComponent(templatesAccountId)}`
+  // From the app-wide directory (seeded once in the (app) layout) rather than a
+  // fourth client refetch of the same rows. `catalog_changed` re-runs that
+  // layout, so a connect/rename lands here too.
+  const { all: directoryAccounts } = useChannelAccounts();
+  const whatsappAccounts = useMemo(
+    () =>
+      directoryAccounts
+        .filter((a) => a.channel === "whatsapp" && a.isActive)
+        .map((a) => ({ id: a.id, name: a.name, isDefault: a.isDefault })),
+    [directoryAccounts],
+  );
+  // With SEVERAL numbers the page must always be scoped to exactly ONE
+  // catalogue. The picker used to offer a `value=""` option labelled "Default
+  // account" which sent no accountId at all — so the server returned EVERY
+  // WABA's templates while the control claimed you were looking at one. Two
+  // same-named templates from two Business Accounts then sat side by side,
+  // indistinguishable, and picking the wrong one fails at send with Meta's
+  // opaque per-recipient error.
+  //
+  // A single-account workspace keeps the legacy unscoped request: there is one
+  // catalogue, so "scoped" and "unscoped" are the same list.
+  const defaultWhatsappAccountId =
+    whatsappAccounts.find((a) => a.isDefault)?.id ?? whatsappAccounts[0]?.id ?? null;
+  const effectiveAccountId =
+    whatsappAccounts.length > 1 ? (templatesAccountId ?? defaultWhatsappAccountId) : null;
+  const accountQuery = effectiveAccountId
+    ? `?accountId=${encodeURIComponent(effectiveAccountId)}`
     : "";
   // The same scope, stamped on the creation LINKS (new / library / auth) so a
   // template authored while viewing a non-default number lands on that
@@ -400,12 +394,13 @@ export function TemplatesView({
             "Send from". Hidden with one number — the whole list is its WABA's. */}
         {whatsappAccounts.length > 1 && (
           <select
-            value={templatesAccountId ?? ""}
+            value={effectiveAccountId ?? ""}
             onChange={(e) => setTemplatesAccountId(e.target.value || null)}
             className="h-9 rounded-md border border-input bg-background px-2 text-xs"
             aria-label="Which number's templates to show"
           >
-            <option value="">Default account</option>
+            {/* No "all accounts" option, deliberately — see the scoping note
+                above. Every option is exactly one WABA's catalogue. */}
             {whatsappAccounts.map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name}
@@ -515,6 +510,7 @@ export function TemplatesView({
       )}
 
       <DetailDrawer
+        accountQuery={creationAccountQuery}
         template={selected}
         allTemplates={templates}
         fieldDefinitions={fieldDefinitions}
@@ -848,6 +844,7 @@ function DetailDrawer({
   template,
   allTemplates,
   fieldDefinitions,
+  accountQuery,
   deleting,
   deleteError,
   reloading,
@@ -865,6 +862,9 @@ function DetailDrawer({
   /** The workspace's whole catalog — the comparison picker's candidate pool. */
   allTemplates: TemplateDto[];
   fieldDefinitions: ContactFieldDefinition[];
+  /** The list page's current account scope, forwarded onto the Edit link so
+   *  the edit page's connection hints describe the right number. */
+  accountQuery: string;
   deleting: boolean;
   deleteError: string | null;
   reloading: boolean;
@@ -1317,7 +1317,15 @@ function DetailDrawer({
                   {canManage &&
                     ["approved", "rejected", "paused"].includes(template.status) && (
                       <Button asChild variant="outline" size="sm">
-                        <Link href={`/templates/${template.id}/edit`} className="gap-1.5">
+                        {/* Carry the account scope, like the create links do.
+                            Without it the edit page loaded its connection
+                            hints (connected / hasWabaId / hasAppId) from the
+                            DEFAULT account, so editing a second number's
+                            template could bounce you to Settings. */}
+                        <Link
+                          href={`/templates/${template.id}/edit${accountQuery}`}
+                          className="gap-1.5"
+                        >
                           <Pencil className="size-3.5" />
                           Edit
                         </Link>

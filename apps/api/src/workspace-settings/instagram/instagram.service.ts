@@ -11,6 +11,7 @@ import {
   getPageSubscription,
 } from "@/lib/providers/meta-page-subscription";
 import { getMetaConnection } from "@/lib/providers/meta-connection";
+import { assertChannelDisconnectConfirmed } from "@/lib/providers/assert-channel-disconnect";
 
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
@@ -338,7 +339,9 @@ export class InstagramService {
     return { config: { igId, igUsername: igUsername ?? null, pageId, verifyToken } };
   }
 
-  async disconnect(workspaceId: string): Promise<void> {
+  async disconnect(workspaceId: string, confirmAll?: boolean): Promise<void> {
+    // Refuse an ambiguous blast radius; see the helper.
+    await assertChannelDisconnectConfirmed(workspaceId, CHANNEL, confirmAll);
     await this.db.channelConnection.deleteMany({ where: { workspaceId, channel: CHANNEL } });
     invalidateInstagramConfig(workspaceId);
     await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "channels" });

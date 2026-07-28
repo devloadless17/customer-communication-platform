@@ -509,6 +509,22 @@ function ConditionValueControl({
       />
     );
   }
+  if (kind === "channel_account" && catalogs) {
+    return (
+      <CatalogSelect
+        value={value}
+        onChange={onChange}
+        // Labelled with the channel too: two accounts can share a label across
+        // channels ("Support" on WhatsApp and on Messenger), and a rule that
+        // silently picked the wrong one would be invisible.
+        rows={catalogs.channelAccounts.map((a) => ({
+          id: a.id,
+          label: `${a.name} · ${a.channel}`,
+        }))}
+        placeholder="Select account…"
+      />
+    );
+  }
   if (kind === "tag" && catalogs) {
     return (
       <CatalogSelect

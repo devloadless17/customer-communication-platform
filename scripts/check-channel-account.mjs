@@ -123,7 +123,118 @@ function topLevelArgs(text) {
   return args;
 }
 
+/**
+ * RULE 2 — reading "the default account" is a budgeted, reviewed act.
+ *
+ * `findFirst({ channel, isDefault: true })` on ChannelConnection answers a
+ * question about ONE account using whichever row happens to be default. That is
+ * right in a handful of places (an explicit outbound-first fallback, the
+ * placeholder repair, the legacy single-account settings forms) and wrong
+ * everywhere else — it is how inbound webhook HMAC came to be resolved from a
+ * single account, silently dropping every sibling's messages.
+ *
+ * Rule 1 can't see these: they aren't credential-loader calls.
+ *
+ * Budgeted PER FILE rather than per line, so ordinary edits don't churn the
+ * list while a NEW default-scoped read still fails the build. Scoped to
+ * ChannelConnection `where` clauses only — `select: { isDefault: true }`, a
+ * `data:` write, and the many `isDefault` columns on other models (TeamChannel,
+ * ContactStage, AssignmentPolicy) are not this rule's business, and a checker
+ * that cries wolf gets ignored.
+ */
+const DEFAULT_READ_BUDGET = new Map([
+  [
+    "apps/api/src/lib/conversations/account.ts",
+    { max: 1, why: "resolveOutboundAccountId — the ONE sanctioned outbound-first fallback." },
+  ],
+  [
+    "apps/api/src/lib/providers/normalize-default-account.ts",
+    { max: 2, why: "Placeholder repair: its whole job is to find and fix the default row." },
+  ],
+  [
+    "apps/api/src/lib/providers/config.ts",
+    { max: 2, why: "loadSendCipher (guarded by the active>1 refusal) + getBusinessNumberCountry's per-account-or-default read." },
+  ],
+  [
+    "apps/api/src/lib/providers/messenger-config.ts",
+    { max: 1, why: "loadSendCipher — guarded by the same active>1 refusal." },
+  ],
+  [
+    "apps/api/src/lib/providers/instagram-config.ts",
+    { max: 1, why: "loadSendCipher — guarded by the same active>1 refusal." },
+  ],
+  [
+    "apps/api/src/lib/providers/meta-health.ts",
+    { max: 1, why: "getWhatsappHealth — explicit id when the caller names one, default otherwise." },
+  ],
+  [
+    "apps/api/src/webhooks/meta/meta.controller.ts",
+    { max: 1, why: "Documented social fallback: a payload with no entry[].id has nothing else to attribute to." },
+  ],
+  [
+    "apps/api/src/calls/calls.service.ts",
+    { max: 4, why: "Thread's own connection when known, default for workspace-level settings reads." },
+  ],
+  [
+    "apps/api/src/workspace-settings/whatsapp/whatsapp.service.ts",
+    { max: 6, why: "Legacy single-account settings form (getConfig, verify-token pre-mint, template op fallbacks)." },
+  ],
+  [
+    "apps/api/src/workspace-settings/messenger/messenger.service.ts",
+    { max: 2, why: "Legacy single-account settings form." },
+  ],
+  [
+    "apps/api/src/workspace-settings/instagram/instagram.service.ts",
+    { max: 2, why: "Legacy single-account settings form." },
+  ],
+  [
+    "apps/api/src/workspace-settings/channel-accounts/channel-accounts.service.ts",
+    { max: 1, why: "setDefault — demoting the current default is the operation." },
+  ],
+  [
+    "apps/api/src/lib/analytics/template-analytics.ts",
+    { max: 3, why: "KNOWN GAP, documented in-file: Meta's insights switch is per-WABA and the route takes no accountId yet." },
+  ],
+  [
+    "apps/api/src/outbound-webhooks/outbound-webhooks.subscriber.ts",
+    { max: 1, why: "Channel-default fallback for events that carry neither an account nor a conversation." },
+  ],
+]);
+
+/** ChannelConnection reads whose `where` names the default account. */
+function countDefaultAccountReads(code) {
+  let count = 0;
+  const re = /\bchannelConnection\s*\.\s*(findFirst|findMany|findUnique|findUniqueOrThrow|findFirstOrThrow|count)\s*\(/g;
+  let m;
+  while ((m = re.exec(code))) {
+    let depth = 1;
+    let j = m.index + m[0].length;
+    while (j < code.length && depth > 0) {
+      if (code[j] === "(") depth++;
+      else if (code[j] === ")") depth--;
+      j++;
+    }
+    const call = code.slice(m.index + m[0].length, j - 1);
+    // Isolate the `where:` object — a `select: { isDefault: true }` is a
+    // projection, not a default-scoped read, and must not count.
+    const w = call.indexOf("where:");
+    if (w === -1) continue;
+    const braceStart = call.indexOf("{", w);
+    if (braceStart === -1) continue;
+    let d = 1;
+    let k = braceStart + 1;
+    while (k < call.length && d > 0) {
+      if (call[k] === "{") d++;
+      else if (call[k] === "}") d--;
+      k++;
+    }
+    if (/isDefault\s*:\s*true/.test(call.slice(braceStart, k))) count++;
+  }
+  return count;
+}
+
 const violations = [];
+const budgetViolations = [];
 let scanned = 0;
 let checked = 0;
 
@@ -131,9 +242,20 @@ for (const dir of SCAN_DIRS) {
   for (const file of walk(join(ROOT, dir))) {
     scanned++;
     const raw = readFileSync(file, "utf8");
+    const rel = relative(ROOT, file);
+
+    // RULE 2 runs on every file — a default-scoped read need not sit next to a
+    // credential loader (the webhook HMAC one didn't).
+    if (raw.includes("channelConnection")) {
+      const found = countDefaultAccountReads(stripNonCode(raw));
+      const budget = DEFAULT_READ_BUDGET.get(rel);
+      if (found > (budget?.max ?? 0)) {
+        budgetViolations.push({ file: rel, found, allowed: budget?.max ?? 0 });
+      }
+    }
+
     if (!LOADERS.some((l) => raw.includes(l))) continue;
     const code = stripNonCode(raw);
-    const rel = relative(ROOT, file);
 
     for (const loader of LOADERS) {
       const re = new RegExp(`\\b${loader}\\s*\\(`, "g");
@@ -185,6 +307,28 @@ if (violations.length > 0) {
   process.exit(1);
 }
 
+if (budgetViolations.length > 0) {
+  console.error("✖ channel-account check — NEW default-account read(s):\n");
+  for (const v of budgetViolations) {
+    console.error(`  ${v.file}  ${v.found} ChannelConnection read(s) scoped to isDefault (budget ${v.allowed})`);
+  }
+  console.error(
+    "\nReading `isDefault: true` answers a per-account question with whichever row\n" +
+      "happens to be the workspace default. That is how inbound webhook HMAC came to\n" +
+      "be resolved from ONE account, silently dropping every sibling's messages.\n" +
+      "Prefer the account the thing actually belongs to:\n" +
+      "  · a thread    → conversation.channelConnectionId\n" +
+      "  · a message   → message.channelConnectionId (its historical account)\n" +
+      "  · a campaign  → broadcast.channelConnectionId\n" +
+      "  · a webhook   → resolveInboundAccount\n" +
+      "  · ALL of them → findMany({ isActive: true }) and handle each\n" +
+      "If the default genuinely IS the answer here, raise this file's budget in\n" +
+      "DEFAULT_READ_BUDGET (scripts/check-channel-account.mjs) with the reason.",
+  );
+  process.exit(1);
+}
+
 console.log(
-  `✓ channel-account check passed (${checked} credential resolution(s) in ${scanned} files, all account-scoped)`,
+  `✓ channel-account check passed (${checked} credential resolution(s) in ${scanned} files, all account-scoped;\n` +
+    `  default-account reads within budget in ${DEFAULT_READ_BUDGET.size} reviewed file(s))`,
 );

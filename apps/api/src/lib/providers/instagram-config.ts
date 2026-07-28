@@ -2,7 +2,10 @@ import { decryptSecret } from "@/lib/crypto/envelope";
 import { db } from "@/lib/db";
 import { ProviderNotConfiguredError, ACCOUNT_UNRESOLVED } from "@/lib/providers/config";
 import { TtlCache } from "@/lib/providers/config-cache";
-import { getMetaConnection, resolveWebhookSecrets } from "@/lib/providers/meta-connection";
+import {
+  getMetaConnection,
+  resolveWebhookSecretCandidates,
+} from "@/lib/providers/meta-connection";
 
 /**
  * Per-team Instagram DM config. Same credential model as WhatsApp / Messenger
@@ -42,11 +45,11 @@ export interface InstagramSendConfig {
 }
 
 export interface InstagramWebhookConfig {
+  /** First candidate to try — the shared Meta App secret when one is set. */
   appSecret: string;
-  /** Secondary secret to also try during HMAC verify (channel on its own app). */
-  appSecretFallback?: string;
-  verifyToken: string;
-  igId: string | null;
+  /** Every OTHER candidate: each active account's own stored secret. A SET, not
+   *  one value — see `resolveWebhookSecretCandidates` for why. */
+  appSecretFallbacks: string[];
 }
 
 const DEFAULT_GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
@@ -59,11 +62,9 @@ interface SendCipher {
    *  DIFFERENT app than the shared one). Optional: proof skipped if absent. */
   appSecretCipher?: string;
 }
-interface WebhookCipher {
-  appSecretCipher: string;
-  verifyToken: string;
-  igId: string | null;
-}
+/** Ciphertext of every ACTIVE account's own app secret. A list, not the default
+ *  account's single value — an inbound signed by any of them must verify. */
+type WebhookCipher = string[];
 
 type CachedSend =
   | { kind: "ok"; cipher: SendCipher }
@@ -71,7 +72,7 @@ type CachedSend =
 
 // TTL/cap/sweep mechanics live in the shared TtlCache primitive (config-cache.ts).
 const sendCache = new TtlCache<CachedSend>();
-const webhookCache = new TtlCache<WebhookCipher | null>();
+const webhookCache = new TtlCache<WebhookCipher>();
 
 /** Drop cached Instagram credentials for a team. Call after the settings save. */
 function sendKey(workspaceId: string, accountId?: string | null): string {
@@ -181,44 +182,36 @@ export async function getInstagramSendConfig(
 export async function getInstagramWebhookConfig(
   workspaceId: string,
 ): Promise<InstagramWebhookConfig | null> {
-  const hit = webhookCache.get(workspaceId);
-  let cipher: WebhookCipher | null;
-  if (hit !== undefined) {
-    cipher = hit;
-  } else {
-    const conn = await db.channelConnection.findFirst({
-      where: { workspaceId, channel: "instagram", isDefault: true },
-      select: { config: true, secrets: true, isActive: true },
+  let cipher = webhookCache.get(workspaceId);
+  if (cipher === undefined) {
+    // EVERY active account, not the default one — see getMetaWebhookConfig.
+    const conns = await db.channelConnection.findMany({
+      where: { workspaceId, channel: "instagram", isActive: true },
+      select: { secrets: true },
     });
-    const config = (conn?.config ?? {}) as InstagramChannelConfig;
-    const secrets = (conn?.secrets ?? {}) as InstagramChannelSecrets;
-    cipher =
-      conn && conn.isActive && secrets.appSecret && config.verifyToken
-        ? {
-            appSecretCipher: secrets.appSecret,
-            verifyToken: config.verifyToken,
-            igId: config.igId ?? null,
-          }
-        : null;
+    cipher = conns
+      .map((c) => ((c.secrets ?? {}) as InstagramChannelSecrets).appSecret)
+      .filter((s): s is string => typeof s === "string" && s.length > 0);
     webhookCache.set(workspaceId, cipher);
   }
-  if (!cipher) return null;
-  try {
-    // Prefer the shared Meta App secret (single source — rotation there applies
-    // to every channel at once); fall back to the per-channel cipher for legacy
-    // / pre-Meta-App rows. See getMetaWebhookConfig for the rationale.
-    const meta = await getMetaConnection(workspaceId);
-    return {
-      ...resolveWebhookSecrets(meta?.appSecret, decryptSecret(cipher.appSecretCipher)),
-      verifyToken: cipher.verifyToken,
-      igId: cipher.igId,
-    };
-  } catch (err) {
-    console.error(
-      `[instagram-config] failed to decrypt webhook secrets for team=${workspaceId}: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-    return null;
+
+  // Per-candidate decrypt: one corrupt ciphertext must not silence the channel.
+  const own: string[] = [];
+  for (const c of cipher) {
+    try {
+      own.push(decryptSecret(c));
+    } catch (err) {
+      console.error(
+        `[instagram-config] skipping undecryptable webhook secret for team=${workspaceId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
+
+  // Prefer the shared Meta App secret (single source — rotation there applies to
+  // every channel at once); each account's own secret covers an account on a
+  // different Meta app, and legacy / pre-Meta-App rows.
+  const meta = await getMetaConnection(workspaceId);
+  return resolveWebhookSecretCandidates(meta?.appSecret, own);
 }

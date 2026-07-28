@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { LocalTime } from "@/components/local-time";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
+import { AccountLabel } from "@/features/channels/components/account-label";
 import { CHANNEL_LABEL, ChannelBadge } from "./channel-badge";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
 import type { Channel, ContactListItem } from "@ccp/shared/types";
@@ -22,6 +23,9 @@ interface CustomerContact {
   externalContactId: string | null;
   avatarUrl: string | null;
   conversationId: string | null;
+  /** Which of our numbers/Pages that thread is on — the whole point of the
+   *  hub is answering "where has this person reached us". */
+  channelConnectionId: string | null;
   lastMessagePreview: string | null;
   lastMessageAt: string | null;
   unreadCount: number;
@@ -415,6 +419,16 @@ export function LinkedChannels({ contactId }: { contactId: string }) {
               <div className="flex items-center gap-1.5">
                 <ChannelBadge channel={c.identityChannel} className="size-3 shrink-0" />
                 <span className="truncate text-xs font-medium">{c.name}</span>
+                {/* WHICH of our numbers this person used. Renders nothing on a
+                    single-account channel, so the hub is unchanged for most
+                    workspaces — but on two numbers it is the difference between
+                    "they messaged us on WhatsApp" and "they messaged Sales". */}
+                <AccountLabel
+                  channel={c.identityChannel}
+                  accountId={c.channelConnectionId}
+                  verb="Received on"
+                  className="shrink-0"
+                />
                 {c.lastMessageAt && (
                   <LocalTime
                     iso={c.lastMessageAt}

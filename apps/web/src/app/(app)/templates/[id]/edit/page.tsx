@@ -21,15 +21,23 @@ const EDITABLE = new Set(["approved", "rejected", "paused"]);
  */
 export default async function EditTemplatePage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ accountId?: string }>;
 }) {
   const { id } = await params;
+  // The list page stamps its current account scope onto the Edit link, so the
+  // connection hints below describe the number whose template this is.
+  const { accountId } = await searchParams;
   const { permissions } = await getSession();
   if (!permissions["templates:manage"]) redirect("/templates");
 
   const [{ templates, connected, hasWabaId, hasAppId }, fieldDefinitions] =
-    await Promise.all([listWhatsappTemplates(), listContactFieldDefinitions()]);
+    await Promise.all([
+      listWhatsappTemplates(accountId ?? null),
+      listContactFieldDefinitions(),
+    ]);
 
   if (!connected) redirect("/settings/whatsapp?from=templates");
   if (!hasWabaId) redirect("/settings/whatsapp?from=templates&missing=waba");

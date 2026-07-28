@@ -48,7 +48,6 @@ import {
 } from "@ccp/shared/field-tokens";
 import { parseVariableBindings, type VariableBinding } from "@ccp/shared/template-bindings";
 
-import type { ChannelAccountDirectoryEntry } from "@/lib/api/queries";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { useAudienceCount } from "@/hooks/use-audience-count";
 import { toast } from "@/lib/toast";
@@ -63,6 +62,7 @@ import {
   type CarouselCardValue,
 } from "@/features/templates/components/carousel-cards-field";
 import { TokenHighlightInput } from "@/features/templates/components/token-highlight";
+import { useChannelAccounts } from "@/features/channels/contexts/channel-accounts-context";
 
 /** Result of POST /api/broadcasts/preview-missing — recipients whose template
  *  variables would resolve to empty (missing field, no default) and be rejected
@@ -239,40 +239,20 @@ export function NewBroadcastForm({
    * separate thread.
    */
   const [includeOtherAccounts, setIncludeOtherAccounts] = useState(false);
-  const [accounts, setAccounts] = useState<ChannelAccountDirectoryEntry[]>([]);
   // Honest failure state: a swallowed accounts fetch used to be visually
   // identical to a healthy single-account workspace (one channel button, no
   // "Send from" select, no message) while the send fell back to whatever the
   // server defaulted to. Say so instead.
-  const [accountsLoadFailed, setAccountsLoadFailed] = useState(false);
+  // The workspace's connected accounts, from the app-wide directory seeded in
+  // the (app) layout — not a fifth client refetch of the same rows.
+  //
+  // `failed` is carried through the context on purpose. A swallowed accounts
+  // fetch used to be visually identical to a healthy single-account workspace
+  // (one channel button, no "Send from" select, no message) while the send fell
+  // back to whatever the server defaulted to. A surface that picks a SENDER
+  // must not present "we couldn't load your numbers" as "you have one number".
+  const { all: accounts, failed: accountsLoadFailed } = useChannelAccounts();
 
-  // The workspace's connected accounts, once. Small (a handful per workspace),
-  // member-readable, and needed before the first step can render.
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await apiFetch("/api/workspace/channel-accounts");
-        if (!res.ok) {
-          if (!cancelled) setAccountsLoadFailed(true);
-          return;
-        }
-        const data = (await res.json()) as { accounts?: ChannelAccountDirectoryEntry[] };
-        if (!cancelled) {
-          setAccounts(data.accounts ?? []);
-          setAccountsLoadFailed(false);
-        }
-      } catch {
-        // Non-fatal: the composer falls back to the channel's default account,
-        // which is exactly the pre-multi-account behaviour — but the note
-        // below tells the user that is what will happen.
-        if (!cancelled) setAccountsLoadFailed(true);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
   const [templateQuery, setTemplateQuery] = useState("");
   const [bodyVars, setBodyVars] = useState<string[]>([]);

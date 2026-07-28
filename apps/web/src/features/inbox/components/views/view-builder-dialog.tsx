@@ -22,7 +22,7 @@ import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { CHANNEL_LABEL } from "@/features/inbox/components/channel-badge";
-import { useChannelAccounts } from "@/features/inbox/contexts/channel-accounts-context";
+import { useChannelAccounts } from "@/features/channels/contexts/channel-accounts-context";
 import { VIEW_ICON_OPTIONS, viewIcon } from "./view-icon";
 
 /**

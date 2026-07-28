@@ -88,6 +88,18 @@ export const ASSIGNMENT_SOURCES: readonly AssignmentSource[] = [
 export interface AssignmentRuleConditions {
   /** Conversation channel. */
   channels?: Channel[];
+  /**
+   * Which of the workspace's ACCOUNTS on that channel the conversation is on —
+   * a specific WhatsApp number, Facebook Page or Instagram handle
+   * (`ChannelConnection.id`).
+   *
+   * Finer-grained than `channels` and independent of it: "WhatsApp" and "the
+   * Sales number" are different questions, and a workspace running Sales and
+   * Support on two numbers wants the second one. This is the single most
+   * requested multi-account routing rule — without it, "chats arriving on the
+   * Sales number go to the Sales team" is unexpressible.
+   */
+  channelAccountIds?: string[];
   /** Contact must carry at least one of these tags. */
   tagIds?: string[];
   /** Contact's pipeline stage. */
@@ -109,6 +121,8 @@ export interface AssignmentRuleConditions {
 export interface AssignmentContext {
   source: AssignmentSource;
   channel?: Channel | null;
+  /** The account the conversation is bound to (`Conversation.channelConnectionId`). */
+  channelAccountId?: string | null;
   tagIds?: string[];
   stageId?: string | null;
   messageText?: string | null;

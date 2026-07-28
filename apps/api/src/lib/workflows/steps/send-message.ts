@@ -44,6 +44,14 @@ import { buildTokenContext } from "./token-context";
 export interface SendMessageStepConfig {
   body: string;
   target?: StepTarget;
+  /**
+   * Which of the workspace's accounts to send FROM when this step has to OPEN
+   * a conversation. An existing thread always keeps its own account — moving a
+   * live thread to another number mid-flight would reach the customer from a
+   * sender they never messaged. Absent = the channel's default, which is the
+   * pre-existing behaviour.
+   */
+  accountId?: string;
 }
 
 export const sendMessageStepHandler: StepHandler<SendMessageStepConfig> = {
@@ -58,7 +66,12 @@ export const sendMessageStepHandler: StepHandler<SendMessageStepConfig> = {
       throw new StepConfigError("send_message.body must be a non-empty string");
     }
     const target = parseStepTarget(r.target);
-    return target ? { body: r.body, target } : { body: r.body };
+    const accountId = typeof r.accountId === "string" && r.accountId ? r.accountId : undefined;
+    return {
+      body: r.body,
+      ...(target ? { target } : {}),
+      ...(accountId ? { accountId } : {}),
+    };
   },
   describeConfig(config) {
     const head = `Send "${config.body.slice(0, 40)}${config.body.length > 40 ? "…" : ""}"`;
@@ -72,6 +85,10 @@ export const sendMessageStepHandler: StepHandler<SendMessageStepConfig> = {
     try {
       resolved = await resolveStepTarget(config.target, envelope, ctx.workspaceId, {
         createConversation: true,
+        // Only used when the step OPENS a thread. An existing conversation
+        // keeps its own account — a workflow must never move a live thread to
+        // a different number mid-flight.
+        accountId: config.accountId,
       });
     } catch (err) {
       if (err instanceof StepConfigError) {

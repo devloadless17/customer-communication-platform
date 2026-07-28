@@ -87,6 +87,23 @@ export class ChannelAccountsController {
   }
 
   /**
+   * What the CHANNEL-level disconnect would break. That button removes every
+   * account on the channel, so its confirm dialog needs whole-channel numbers —
+   * the per-account route below speaks for one row only.
+   *
+   * Declared before `:id/removal-impact`; the paths are unambiguous (there is
+   * no bare `@Get(":id")`) but keeping them adjacent makes the pair obvious.
+   */
+  @Get("removal-impact")
+  async channelRemovalImpact(
+    @CurrentSession() session: ApiSession,
+    @Param("channel") channel: string,
+  ) {
+    const ch = parseAccountChannel(channel);
+    return this.accounts.channelRemovalImpact(session.workspaceId, ch);
+  }
+
+  /**
    * What disconnecting would break — read BEFORE the destructive call so the
    * confirm dialog can be specific instead of vague.
    */

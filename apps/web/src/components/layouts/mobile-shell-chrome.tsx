@@ -13,6 +13,7 @@ import {
   Menu,
   Settings as SettingsIcon,
   UserCircle2,
+  BarChart3,
   Workflow,
 } from "lucide-react";
 
@@ -93,6 +94,13 @@ const WORKFLOWS_ITEM: NavItem = {
   icon: Workflow,
 };
 
+// Reports mirrors the desktop AppRail's `teamActivity:view` gate.
+const REPORTS_ITEM: NavItem = {
+  href: "/reports",
+  label: "Reports",
+  icon: BarChart3,
+};
+
 function sectionTitle(pathname: string): string {
   if (pathname.startsWith("/inbox")) return "Inbox";
   if (pathname.startsWith("/team")) return "Team chat";
@@ -100,6 +108,7 @@ function sectionTitle(pathname: string): string {
   if (pathname.startsWith("/broadcasts")) return "Broadcasts";
   if (pathname.startsWith("/templates")) return "Templates";
   if (pathname.startsWith("/workflows")) return "Workflows";
+  if (pathname.startsWith("/reports")) return "Reports";
   if (pathname.startsWith("/settings")) return "Settings";
   return "";
 }
@@ -109,6 +118,7 @@ export function MobileShellChrome({
   team,
   canManageAvailability,
   canManageWorkflows,
+  canViewReports,
   subSidebar,
   /** Override the auto-derived section title (rare). */
   title,
@@ -125,6 +135,9 @@ export function MobileShellChrome({
    *  desktop AppRail gate — non-admins tapping it would bounce off the
    *  redirect in workflows/page.tsx. */
   canManageWorkflows: boolean;
+  /** Resolved `teamActivity:view` capability — surfaces the Reports item,
+   *  mirroring the desktop AppRail gate. */
+  canViewReports: boolean;
   subSidebar?: ReactNode;
   title?: string;
   rightSlot?: ReactNode;
@@ -185,6 +198,8 @@ export function MobileShellChrome({
 
   const items = useMemo<NavItem[]>(() => {
     const out = [...PRIMARY_ITEMS];
+    // Same order as the desktop rail: Reports beside the analytics surfaces.
+    if (canViewReports) out.push(REPORTS_ITEM);
     // Workflows is admin-only — appended after the primary items (its prior
     // position) so the order is unchanged for admins, hidden for everyone else.
     if (canManageWorkflows) out.push(WORKFLOWS_ITEM);
@@ -198,7 +213,7 @@ export function MobileShellChrome({
     // shell entirely (→ /platform in the (app) layout), so they never render
     // this chrome. The old `/admin` push here was dead + unreachable.
     return out;
-  }, [canManageWorkflows]);
+  }, [canManageWorkflows, canViewReports]);
 
   const resolvedTitle = title ?? sectionTitle(pathname);
 

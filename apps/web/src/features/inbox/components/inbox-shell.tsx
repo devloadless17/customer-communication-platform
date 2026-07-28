@@ -1198,7 +1198,14 @@ export function InboxShell({
     if (!targetId) return;
     const snapshot = cache.get(targetId);
     const contactName = snapshot?.data.contact.name ?? "Customer";
-    const result = await callApi.initiateOutbound(targetId, contactName);
+    const result = await callApi.initiateOutbound(
+      targetId,
+      contactName,
+      // The thread owns the account — this call goes out the number the
+      // customer already messaged, and the live panel should say which.
+      snapshot?.data.conversation.channel ?? null,
+      snapshot?.data.conversation.channelConnectionId ?? null,
+    );
     if (!result.ok) {
       // A pre-flight rejection tore down `liveCall`, so the global CallPanel
       // won't show it — a toast guarantees the agent sees why it didn't start.

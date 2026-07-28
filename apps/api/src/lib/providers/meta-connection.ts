@@ -115,17 +115,38 @@ export async function getMetaConnection(
 /**
  * Candidate app secrets for inbound webhook HMAC verification. Prefer the shared
  * Meta App secret (rotating it there covers every channel at once), but ALSO
- * expose the channel's OWN stored secret as a fallback — so a channel connected
- * to a DIFFERENT Meta app than the shared one (e.g. Instagram on its own app,
- * signed with that app's secret) still verifies. `verifySignature` accepts
- * either candidate; both are secrets the team itself configured.
+ * expose each connected ACCOUNT's own stored secret — so an account connected to
+ * a DIFFERENT Meta app than the shared one (e.g. Instagram on its own app, or a
+ * second WhatsApp number onboarded under its own app) still verifies.
+ * `verifySignature` accepts any candidate; every one is a secret the team itself
+ * configured, so this never widens trust beyond the team's own apps.
+ *
+ * WHY A SET, NOT ONE ACCOUNT'S SECRET. A workspace holds MANY accounts per
+ * channel, and Meta signs an inbound webhook with the secret of whichever app
+ * owns the account it came from. Resolving a single account's secret — the
+ * DEFAULT's — meant a sibling's inbound failed HMAC and was dropped as forged:
+ * silently, and permanently once Meta stopped retrying. The GET-challenge half
+ * of this same handshake already collects tokens from every connection
+ * (`getTeamVerifyTokens`); this is the POST half finally agreeing with it.
+ *
+ * Returns null only when there is no candidate at all — the one genuine
+ * "this channel is not configured" case.
  */
-export function resolveWebhookSecrets(
+export function resolveWebhookSecretCandidates(
   sharedSecret: string | null | undefined,
-  ownSecret: string,
-): { appSecret: string; appSecretFallback?: string } {
-  if (sharedSecret && sharedSecret !== ownSecret) {
-    return { appSecret: sharedSecret, appSecretFallback: ownSecret };
+  ownSecrets: readonly string[],
+): { appSecret: string; appSecretFallbacks: string[] } | null {
+  // Shared first, so the overwhelmingly common case verifies on the first HMAC.
+  // De-duplicated: a workspace whose accounts all sit on the shared app would
+  // otherwise recompute the same digest once per account.
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  for (const secret of [sharedSecret, ...ownSecrets]) {
+    if (!secret || seen.has(secret)) continue;
+    seen.add(secret);
+    ordered.push(secret);
   }
-  return { appSecret: sharedSecret ?? ownSecret };
+  const [primary, ...fallbacks] = ordered;
+  if (primary === undefined) return null;
+  return { appSecret: primary, appSecretFallbacks: fallbacks };
 }

@@ -268,14 +268,20 @@ export class OutboundWebhooksService {
       externalAccountId: true,
       config: true,
     } as const;
+    // DETERMINISTIC pick. The ping's whole purpose is byte-identical parity
+    // with a live delivery, and it now carries account_label / account_address
+    // / account_external_id — so an unordered findFirst handed a partner
+    // validating their parser a different account run to run. Default first,
+    // then oldest, matching how the accounts list itself orders.
     const conn =
       (await this.db.channelConnection.findFirst({
         where: { workspaceId, channel: "whatsapp", isActive: true },
+        orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
         select: identitySelect,
       })) ??
       (await this.db.channelConnection.findFirst({
         where: { workspaceId, isActive: true },
-        orderBy: { createdAt: "asc" },
+        orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
         select: identitySelect,
       }));
     const channelBase: WireChannelBase | null = conn

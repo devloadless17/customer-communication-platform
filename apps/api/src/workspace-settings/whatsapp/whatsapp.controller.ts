@@ -232,9 +232,16 @@ export class WhatsappController {
     return { ok: true };
   }
 
+  /**
+   * Removes EVERY account on this channel. `?confirmAll=1` is required when
+   * the workspace holds more than one — see assertChannelDisconnectConfirmed.
+   */
   @Delete()
-  async disconnect(@CurrentSession() session: ApiSession) {
-    await this.whatsapp.disconnect(session.workspaceId);
+  async disconnect(
+    @CurrentSession() session: ApiSession,
+    @Query("confirmAll") confirmAll?: string,
+  ) {
+    await this.whatsapp.disconnect(session.workspaceId, confirmAll === "1" || confirmAll === "true");
     return { ok: true };
   }
 }

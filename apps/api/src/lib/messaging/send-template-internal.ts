@@ -114,6 +114,9 @@ export class SendTemplateValidationError extends Error {
     // Template carries a CAROUSEL and the per-card values don't match what it
     // was approved with (count, media kind, body values, or a button value).
     | "carousel_cards_required"
+    // The template belongs to a different WhatsApp Business Account than the
+    // number this thread replies from. Meta rejects it with an opaque error.
+    | "template_wrong_account"
     | "contact_has_no_phone"
     // The workspace blocked this contact (Block Users API) — the provider
     // rejects every send to them, so refuse up front with the reason.
@@ -578,6 +581,30 @@ export async function sendTemplateInternal(
       );
     }
     throw err;
+  }
+
+  // A template belongs to a WhatsApp Business Account, and a number can only
+  // send templates from its OWN WABA. Sending one from the wrong account is
+  // rejected by Meta per-recipient with an opaque error, so catch it here.
+  //
+  // The broadcast path guards this at campaign creation
+  // (broadcasts.service.ts, `template_wrong_account`); this is the same rule
+  // for every 1:1 send — the inbox composer, `/v1`, and the workflow
+  // `send_template` step. Free: `wabaId` is already on the send config, so
+  // there is no extra query.
+  //
+  // `""` is the legacy/unknown-WABA sentinel on BOTH sides — treat it as "no
+  // opinion" rather than a mismatch, or every pre-multi-account template
+  // becomes unsendable.
+  const accountWaba = (sendConfig as { wabaId?: string }).wabaId ?? "";
+  const templateWaba = template.wabaId ?? "";
+  if (accountWaba && templateWaba && accountWaba !== templateWaba) {
+    throw new SendTemplateValidationError(
+      "template_wrong_account",
+      "template belongs to a different WhatsApp Business Account",
+      "That template belongs to a different WhatsApp Business Account than the number " +
+        "this conversation replies from. Pick a template from this account.",
+    );
   }
 
   // Templates are a provider capability — channels without a template catalog

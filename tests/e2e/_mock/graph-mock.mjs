@@ -194,6 +194,43 @@ const server = createServer(async (req, res) => {
     return json(res, 200, { attachment_id: `att_${n}` });
   }
 
+  // GET /{v}/{waba-id}/message_templates  → the template catalog, PER WABA.
+  //
+  // Per-WABA is the whole point: a workspace can hold two numbers on two
+  // different Business Accounts, and a sync of one must never return (and
+  // therefore never PRUNE against) the other's catalog. Every WABA answers
+  // with a template named `waba_scoped_greeting` so a spec can prove the two
+  // rows are distinct despite sharing a name — which is legal, since the
+  // catalog is keyed (workspaceId, wabaId, name, language).
+  if (method === "GET" && last === "message_templates") {
+    const wabaId = String(segments[1] ?? "unknown");
+    return json(res, 200, {
+      data: [
+        {
+          id: `tpl_${wabaId}_greeting`,
+          name: "waba_scoped_greeting",
+          language: "en_US",
+          status: "APPROVED",
+          category: "UTILITY",
+          parameter_format: "POSITIONAL",
+          components: [{ type: "BODY", text: `Hello from ${wabaId}` }],
+        },
+        {
+          // Unique to this WABA, so "did the right catalog load?" is provable
+          // without relying on the shared-name row.
+          id: `tpl_${wabaId}_only`,
+          name: `only_on_${wabaId}`,
+          language: "en_US",
+          status: "APPROVED",
+          category: "UTILITY",
+          parameter_format: "POSITIONAL",
+          components: [{ type: "BODY", text: "Scoped" }],
+        },
+      ],
+      paging: {},
+    });
+  }
+
   // POST /{v}/{page-id}/calls  → Messenger Calling unified action endpoint.
   if (method === "POST" && last === "calls") {
     const action = body?.action;

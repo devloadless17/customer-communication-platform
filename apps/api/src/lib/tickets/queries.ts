@@ -270,6 +270,8 @@ export interface ListTicketsFilters {
   contactId?: string;
   conversationId?: string;
   channel?: string;
+  /** One channel ACCOUNT — matched through the conversation relation. */
+  accountId?: string;
   tagIds?: string[];
   /** Only tickets that missed a promise — the board's "at risk" view. */
   breachedOnly?: boolean;
@@ -321,6 +323,11 @@ export async function listTickets(
   if (filters.contactId) and.push({ contactId: filters.contactId });
   if (filters.conversationId) and.push({ conversationId: filters.conversationId });
   if (filters.channel) and.push({ channel: filters.channel as Prisma.EnumChannelFilter["equals"] });
+  // Through the relation, deliberately — see the schema note on why Ticket
+  // carries no account column of its own.
+  if (filters.accountId) {
+    and.push({ conversation: { channelConnectionId: filters.accountId } });
+  }
   if (filters.tagIds?.length) and.push({ tags: { some: { id: { in: filters.tagIds } } } });
   if (filters.breachedOnly) {
     and.push({ OR: [{ firstResponseBreached: true }, { resolutionBreached: true }] });

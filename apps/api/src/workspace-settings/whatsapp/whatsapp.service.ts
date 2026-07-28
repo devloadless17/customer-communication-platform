@@ -62,6 +62,7 @@ import {
   validateTemplateTtl,
 } from "@ccp/shared/template-render";
 import { syncTemplateCatalog } from "@/lib/templates/catalog-sync";
+import { assertChannelDisconnectConfirmed } from "@/lib/providers/assert-channel-disconnect";
 
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
@@ -1003,7 +1004,9 @@ export class WhatsappService {
    * Wipe credentials but leave historical messages intact (multi-tenancy
    * rule #2 — integration toggles must not erase audit trail).
    */
-  async disconnect(workspaceId: string): Promise<void> {
+  async disconnect(workspaceId: string, confirmAll?: boolean): Promise<void> {
+    // Refuse an ambiguous blast radius; see the helper.
+    await assertChannelDisconnectConfirmed(workspaceId, META_PROVIDER, confirmAll);
     // Drop the connection row entirely (wipes creds + verify token, matching
     // the old "null every meta_* column" behavior). Historical messages are
     // untouched — they live on their own tables. deleteMany so a
@@ -1128,11 +1131,31 @@ export class WhatsappService {
       )?.id;
     const config = await this.requireSendConfig(workspaceId, target);
     if (!config.wabaId) {
-      throw new ConflictException({
-        error: "waba_id_missing",
-        detail:
-          "Add your WhatsApp Business Account ID in Settings \u2192 WhatsApp to load templates.",
-      });
+      // The preflight is only allowed to speak for the account it checked.
+      // `syncTemplateCatalog` below iterates EVERY active account's WABA on its
+      // own, so a workspace whose DEFAULT number has no WABA id but whose
+      // second number does was getting a hard 409 and could never sync \u2014
+      // despite having a perfectly syncable catalog. Only refuse when NO
+      // account can name a WABA. An explicitly targeted account still refuses,
+      // because there the caller asked about that one specifically.
+      const anyWaba = accountId
+        ? 0
+        : await this.db.channelConnection.count({
+            where: {
+              workspaceId,
+              channel: META_PROVIDER,
+              isActive: true,
+              wabaId: { not: null },
+              NOT: { wabaId: "" },
+            },
+          });
+      if (anyWaba === 0) {
+        throw new ConflictException({
+          error: "waba_id_missing",
+          detail:
+            "Add your WhatsApp Business Account ID in Settings \u2192 WhatsApp to load templates.",
+        });
+      }
     }
 
     // Reconciliation lives in the domain layer (lib/templates/catalog-sync.ts)
@@ -2346,6 +2369,10 @@ export class WhatsappService {
     file: Express.Multer.File,
     /** Which number's credentials/app upload the asset; omitted = default. */
     accountId?: string | null,
+    /** An EXISTING template being edited. Wins over `accountId`: the asset must
+     *  be uploaded through the app that owns the template's WABA, and the
+     *  template row is the only source of that which a link cannot drop. */
+    templateId?: string | null,
   ): Promise<{ headerHandle: string }> {
     if (file.size > UPLOAD_MAX_BYTES) {
       throw new PayloadTooLargeException({
@@ -2362,7 +2389,23 @@ export class WhatsappService {
     }
     const filename = file.originalname || "upload";
 
-    const config = await this.templateOpConfig(workspaceId, { accountId });
+    // Prefer the TEMPLATE's own WABA when one is named. `templateOpConfig`
+    // already resolves credentials from a wabaId; this just stops the edit path
+    // depending on a query param surviving every entry point into the form —
+    // the Edit link dropped it, so a header asset was minted through the
+    // DEFAULT account's app and then attached to another WABA's template.
+    const templateWabaId = templateId
+      ? (
+          await this.db.messageTemplate.findFirst({
+            where: { id: templateId, workspaceId },
+            select: { wabaId: true },
+          })
+        )?.wabaId ?? null
+      : null;
+    const config = await this.templateOpConfig(
+      workspaceId,
+      templateWabaId ? { wabaId: templateWabaId } : { accountId },
+    );
     const provider = getMetaProvider();
     if (!provider.uploadHeaderMedia) {
       throw new HttpException(

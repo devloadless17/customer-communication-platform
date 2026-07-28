@@ -13,6 +13,7 @@ import { apiFetch } from "@/lib/api/client-fetch";
 import { notificationSound } from "@/lib/notifications/notification-sound";
 import { useNotificationSounds } from "@/providers/notification-sound-provider";
 import { CHANNEL_LABEL } from "@/features/inbox/components/channel-badge";
+import { useChannelAccounts } from "@/features/channels/contexts/channel-accounts-context";
 
 /**
  * Team-wide incoming-call toast. Subscribes to `call:incoming` (team-room)
@@ -27,6 +28,9 @@ interface IncomingCall {
   callId: string;
   conversationId: string;
   channel: Channel;
+  /** WHICH of our numbers/Pages is being called. Null when the thread has no
+   *  bound account. See the card copy below for why the channel isn't enough. */
+  channelConnectionId: string | null;
   contactName: string;
   ringingAt: string;
 }
@@ -48,6 +52,8 @@ export function IncomingCallToast({
     contactName: string,
     conversationId: string,
     channel: Channel,
+    /** The account being called, so the live panel can keep naming it. */
+    accountId: string | null,
   ) => void;
   /** Called when the user clicks Decline. */
   onReject: (callId: string) => void;
@@ -115,6 +121,10 @@ export function IncomingCallToast({
             direction: "in" | "out";
             status: string;
             ringingAt: string;
+            /** Carried since the row gained a channel — no more assuming
+             *  WhatsApp on a recovered missed call. */
+            channel: Channel;
+            accountId: string | null;
           }>;
         };
         const stillRinging = (body.items ?? []).filter(
@@ -131,10 +141,12 @@ export function IncomingCallToast({
             .map((c) => ({
               callId: c.id,
               conversationId: c.conversationId,
-              // The list row carries no channel; calling is WhatsApp-only on
-              // phone numbers today, and answerIncoming only uses this to pick
-              // the answer signaling.
-              channel: "whatsapp" as Channel,
+              // The row carries its own channel now, so this no longer has to
+              // assume WhatsApp — it fell back to that only because
+              // `TeamCallRow` had no channel field, which is the same gap that
+              // made the calls list infer multi-account from one page of rows.
+              channel: c.channel,
+              channelConnectionId: c.accountId ?? null,
               contactName: c.contactName ?? c.contactPhone ?? "Unknown",
               ringingAt: c.ringingAt,
             }));
@@ -160,6 +172,7 @@ export function IncomingCallToast({
       callId: string;
       conversationId: string;
       channel: Channel;
+      channelConnectionId: string | null;
       contactName: string;
       ringingAt: string;
     }) => {
@@ -178,6 +191,7 @@ export function IncomingCallToast({
             callId: payload.callId,
             conversationId: payload.conversationId,
             channel: payload.channel,
+            channelConnectionId: payload.channelConnectionId ?? null,
             contactName: payload.contactName,
             ringingAt: payload.ringingAt,
           },
@@ -230,7 +244,13 @@ export function IncomingCallToast({
             // answer is idempotent server-side (CAS); a failed answer
             // (already_answered) re-emits the right state.
             drop(call.callId);
-            onAnswer(call.callId, call.contactName, call.conversationId, call.channel);
+            onAnswer(
+              call.callId,
+              call.contactName,
+              call.conversationId,
+              call.channel,
+              call.channelConnectionId,
+            );
           }}
           onReject={() => {
             drop(call.callId);
@@ -251,6 +271,12 @@ function IncomingCallCard({
   onAnswer: () => void;
   onReject: () => void;
 }) {
+  // Null unless this channel has more than one connected account — the same
+  // "attribution is a disambiguator" rule every other surface follows.
+  const calledAccount = useChannelAccounts().accountFor(
+    call.channel,
+    call.channelConnectionId,
+  );
   return (
     <div className="flex w-72 items-center gap-3 rounded-xl border border-border bg-card p-3 shadow-lg">
       <Avatar className="size-9">
@@ -263,8 +289,14 @@ function IncomingCallCard({
       </Avatar>
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-semibold">{call.contactName}</div>
-        <div className="text-xs text-muted-foreground">
-          is calling you on {CHANNEL_LABEL[call.channel]}
+        {/* Name the ACCOUNT when the workspace has more than one to confuse,
+            otherwise the channel exactly as before. "on WhatsApp" is identical
+            for both of a workspace's numbers, so an agent answering a Sales
+            call as Support had no way to know which business to be. */}
+        <div className="truncate text-xs text-muted-foreground">
+          {calledAccount
+            ? `is calling your ${calledAccount.name} line`
+            : `is calling you on ${CHANNEL_LABEL[call.channel]}`}
         </div>
       </div>
       <Button

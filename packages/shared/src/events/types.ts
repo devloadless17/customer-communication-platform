@@ -1223,6 +1223,20 @@ export interface CallIncomingEvent {
    *  (Messenger) answer generates the offer locally — the frontend must know
    *  which. Also drives the toast copy ("on WhatsApp" vs "on Messenger"). */
   channel: Channel;
+  /**
+   * WHICH of the workspace's accounts on that channel is being called — the
+   * number/Page the customer dialled (`Conversation.channelConnectionId`).
+   *
+   * The channel alone is not enough to answer a call well. A workspace running
+   * a Sales and a Support number gets "is calling you on WhatsApp" for both, so
+   * the agent's greeting is a coin flip between two business identities. Null
+   * on a thread not bound to an account, and on any pre-existing frame.
+   *
+   * Carried on the event (§9: payloads carry enough context to react without a
+   * DB re-read) rather than looked up by the toast, which has no session to
+   * query with.
+   */
+  channelConnectionId: string | null;
   /** Embedded so the toast can render contact name + avatar instantly. */
   contact: WorkflowContactSnapshot;
   ringingAt: string;

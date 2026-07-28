@@ -316,6 +316,12 @@ export const BroadcastListQuerySchema = z.object({
   // row from the previous page; `take` bounds the page (default 100, max 200).
   // Older history beyond the first page is reachable by paging — previously the
   // list was hard-capped at 100 with no way to reach row 101+.
+  /**
+   * One channel ACCOUNT (`ChannelConnection.id`) — the number/Page a campaign
+   * sent FROM. The list already displays it; this makes it narrowable, so
+   * "what did the Sales line send?" doesn't require reading every row.
+   */
+  accountId: z.string().min(1).optional(),
   cursor: z.string().optional(),
   take: z.coerce.number().int().min(1).max(200).optional(),
   /** 1-based page for numbered (offset) pagination. When present the query runs

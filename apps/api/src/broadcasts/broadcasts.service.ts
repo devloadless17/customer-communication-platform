@@ -64,6 +64,7 @@ import {
 } from "@ccp/shared/providers/capabilities";
 import { checkTextCap } from "../lib/messaging/text-cap";
 import { directoryContactWhere, resolveAudienceGroupMembers } from "@/lib/queries";
+import { channelAccountDisplayName } from "@/lib/channel-accounts/display";
 import {
   parseVariableBindings,
   resolveBinding,
@@ -1462,6 +1463,12 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     if (query?.status && query.status !== "all") {
       where.status = query.status;
     }
+    // Which number/Page the campaign SENT FROM. A column on Broadcast (unlike
+    // tickets and calls, where the account lives on the conversation), because
+    // a campaign's sender is fixed for its whole life.
+    if (query?.accountId) {
+      where.channelConnectionId = query.accountId;
+    }
     if (query?.search) {
       // Search the operator name + the template name (the two human labels).
       where.OR = [
@@ -1553,10 +1560,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       config: Prisma.JsonValue;
     } | null,
   ): string | null {
-    if (!conn) return null;
-    const display = (conn.config as { displayPhoneNumber?: string } | null)
-      ?.displayPhoneNumber;
-    return conn.label || display || conn.externalAccountId;
+    return channelAccountDisplayName(conn);
   }
 
   /**

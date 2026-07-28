@@ -44,6 +44,7 @@ const SCOPES: ReadonlyArray<{ scope: string; grants: string }> = [
   { scope: "write:catalog", grants: "create / edit tags + custom fields" },
   { scope: "read:broadcasts", grants: "read broadcast campaigns + delivery reports" },
   { scope: "read:calls", grants: "read call history + calling-permission state" },
+  { scope: "read:reports", grants: "read performance reports (no message content)" },
   { scope: "write:calls", grants: "request calling permission · send call buttons" },
   {
     scope: "write:broadcasts",
@@ -201,7 +202,20 @@ export default function ApiDocsPage() {
           <strong> Browsing</strong>:{" "}
           <code>?search=</code> for fuzzy across name / phone / email,{" "}
           <code>?stageId=</code>, <code>?tagIds=</code>,{" "}
-          <code>?cursor=</code>, <code>?limit=</code>.
+          <code>?accountId=</code>, <code>?cursor=</code>, <code>?limit=</code>.
+          <br />
+          Every contact row carries <code>channelConnectionId</code> — which of
+          your accounts that person&apos;s thread is on — so a partner can route
+          on the number without a second call. Null when they have no thread
+          yet, or when the account was disconnected.
+          <br />
+          <code>?accountId=</code> narrows to people who have a conversation on
+          ONE of your channel accounts — a specific WhatsApp number, Page or
+          Instagram handle (ids from <code>GET /v1/channel-accounts</code>). It
+          ANDs with the other filters. The same parameter narrows{" "}
+          <code>/v1/conversations</code>, <code>/v1/calls</code>,{" "}
+          <code>/v1/tickets</code> and <code>/v1/broadcasts</code> — on
+          broadcasts it means the account the campaign SENT FROM.
           <br />
           <strong>Directory scope.</strong> Both lookup and browsing return only{" "}
           <em>directory</em> contacts. Anonymous website-widget visitors are
@@ -536,6 +550,34 @@ export default function ApiDocsPage() {
           always bill, so only utility campaigns come back mixed. Pair it with{" "}
           <code>pricingCategory</code>; we deliberately store no amount, because
           rates are per-country cards that change.
+        </Endpoint>
+      </Section>
+
+      <Section title="Reports">
+        <Endpoint method="GET" path="/api/external/v1/reports/overview">
+          Workspace performance report — the same aggregates (and the same
+          response shape) as the in-app Reports dashboard: message volume with
+          per-day buckets, per-channel split, first-response and resolution
+          times (average + median, seconds), per-agent activity, ticket-SLA
+          attainment, and the AI share of replies. Required{" "}
+          <code>?from=</code>/<code>?to=</code> (ISO instants, exclusive upper
+          bound, up to 366 days); optional <code>?tz=</code> (IANA zone daily
+          buckets flip in, default UTC) and <code>?accountId=</code>.
+          <br />
+          <code>?accountId=</code> scopes EVERY panel to one channel account —
+          a specific WhatsApp number, Page or Instagram handle (ids from{" "}
+          <code>GET /v1/channel-accounts</code>). A workspace running a Sales
+          and a Support line is two operations sharing a medium, and a blended
+          first-response time hides one drowning behind the other. Omit it for
+          the whole workspace. An id from another workspace is rejected rather
+          than silently returning an empty report. The response echoes the
+          scope back as <code>range.accountId</code>, and the new{" "}
+          <code>accounts[]</code> panel gives the per-account split without a
+          filter (traffic on a since-disconnected account is reported with a
+          null <code>accountId</code>, never dropped). Durations are <code>null</code> when
+          the range holds no qualifying rows — &ldquo;no data&rdquo; is not
+          zero seconds. Scope: <code>read:reports</code> (grants no access to
+          message content).
         </Endpoint>
       </Section>
 
@@ -981,15 +1023,26 @@ export default function ApiDocsPage() {
           body={{
             name: "VIP WhatsApp → senior pool",
             policyId: "apol_...",
-            conditions: { channels: ["whatsapp"], tagIds: ["tag_vip"] },
+            conditions: {
+              channelAccountIds: ["ccn_sales_line"],
+              tagIds: ["tag_vip"],
+            },
           }}
         >
           Clauses AND together; values inside one clause OR. Available:{" "}
-          <code>channels</code>, <code>tagIds</code>, <code>stageIds</code>,{" "}
-          <code>languages</code> (prefix match), <code>keywords</code>{" "}
-          (case-insensitive substring), <code>isNewContact</code>,{" "}
-          <code>sources</code>. An absent clause means &ldquo;don&apos;t
-          care&rdquo;, so <code>{`{}`}</code> is a catch-all.
+          <code>channels</code>, <code>channelAccountIds</code>,{" "}
+          <code>tagIds</code>, <code>stageIds</code>, <code>languages</code>{" "}
+          (prefix match), <code>keywords</code> (case-insensitive substring),{" "}
+          <code>isNewContact</code>, <code>sources</code>. An absent clause means
+          &ldquo;don&apos;t care&rdquo;, so <code>{`{}`}</code> is a catch-all.
+          <br />
+          <code>channelAccountIds</code> is narrower than <code>channels</code>:
+          it names specific <em>accounts</em> (a WhatsApp number, a Page, an
+          Instagram handle — ids from{" "}
+          <code>GET /v1/channel-accounts</code>), so a workspace running Sales and
+          Support on two numbers can route each one to its own team. It fails
+          closed: a conversation not bound to an account matches no
+          account-scoped rule.
         </Endpoint>
         <Endpoint method="PUT" path="/api/external/v1/assignment/rules/order" body={{ ruleIds: ["r1", "r2"] }}>
           Full reorder — send the complete ordered id list.

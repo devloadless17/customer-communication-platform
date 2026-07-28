@@ -242,6 +242,14 @@ export const ListTeamCallsQuerySchema = z
      *  ask for a full scan that returns nothing. */
     page: z.coerce.number().int().min(1).max(10_000).optional(),
     q: z.string().trim().max(100).optional(),
+    /**
+     * One channel ACCOUNT — a specific WhatsApp number / Page / handle
+     * (`ChannelConnection.id`). "How many calls did the Support line take?" is
+     * unanswerable without it, and the log itself is unreadable on a
+     * multi-number workspace: two calls from the same customer to two
+     * different numbers look identical.
+     */
+    accountId: z.string().min(1).optional(),
     from: z.string().datetime().optional(),
     to: z.string().datetime().optional(),
   })

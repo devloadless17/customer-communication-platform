@@ -30,6 +30,7 @@ import { WorkspaceSettingsModule } from "./workspace-settings/workspace-settings
 import { TeamChatModule } from "./team-chat/team-chat.module";
 import { RegistrationModule } from "./registration/registration.module";
 import { UsersModule } from "./users/users.module";
+import { ReportsModule } from "./reports/reports.module";
 import { WebchatwidgetModule } from "./webchatwidget/webchatwidget.module";
 import { WebhooksModule } from "./webhooks/webhooks.module";
 import { WorkflowsModule } from "./workflows/workflows.module";
@@ -58,6 +59,7 @@ import { WorkflowsModule } from "./workflows/workflows.module";
     WorkspacesModule,
     ChannelAccountsModule,
     UsersModule,
+    ReportsModule,
     AdminModule,
     ConversationsModule,
     InboxViewsModule,

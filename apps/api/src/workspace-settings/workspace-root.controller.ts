@@ -14,7 +14,7 @@ import {
   type SetTeamWorkHoursInput,
 } from "../users/users.schemas";
 import { UsersService } from "../users/users.service";
-import { getBusinessNumberCountry } from "@/lib/providers/config";
+import { getActiveWhatsappCountries } from "@/lib/providers/config";
 import { isBicAllowedForBusinessNumber } from "@ccp/shared/providers/calling-regions";
 
 /**
@@ -84,11 +84,18 @@ export class WorkspaceRootController {
     // business-initiated calling isn't offered can't call anyone, while an
     // eligible one can call customers anywhere. Sent once here rather than
     // derived per contact in the UI, because it is not a per-contact fact.
-    const businessCountry = await getBusinessNumberCountry(session.workspaceId);
+    //
+    // ANY active number, not the default one. Eligibility is per NUMBER, so a
+    // workspace whose default sits in a blocked market was hiding the Call
+    // button on every thread — including threads bound to an eligible second
+    // number, where the real per-thread gate (calls.service) would have allowed
+    // it. This flag only decides whether the affordance EXISTS; that per-thread
+    // gate stays the authority on whether a given call may be placed.
+    const countries = await getActiveWhatsappCountries(session.workspaceId);
     return {
       team: {
         ...team,
-        outboundCallingAvailable: isBicAllowedForBusinessNumber(businessCountry),
+        outboundCallingAvailable: countries.some(isBicAllowedForBusinessNumber),
       },
     };
   }

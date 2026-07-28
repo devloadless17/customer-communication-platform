@@ -133,6 +133,9 @@ export function NewContactDialog({
       onCreated({
         contact: data.contact,
         activeConversationId: null,
+        // A brand-new contact has no thread yet, so no account either — the
+        // row picks one up as soon as a conversation exists.
+        channelConnectionId: null,
         lastMessageAt: null,
         // A freshly-created contact has never messaged us, so the 24h
         // window is not open. The list-row chip will render "No window".

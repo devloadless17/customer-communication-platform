@@ -1,7 +1,10 @@
 import { decryptSecret } from "@/lib/crypto/envelope";
 import { db } from "@/lib/db";
 import { TtlCache } from "@/lib/providers/config-cache";
-import { getMetaConnection, resolveWebhookSecrets } from "@/lib/providers/meta-connection";
+import {
+  getMetaConnection,
+  resolveWebhookSecretCandidates,
+} from "@/lib/providers/meta-connection";
 import type { Channel } from "@ccp/shared/types";
 import { getCountryFromPhone } from "@ccp/shared/utils";
 
@@ -115,15 +118,11 @@ export interface MetaSendConfig {
 }
 
 export interface MetaWebhookConfig {
+  /** First candidate to try — the shared Meta App secret when one is set. */
   appSecret: string;
-  /** Secondary secret to also try during HMAC verify (channel on its own app). */
-  appSecretFallback?: string;
-  verifyToken: string;
-  /** Optional — when set, every webhook's `entry[].changes[].value.metadata.phone_number_id`
-   *  must match. Caching this here lets the controller's mismatch check
-   *  reuse the same cached lookup as the appSecret read instead of paying
-   *  a separate `db.workspace.findUnique` per webhook. */
-  phoneNumberId: string | null;
+  /** Every OTHER candidate: each active account's own stored secret. A SET, not
+   *  one value — see `resolveWebhookSecretCandidates` for why. */
+  appSecretFallbacks: string[];
 }
 
 // Human channel names for error copy (settings paths are the enum values). Kept
@@ -217,17 +216,16 @@ interface SendConfigCipher {
   appId?: string;
   displayPhoneNumber?: string;
 }
-interface WebhookConfigCipher {
-  appSecretCipher: string;
-  verifyToken: string;
-  phoneNumberId: string | null;
-}
+/** Ciphertext of every ACTIVE account's own app secret on the channel. Cached as
+ *  a list (not the default account's single value) so an inbound webhook signed
+ *  by any of the workspace's accounts verifies. */
+type WebhookConfigCipher = string[];
 
 type CachedSend =
   | { kind: "ok"; cipher: SendConfigCipher }
   | { kind: "err"; missing: readonly string[] };
 const sendCache = new TtlCache<CachedSend>();
-const webhookCache = new TtlCache<WebhookConfigCipher | null>();
+const webhookCache = new TtlCache<WebhookConfigCipher>();
 
 /**
  * Cache key for a send config. A workspace may hold SEVERAL accounts on a
@@ -409,6 +407,31 @@ export async function getBusinessNumberCountry(
 }
 
 /**
+ * Every ACTIVE WhatsApp number's country, for workspace-wide capability flags.
+ *
+ * Business-initiated calling eligibility is a per-NUMBER fact, but some UI
+ * questions are workspace-wide ("should the Call button exist at all?"). Those
+ * were answered from the DEFAULT number, so a workspace whose default sits in a
+ * blocked market hid the button on every thread — including threads bound to a
+ * perfectly eligible second number — while the real per-thread gate
+ * (`calls.service.ts`, which passes the thread's account) disagreed with no way
+ * to reconcile them.
+ *
+ * A `null` entry means "unknown", which callers treat as "don't gate".
+ */
+export async function getActiveWhatsappCountries(
+  workspaceId: string,
+): Promise<(string | null)[]> {
+  const conns = await db.channelConnection.findMany({
+    where: { workspaceId, channel: "whatsapp", isActive: true },
+    select: { config: true },
+  });
+  return conns.map((c) =>
+    getCountryFromPhone(((c.config ?? {}) as MetaChannelConfig).displayPhoneNumber ?? null),
+  );
+}
+
+/**
  * Loads the webhook-side config. Used by /api/webhooks/meta/[workspaceId] for
  * both the GET verify dance and POST HMAC verification.
  *
@@ -450,45 +473,41 @@ export async function getTeamVerifyTokens(workspaceId: string): Promise<string[]
 export async function getMetaWebhookConfig(
   workspaceId: string,
 ): Promise<MetaWebhookConfig | null> {
-  const hit = webhookCache.get(workspaceId);
-  let cipher: WebhookConfigCipher | null;
-  if (hit !== undefined) {
-    cipher = hit;
-  } else {
-    const conn = await db.channelConnection.findFirst({
-      where: { workspaceId, channel: "whatsapp", isDefault: true },
-      select: { config: true, secrets: true, isActive: true },
+  let cipher = webhookCache.get(workspaceId);
+  if (cipher === undefined) {
+    // EVERY active account, not the default one. Meta signs with the secret of
+    // whichever app owns the account the event came from, so resolving only the
+    // default silently 403'd (and permanently lost) all inbound on siblings.
+    const conns = await db.channelConnection.findMany({
+      where: { workspaceId, channel: "whatsapp", isActive: true },
+      select: { secrets: true },
     });
-    const config = (conn?.config ?? {}) as MetaChannelConfig;
-    const secrets = (conn?.secrets ?? {}) as MetaChannelSecrets;
-    cipher =
-      conn && conn.isActive && secrets.appSecret && config.verifyToken
-        ? {
-            appSecretCipher: secrets.appSecret,
-            verifyToken: config.verifyToken,
-            phoneNumberId: config.phoneNumberId ?? null,
-          }
-        : null;
+    cipher = conns
+      .map((c) => ((c.secrets ?? {}) as MetaChannelSecrets).appSecret)
+      .filter((s): s is string => typeof s === "string" && s.length > 0);
     webhookCache.set(workspaceId, cipher);
   }
-  if (!cipher) return null;
-  try {
-    // App secret signs every inbound webhook (HMAC-SHA256). Prefer the shared
-    // Meta App connection (the single source — an app-secret rotation there
-    // takes effect on every channel immediately, no per-channel resync), and
-    // fall back to the per-channel cipher for legacy / pre-Meta-App rows.
-    const meta = await getMetaConnection(workspaceId);
-    return {
-      ...resolveWebhookSecrets(meta?.appSecret, decryptSecret(cipher.appSecretCipher)),
-      verifyToken: cipher.verifyToken,
-      phoneNumberId: cipher.phoneNumberId,
-    };
-  } catch (err) {
-    console.error(
-      `[provider-config] failed to decrypt webhook secrets for team=${workspaceId}: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-    return null;
+
+  // Decrypt each candidate SEPARATELY. One corrupt/rotated-key ciphertext must
+  // not take the whole channel down — the previous single try/catch around the
+  // default's decrypt returned null, meaning a healthy sibling sitting right
+  // there could not verify a thing.
+  const own: string[] = [];
+  for (const c of cipher) {
+    try {
+      own.push(decryptSecret(c));
+    } catch (err) {
+      console.error(
+        `[provider-config] skipping undecryptable whatsapp webhook secret for team=${workspaceId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
+
+  // The shared Meta App secret is the primary signer and is enough on its own —
+  // it must be consulted even when NO account carries its own secret, which the
+  // old `cipher === null` early-return skipped entirely.
+  const meta = await getMetaConnection(workspaceId);
+  return resolveWebhookSecretCandidates(meta?.appSecret, own);
 }

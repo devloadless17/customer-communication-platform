@@ -260,6 +260,7 @@ export async function listContacts(
       createdAt: Date;
       lastMessageAt: Date | null;
       activeConversationId: string | null;
+      channelConnectionId: string | null;
       lastInboundAt: Date | null;
     }>
   >`
@@ -279,10 +280,14 @@ export async function listContacts(
       c."createdAt",
       conv."lastMessageAt"          AS "lastMessageAt",
       conv.id                       AS "activeConversationId",
+      -- WHICH of our accounts that thread is on. Free: the LATERAL is already
+      -- selecting from the row. Lets the list say "this person talks to Sales"
+      -- instead of only "this person is on WhatsApp".
+      conv."channelConnectionId"    AS "channelConnectionId",
       c."lastInboundAt"             AS "lastInboundAt"
     FROM "Contact" c
     LEFT JOIN LATERAL (
-      SELECT id, "lastMessageAt"
+      SELECT id, "lastMessageAt", "channelConnectionId"
       FROM "Conversation" co
       -- Match on (workspaceId, contactId) so the LEFT JOIN LATERAL seeks the
       -- Conversation_workspaceId_contactId_key unique index. Filtering on
@@ -394,6 +399,7 @@ export async function listContacts(
       tagIds: tagIdsByContact.get(r.id) ?? [],
     },
     activeConversationId: r.activeConversationId,
+    channelConnectionId: r.channelConnectionId ?? null,
     lastMessageAt: r.lastMessageAt ? r.lastMessageAt.toISOString() : null,
     lastInboundAt: r.lastInboundAt ? r.lastInboundAt.toISOString() : null,
   }));
@@ -477,6 +483,7 @@ export async function listPeople(
       createdAt: Date;
       lastMessageAt: Date | null;
       activeConversationId: string | null;
+      channelConnectionId: string | null;
       lastInboundAt: Date | null;
       customerId: string | null;
     }>
@@ -498,11 +505,15 @@ export async function listPeople(
         c."createdAt",
         conv."lastMessageAt"          AS "lastMessageAt",
         conv.id                       AS "activeConversationId",
+        -- Person mode rolls a customer up across channels; this names the
+        -- account of the REPRESENTATIVE contact's thread. Selected here too —
+        -- the type alone would have compiled while the SQL returned undefined.
+        conv."channelConnectionId"    AS "channelConnectionId",
         c."lastInboundAt"             AS "lastInboundAt",
         c."customerId"                AS "customerId"
       FROM "Contact" c
       LEFT JOIN LATERAL (
-        SELECT id, "lastMessageAt"
+        SELECT id, "lastMessageAt", "channelConnectionId"
         FROM "Conversation" co
         WHERE co."workspaceId" = c."workspaceId"
           AND co."contactId" = c.id
@@ -573,6 +584,7 @@ export async function listPeople(
       tagIds: tagIdsByContact.get(r.id) ?? [],
     },
     activeConversationId: r.activeConversationId,
+    channelConnectionId: r.channelConnectionId ?? null,
     lastMessageAt: r.lastMessageAt ? r.lastMessageAt.toISOString() : null,
     lastInboundAt: r.lastInboundAt ? r.lastInboundAt.toISOString() : null,
     personChannels: r.customerId

@@ -8,7 +8,7 @@ import { AiStateControl } from "../ai/ai-state-control";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { useCallApi } from "@/features/calls/call-provider";
-import { useChannelAccounts } from "@/features/inbox/contexts/channel-accounts-context";
+import { AccountLabel } from "@/features/channels/components/account-label";
 import { ContactStagePicker } from "@/features/contacts/components/contact-stage-picker";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
@@ -231,7 +231,6 @@ function ThreadHeaderImpl({
   // agent about to type sees which of the workspace's numbers the customer is
   // talking to, without opening settings. Null unless the channel actually has
   // more than one account.
-  const inboundAccount = useChannelAccounts().accountFor(channel, channelConnectionId);
   // Provider-level blocking is a CHANNEL capability (WhatsApp Block Users API
   // today) — derived from the same map the composer reads, never hardcoded.
   const canBlockContact = !!channel && !!CHANNEL_CAPABILITIES[channel]?.blockUsers;
@@ -266,34 +265,13 @@ function ThreadHeaderImpl({
         </div>
         <div className="flex items-center gap-1.5 truncate text-2xs text-muted-foreground">
           <span className="truncate font-mono tabular-nums">{formatPhone(phone)}</span>
-          {inboundAccount && (
-            <>
-              <span aria-hidden className="text-muted-foreground/50">·</span>
-              <span
-                className="truncate"
-                title={
-                  inboundAccount.providerName &&
-                  inboundAccount.providerName !== inboundAccount.name
-                    ? `Replying from ${inboundAccount.name} (${inboundAccount.providerName})`
-                    : `Replying from ${inboundAccount.name}`
-                }
-              >
-                via <span className="font-medium text-foreground/70">{inboundAccount.name}</span>
-              </span>
-              {/* Trust pill: this account's token is dead, so a reply typed
-                  here WILL fail at send. Non-blocking — the server's refusal
-                  stays the truth — but the agent shouldn't discover it from a
-                  failed bubble. */}
-              {inboundAccount.needsReconnect && (
-                <span
-                  className="inline-flex shrink-0 items-center rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-px text-3xs font-medium text-amber-700 dark:text-amber-400"
-                  title={`${inboundAccount.name} has an expired connection — replies will fail until an admin reconnects it in Settings.`}
-                >
-                  reconnect needed
-                </span>
-              )}
-            </>
-          )}
+          <AccountLabel
+            channel={channel}
+            accountId={channelConnectionId}
+            variant="inline"
+            verb="Replying from"
+            showReconnect
+          />
         </div>
       </div>
 

@@ -41,20 +41,33 @@ export async function flagChannelNeedsReconnect(
  * common (healthy) send path. The connect flows clear it directly too, for an
  * instant banner dismiss on reconnect.
  *
- * Deliberately CHANNEL-WIDE (no per-connection narrowing, unlike the flag):
- * the hot success path would need an extra conversation read to name its
- * account, and clearing a sibling too broadly self-corrects — its very next
- * send re-flags it. The asymmetry is safe in exactly one direction: a wrongly
- * CLEARED flag re-appears on the next failure; a wrongly SET one (the old
- * channel-wide flag) told an admin to reconnect numbers that were fine.
+ * Pass `channelConnectionId` whenever the caller already knows which account
+ * succeeded — then the clear is exact. It is OPTIONAL because the hot success
+ * path does not know: naming the account there costs an extra conversation read
+ * on every send, which is not worth paying to keep a badge honest.
+ *
+ * When omitted this stays CHANNEL-WIDE, and the tradeoff is real rather than
+ * free: account A's successful send clears account B's badge too. The comment
+ * here used to claim that "self-corrects on the next send" — it does NOT for an
+ * IDLE sibling, which can carry a genuinely dead credential and show no warning
+ * until someone tries to use it. Still the safer direction of the asymmetry: a
+ * wrongly CLEARED flag re-appears the moment that number is used, while a
+ * wrongly SET one (the old channel-wide FLAG) told an admin to reconnect
+ * numbers that were fine.
  */
 export async function clearChannelNeedsReconnect(
   workspaceId: string,
   channel: Channel,
+  channelConnectionId?: string | null,
 ): Promise<void> {
   await db.channelConnection
     .updateMany({
-      where: { workspaceId, channel, needsReconnect: true },
+      where: {
+        workspaceId,
+        channel,
+        needsReconnect: true,
+        ...(channelConnectionId ? { id: channelConnectionId } : {}),
+      },
       data: { needsReconnect: false, lastAuthErrorAt: null },
     })
     .catch(() => undefined);

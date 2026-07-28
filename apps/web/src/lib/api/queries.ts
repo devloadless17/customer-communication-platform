@@ -10,6 +10,7 @@ import type {
   AudienceGroupDto,
   ListContactsOpts,
   PlatformAnalytics,
+  PlatformOpsSnapshot,
   SuperAdminTeamDetail,
   SuperAdminTeamRow,
   SuperAdminOrgRow,
@@ -185,6 +186,10 @@ export async function getTeamDetailForSuperAdmin(
 
 export async function getPlatformAnalytics(): Promise<PlatformAnalytics> {
   return api<PlatformAnalytics>("/api/admin/analytics");
+}
+
+export async function getPlatformOps(): Promise<PlatformOpsSnapshot> {
+  return api<PlatformOpsSnapshot>("/api/admin/analytics/ops");
 }
 
 // ---------------------------------------------------------------------------
@@ -611,12 +616,19 @@ export interface ChannelAccountDirectoryEntry {
   needsReconnect: boolean;
 }
 
-export async function listChannelAccountDirectory(): Promise<ChannelAccountDirectoryEntry[]> {
-  const { accounts } = await api<{ accounts: ChannelAccountDirectoryEntry[] }>(
-    "/api/workspace/channel-accounts",
-  );
-  return accounts;
-}
+/**
+ * `cache()`d because the provider now mounts in the APP layout while the inbox
+ * layout still reads it for its own sub-sidebar — without this the two would
+ * each pay the round trip on every inbox render.
+ */
+export const listChannelAccountDirectory = cache(
+  async (): Promise<ChannelAccountDirectoryEntry[]> => {
+    const { accounts } = await api<{ accounts: ChannelAccountDirectoryEntry[] }>(
+      "/api/workspace/channel-accounts",
+    );
+    return accounts;
+  },
+);
 
 /** Server→browser view for the Messenger connect form (mirrors the API shape). */
 export interface MessengerConfigView {
@@ -718,13 +730,18 @@ export async function getTeamWebchatWidgets(): Promise<WebchatWidgetView[]> {
   return widgets;
 }
 
-export async function listWhatsappTemplates(): Promise<{
+export async function listWhatsappTemplates(accountId?: string | null): Promise<{
   templates: TemplateDto[];
   hasWabaId: boolean;
   hasAppId: boolean;
   connected: boolean;
 }> {
-  return api("/api/workspace/whatsapp/templates");
+  // Scoped when the caller knows which number it means. `connected` /
+  // `hasWabaId` / `hasAppId` describe THAT account — unscoped they describe the
+  // workspace default, so an edit page opened for a second number's template
+  // could redirect to Settings because the DEFAULT number lacked a WABA id.
+  const q = accountId ? `?accountId=${encodeURIComponent(accountId)}` : "";
+  return api(`/api/workspace/whatsapp/templates${q}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -923,8 +940,9 @@ export async function loadWorkflowCatalogs(): Promise<{
   fields: Array<{ key: string; label: string }>;
   workflows: Array<{ id: string; name: string; trigger: WorkflowTriggerEvent }>;
   assignmentPolicies: Array<{ id: string; name: string; isDefault: boolean }>;
+  channelAccounts: Array<{ id: string; name: string; channel: string }>;
 }> {
-  const [users, templates, tags, stages, fields, workflows, assignmentPolicies] =
+  const [users, templates, tags, stages, fields, workflows, assignmentPolicies, channelAccounts] =
     await Promise.all([
       listTeamMembers(),
       listWhatsappTemplates(),
@@ -933,8 +951,15 @@ export async function loadWorkflowCatalogs(): Promise<{
       listContactFieldDefinitions(),
       listWorkflows(),
       listAssignmentPolicies(),
+      // `cache()`d and already fetched by the (app) layout, so this is free.
+      listChannelAccountDirectory(),
     ]);
   return {
+    // Only ACTIVE accounts: a rule keyed to a disconnected number can never
+    // fire, so offering it would be a trap.
+    channelAccounts: channelAccounts
+      .filter((a) => a.isActive)
+      .map((a) => ({ id: a.id, name: a.name, channel: a.channel })),
     users: users
       .filter((u) => u.isActive)
       .map((u) => ({ id: u.id, name: u.name, email: u.email })),

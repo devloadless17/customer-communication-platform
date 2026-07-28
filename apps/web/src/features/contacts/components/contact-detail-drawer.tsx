@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Flag, Globe, Loader2, Mail, MapPin, MessageSquare, Phone, Send, Trash2, User as UserIcon } from "lucide-react";
@@ -24,6 +24,7 @@ import { EditableHeading } from "@/features/inbox/components/contact-panel/edita
 import { Section } from "@/features/inbox/components/contact-panel/section";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { dispatchLocalSocketEvent } from "@/lib/socket-client";
+import { useChannelAccounts } from "@/features/channels/contexts/channel-accounts-context";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { formatPhone, initials } from "@ccp/shared/utils";
 import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
@@ -104,6 +105,23 @@ export function ContactDetailDrawer({
   // deleted). Get-or-create on the server, then open it in the inbox. When a
   // thread already exists this same endpoint just returns it — but the footer
   // only renders this button when there isn't one, so this is the create path.
+  // WHICH of our numbers a business-initiated thread opens on.
+  //
+  // `POST /api/conversations/start` has always accepted `channelConnectionId`,
+  // and every caller omitted it — so on a two-number workspace every thread an
+  // agent started bound to the DEFAULT, permanently (the pointer only
+  // re-stamps on an INBOUND). The customer then hears from a number nobody
+  // chose. Shown only when there is a real choice to make.
+  const { all: allAccounts } = useChannelAccounts();
+  const startAccounts = useMemo(
+    () =>
+      allAccounts.filter(
+        (a) => a.isActive && a.channel === (contact.identityChannel ?? undefined),
+      ),
+    [allAccounts, contact.identityChannel],
+  );
+  const [startAccountId, setStartAccountId] = useState<string | null>(null);
+
   async function startChat() {
     if (starting) return;
     setStarting(true);
@@ -112,7 +130,12 @@ export function ContactDetailDrawer({
       const res = await apiFetch("/api/conversations/start", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ contactId: contact.id }),
+        body: JSON.stringify({
+          contactId: contact.id,
+          // Omitted when there is only one account — the server then applies
+          // the channel default, which is the pre-existing behaviour.
+          ...(startAccountId ? { channelConnectionId: startAccountId } : {}),
+        }),
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
@@ -584,6 +607,21 @@ export function ContactDetailDrawer({
             </Button>
           ) : (
             <>
+              {startAccounts.length > 1 && (
+                <select
+                  value={startAccountId ?? startAccounts.find((a) => a.isDefault)?.id ?? ""}
+                  onChange={(e) => setStartAccountId(e.target.value || null)}
+                  aria-label="Which number to start the chat from"
+                  className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-xs"
+                >
+                  {startAccounts.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      From {a.name}
+                      {a.isDefault ? " · default" : ""}
+                    </option>
+                  ))}
+                </select>
+              )}
               {/* No thread (new contact, or its conversation was deleted) —
                   recreate + open it. "Send template" stays as the secondary
                   cold-outbound path. */}

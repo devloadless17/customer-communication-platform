@@ -15,10 +15,19 @@ import type { Channel } from "@ccp/shared/types";
  * agent in a two-number workspace replied without knowing whether the customer
  * was talking to Sales or Support.
  *
- * The directory is SSR-seeded once in the inbox layout and never refetched: it
- * is a handful of rows that change only when an admin connects or disconnects
- * an account, and the alternative — joining the account onto every conversation
+ * The directory is SSR-seeded once in the APP layout and never refetched: it is
+ * a handful of rows that change only when an admin connects or disconnects an
+ * account, and the alternative — joining the account onto every conversation
  * row — would widen the hottest read in the app for a string that repeats.
+ * (A rename / set-default / remove publishes `team.catalog_changed`, which
+ * re-runs the layout, so it does not go stale either.)
+ *
+ * Mounted at the APP layout, not the inbox one, for a structural reason: the
+ * call layer (`CallProvider`) lives above the inbox, so an inbox-scoped
+ * provider is invisible to the incoming-call toast and the live-call panel —
+ * the two surfaces where knowing which business identity is being called
+ * matters most. Contacts, calls, templates and broadcasts previously each
+ * refetched the same rows for the same reason.
  *
  * `showAccountFor(channel)` is the important part of the contract. A workspace
  * with ONE WhatsApp number must look exactly as it does today: attribution is a
@@ -28,6 +37,8 @@ import type { Channel } from "@ccp/shared/types";
  */
 interface ChannelAccountsValue {
   byId: Map<string, ChannelAccountDirectoryEntry>;
+  /** Every account, in the server's order (default first, then oldest). */
+  all: ChannelAccountDirectoryEntry[];
   /** True when `channel` has more than one connected account. */
   showAccountFor: (channel: Channel | undefined) => boolean;
   /** The account for a conversation, or null when unknown/not worth showing. */
@@ -35,21 +46,33 @@ interface ChannelAccountsValue {
     channel: Channel | undefined,
     channelConnectionId: string | null | undefined,
   ) => ChannelAccountDirectoryEntry | null;
+  /**
+   * The directory FETCH failed, as opposed to the workspace genuinely having no
+   * accounts. Both arrive as an empty list, and a surface that lets an operator
+   * pick a sending account must not present "we couldn't load your numbers" as
+   * "you have one number" — the broadcast composer says so out loud.
+   */
+  failed: boolean;
 }
 
 const EMPTY: ChannelAccountsValue = {
   byId: new Map(),
+  all: [],
   showAccountFor: () => false,
   accountFor: () => null,
+  failed: false,
 };
 
 const ChannelAccountsContext = createContext<ChannelAccountsValue>(EMPTY);
 
 export function ChannelAccountsProvider({
   accounts,
+  failed = false,
   children,
 }: {
   accounts: ChannelAccountDirectoryEntry[];
+  /** True when the directory read FAILED — see `failed` on the context value. */
+  failed?: boolean;
   children: React.ReactNode;
 }) {
   const value = useMemo<ChannelAccountsValue>(() => {
@@ -62,13 +85,15 @@ export function ChannelAccountsProvider({
       channel ? (perChannel.get(channel) ?? 0) > 1 : false;
     return {
       byId,
+      all: accounts,
       showAccountFor,
       accountFor: (channel, channelConnectionId) => {
         if (!channelConnectionId || !showAccountFor(channel)) return null;
         return byId.get(channelConnectionId) ?? null;
       },
+      failed,
     };
-  }, [accounts]);
+  }, [accounts, failed]);
 
   return (
     <ChannelAccountsContext.Provider value={value}>{children}</ChannelAccountsContext.Provider>

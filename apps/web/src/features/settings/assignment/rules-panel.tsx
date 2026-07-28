@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, Loader2, Plus, Trash2 } from "lucide-react";
 
 import { LIVE_CHANNELS } from "@ccp/shared/providers/capabilities";
@@ -10,6 +10,7 @@ import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
+import { useChannelAccounts } from "@/features/channels/contexts/channel-accounts-context";
 
 import type { MemberRow, PolicyRow, RuleRow } from "./types";
 
@@ -37,6 +38,19 @@ export function RulesPanel({
 }) {
   const [busy, setBusy] = useState(false);
   const defaultPolicy = policies.find((p) => p.isDefault) ?? policies[0];
+
+  // Accounts worth offering as a routing condition: only on channels that
+  // actually hold MORE THAN ONE. A single-number workspace has nothing to
+  // disambiguate, so the control is hidden rather than shown-and-useless —
+  // the same rule the inbox chip follows.
+  const { all: allAccounts } = useChannelAccounts();
+  const multiAccountOptions = useMemo(() => {
+    const perChannel = new Map<string, number>();
+    for (const a of allAccounts) {
+      if (a.isActive) perChannel.set(a.channel, (perChannel.get(a.channel) ?? 0) + 1);
+    }
+    return allAccounts.filter((a) => a.isActive && (perChannel.get(a.channel) ?? 0) > 1);
+  }, [allAccounts]);
 
   const call = async (path: string, init: RequestInit, message?: string) => {
     setBusy(true);
@@ -185,6 +199,39 @@ export function RulesPanel({
                 Nothing selected = any channel.
               </p>
             </div>
+
+            {/* Which of our NUMBERS / Pages, not just which medium. Hidden
+                entirely unless some channel actually holds more than one
+                account — on a single-number workspace there is nothing to
+                disambiguate and the control would be pure noise. */}
+            {multiAccountOptions.length > 0 && (
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium">When the account is</label>
+                <Select
+                  multiple
+                  className="h-auto min-h-24"
+                  value={rule.conditions.channelAccountIds ?? []}
+                  onChange={(e) =>
+                    void patchRule(rule.id, {
+                      conditions: {
+                        ...rule.conditions,
+                        channelAccountIds: selectedValues(e.target),
+                      },
+                    })
+                  }
+                >
+                  {multiAccountOptions.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name}
+                    </option>
+                  ))}
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Nothing selected = any account. Narrower than the channel — pick
+                  this to route one number&apos;s chats to its own team.
+                </p>
+              </div>
+            )}
 
             <div className="space-y-1.5">
               <label className="text-xs font-medium">

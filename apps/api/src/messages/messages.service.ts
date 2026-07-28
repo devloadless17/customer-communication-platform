@@ -3422,6 +3422,10 @@ const TEMPLATE_ERROR_STATUS: Record<SendTemplateValidationError["code"], number>
   limited_time_offer_expiry_required: 400,
   carousel_cards_required: 400,
   contact_has_no_phone: 400,
+  // 409: request is well-formed, but the template and the thread's number
+  // belong to different WhatsApp Business Accounts. Fixed by picking a
+  // template from this account, not by re-shaping the request.
+  template_wrong_account: 409,
   // The workspace blocked this contact — every provider send would be
   // rejected. Same shape as the other pre-flight refusals: actionable 400.
   contact_blocked: 400,

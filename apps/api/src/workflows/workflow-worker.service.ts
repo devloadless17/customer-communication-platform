@@ -37,6 +37,10 @@ import {
   stopWhatsappHealthRefreshSweeper,
 } from "@/lib/sweepers/whatsapp-health-refresh";
 import {
+  startWebhookSubscriptionHealthSweeper,
+  stopWebhookSubscriptionHealthSweeper,
+} from "@/lib/sweepers/webhook-subscription-health";
+import {
   startTemplateAnalyticsCaptureSweeper,
   stopTemplateAnalyticsCaptureSweeper,
 } from "@/lib/sweepers/template-analytics-capture";
@@ -194,6 +198,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private broadcastMaterializeWorkerStarted = false;
   private broadcastMaterializeDriftSweeperStarted = false;
   private whatsappHealthRefreshSweeperStarted = false;
+  private webhookSubscriptionHealthSweeperStarted = false;
   private templateCatalogRefreshStarted = false;
   private templateAnalyticsCaptureStarted = false;
   private workHoursSweeperStarted = false;
@@ -504,6 +509,20 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     // Its OWN try, like every sibling — see the note below on why a shared try
     // leaves the other sweeper's stop-flag unset.
     try {
+      // Inbound-webhook gap detection: verifies every Meta connection's
+      // WABA/Page subscription + token against Graph, self-heals a dropped
+      // subscription, and flags the Settings reconnect banner for what it
+      // can't fix. Closes the one hole where inbound silently stops with
+      // valid-looking credentials.
+      startWebhookSubscriptionHealthSweeper();
+      this.webhookSubscriptionHealthSweeperStarted = true;
+      this.logger.log("Webhook subscription-health sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start webhook-subscription-health sweeper", err);
+    }
+    // Its OWN try, like every sibling — see the note below on why a shared try
+    // leaves the other sweeper's stop-flag unset.
+    try {
       // Backstop for template CREATE/DELETE done in WhatsApp Manager, which no
       // webhook covers. Without it a catalog is only as fresh as the last time a
       // human pressed "Sync".
@@ -568,6 +587,14 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.warn(
         `stopWhatsappHealthRefreshSweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    try {
+      if (this.webhookSubscriptionHealthSweeperStarted)
+        stopWebhookSubscriptionHealthSweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopWebhookSubscriptionHealthSweeper threw: ${err instanceof Error ? err.message : err}`,
       );
     }
     try {

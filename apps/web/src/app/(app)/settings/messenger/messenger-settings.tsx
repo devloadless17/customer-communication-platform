@@ -7,6 +7,10 @@ import { cn } from "@ccp/shared/utils";
 
 import { Button } from "@/components/ui/button";
 import { ChannelAccountsPanel } from "@/features/channels/components/channel-accounts-panel";
+import {
+  channelDisconnectCopy,
+  fetchChannelRemovalImpact,
+} from "@/features/channels/lib/channel-disconnect";
 import type { ChannelAccountView } from "@/lib/api/queries";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
@@ -88,15 +92,25 @@ export function MessengerSettings({
   }
 
   async function disconnect() {
+    // Read the blast radius FIRST — this button removes every Page, and the
+    // old copy said only "no new messages will flow", which on a two-Page
+    // workspace understated it by an entire Page.
+    const impact = await fetchChannelRemovalImpact("messenger");
+    const { description, confirmLabel } = channelDisconnectCopy(
+      "Page",
+      "Pages",
+      impact,
+    );
     const ok = await confirm({
       title: "Disconnect Messenger?",
-      description:
-        "Your conversations will stay, but no new Messenger messages will flow until you reconnect.",
-      confirmLabel: "Disconnect",
+      description,
+      confirmLabel,
       destructive: true,
     });
     if (!ok) return;
-    const res = await apiFetch("/api/workspace/messenger", { method: "DELETE" });
+    // The server refuses an unconfirmed multi-account disconnect (409); the
+    // dialog above IS that confirmation.
+    const res = await apiFetch("/api/workspace/messenger?confirmAll=1", { method: "DELETE" });
     if (!res.ok) {
       setError("Failed to disconnect");
       return;

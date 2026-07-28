@@ -241,7 +241,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     }
     if (!insecureSkipVerify(this.logger)) {
       if (!signature) throw webhookForbidden(this.logger, workspaceId, "whatsapp", req, "no_signature");
-      const cands = [config.appSecret, config.appSecretFallback];
+      const cands = [config.appSecret, ...config.appSecretFallbacks];
       if (!verifySignature(rawBody, signature, cands)) {
         logSignatureDiag(this.logger, signature, rawBody, cands);
         throw webhookForbidden(this.logger, workspaceId, "whatsapp", req, "bad_signature");
@@ -435,7 +435,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     }
     if (!insecureSkipVerify(this.logger)) {
       if (!signature) throw webhookForbidden(this.logger, workspaceId, channel, req, "no_signature");
-      const cands = [config.appSecret, config.appSecretFallback];
+      const cands = [config.appSecret, ...config.appSecretFallbacks];
       if (!verifySignature(rawBody, signature, cands)) {
         logSignatureDiag(this.logger, signature, rawBody, cands);
         throw webhookForbidden(this.logger, workspaceId, channel, req, "bad_signature");
@@ -714,10 +714,6 @@ export class MetaWebhookController implements OnModuleDestroy {
    * Only iterates the shape we care about — a malformed payload (no entry
    * array) returns false rather than crashing the request.
    */
-  // (Free function below — moved out of the controller class so it can read
-  // the cached `phoneNumberId` from getMetaWebhookConfig instead of a per-
-  // request `db.workspace.findUnique`.)
-
   /**
    * Did the parser originally attach media to this event? Used to tell
    * apart "never had media" (nothing to patch) from "had media but the
@@ -1371,20 +1367,6 @@ async function readBodyCapped(
 }
 
 /**
- * Phone-number-id defense-in-depth check. Returns true if the payload's
- * `entry[].changes[].value.metadata.phone_number_id` is set on at least
- * one change AND doesn't match the team-configured number. False when:
- *   - The team has no `phoneNumberId` configured (newly onboarded; HMAC
- *     is the only gate).
- *   - The payload omits metadata on every change (some Meta event types
- *     don't carry it).
- *   - Every change's phone_number_id matches.
- *
- * Reads from the cached `MetaWebhookConfig.phoneNumberId` instead of a
- * per-request DB lookup — see provider/config.ts for the cache TTL.
- */
-
-/**
  * Resolve the ChannelConnection an inbound payload belongs to.
  *
  * Replaces the old "validate against the workspace's single configured account
@@ -1455,16 +1437,6 @@ function socialPayloadAccountId(payload: unknown): string | null {
   return null;
 }
 
-
-/**
- * Defense-in-depth for the social webhook, parallel to `phoneNumberMismatch` on
- * WhatsApp. Every legitimate Messenger/Instagram webhook carries the business
- * account id in `entry[].id` — the Page id (Messenger) or the IG professional
- * account id (Instagram). If the team has that id configured and an incoming
- * entry names a DIFFERENT account, drop the batch rather than ingest messages
- * attributed to the wrong tenant. Skipped when the id isn't configured yet
- * (HMAC against the per-team appSecret remains the primary gate).
- */
 
 /**
  * True if any change in the payload is a Coexistence `history` backfill. Cheap

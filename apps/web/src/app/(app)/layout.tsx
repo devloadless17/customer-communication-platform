@@ -6,7 +6,13 @@ import { ChunkErrorReload } from "@/components/chunk-error-reload";
 import { CatalogSyncBoundary } from "@/providers/catalog-sync-boundary";
 import { NotificationSoundProvider } from "@/providers/notification-sound-provider";
 import { TeamChatNotificationsProvider } from "@/providers/team-chat-notifications";
-import { listDirectMessagesForUser } from "@/lib/api/queries";
+import {
+  listChannelAccountDirectory,
+  listDirectMessagesForUser,
+  type ChannelAccountDirectoryEntry,
+} from "@/lib/api/queries";
+import { soft } from "@/lib/api/soft";
+import { ChannelAccountsProvider } from "@/features/channels/contexts/channel-accounts-context";
 import { CallProvider } from "@/features/calls/call-provider";
 import { getSession } from "@/lib/auth/current-user";
 import { getCurrentTeam } from "@/lib/api/queries";
@@ -63,7 +69,7 @@ export default async function AppShellLayout({
 
   // Now safe to fetch team-scoped chrome. Parallel — independent reads, both
   // React.cached so child layouts re-calling them are free cache hits.
-  const [team, cookieStore, dms] = await Promise.all([
+  const [team, cookieStore, dms, channelAccountsOrNull] = await Promise.all([
     getCurrentTeam(),
     cookies(),
     // Seeds the DM-alert set. A DM is inherently addressed to you, so ANY
@@ -71,6 +77,18 @@ export default async function AppShellLayout({
     // DM from a channel, so the client needs the id set to branch on.
     // Best-effort: a failure just means DM dings wait until /team is visited.
     listDirectMessagesForUser().catch(() => []),
+    // Which accounts this workspace has on each channel. Seeded HERE rather
+    // than in the inbox layout because the call layer below sits above the
+    // inbox — an inbox-scoped provider is invisible to the incoming-call toast,
+    // which is exactly where an agent needs to know which business identity is
+    // being called. `cache()`d, so the inbox re-reading it is free.
+    //
+    // `null` is the FAILURE sentinel: soft() returns the fallback on error, and
+    // a surface that lets an operator pick a sending account must not present
+    // "we couldn't load your numbers" as "you have one number".
+    soft<ChannelAccountDirectoryEntry[] | null>("channel-account directory", null, () =>
+      listChannelAccountDirectory(),
+    ),
   ]);
   const dmChannelIds = new Set(dms.map((d) => d.id));
   const railCollapsed = cookieStore.get(RAIL_COLLAPSED_COOKIE)?.value !== "false";
@@ -101,6 +119,13 @@ export default async function AppShellLayout({
         {/* App-wide voice-call layer: the single useCall instance + the
             incoming-call toast / active-call panel, so a call ringing in is
             visible on every page (not just the inbox). */}
+        {/* OUTSIDE CallProvider on purpose: the incoming-call toast and the
+            live-call panel both need to name the account being called, and a
+            provider mounted below them cannot be read from inside. */}
+        <ChannelAccountsProvider
+          accounts={channelAccountsOrNull ?? []}
+          failed={channelAccountsOrNull === null}
+        >
         <CallProvider canReceiveCalls={permissions["calls:receive"]}>
           <div className="relative flex h-svh w-full flex-col overflow-hidden bg-background text-foreground md:flex-row">
             <AppRail
@@ -109,11 +134,13 @@ export default async function AppShellLayout({
               workspaces={workspaces}
               organizationName={organizationName}
               canManageAvailability={permissions["availability:manage"]}
+              canViewReports={permissions["teamActivity:view"]}
               initialCollapsed={railCollapsed}
             />
             <div className="flex min-w-0 flex-1 flex-col md:flex-row">{children}</div>
           </div>
         </CallProvider>
+        </ChannelAccountsProvider>
       </NotificationSoundProvider>
     </CatalogSyncBoundary>
   );

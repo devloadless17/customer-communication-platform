@@ -4,7 +4,7 @@ import { useState } from "react";
 import { ChevronRight } from "lucide-react";
 
 import { ChannelBadge } from "@/features/inbox/components/channel-badge";
-import { useChannelAccounts } from "@/features/inbox/contexts/channel-accounts-context";
+import { useChannelAccounts } from "@/features/channels/contexts/channel-accounts-context";
 import { useInboxFilter } from "@/features/inbox/contexts/inbox-filter-context";
 import { cn } from "@ccp/shared/utils";
 

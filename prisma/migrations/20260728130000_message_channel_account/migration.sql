@@ -1,0 +1,13 @@
+-- Record WHICH account carried each message.
+--
+-- `Conversation.channelConnectionId` is re-stamped on every inbound, so it
+-- answers "where does the next reply go" — not "which number sent this". A
+-- message sent from Sales began reporting as Support as soon as the customer
+-- messaged Support, including to webhook partners. This column is the
+-- immutable historical answer.
+--
+-- Nullable, no FK, no index, NO BACKFILL — backfilling from the conversation's
+-- current pointer would write the wrong value for exactly the rows this fixes.
+-- NULL means "not recorded" and readers fall back to the conversation pointer,
+-- which is the pre-existing behaviour.
+ALTER TABLE "Message" ADD COLUMN "channelConnectionId" TEXT;

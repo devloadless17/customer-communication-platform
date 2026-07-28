@@ -1,5 +1,6 @@
 import Link from "next/link";
 import {
+  Activity,
   Building2,
   CheckCircle2,
   ChevronRight,
@@ -14,7 +15,7 @@ import {
 
 import { LocalTime } from "@/components/local-time";
 import { QuickApproveButton } from "@/components/platform/team-status-actions";
-import { getPlatformAnalytics } from "@/lib/api/queries";
+import { getPlatformAnalytics, getPlatformOps } from "@/lib/api/queries";
 
 export const metadata = { title: "Overview · Platform" };
 export const dynamic = "force-dynamic";
@@ -26,7 +27,13 @@ export const dynamic = "force-dynamic";
  * action is one click from the landing page.
  */
 export default async function PlatformOverviewPage() {
-  const a = await getPlatformAnalytics();
+  // Ops probes are individually time-bounded server-side, but the whole call
+  // is still guarded here: an api that can't produce the snapshot must not
+  // blank the approval queue this page exists for.
+  const [a, ops] = await Promise.all([
+    getPlatformAnalytics(),
+    getPlatformOps().catch(() => null),
+  ]);
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-7 px-4 py-6 sm:px-6 md:px-8 md:py-8">
@@ -122,6 +129,71 @@ export default async function PlatformOverviewPage() {
               </li>
             ))}
           </ul>
+        </section>
+      )}
+
+      {/* Operational health — the durable view (queue counts live in Redis and
+          survive api restarts, unlike /health's in-process counters). */}
+      {ops && (
+        <section className="flex flex-col gap-3">
+          <h2 className="text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Operations
+          </h2>
+          {ops.degraded.length > 0 ? (
+            <div className="rounded-xl border border-destructive/40 bg-destructive/5 px-4 py-3">
+              <div className="flex items-center gap-2 text-sm font-medium text-destructive">
+                <Activity className="size-4" /> Degraded
+              </div>
+              <ul className="mt-1.5 list-inside list-disc text-xs text-muted-foreground">
+                {ops.degraded.map((d) => (
+                  <li key={d}>{d}</li>
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 rounded-xl border border-border bg-card px-4 py-3 text-sm text-muted-foreground">
+              <CheckCircle2 className="size-4 text-success-fg" />
+              All health thresholds within range
+            </div>
+          )}
+          <div className="overflow-x-auto rounded-xl border border-border bg-card">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border text-left text-2xs uppercase tracking-wider text-muted-foreground">
+                  <th className="px-4 py-2.5 font-semibold">Queue</th>
+                  <th className="px-4 py-2.5 text-right font-semibold">Failed (7d)</th>
+                  <th className="px-4 py-2.5 text-right font-semibold">Waiting</th>
+                  <th className="px-4 py-2.5 text-right font-semibold">Delayed</th>
+                  <th className="px-4 py-2.5 text-right font-semibold">Active</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {Object.entries(ops.queues).map(([name, counts]) => (
+                  <tr key={name}>
+                    <td className="px-4 py-2 font-medium">{name}</td>
+                    {counts ? (
+                      <>
+                        <td
+                          className={`px-4 py-2 text-right tabular-nums ${
+                            counts.failed > 0 ? "font-semibold text-destructive" : ""
+                          }`}
+                        >
+                          {counts.failed}
+                        </td>
+                        <td className="px-4 py-2 text-right tabular-nums">{counts.waiting}</td>
+                        <td className="px-4 py-2 text-right tabular-nums">{counts.delayed}</td>
+                        <td className="px-4 py-2 text-right tabular-nums">{counts.active}</td>
+                      </>
+                    ) : (
+                      <td colSpan={4} className="px-4 py-2 text-right text-xs text-muted-foreground">
+                        probe failed
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </section>
       )}
 

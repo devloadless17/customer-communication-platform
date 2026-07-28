@@ -34,7 +34,11 @@ const prisma = createTestPrismaClient();
 // connection or that call throws "lib/db.ts accessed before DbService booted".
 setSharedDb(prisma as unknown as PrismaClient);
 
-const service = new ChannelAccountsService(prisma as unknown as DbService);
+// The service publishes `team.catalog_changed` on rename/setDefault/remove so
+// the app-wide account directory can't go stale; these specs assert the DB
+// transitions, so a no-op bus is the whole dependency.
+const bus = { publish: async () => undefined };
+const service = new ChannelAccountsService(prisma as unknown as DbService, bus as never);
 
 const S = `ca${Date.now().toString().slice(-8)}`;
 let orgId = "";

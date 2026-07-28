@@ -413,6 +413,10 @@ export class ExternalV1Service {
     const where: Prisma.CallWhereInput = {
       workspaceId,
       ...(query.conversationId ? { conversationId: query.conversationId } : {}),
+      // Through the conversation — Call has no account column by design.
+      ...(query.accountId
+        ? { conversation: { channelConnectionId: query.accountId } }
+        : {}),
       ...(ringingAt.gte || ringingAt.lte ? { ringingAt } : {}),
       ...(parsed
         ? {
@@ -682,6 +686,13 @@ export class ExternalV1Service {
         // last one and silently widen the result set.
         AND: [
           directoryContactWhere,
+          // "Has a conversation on THIS account." A relation EXISTS rather than
+          // a column, because a contact belongs to a channel while the ACCOUNT
+          // lives on the thread. Its own AND element for the reason stated
+          // above — a spread here would drop the directory predicate.
+          ...(q.accountId
+            ? [{ conversations: { some: { channelConnectionId: q.accountId } } }]
+            : []),
           ...(q.search
             ? [
                 {
@@ -2349,6 +2360,9 @@ export class ExternalV1Service {
       where: {
         workspaceId,
         ...(q.status ? { status: q.status } : {}),
+        // The account a campaign was BOUND to — a column on Broadcast, unlike
+        // tickets/calls where it lives on the conversation.
+        ...(q.accountId ? { channelConnectionId: q.accountId } : {}),
         ...(q.since ? { createdAt: { gte: new Date(q.since) } } : {}),
       },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],

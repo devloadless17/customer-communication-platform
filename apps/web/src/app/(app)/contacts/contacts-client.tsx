@@ -67,6 +67,7 @@ import { ContactRowsSkeleton } from "@/features/contacts/components/contact-brow
 import { ContactStagePicker } from "@/features/contacts/components/contact-stage-picker";
 import { Pagination } from "@/components/ui/pagination";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { useChannelAccounts } from "@/features/channels/contexts/channel-accounts-context";
 
 import dynamic from "next/dynamic";
 
@@ -189,49 +190,16 @@ export function ContactsClient({
   // The workspace's channel accounts, for the "Account" filter. Fetched once —
   // the list changes only when an admin connects/disconnects a number, and the
   // menu hides itself when there are fewer than two to choose between.
-  const [channelAccounts, setChannelAccounts] = useState<
-    Array<{ id: string; channel: string; name: string }>
-  >([]);
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await apiFetch("/api/workspace/channel-accounts");
-        if (!res.ok) return;
-        const data = (await res.json()) as {
-          accounts?: Array<{
-            id: string;
-            channel: string;
-            label?: string | null;
-            displayPhoneNumber?: string | null;
-            externalAccountId?: string | null;
-            isActive?: boolean;
-          }>;
-        };
-        if (cancelled) return;
-        setChannelAccounts(
-          (data.accounts ?? [])
-            .filter((a) => a.isActive !== false)
-            .map((a) => ({
-              id: a.id,
-              channel: a.channel,
-              // Same precedence the rest of the app uses: the operator's label,
-              // else the number, else the provider id — never a bare cuid.
-              name:
-                (a.label && a.label.trim()) ||
-                a.displayPhoneNumber ||
-                a.externalAccountId ||
-                "Unnamed account",
-            })),
-        );
-      } catch {
-        // Non-fatal: the filter section simply stays hidden.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // From the app-wide directory (seeded once in the (app) layout), not a
+  // per-page refetch of the same handful of rows.
+  const { all: directoryAccounts } = useChannelAccounts();
+  const channelAccounts = useMemo(
+    () =>
+      directoryAccounts
+        .filter((a) => a.isActive)
+        .map((a) => ({ id: a.id, channel: a.channel as string, name: a.name })),
+    [directoryAccounts],
+  );
 
   const [fieldDefinitions, setFieldDefinitions] =
     useState<ContactFieldDefinition[]>(initialFieldDefinitions);
@@ -675,7 +643,12 @@ export function ContactsClient({
           channelFilter={list.channelFilter}
           onChannelChange={list.setChannelFilter}
           accountFilter={list.accountFilter}
-          onAccountChange={list.setAccountFilter}
+          // Person mode rolls a customer UP across their channel-contacts, so
+          // scoping to one account would return a subset of the people on
+          // screen — the query correctly drops the filter there. Hiding the
+          // control (rather than leaving it lit and inert) is the honest half:
+          // a filter that reads as applied and isn't is worse than none.
+          onAccountChange={list.groupByPerson ? undefined : list.setAccountFilter}
           accounts={channelAccounts}
           windowFilter={list.windowFilter}
           onWindowChange={list.setWindowFilter}

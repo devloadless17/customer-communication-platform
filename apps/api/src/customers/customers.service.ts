@@ -60,6 +60,15 @@ export interface CustomerContactView {
   lastInboundAt: string | null;
   /** The contact's conversation (one per contact) — for switching threads. */
   conversationId: string | null;
+  /**
+   * WHICH of the workspace's accounts that thread is on.
+   *
+   * The person hub exists to answer "where has this person reached us", and
+   * with two numbers on one channel the channel badge alone cannot: someone who
+   * messaged both Sales and Support looked like one undifferentiated WhatsApp
+   * contact.
+   */
+  channelConnectionId: string | null;
   /** Denormalized thread activity, so the switcher shows each channel like a
    *  mini conversation-list row (last message + time + unread + status). */
   lastMessagePreview: string | null;
@@ -182,6 +191,7 @@ export class CustomersService {
               ...(viewer ? { where: visibilityWhere(viewer) } : {}),
               select: {
                 id: true,
+                channelConnectionId: true,
                 lastMessagePreview: true,
                 lastMessageAt: true,
                 unreadCount: true,
@@ -216,6 +226,7 @@ export class CustomersService {
         avatarUrl: c.avatarUrl,
         lastInboundAt: c.lastInboundAt?.toISOString() ?? null,
         conversationId: convo?.id ?? null,
+        channelConnectionId: convo?.channelConnectionId ?? null,
         lastMessagePreview: convo?.lastMessagePreview ?? null,
         lastMessageAt: convo?.lastMessageAt?.toISOString() ?? null,
         unreadCount: convo?.unreadCount ?? 0,

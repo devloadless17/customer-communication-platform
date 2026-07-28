@@ -721,6 +721,13 @@ export async function ingestCallEvent(
           callId: callRow.id,
           externalCallId: evt.externalCallId,
           channel,
+          // WHICH of our numbers/Pages the customer dialled. Prefer the
+          // account this batch was attributed to; fall back to the thread's
+          // own pointer (they agree, since ingest re-stamps the conversation
+          // to the receiving account just above). Without it the toast can
+          // only say "on WhatsApp", and an agent running two lines answers
+          // with the wrong business identity half the time.
+          channelConnectionId: channelConnectionId ?? conversation.channelConnectionId ?? null,
           contact: toWorkflowContact(contact),
           ringingAt: evt.timestamp.toISOString(),
         });

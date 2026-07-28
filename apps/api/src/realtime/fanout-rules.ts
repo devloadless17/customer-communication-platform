@@ -903,6 +903,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
       callId: e.callId,
       externalCallId: e.externalCallId,
       channel: e.channel,
+      channelConnectionId: e.channelConnectionId,
       contactId: e.contact.id,
       contactName: e.contact.name,
       ringingAt: e.ringingAt,
