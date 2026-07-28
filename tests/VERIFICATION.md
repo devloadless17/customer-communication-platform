@@ -937,6 +937,72 @@ VERIFIED HELD (real coverage — the good news):
   redelivery, permission is a provider READ not a local ledger, SIP never
   enabled, recording correctly unbuilt.
 
+### SELF-REVIEW of the account batch + RED DEPLOY (2026-07-28)
+
+Requested as a whole-system review. The highest-risk unreviewed code was the
+account batch itself, which had meanwhile been COMMITTED and pushed — so the
+review started at CI, not at the diff.
+
+**THE DEPLOY WAS RED and `ship` was SKIPPED** (run 30348259120): production was
+NOT updated — the gate did its job. Both failures came from two calling specs
+added in the SAME commit, neither from this batch: `inapp-recording.spec.ts`
+("driven against the REAL database and blob storage") and
+`whatsapp-call-artifacts.spec.ts` (every case waits for artifact BYTES to land).
+CI has no R2 credentials, so both failed.
+
+**MY FIRST FIX WAS THE WRONG ONE, and reviewing my own work is what caught it.**
+I gated both suites on `skipIf(!hasR2)`, citing the repo's existing
+`skipIf(!hasFfmpeg)` / `@pressure` / NON-CI-uiux precedents. Meanwhile a
+`BLOB_STORAGE_DRIVER=local` filesystem driver was landing in the same tree —
+an explicit opt-in, refused in production — whose docblock names my exact
+choice as the thing to avoid: *"Without a local backend the whole
+`whatsapp-call-artifacts` e2e file and the in-app recording specs can only be
+skipped, which is exactly the coverage we can least afford to lose."*
+Worse, the two are actively incompatible: under `BLOB_STORAGE_DRIVER=local`
+there are no R2 vars, so my predicate stays false and the specs would have
+skipped anyway — **silently suppressing coverage the local driver had just
+restored.** Both gates reverted to byte-identical-with-HEAD; verified under a
+CI-shaped env (`R2_ACCOUNT_ID` unset, `BLOB_STORAGE_DRIVER=local`): unit spec
+passes, meta e2e **170/170**. THE LESSON: a workaround that disables a check is
+only correct if no one is fixing the underlying capability — look before
+reaching for `skip`.
+
+**Found in my own batch, and fixed:**
+- `listPeople` stripped the `channel` filter for group-by-person mode but NOT
+  the new `accountId` — a person spans their channel-contacts, so scoping to one
+  account returns a subset of the persons on screen and makes counts disagree
+  with rows. The UI suppressed it, but the UI is not the contract (/v1 and
+  hand-built calls exist). Negative-tested.
+- `deriveEventAccountId` carried a top-level branch no event sets — untested
+  forward-compat, which §17 forbids. Removed; the `conversationId` fallback
+  already covers every conversation-scoped event.
+- `teamConnectedChannels` issued one account query PER CHANNEL. Collapsed to one
+  query for all of them — it runs on a workflow step, and four round-trips to
+  answer "which channels are live" is three more than the question needs.
+- `inapp-recording.spec.ts` built its own `PrismaClient` without
+  `transactionOptions` — exactly the drift `test/_prisma.ts` was created to end,
+  reintroduced by a spec written in parallel. Pointed at the factory. (This fix
+  KEPT; only the skip gates were reverted.)
+
+**Verified rather than asserted:**
+- The contacts account filter really does use the new index — `EXPLAIN` shows
+  `Index Scan using "Conversation_channelConnectionId_idx"`, not a scan.
+- The webhook account lookup is correctly placed: `handle()` returns at
+  `webhooks.length === 0` BEFORE any enrichment, so the added read costs nothing
+  when no webhook is subscribed, and runs once per EVENT rather than per
+  delivery.
+- `ingest-call`'s restructured branch sets `reopen` on both the re-stamp path
+  and the plain closed-inbound path (a dropped reopen there would be silent).
+
+**One flake, honestly recorded**: `assignment-routing.spec.ts` "auto-assign on
+inbound" failed once, then passed on three consecutive full runs. Symptom
+matches the documented shared-team-id class exactly
+(`meta-e2e-shared-team-flake` lists "unassigned conversations" as a tell). Not
+chased; recorded so the next person sees it is known rather than new.
+
+Evidence: `pnpm run check` 0 errors / 7 checkers · vitest **745/745** · meta e2e
+**170/170**, both re-verified under a CI-shaped env.
+
 ### ACCOUNT-SCOPING INVENTORY + CHECKER 7 (2026-07-28)
 
 Maintainer's ask: not another round of spot fixes — a GUARANTEE that everywhere

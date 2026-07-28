@@ -150,6 +150,18 @@ export interface BlobStorageProvider {
    */
   isOwnUrl(url: string): boolean;
   /**
+   * Recover the object KEY from one of our own stable object urls; null for
+   * anything that isn't ours (foreign host, wrong bucket prefix, malformed).
+   * `isOwnUrl` answers "may I touch this at all"; this answers "which object
+   * is it" — which is what a tenant-scope gate needs, because the tenant lives
+   * in the key prefix (`media/{workspaceId}/…`), not in the url.
+   *
+   * On the interface rather than reachable only through the R2 module: a gate
+   * that parses one provider's url shape silently fails open-or-closed the
+   * moment the active provider is a different one.
+   */
+  keyFromUrl(url: string): string | null;
+  /**
    * Enumerate stored blobs in pages. Used by the blob-orphan sweeper to
    * cross-check provider state against the DB and reclaim leaked uploads
    * (e.g. a contact delete whose blobStorage.delete() got swallowed by a

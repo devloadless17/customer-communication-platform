@@ -1,13 +1,8 @@
 import { createHash } from "node:crypto";
 
-import {
-  DeleteObjectCommand,
-  PutObjectCommand,
-} from "@aws-sdk/client-s3";
-
 import { normalizeMimeType } from "@/lib/media-storage";
 
-import { r2Internal } from "./r2";
+import { blobStorage } from "./provider";
 
 /**
  * Avatar upload — deliberately separate from the WhatsApp `MediaKind` blob
@@ -74,18 +69,14 @@ export async function uploadAvatar(input: AvatarUploadInput): Promise<AvatarUplo
 
   const key = avatarObjectKey(input.userId);
   try {
-    await r2Internal.client().send(
-      new PutObjectCommand({
-        Bucket: r2Internal.bucket(),
-        Key: key,
-        Body: input.bytes,
-        ContentType: mime,
-      }),
-    );
+    // Through the provider (not a raw S3 command) so avatars land wherever the
+    // active driver stores everything else — the mime allowlist above is this
+    // path's own gate, which is why it uses putObject rather than upload.
+    await blobStorage.putObject({ key, bytes: input.bytes, contentType: mime });
   } catch (err) {
     throw new AvatarUploadError(
       "upload_failed",
-      `r2 avatar upload failed: ${err instanceof Error ? err.message : String(err)}`,
+      `avatar upload failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
   return { key, sizeBytes: input.bytes.length };
@@ -98,13 +89,9 @@ export async function uploadAvatar(input: AvatarUploadInput): Promise<AvatarUplo
  * deterministic key overwrites in place.)
  */
 export async function deleteAvatar(userId: string): Promise<void> {
-  try {
-    await r2Internal.client().send(
-      new DeleteObjectCommand({ Bucket: r2Internal.bucket(), Key: avatarObjectKey(userId) }),
-    );
-  } catch {
-    // swallow — see doc comment
-  }
+  // `delete` is contractually non-throwing (a missing key is not an error), so
+  // there is nothing left to swallow here.
+  await blobStorage.delete(avatarObjectKey(userId));
 }
 
 export class AvatarUploadError extends Error {
@@ -174,14 +161,11 @@ export async function captureRemoteContactAvatar(
     const path = `/api/contacts/${contactId}/avatar?v=${v}`;
     if (currentAvatarUrl === path) return path;
 
-    await r2Internal.client().send(
-      new PutObjectCommand({
-        Bucket: r2Internal.bucket(),
-        Key: contactAvatarObjectKey(contactId),
-        Body: bytes,
-        ContentType: mime,
-      }),
-    );
+    await blobStorage.putObject({
+      key: contactAvatarObjectKey(contactId),
+      bytes,
+      contentType: mime,
+    });
     return path;
   } catch {
     return null; // best-effort — keep the initials fallback on any failure

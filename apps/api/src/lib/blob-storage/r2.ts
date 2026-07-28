@@ -349,6 +349,10 @@ export const r2Provider: BlobStorageProvider = {
     }
   },
 
+  keyFromUrl(url: string): string | null {
+    return keyFromOwnUrl(url);
+  },
+
   async listKeys({ limit, cursor, prefix }) {
     const res = await getClient().send(
       new ListObjectsV2Command({
@@ -381,8 +385,12 @@ export const r2Provider: BlobStorageProvider = {
  * Shape: `media/{workspaceId}/{yyyy}/{mm}/{externalShort}-{kind}.{ext}`
  * The `media/` prefix + per-team segment give multi-tenant isolation and let
  * the orphan sweeper tell media apart from `avatars/` by prefix.
+ *
+ * Exported because the key scheme is storage-agnostic — the local driver
+ * (local.ts) must produce the SAME keys, or a suite that runs on it would be
+ * exercising a different namespace than production.
  */
-function buildKey(input: UploadInput): string {
+export function buildKey(input: UploadInput): string {
   const { context } = input;
   const now = new Date();
   const yyyy = String(now.getUTCFullYear());
@@ -447,18 +455,11 @@ function sanitizeMeta(s: string): string {
   return s.replace(/[^\x20-\x7e]/g, "_").slice(0, 200);
 }
 
-/**
- * Shared client/config for sibling blob helpers (avatar.ts) that need direct
- * object access with their own key scheme + allowlist. Keeping one S3Client +
- * one bucket resolver means avatars and media share a pool and credentials.
- */
-export const r2Internal = {
-  client: getClient,
-  bucket,
-  presignTtlSeconds,
-  stableObjectUrl,
-  keyFromOwnUrl,
-};
+// There is deliberately NO `r2Internal` escape hatch anymore. avatar.ts and the
+// header-media tenant gate used to reach past the interface for a raw S3Client
+// and R2's url parser; both now go through BlobStorageProvider (`putObject`,
+// `delete`, `keyFromUrl`), so nothing outside this file knows the app stores
+// anything on R2 — which is the only reason a second driver can exist at all.
 
 /** Exposed for tests. */
 export const _testing = { buildKey, buildReadableName, slug };

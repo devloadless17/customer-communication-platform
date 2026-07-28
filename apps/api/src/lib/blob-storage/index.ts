@@ -1,17 +1,12 @@
 import { avatarObjectKey } from "./avatar";
-import { r2Provider } from "./r2";
-import type { BlobStorageProvider } from "./types";
+import { blobStorage } from "./provider";
 
 /**
- * Active blob storage provider. Cloudflare R2 (private bucket, presigned
- * serving) is the only impl. When we add another (S3, Supabase), this is the
- * only place the wiring changes — every call site already talks to
- * BlobStorageProvider.
- *
- * Mirrors how lib/providers/ keeps a single MetaProvider behind a
- * MessagingProvider interface (CLAUDE.md rule #1).
+ * The active provider is selected in `provider.ts` (one place; explicit driver
+ * opt-in, production-gated). Re-exported here so every call site keeps its
+ * single `@/lib/blob-storage` import.
  */
-export const blobStorage: BlobStorageProvider = r2Provider;
+export { blobStorage };
 
 /**
  * Turn a stored media url into one an EXTERNAL consumer (outbound-webhook

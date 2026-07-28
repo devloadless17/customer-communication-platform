@@ -939,15 +939,16 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
  * consistently wrong rather than occasionally.
  */
 function deriveEventAccountId(event: Record<string, unknown>): string | null {
-  // Top-level, for events with no conversation snapshot (message.sent,
-  // message.status_changed).
-  const topLevel = event.channelConnectionId as string | null | undefined;
-  if (topLevel) return topLevel;
+  // Only the conversation snapshot carries it today (message.received and the
+  // conversation.* events). No event sets it at the top level, so there is no
+  // branch for that: an unused one would be untested forward-compat, and the
+  // `conversationId` fallback in `resolveEventAccountId` already covers every
+  // conversation-scoped event correctly — a future top-level field would be an
+  // optimisation to add HERE, not a correctness gap.
   const conversation = event.conversation as
     | { channelConnectionId?: string | null }
     | undefined;
-  if (conversation?.channelConnectionId) return conversation.channelConnectionId;
-  return null;
+  return conversation?.channelConnectionId ?? null;
 }
 
 function deriveEventChannel(event: Record<string, unknown>): ChannelMedium | null {

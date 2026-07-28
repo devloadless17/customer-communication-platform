@@ -184,32 +184,37 @@ export function getMetaProvider(): MessagingProvider<MetaSendConfig> {
  * connected-set logic never drifts between them.
  */
 export async function teamConnectedChannels(workspaceId: string): Promise<Set<Channel>> {
+  // Probe a CONCRETE account per channel, not the workspace-only fallback.
+  //
+  // "Can we send on this channel?" is a channel-level question, but it can only
+  // be answered by loading a real account's credentials — and passing no account
+  // means the loader refuses with `account-unresolved` the moment the workspace
+  // has two live accounts on that channel. So a workspace with two healthy
+  // WhatsApp numbers reported WhatsApp as NOT connected, `bestChannelForCustomer`
+  // could never pick it, and a workflow targeting a person failed with "target
+  // customer has no reachable channel" while both numbers worked fine.
+  //
+  // ONE query for every channel rather than one per channel: this runs on a
+  // workflow step, and four round-trips to answer "which channels are live"
+  // is three more than the question needs. Ordered so the reduce below keeps
+  // the DEFAULT account when a channel has several — any loadable account
+  // proves the channel is usable, and the default is the least surprising pick.
+  const accounts = await db.channelConnection.findMany({
+    where: { workspaceId, channel: { in: [...LIVE_CHANNELS] }, isActive: true },
+    orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+    select: { id: true, channel: true },
+  });
+  const accountByChannel = new Map<Channel, string>();
+  for (const a of accounts) if (!accountByChannel.has(a.channel)) accountByChannel.set(a.channel, a.id);
+
   const connected = new Set<Channel>();
   await Promise.all(
     [...LIVE_CHANNELS].map(async (ch) => {
       try {
-        // Probe a CONCRETE account, not the workspace-only fallback.
-        //
-        // "Can we send on this channel?" is a channel-level question, but it can
-        // only be answered by loading a real account's credentials — and passing
-        // no account means the loader refuses with `account-unresolved` the
-        // moment the workspace has two live accounts on that channel. So a
-        // workspace with two healthy WhatsApp numbers reported WhatsApp as NOT
-        // connected, `bestChannelForCustomer` could never pick it, and a
-        // workflow targeting a person failed with "target customer has no
-        // reachable channel" — while both numbers worked fine.
-        //
-        // Prefer the default account, fall back to any active one: the question
-        // is whether ANY account can send, so any loadable account is a yes.
-        const account = await db.channelConnection.findFirst({
-          where: { workspaceId, channel: ch, isActive: true },
-          orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
-          select: { id: true },
-        });
         // `webchatwidget` is first-party and keeps its config outside
-        // ChannelConnection, so it legitimately has no row — probe it the old
-        // way (its loader has no account fallback to be ambiguous about).
-        await getProviderBinding(ch).getSendConfig(workspaceId, account?.id);
+        // ChannelConnection, so it legitimately has no row here — its loader
+        // takes no account and has no ambiguous fallback to guard against.
+        await getProviderBinding(ch).getSendConfig(workspaceId, accountByChannel.get(ch));
         connected.add(ch);
       } catch {
         // Not connected / creds expired — exclude from best-channel resolution.

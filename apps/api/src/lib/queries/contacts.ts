@@ -445,7 +445,17 @@ export async function listPeople(
   const take = clampTake(opts.take, CONTACTS_PAGE);
   const page = opts.page != null && opts.page >= 1 ? opts.page : 1;
   const offset = (page - 1) * take;
-  const filterWhere = buildContactFilterWhere(workspaceId, { ...opts, channel: undefined });
+  // Person mode rolls a Customer up ACROSS their channel-contacts, so both the
+  // channel and the ACCOUNT filters are dropped here: scoping to one would
+  // return a subset of the very persons the page is showing, and the counts
+  // would disagree with the rows. (`accountId` was missed when it was added —
+  // the UI already suppressed it in this mode, but the API is the contract and
+  // /v1 or a hand-built call would have hit the inconsistency.)
+  const filterWhere = buildContactFilterWhere(workspaceId, {
+    ...opts,
+    channel: undefined,
+    accountId: undefined,
+  });
 
   // DISTINCT ON must lead ORDER BY with the person key, so pick the
   // representative contact per person in the inner query, then order the OUTER

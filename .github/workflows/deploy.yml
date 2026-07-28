@@ -119,7 +119,7 @@ jobs:
       # workspace whose channels are fine. Found by hand five times before this.
       - run: node scripts/check-channel-account.mjs
 
-  # The Vitest suite (apps/api/test — 36 files, ~500 tests) against a REAL
+  # The Vitest suite (apps/api/test — 68 files, ~745 tests) against a REAL
   # throwaway Postgres + Redis. `migrate deploy` on the empty DB also proves
   # the migration chain (including the hand-maintained partial-index section,
   # which partial-indexes.spec.ts then asserts against pg_indexes) on every
@@ -154,6 +154,12 @@ jobs:
       # Must base64-decode to exactly 32 bytes or the api env gate refuses to
       # boot (verified by local rehearsal). This is base64("ci-0123…abc").
       ENCRYPTION_KEY: Y2ktMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmM=
+      # Blobs go to the filesystem here. The only R2 credentials this repo has
+      # are PRODUCTION's, so pointing a test job at them would write test
+      # objects into live tenant storage — and without SOME backend the media
+      # specs (call recordings above all, where a lost object is unrecoverable)
+      # can only be skipped. See lib/blob-storage/local.ts.
+      BLOB_STORAGE_DRIVER: local
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       - uses: pnpm/action-setup@d15e628ca66d93ee5f352c71671a7bc6a97af5c9  # v6.0.8
@@ -210,6 +216,11 @@ jobs:
       BETTER_AUTH_SECRET: ci-placeholder
       BETTER_AUTH_URL: http://localhost:3000
       ENCRYPTION_KEY: Y2ktMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmM=
+      # Inherited by the spawned test api (meta-stack.ts passes process.env
+      # through). Same reason as the unit job: no R2 credentials belong in a
+      # test job, and the call-artifact specs assert the stored bytes come back
+      # byte-identical — that needs a real backend, not a stub.
+      BLOB_STORAGE_DRIVER: local
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       - uses: pnpm/action-setup@d15e628ca66d93ee5f352c71671a7bc6a97af5c9  # v6.0.8

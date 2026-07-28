@@ -21,7 +21,6 @@ import { diskStorage } from "multer";
 import { randomUUID } from "node:crypto";
 
 import { blobStorage } from "@/lib/blob-storage";
-import { r2Internal } from "@/lib/blob-storage/r2";
 
 import { streamBlob } from "../media/stream-blob";
 import { ScopedByConversation } from "../auth/conversation-visibility.guard";
@@ -320,17 +319,18 @@ export class MessagesController {
 
 /**
  * Team-scope gate for the header-media preview. Staged header-media objects are
- * keyed `media/{workspaceId}/…` (see r2 `buildKey`), so recover the key from our own
+ * keyed `media/{workspaceId}/…` (see `buildKey`), so recover the key from our own
  * stable object URL — path-style `https://…/{bucket}/{key}` — and require it to
  * sit under the caller's team prefix. Assumes `blobStorage.isOwnUrl` already
  * vetted the host. teamIds are URL-safe (cuid) so no re-sanitization needed.
  */
 function isOwnTeamMediaUrl(rawUrl: string, workspaceId: string): boolean {
-  // Recover the object key via r2's canonical parser (host + `/{bucket}/` prefix
-  // check) instead of re-deriving it here — one source of truth for what "our
-  // key" means, and it returns null (→ false) for foreign/malformed URLs or an
-  // env/config miss rather than throwing. Only the team-scope gate stays local.
-  const key = r2Internal.keyFromOwnUrl(rawUrl);
+  // Recover the object key via the ACTIVE provider's canonical parser (host +
+  // `/{bucket}/` prefix check) instead of re-deriving it here — one source of
+  // truth for what "our key" means, and it returns null (→ false) for
+  // foreign/malformed URLs or an env/config miss rather than throwing. Only the
+  // team-scope gate stays local.
+  const key = blobStorage.keyFromUrl(rawUrl);
   if (!key) return false;
   return key.startsWith(`media/${workspaceId}/`);
 }

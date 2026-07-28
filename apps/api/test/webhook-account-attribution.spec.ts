@@ -32,7 +32,7 @@ vi.mock("@/lib/events/bus", async (importOriginal) => {
 
 import { metaProvider } from "@/lib/providers/meta";
 import { ingestEvents } from "@/lib/providers/ingest";
-import { listContacts } from "@/lib/queries";
+import { listContacts, listPeople } from "@/lib/queries";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
 if (existsSync("../../.env")) process.loadEnvFile("../../.env");
@@ -589,5 +589,25 @@ describe("contacts directory: filter by account", () => {
     const allIds = all.items.map((c) => c.contact.id);
     expect(allIds).toContain(aId);
     expect(allIds).toContain(bId);
+  });
+
+  it("IGNORES the account filter in group-by-person mode, exactly like channel", async () => {
+    // A Customer spans their channel-contacts, so scoping to one account would
+    // return a subset of the persons on screen and make the counts disagree
+    // with the rows. `channel` has always been dropped here; `accountId` was
+    // missed when it was added, and the UI suppressing it is not the contract.
+    const onA = `1555${S.slice(-7)}81`;
+    const contact = await prisma.contact.create({
+      data: { workspaceId, name: `Person ${onA}`, phoneNumber: onA, identityChannel: "whatsapp" },
+      select: { id: true },
+    });
+    await prisma.conversation.create({
+      data: { workspaceId, contactId: contact.id, channel: "whatsapp", channelConnectionId: connA },
+    });
+
+    // connB is a DIFFERENT account: in flat mode this person must disappear...
+    const flat = await listPeople(workspaceId, { accountId: connB, take: 100 });
+    // ...but in person mode the filter is ignored, so they are still listed.
+    expect(flat.items.map((c) => c.contact.id)).toContain(contact.id);
   });
 });

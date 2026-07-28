@@ -75,7 +75,7 @@ Everything in the app revolves around the conversation. The inbox is the heart o
 - **Realtime**: **Socket.io**, hosted **inside NestJS** (same process as the event sources = zero cross-process emit latency).
 - **Queues / cache**: **Redis 7.4** + **BullMQ** (workers run in-process by default).
 - **Auth**: **Better Auth**, **in Next.js** (login/logout/signup, cookie issuance). NestJS only *validates* the session cookie via Prisma.
-- **Media**: **Cloudflare R2** (private bucket, team-prefixed keys, presigned GETs streamed same-origin).
+- **Media**: **Cloudflare R2** (private bucket, team-prefixed keys, presigned GETs streamed same-origin) behind `BlobStorageProvider` — nothing outside `lib/blob-storage/` knows the vendor. `BLOB_STORAGE_DRIVER=local` swaps in a filesystem impl so CI/offline dev exercise the media paths for real; it is an explicit opt-in, never a fallback for absent R2 env, and is refused under `NODE_ENV=production`.
 - **Edge**: **Caddy** (auto-HTTPS, WebSocket upgrade, routes `/`, `/_next/*`, `/api/auth/*` → web; `/api/*`, `/webhooks/*` → api).
 - **Two processes, one `docker-compose`, one VPS.** No microservices.
 

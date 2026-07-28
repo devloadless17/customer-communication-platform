@@ -17,17 +17,15 @@
 import { existsSync } from "node:fs";
 
 import { PrismaClient } from "@prisma/client";
-import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { setSharedDb } from "@/lib/db";
+import { createTestPrismaClient } from "./_prisma";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
 if (existsSync("../../.env")) process.loadEnvFile("../../.env");
 
-const prisma = new PrismaClient({
-  adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }),
-});
+const prisma = createTestPrismaClient();
 setSharedDb(prisma as unknown as PrismaClient);
 
 import { storeInAppRecording } from "@/lib/media/call-recording-download";
