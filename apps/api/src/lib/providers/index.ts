@@ -1,4 +1,5 @@
 import { getMetaSendConfig, type MetaSendConfig } from "@/lib/providers/config";
+import { db } from "@/lib/db";
 import { metaProvider } from "@/lib/providers/meta";
 import { messengerProvider } from "@/lib/providers/messenger";
 import { getMessengerSendConfig } from "@/lib/providers/messenger-config";
@@ -187,7 +188,28 @@ export async function teamConnectedChannels(workspaceId: string): Promise<Set<Ch
   await Promise.all(
     [...LIVE_CHANNELS].map(async (ch) => {
       try {
-        await getProviderBinding(ch).getSendConfig(workspaceId);
+        // Probe a CONCRETE account, not the workspace-only fallback.
+        //
+        // "Can we send on this channel?" is a channel-level question, but it can
+        // only be answered by loading a real account's credentials — and passing
+        // no account means the loader refuses with `account-unresolved` the
+        // moment the workspace has two live accounts on that channel. So a
+        // workspace with two healthy WhatsApp numbers reported WhatsApp as NOT
+        // connected, `bestChannelForCustomer` could never pick it, and a
+        // workflow targeting a person failed with "target customer has no
+        // reachable channel" — while both numbers worked fine.
+        //
+        // Prefer the default account, fall back to any active one: the question
+        // is whether ANY account can send, so any loadable account is a yes.
+        const account = await db.channelConnection.findFirst({
+          where: { workspaceId, channel: ch, isActive: true },
+          orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+          select: { id: true },
+        });
+        // `webchatwidget` is first-party and keeps its config outside
+        // ChannelConnection, so it legitimately has no row — probe it the old
+        // way (its loader has no account fallback to be ambiguous about).
+        await getProviderBinding(ch).getSendConfig(workspaceId, account?.id);
         connected.add(ch);
       } catch {
         // Not connected / creds expired — exclude from best-channel resolution.

@@ -83,6 +83,7 @@ export function buildContactFilterWhere(
   const fieldFilter = opts.fieldFilter;
   const source = opts.source;
   const channel = opts.channel;
+  const accountId = opts.accountId;
   const windowFilter = opts.window;
   const stageFilter = opts.stageId;
   const tagIds = (opts.tagIds ?? []).filter((t) => t.length > 0);
@@ -114,6 +115,22 @@ export function buildContactFilterWhere(
     }
     ${source ? Prisma.sql`AND c.source = ${source}::"ContactSource"` : Prisma.empty}
     ${channel ? Prisma.sql`AND c."identityChannel" = ${channel}::"Channel"` : Prisma.empty}
+    ${
+      /* WHICH of our accounts on the channel this contact talks to. A workspace
+         can hold several numbers/Pages/handles, and "who writes to the Sales
+         number" was unanswerable from this page even though the inbox has had
+         the same filter for a while. The account lives on the CONVERSATION (the
+         single owner of that fact), so this is an EXISTS through the thread —
+         served by the `Conversation(channelConnectionId)` index. */
+      accountId
+        ? Prisma.sql`AND EXISTS (
+            SELECT 1 FROM "Conversation" cv
+            WHERE cv."contactId" = c.id
+              AND cv."workspaceId" = ${workspaceId}
+              AND cv."channelConnectionId" = ${accountId}
+          )`
+        : Prisma.empty
+    }
     ${
       windowFilter === "open"
         ? Prisma.sql`AND c."lastInboundAt" >= now() - interval '24 hours'`

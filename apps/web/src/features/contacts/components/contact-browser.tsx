@@ -67,6 +67,14 @@ export interface ContactListFilters {
   sourceFilter: SourceFilter;
   /** Channel identity filter. "any" disables the filter. */
   channelFilter: ChannelFilter;
+  /**
+   * ONE account on that channel — a specific WhatsApp number, Page or IG
+   * handle. `null` disables it. Answers "who writes to the Sales number",
+   * which `channelFilter` alone cannot express on a multi-account workspace.
+   * Matched server-side through the contact's conversation, which is the
+   * single owner of a thread's account.
+   */
+  accountFilter: string | null;
   windowFilter: WindowFilter;
   /** Keep contacts carrying ANY of these tag ids. Empty = no tag filter. */
   tagIds: string[];
@@ -95,6 +103,12 @@ export async function fetchContactsPage(
   // meaningless there — send groupByPerson and skip channel.
   if (filters.groupByPerson) params.set("groupByPerson", "1");
   else if (filters.channelFilter !== "any") params.set("channel", filters.channelFilter);
+  // Same rule as `channel`: person mode rolls a customer up ACROSS their
+  // channel-contacts, so scoping to one account would return a subset of the
+  // persons on screen.
+  if (!filters.groupByPerson && filters.accountFilter) {
+    params.set("accountId", filters.accountFilter);
+  }
   if (filters.windowFilter !== "any") params.set("window", filters.windowFilter);
   if (filters.tagIds.length > 0) params.set("tagIds", filters.tagIds.join(","));
   if (filters.stageFilter !== "any") params.set("stageId", filters.stageFilter);
@@ -227,6 +241,8 @@ export interface UseContactListResult {
   sourceFilter: SourceFilter;
   setSourceFilter: (v: SourceFilter) => void;
   channelFilter: ChannelFilter;
+  accountFilter: string | null;
+  setAccountFilter: (v: string | null) => void;
   setChannelFilter: (v: ChannelFilter) => void;
   groupByPerson: boolean;
   setGroupByPerson: (v: boolean) => void;
@@ -310,6 +326,7 @@ export function useContactList(opts?: {
   const [fieldFilter, setFieldFilter] = useState<FieldFilter | null>(null);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [channelFilter, setChannelFilter] = useState<ChannelFilter>("any");
+  const [accountFilter, setAccountFilter] = useState<string | null>(null);
   const [groupByPerson, setGroupByPerson] = useState(false);
   const [windowFilter, setWindowFilter] = useState<WindowFilter>("any");
   const [tagIds, setTagIds] = useState<string[]>([]);
@@ -346,7 +363,7 @@ export function useContactList(opts?: {
     const t = window.setTimeout(async () => {
       try {
         const page = await fetchContactsPage(
-          { search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagIds, stageFilter, groupByPerson },
+          { search, fieldFilter, sourceFilter, channelFilter, accountFilter, windowFilter, tagIds, stageFilter, groupByPerson },
           null,
         );
         if (reqId.current !== my) return;
@@ -361,7 +378,7 @@ export function useContactList(opts?: {
     }, 250);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagKey, stageFilter, groupByPerson]);
+  }, [search, fieldFilter, sourceFilter, channelFilter, accountFilter, windowFilter, tagKey, stageFilter, groupByPerson]);
 
   // ── Numbered (offset) pagination effects — `paged` mode only ──────────────
   // A filter change resets to page 1 (page N of the old filter set is
@@ -375,7 +392,7 @@ export function useContactList(opts?: {
     }
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagKey, stageFilter, groupByPerson]);
+  }, [search, fieldFilter, sourceFilter, channelFilter, accountFilter, windowFilter, tagKey, stageFilter, groupByPerson]);
 
   // Fetch the current page whenever filters or the page number change. Debounce
   // ONLY the typed search (so keystrokes don't flood the API); page navigation
@@ -401,7 +418,7 @@ export function useContactList(opts?: {
     const t = window.setTimeout(async () => {
       try {
         const data = await fetchContactsPage(
-          { search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagIds, stageFilter, groupByPerson },
+          { search, fieldFilter, sourceFilter, channelFilter, accountFilter, windowFilter, tagIds, stageFilter, groupByPerson },
           null,
           { page, take: pageSize },
         );
@@ -417,7 +434,7 @@ export function useContactList(opts?: {
     }, delay);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagKey, stageFilter, groupByPerson, page]);
+  }, [search, fieldFilter, sourceFilter, channelFilter, accountFilter, windowFilter, tagKey, stageFilter, groupByPerson, page]);
 
   function loadMore() {
     if (!nextCursor || loadingMore) return;
@@ -437,7 +454,7 @@ export function useContactList(opts?: {
     void (async () => {
       try {
         const page = await fetchContactsPage(
-          { search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagIds, stageFilter, groupByPerson },
+          { search, fieldFilter, sourceFilter, channelFilter, accountFilter, windowFilter, tagIds, stageFilter, groupByPerson },
           fromCursor,
         );
         // superseded by a filter change (reqId) or a page-1 refetch (cursor)
@@ -467,12 +484,13 @@ export function useContactList(opts?: {
     fieldFilter,
     sourceFilter,
     channelFilter,
+    accountFilter,
     windowFilter,
     tagIds,
     stageFilter,
     groupByPerson,
   });
-  filtersRef.current = { search, fieldFilter, sourceFilter, channelFilter, windowFilter, tagIds, stageFilter, groupByPerson };
+  filtersRef.current = { search, fieldFilter, sourceFilter, channelFilter, accountFilter, windowFilter, tagIds, stageFilter, groupByPerson };
 
   // Public refetch — wired to the coalesced `contacts:bulk_updated` socket
   // event. Bulk paths (server-side bulk-tag etc.) don't send per-contact
@@ -603,6 +621,8 @@ export function useContactList(opts?: {
     setSourceFilter,
     channelFilter,
     setChannelFilter,
+    accountFilter,
+    setAccountFilter,
     groupByPerson,
     setGroupByPerson,
     windowFilter,
@@ -632,6 +652,9 @@ export function ContactFilterBar({
   onSourceChange,
   channelFilter = "any",
   onChannelChange,
+  accountFilter = null,
+  onAccountChange,
+  accounts = [],
   windowFilter = "any",
   onWindowChange,
   fieldFilter,
@@ -651,6 +674,10 @@ export function ContactFilterBar({
   onSourceChange: (v: SourceFilter) => void;
   channelFilter?: ChannelFilter;
   onChannelChange?: (v: ChannelFilter) => void;
+  /** ONE account on the channel. Omit `onAccountChange` to hide the section. */
+  accountFilter?: string | null;
+  onAccountChange?: (v: string | null) => void;
+  accounts?: Array<{ id: string; channel: string; name: string }>;
   windowFilter?: WindowFilter;
   onWindowChange?: (v: WindowFilter) => void;
   fieldFilter: FieldFilter | null;
@@ -670,6 +697,7 @@ export function ContactFilterBar({
   const moreActive =
     sourceFilter !== "all" ||
     (Boolean(onChannelChange) && channelFilter !== "any") ||
+    (Boolean(onAccountChange) && accountFilter !== null) ||
     (Boolean(onWindowChange) && windowFilter !== "any") ||
     fieldFilter !== null;
 
@@ -677,6 +705,7 @@ export function ContactFilterBar({
     onSearchChange("");
     onSourceChange("all");
     onChannelChange?.("any");
+    onAccountChange?.(null);
     onWindowChange?.("any");
     onStageFilterChange?.("any");
     onTagsChange?.([]);
@@ -778,6 +807,9 @@ export function ContactFilterBar({
                 onSourceChange={onSourceChange}
                 channelFilter={channelFilter}
                 onChannelChange={onChannelChange}
+                accountFilter={accountFilter}
+                onAccountChange={onAccountChange}
+                accounts={accounts}
                 windowFilter={windowFilter}
                 onWindowChange={onWindowChange}
                 fieldFilter={fieldFilter}

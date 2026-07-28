@@ -4,6 +4,7 @@
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
+import { resolveOutboundAccountId } from "@/lib/conversations/account";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
 import { bestChannelForCustomer } from "@/lib/identity/best-channel";
 import { teamConnectedChannels } from "@/lib/providers";
@@ -173,7 +174,16 @@ async function resolveCustomerBestChannel(
   let conv: { id: string };
   try {
     conv = await db.conversation.create({
-      data: { workspaceId, contactId, channel: best.channel, status: "open" },
+      data: {
+        workspaceId,
+        contactId,
+        channel: best.channel,
+        // Bind the account too — a workflow-opened thread is outbound-first, so
+        // there is no webhook to learn it from, and an unbound thread cannot
+        // send at all in a multi-account workspace.
+        channelConnectionId: (await resolveOutboundAccountId(db, workspaceId, best.channel)).accountId,
+        status: "open",
+      },
       select: { id: true },
     });
   } catch (err) {
@@ -346,7 +356,16 @@ export async function resolveStepTarget(
   let newConv: { id: string };
   try {
     newConv = await db.conversation.create({
-      data: { workspaceId, contactId, status: "open" },
+      data: {
+        workspaceId,
+        contactId,
+        // This path targets by PHONE, so the schema's `whatsapp` default is
+        // the right channel — named explicitly here only so the account
+        // resolved beside it is provably for the same channel.
+        channel: "whatsapp",
+        channelConnectionId: (await resolveOutboundAccountId(db, workspaceId, "whatsapp")).accountId,
+        status: "open",
+      },
       select: { id: true },
     });
   } catch (err) {

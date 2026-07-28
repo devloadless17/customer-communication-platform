@@ -53,6 +53,7 @@ import {
   ConversationSendRateLimitedError,
 } from "@/lib/messaging/conversation-send-budget";
 import { getProviderBinding } from "@/lib/providers";
+import { resolveOutboundAccountId } from "@/lib/conversations/account";
 import {
   NoChannelDestinationError,
   resolveContactChannel,
@@ -1177,12 +1178,18 @@ export class ExternalV1MessagingService {
           // surface the proper "contact has no reachable address" error.
         }
       }
+      // Bind the new thread to an account through the shared rule — an
+      // integration-started thread must be as attributable as an inbound one,
+      // and in a multi-account workspace a null here makes every later send
+      // fail `account-unresolved`.
+      const { accountId } = await resolveOutboundAccountId(this.db, workspaceId, channel);
       try {
         conv = await this.db.conversation.create({
           data: {
             workspaceId,
             contactId,
             channel,
+            channelConnectionId: accountId,
             status: "pending",
             lastMessageAt: new Date(),
             lastMessagePreview: "",

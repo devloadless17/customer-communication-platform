@@ -36,6 +36,7 @@ import { normalizeDefaultAccount } from "@/lib/providers/normalize-default-accou
 import {
   readTemplateAnalytics,
   refreshTemplateAnalytics,
+  templateAnalyticsAccountContext,
 } from "@/lib/analytics/template-analytics";
 import {
   MetaSendError,
@@ -676,9 +677,15 @@ export class WhatsappService {
 
   /** Stored daily rollup for one template. No Graph call. */
   async templateAnalytics(workspaceId: string, templateId: string, daysRaw?: string) {
-    const { externalId } = await this.templateRef(workspaceId, templateId);
+    const { externalId, wabaId } = await this.templateRef(workspaceId, templateId);
     const { start, end } = this.analyticsWindow(daysRaw);
-    return readTemplateAnalytics(workspaceId, externalId, start, end);
+    const result = await readTemplateAnalytics(workspaceId, externalId, start, end);
+    // Meta records NOTHING before the insights switch was flipped (no
+    // backfill), and serves EU/Japan accounts nothing at all. Same two facts
+    // the campaign report carries, resolved by the same function — the drawer
+    // says them too, or an empty chart on an old template reads as a broken
+    // feature.
+    return { ...result, ...(await templateAnalyticsAccountContext(workspaceId, wabaId)) };
   }
 
   /** Pull fresh figures from Meta for one template, then store them. */

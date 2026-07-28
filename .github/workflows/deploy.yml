@@ -110,6 +110,15 @@ jobs:
       # Before 2026-07-27 both spellings coexisted for the same condition.
       - run: node scripts/check-error-keys.mjs
 
+      # Every provider-credential resolution names an ACCOUNT. A workspace can
+      # hold several numbers/Pages/handles on one channel, so resolving without
+      # one is a guess that the loaders refuse outright once a second account
+      # goes live — and the symptom is always something silent and unrelated:
+      # replies from the wrong number, typing indicators that never arrive,
+      # contacts stuck named by their PSID, "no reachable channel" on a
+      # workspace whose channels are fine. Found by hand five times before this.
+      - run: node scripts/check-channel-account.mjs
+
   # The Vitest suite (apps/api/test — 36 files, ~500 tests) against a REAL
   # throwaway Postgres + Redis. `migrate deploy` on the empty DB also proves
   # the migration chain (including the hand-maintained partial-index section,

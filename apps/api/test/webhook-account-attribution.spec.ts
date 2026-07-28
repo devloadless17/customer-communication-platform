@@ -32,6 +32,7 @@ vi.mock("@/lib/events/bus", async (importOriginal) => {
 
 import { metaProvider } from "@/lib/providers/meta";
 import { ingestEvents } from "@/lib/providers/ingest";
+import { listContacts } from "@/lib/queries";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
 if (existsSync("../../.env")) process.loadEnvFile("../../.env");
@@ -390,5 +391,203 @@ describe("template-status attribution (W2)", () => {
       select: { status: true },
     });
     expect(legacy.status).toBe("paused");
+  });
+});
+
+describe("conversation → account binding", () => {
+  /** An inbound TEXT message on a named account, ingested the way the
+   *  controller does it (batch attributed to one connection). */
+  async function deliverInbound(connId: string, from: string, body: string) {
+    const events = metaProvider.parseWebhook({
+      object: "whatsapp_business_account",
+      entry: [
+        {
+          id: WABA_A,
+          changes: [
+            {
+              field: "messages",
+              value: {
+                messaging_product: "whatsapp",
+                metadata: { display_phone_number: "15550100001", phone_number_id: "pn1" },
+                contacts: [{ profile: { name: "Acct Test" }, wa_id: from }],
+                messages: [
+                  {
+                    from,
+                    id: `wamid.${S}.${Math.round(performance.now() * 1000)}`,
+                    timestamp: `${Math.floor(Date.now() / 1000)}`,
+                    type: "text",
+                    text: { body },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    expect(events.length).toBeGreaterThan(0);
+    await ingestEvents(workspaceId, "whatsapp", events, connId);
+  }
+
+  it("stamps the receiving account on the thread, and re-stamps when the customer switches numbers", async () => {
+    const phone = `1555${S.slice(-7)}1`;
+    await deliverInbound(connA, phone, "hello from A");
+
+    const contact = await prisma.contact.findFirstOrThrow({
+      where: { workspaceId, phoneNumber: { contains: S.slice(-7) } },
+      select: { id: true },
+    });
+    const afterA = await prisma.conversation.findFirstOrThrow({
+      where: { workspaceId, contactId: contact.id },
+      select: { id: true, channelConnectionId: true },
+    });
+    expect(afterA.channelConnectionId).toBe(connA);
+
+    // Same customer now writes to our OTHER number. The live thread — and the
+    // 24h window governing a free-form reply — moves with them.
+    await deliverInbound(connB, phone, "now on B");
+    const afterB = await prisma.conversation.findUniqueOrThrow({
+      where: { id: afterA.id },
+      select: { channelConnectionId: true },
+    });
+    expect(afterB.channelConnectionId).toBe(connB);
+  });
+
+  it("carries the account onto the message.received event the webhooks and workflows read", async () => {
+    // This is what a partner integration and a workflow condition actually
+    // see. Before the account rode on the snapshot, the outbound-webhook
+    // envelope resolved the workspace DEFAULT connection for every event, so
+    // `channel.id` named the wrong number on every multi-number workspace.
+    const phone = `1555${S.slice(-7)}2`;
+    await deliverInbound(connB, phone, "event payload check");
+
+    const contact = await prisma.contact.findFirstOrThrow({
+      where: { workspaceId, phoneNumber: { contains: `${S.slice(-7)}2` } },
+      select: { id: true },
+    });
+    const convo = await prisma.conversation.findFirstOrThrow({
+      where: { workspaceId, contactId: contact.id },
+      select: { id: true },
+    });
+    const row = await prisma.outboundEvent.findFirstOrThrow({
+      where: { workspaceId, type: "message.received" },
+      orderBy: { createdAt: "desc" },
+      select: { payload: true },
+    });
+    const payload = row.payload as {
+      conversationId: string;
+      conversation: { channelConnectionId?: string | null };
+    };
+    expect(payload.conversationId).toBe(convo.id);
+    expect(payload.conversation.channelConnectionId).toBe(connB);
+  });
+});
+
+describe("cross-account broadcast semantics", () => {
+  /**
+   * Pins what the `includeOtherAccounts` opt-in actually costs, because the
+   * service's own comment used to state the wrong mechanism ("the reply opens a
+   * SEPARATE thread"). It cannot: `Conversation` is
+   * `@@unique([workspaceId, contactId])` and a WhatsApp contact is unique per
+   * (workspace, phone), so one customer has exactly ONE thread whichever of our
+   * numbers they write to.
+   *
+   * The real cost is MIGRATION — broadcast from B to an A-contact, they reply
+   * to B, and the thread's account moves to B for good. History stays unified;
+   * ownership moves. That is what the opt-in is guarding, so it is worth a test
+   * rather than a sentence.
+   */
+  it("a reply to another of our numbers MIGRATES the thread, it never forks it", async () => {
+    const phone = `1555${S.slice(-7)}9`;
+    // Customer first talks to account A.
+    await (async () => {
+      const events = metaProvider.parseWebhook({
+        object: "whatsapp_business_account",
+        entry: [{ id: WABA_A, changes: [{ field: "messages", value: {
+          messaging_product: "whatsapp",
+          metadata: { display_phone_number: "15550100001", phone_number_id: "pn1" },
+          contacts: [{ profile: { name: "Migrator" }, wa_id: phone }],
+          messages: [{ from: phone, id: `wamid.${S}.mig1`, timestamp: `${Math.floor(Date.now() / 1000)}`, type: "text", text: { body: "hi A" } }],
+        } }] }],
+      });
+      await ingestEvents(workspaceId, "whatsapp", events, connA);
+    })();
+
+    const contact = await prisma.contact.findFirstOrThrow({
+      where: { workspaceId, phoneNumber: { contains: `${S.slice(-7)}9` } },
+      select: { id: true },
+    });
+    const first = await prisma.conversation.findFirstOrThrow({
+      where: { workspaceId, contactId: contact.id },
+      select: { id: true, channelConnectionId: true },
+    });
+    expect(first.channelConnectionId).toBe(connA);
+
+    // ...then answers a campaign we sent from account B.
+    await (async () => {
+      const events = metaProvider.parseWebhook({
+        object: "whatsapp_business_account",
+        entry: [{ id: WABA_B, changes: [{ field: "messages", value: {
+          messaging_product: "whatsapp",
+          metadata: { display_phone_number: "15550100002", phone_number_id: "pn2" },
+          contacts: [{ profile: { name: "Migrator" }, wa_id: phone }],
+          messages: [{ from: phone, id: `wamid.${S}.mig2`, timestamp: `${Math.floor(Date.now() / 1000)}`, type: "text", text: { body: "hi B" } }],
+        } }] }],
+      });
+      await ingestEvents(workspaceId, "whatsapp", events, connB);
+    })();
+
+    // ONE thread, not two — the same row, now owned by B.
+    const all = await prisma.conversation.findMany({
+      where: { workspaceId, contactId: contact.id },
+      select: { id: true, channelConnectionId: true },
+    });
+    expect(all).toHaveLength(1);
+    expect(all[0]!.id).toBe(first.id);
+    expect(all[0]!.channelConnectionId).toBe(connB);
+
+    // And both messages live on that one thread — history is unified.
+    const msgs = await prisma.message.count({ where: { workspaceId, conversationId: first.id } });
+    expect(msgs).toBe(2);
+  });
+});
+
+describe("contacts directory: filter by account", () => {
+  /**
+   * "Show me everyone who writes to the Sales number." The inbox has had this
+   * filter for a while; the contacts directory could not answer it at all,
+   * which on a multi-number workspace makes the directory a flat list with no
+   * way back to WHICH number a person belongs to.
+   *
+   * Contacts deliberately carry no account column — the CONVERSATION owns that
+   * fact — so the filter is an EXISTS through the thread.
+   */
+  it("returns only contacts whose thread is on that account", async () => {
+    const onA = `1555${S.slice(-7)}71`;
+    const onB = `1555${S.slice(-7)}72`;
+    const mk = async (phone: string, connId: string) => {
+      const contact = await prisma.contact.create({
+        data: { workspaceId, name: `Acct ${phone}`, phoneNumber: phone, identityChannel: "whatsapp" },
+        select: { id: true },
+      });
+      await prisma.conversation.create({
+        data: { workspaceId, contactId: contact.id, channel: "whatsapp", channelConnectionId: connId },
+      });
+      return contact.id;
+    };
+    const aId = await mk(onA, connA);
+    const bId = await mk(onB, connB);
+
+    const page = await listContacts(workspaceId, { accountId: connA, take: 100 });
+    const ids = page.items.map((c) => c.contact.id);
+    expect(ids).toContain(aId);
+    expect(ids).not.toContain(bId);
+
+    // ...and the unfiltered list still shows both, so the filter narrows rather
+    // than the fixture simply being invisible.
+    const all = await listContacts(workspaceId, { take: 100 });
+    const allIds = all.items.map((c) => c.contact.id);
+    expect(allIds).toContain(aId);
+    expect(allIds).toContain(bId);
   });
 });

@@ -257,7 +257,18 @@ export function BroadcastReport({
           </div>
           <div className="text-3xs text-muted-foreground">{pct(rates.clickRate)} of delivered</div>
         </button>
-        <div className="rounded-lg border border-border bg-muted/20 px-3 py-2">
+        <div
+          className="rounded-lg border border-border bg-muted/20 px-3 py-2"
+          // Meta bills PER RECIPIENT, so one campaign legitimately shows both
+          // billable and free rows — which reads as a bug when the number is
+          // presented bare. The rule is Meta's: a utility template is free
+          // inside that contact's open 24h customer service window.
+          title={
+            report.cost.billable < funnel.accepted
+              ? "Meta bills per RECIPIENT, not per campaign. A utility template is free when it lands inside that contact's open 24-hour customer service window (they messaged you in the last 24h) and charged when it doesn't — so one utility campaign is legitimately part billable. Marketing and authentication templates always bill. The flag is Meta's own, per message."
+              : "Conversations Meta billed for this campaign, counted by category. The flag is Meta's own, attached per message — utility templates sent inside a contact's open 24-hour service window are free."
+          }
+        >
           <div className="text-3xs uppercase tracking-wide text-muted-foreground">Billable</div>
           <div className="mt-0.5 text-lg font-semibold tabular-nums">
             {report.cost.billable.toLocaleString()}
@@ -383,6 +394,8 @@ export function BroadcastReport({
           broadcastId={report.broadcastId}
           analytics={report.metaAnalytics}
           onRefreshed={onRefreshed}
+          campaignAccepted={funnel.accepted}
+          campaignStartedAt={report.throughput.startedAt}
         />
       )}
     </div>

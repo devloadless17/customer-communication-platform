@@ -257,15 +257,26 @@ export class OutboundWebhooksService {
     // Reflect a real connected channel in the test ping — prefer WhatsApp for
     // continuity, but fall back to any active connection so a Messenger /
     // Instagram-only workspace's test body still carries a real channel block.
+    // Select the SAME columns the subscriber does — the test ping must be
+    // byte-identical to a live delivery, which is the whole point of it, and
+    // that now includes the account identity fields.
+    const identitySelect = {
+      id: true,
+      channel: true,
+      createdAt: true,
+      label: true,
+      externalAccountId: true,
+      config: true,
+    } as const;
     const conn =
       (await this.db.channelConnection.findFirst({
         where: { workspaceId, channel: "whatsapp", isActive: true },
-        select: { id: true, channel: true, createdAt: true },
+        select: identitySelect,
       })) ??
       (await this.db.channelConnection.findFirst({
         where: { workspaceId, isActive: true },
         orderBy: { createdAt: "asc" },
-        select: { id: true, channel: true, createdAt: true },
+        select: identitySelect,
       }));
     const channelBase: WireChannelBase | null = conn
       ? {
@@ -275,6 +286,10 @@ export class OutboundWebhooksService {
           // Epoch MS — must match the production fanout (subscriber) so the Test
           // ping is byte-identical to a live delivery for parser validation.
           created_at: conn.createdAt.getTime(),
+          account_label: conn.label,
+          account_address:
+            (conn.config as { displayPhoneNumber?: string } | null)?.displayPhoneNumber ?? null,
+          account_external_id: conn.externalAccountId || null,
         }
       : null;
 

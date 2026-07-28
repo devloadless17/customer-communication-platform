@@ -291,6 +291,16 @@ export interface ListContactsOpts {
   tagIds?: string[];
   /** Filter to one channel identity (whatsapp / messenger / instagram). */
   channel?: Channel;
+  /**
+   * Filter to ONE account on that channel — "who writes to the Sales number".
+   * A workspace can hold several numbers / Pages / handles per channel, so
+   * `channel` alone cannot express this; the inbox has had the same filter for
+   * a while and the contacts directory could not answer it at all.
+   *
+   * Matched through the CONVERSATION, which is the single owner of a thread's
+   * account (contacts themselves carry no account column, deliberately).
+   */
+  accountId?: string;
   /** Roll the list up to one row per unified PERSON (a `Customer`, or a solo
    *  contact as its own person) instead of one row per channel-contact — the
    *  contacts-page "Group by person" view. Runs in offset/page mode; the

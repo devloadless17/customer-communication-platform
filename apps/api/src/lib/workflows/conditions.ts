@@ -33,6 +33,13 @@ export type ConditionField =
   | "status_to"
   | "assigned_user_id"
   | "conversation_status"
+  /**
+   * WHICH account on the channel this thread belongs to (the ChannelConnection
+   * id) — "did this come in on the Sales number or the Support number".
+   * `channel` alone cannot express that, so a multi-number workspace had no way
+   * to route by number at all.
+   */
+  | "channel_account_id"
   // Contact fields (always present)
   | "contact_phone"
   | "contact_name"
@@ -84,10 +91,11 @@ export const FIELDS_BY_TRIGGER: Record<WorkflowTriggerEvent, ConditionField[]> =
   message_received: [
     "body", "body_lower", "direction", "option_id", "session_kind",
     "contact_phone", "contact_name", "contact_email", "contact_stage_id",
-    "conversation_status", "assigned_user_id",
+    "conversation_status", "assigned_user_id", "channel_account_id",
   ],
   conversation_created: [
     "contact_phone", "contact_name", "contact_email", "contact_stage_id",
+    "channel_account_id",
   ],
   conversation_opened: [
     "status_from", "contact_phone", "contact_name", "contact_email",
@@ -323,7 +331,11 @@ function readField(field: ConditionField, payload: EventPayload): string | null 
       email?: string | null;
       stageId?: string | null;
     };
-    conversation?: { status?: string; assignedUserId?: string | null } | null;
+    conversation?: {
+      status?: string;
+      assignedUserId?: string | null;
+      channelConnectionId?: string | null;
+    } | null;
     assignedUser?: { id?: string } | null;
     previousStatus?: string;
     newStatus?: string;
@@ -352,6 +364,8 @@ function readField(field: ConditionField, payload: EventPayload): string | null 
       return p.newStatus ?? null;
     case "conversation_status":
       return p.conversation?.status ?? null;
+    case "channel_account_id":
+      return p.conversation?.channelConnectionId ?? null;
     case "assigned_user_id":
       return p.assignedUser?.id ?? p.conversation?.assignedUserId ?? null;
     case "contact_phone":

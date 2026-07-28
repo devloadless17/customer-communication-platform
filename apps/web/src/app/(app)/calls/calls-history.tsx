@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useMemo } from "react";
 import Link from "next/link";
 import {
   AudioLines,
@@ -48,6 +48,10 @@ interface CallRow {
   hasRecording: boolean;
   /** True once the call's opted-in transcript document is stored. */
   hasTranscript: boolean;
+  /** WHICH of our accounts on the channel this call was on (the thread's). */
+  accountId: string | null;
+  /** That account named for a human — the Settings label, else the number. */
+  accountName: string | null;
   /** Auto-detected spoken language of the transcript (ISO 639, e.g. "ar"). */
   transcriptLanguage: string | null;
   /** Why a FAILED call failed, from the provider's terminate webhook. */
@@ -58,6 +62,15 @@ const PAGE = 25;
 
 export function CallsHistory({ canCall }: { canCall: boolean }) {
   const [rows, setRows] = useState<CallRow[]>([]);
+  // Derived, not fetched: if any two rows name different accounts the workspace
+  // is multi-account for the purposes of this log. Avoids a second request just
+  // to decide whether to render one label, and it is self-correcting — a
+  // workspace that adds a number starts showing it as soon as it appears.
+  const multiAccount = useMemo(() => {
+    const seen = new Set<string>();
+    for (const r of rows) if (r.accountId) seen.add(r.accountId);
+    return seen.size > 1;
+  }, [rows]);
   const [page, setPage] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -256,6 +269,7 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
               first={i === 0}
               canCall={canCall}
               calling={callingId === row.id}
+              multiAccount={multiAccount}
               onCallBack={() => void callBack(row)}
             />
           ))}
@@ -343,12 +357,16 @@ function CallRowItem({
   first,
   canCall,
   calling,
+  multiAccount,
   onCallBack,
 }: {
   row: CallRow;
   first: boolean;
   canCall: boolean;
   calling: boolean;
+  /** Does this workspace hold more than one account on the channel? Drives
+   *  whether the "via <number>" fact is worth the pixels. */
+  multiAccount: boolean;
   onCallBack: () => void;
 }) {
   const { Icon, label, tone, actor } = describe(row);
@@ -396,6 +414,17 @@ function CallRowItem({
             <>
               <span className="opacity-50">·</span>
               <span className="tabular-nums">{formatDuration(row.durationSeconds)}</span>
+            </>
+          )}
+          {/* WHICH of our numbers. Only shown when the workspace actually has
+              more than one account on the channel — on a single-number
+              workspace it is noise, and on a multi-number one two calls from
+              the same customer to two different numbers were indistinguishable
+              in this log. */}
+          {multiAccount && row.accountName && (
+            <>
+              <span className="opacity-50">·</span>
+              <span className="truncate">via {row.accountName}</span>
             </>
           )}
           {row.status === "failed" && row.errorTitle && (

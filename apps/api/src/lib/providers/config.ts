@@ -55,6 +55,17 @@ interface MetaChannelConfig {
    * durable in-thread proof of notice the voice line can't.
    */
   callConsentMessage?: string;
+  /**
+   * HOW call artifacts are produced for this number:
+   *   - "meta" (default): the provider's built-in recording/transcription —
+   *     zero infra, but every call opens with Meta's spoken consent
+   *     announcement (no Arabic voice) and artifacts arrive ~1min post-call.
+   *   - "inapp": the agent's BROWSER records (silently — no announcement),
+   *     uploads to our R2, and the transcript comes from our own Whisper
+   *     pipeline (Arabic-native). Consent is the business's responsibility;
+   *     the written consent notice above is the built-in way to give it.
+   */
+  callArtifactMode?: "meta" | "inapp";
 }
 /** Shape of `ChannelConnection.secrets` — envelope-encrypted ciphertext per field. */
 interface MetaChannelSecrets {
@@ -132,18 +143,44 @@ const CHANNEL_DISPLAY_NAME: Partial<Record<Channel, string>> = {
   webchatwidget: "Website chat",
 };
 
+/** The sentinel a loader returns when NO account was named and the workspace
+ *  has more than one live account on the channel, so the fallback would be a
+ *  guess. Exported because it is a distinct, actionable condition — not a
+ *  missing credential. */
+export const ACCOUNT_UNRESOLVED = "account-unresolved";
+
 export class ProviderNotConfiguredError extends Error {
   readonly workspaceId: string;
   readonly channel: Channel;
+  /** True when the ONLY problem is that we could not tell which account to use.
+   *  Callers map this to different copy (and a different fix) than a genuinely
+   *  disconnected channel. */
+  readonly accountUnresolved: boolean;
   constructor(workspaceId: string, missing: string[], channel: Channel = "whatsapp") {
     const label = CHANNEL_DISPLAY_NAME[channel] ?? channel;
+    const unresolved = missing.includes(ACCOUNT_UNRESOLVED);
+    // `account-unresolved` is NOT a configuration problem, and saying it is
+    // sends an admin to reconnect a perfectly healthy integration. The channel
+    // is connected; what is missing is which of several accounts THIS thread
+    // belongs to — normally because the account it was bound to was
+    // disconnected (`onDelete: SetNull` nulls the column on every thread that
+    // pointed at it). Refusing is correct: replying from a sibling number the
+    // customer never contacted has no service window and shows an unknown
+    // sender. But the message has to say that, and say what actually clears it.
     super(
-      `Team ${workspaceId} is missing ${label} config: ${missing.join(", ")}. ` +
-        `Reconnect it in /settings/${channel}.`,
+      unresolved
+        ? `This conversation isn't linked to one of your ${label} accounts, so ` +
+          `there's no way to tell which one to reply from. This usually means ` +
+          `the account it belonged to was disconnected. It re-links itself as ` +
+          `soon as the customer sends another message; to reply right now, use ` +
+          `a template from the account you want to own the thread.`
+        : `${label} isn't fully connected: ${missing.join(", ")}. ` +
+          `Reconnect it in /settings/${channel}.`,
     );
     this.name = "ProviderNotConfiguredError";
     this.workspaceId = workspaceId;
     this.channel = channel;
+    this.accountUnresolved = unresolved;
   }
 }
 
@@ -243,7 +280,7 @@ async function loadSendCipher(
     const active = await db.channelConnection.count({
       where: { workspaceId, channel: "whatsapp", isActive: true },
     });
-    if (active > 1) return { kind: "err", missing: ["account-unresolved"] };
+    if (active > 1) return { kind: "err", missing: [ACCOUNT_UNRESOLVED] };
   }
   const conn = await db.channelConnection.findFirst({
     where: accountId

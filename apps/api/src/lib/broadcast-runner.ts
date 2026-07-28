@@ -1876,6 +1876,18 @@ async function processOneRecipient(
               // the contact's identity channel (WhatsApp for templates, the
               // social channel for freeform) — never a hardcoded WhatsApp.
               channel: sendChannel,
+              // ...and the ACCOUNT the campaign sends from. A campaign run on
+              // the Sales number that opens a brand-new thread must leave that
+              // thread owned by the Sales number: the customer's reply lands
+              // there, and the 24h window that governs the agent's free-form
+              // answer belongs to it. Left null, the reply resolved the
+              // workspace DEFAULT — a different number, where no window exists
+              // — or, once the account-unresolved guard landed, refused to send
+              // at all. Null stays null for a single-account workspace, which
+              // is what the unambiguous fallback is for.
+              ...(broadcast.channelConnectionId
+                ? { channelConnectionId: broadcast.channelConnectionId }
+                : {}),
               status: "pending",
               lastMessagePreview: "",
             },

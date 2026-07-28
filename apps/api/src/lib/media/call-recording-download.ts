@@ -3,6 +3,9 @@ import { createHash } from "node:crypto";
 import { db } from "@/lib/db";
 import { blobStorage } from "@/lib/blob-storage";
 import { getProviderBinding } from "@/lib/providers";
+import { transcodeCallRecordingToOgg } from "@/lib/media/audio-transcode";
+import { transcribeInboundAudio } from "@/lib/ai/voice";
+import { configEnabled, loadAiConfig } from "@/lib/ai/runtime-config";
 
 /**
  * Download an opted-in call recording from the provider and persist it to R2.
@@ -173,6 +176,164 @@ export async function downloadCallTranscript(
     data: {
       transcriptKey: key,
       ...(language ? { transcriptLanguage: language } : {}),
+    },
+  });
+  return true;
+}
+
+// ─── In-app artifact pipeline (browser-recorded calls) ──────────────────────
+//
+// The "inapp" artifact mode: the agent's browser records the call (stereo —
+// agent left, customer right) and uploads it here. No provider announcement,
+// no provider retention window — the bytes are ours from the first flush.
+
+/**
+ * Store an in-app recording upload. Periodic flushes each carry the FULL
+ * file-so-far and overwrite the same key — a browser crash mid-call loses at
+ * most the last flush interval, and no chunk-assembly protocol is needed. The
+ * final upload remuxes to OGG/OPUS (universal playback; the browser sends
+ * webm on Chrome-family, mp4/aac on Safari) and optionally kicks off the
+ * Whisper transcription.
+ */
+export async function storeInAppRecording(
+  callId: string,
+  file: { bytes: Uint8Array; mimeType: string },
+  opts: { final: boolean; transcribe: boolean },
+): Promise<void> {
+  const call = await db.call.findUnique({
+    where: { id: callId },
+    select: { id: true, workspaceId: true },
+  });
+  if (!call) return;
+
+  const rawKey = `call-recordings/${call.workspaceId}/${call.id}.raw`;
+  if (!opts.final) {
+    // Interim flush: store the browser container as-is. Playable in
+    // Chrome-family if the call crashes here; the final upload replaces it.
+    await blobStorage.putObject({
+      key: rawKey,
+      bytes: file.bytes,
+      contentType: file.mimeType || "audio/webm",
+    });
+    await db.call.update({
+      where: { id: call.id },
+      data: { recordingKey: rawKey, recordingMimeType: file.mimeType || "audio/webm" },
+    });
+    return;
+  }
+
+  // Final: remux/transcode to OGG/OPUS for universal playback. On ffmpeg
+  // failure (slot timeout under load, exotic container) keep the raw upload —
+  // a recording that only plays in Chrome beats no recording.
+  let key = rawKey;
+  let contentType = file.mimeType || "audio/webm";
+  let bytesForTranscription = file.bytes;
+  try {
+    const ogg = await transcodeCallRecordingToOgg(file.bytes);
+    key = `call-recordings/${call.workspaceId}/${call.id}.ogg`;
+    contentType = "audio/ogg";
+    bytesForTranscription = ogg;
+    await blobStorage.putObject({ key, bytes: ogg, contentType });
+    // Replace the interim raw object so the stored artifact is exactly one
+    // file (blob-orphan hygiene). Best-effort — a stray raw is harmless.
+    await blobStorage.delete(rawKey).catch(() => undefined);
+  } catch (err) {
+    console.warn(
+      `[call-recording] in-app remux failed for call=${callId} (${
+        err instanceof Error ? err.message : err
+      }) — keeping the browser container`,
+    );
+    await blobStorage.putObject({ key, bytes: file.bytes, contentType });
+  }
+  await db.call.update({
+    where: { id: call.id },
+    data: { recordingKey: key, recordingMimeType: contentType },
+  });
+
+  if (opts.transcribe) {
+    // Detached — the upload response must not wait on Whisper.
+    void transcribeInAppCallRecording(call.id, bytesForTranscription, contentType).catch(
+      (err) => {
+        console.warn(
+          `[call-transcript] in-app transcription failed for call=${callId}: ${
+            err instanceof Error ? err.message : err
+          }`,
+        );
+      },
+    );
+  }
+}
+
+/**
+ * Transcribe an in-app recording through the SAME Whisper pipeline that
+ * handles inbound voice notes — Arabic-native, auto-detected. Produces a
+ * viewer-compatible transcript document (text + language; no per-speaker
+ * segments in v1 — the stereo master preserves the channel split for a
+ * future per-speaker pass).
+ */
+export async function transcribeInAppCallRecording(
+  callId: string,
+  bytes?: Uint8Array,
+  mimeType?: string,
+): Promise<boolean> {
+  const call = await db.call.findUnique({
+    where: { id: callId },
+    select: {
+      id: true,
+      workspaceId: true,
+      transcriptKey: true,
+      recordingKey: true,
+      recordingMimeType: true,
+    },
+  });
+  if (!call || call.transcriptKey) return true;
+  if (!bytes) {
+    if (!call.recordingKey) return false;
+    const fetched = await blobStorage.fetch(call.recordingKey);
+    bytes = fetched.bytes;
+    mimeType = fetched.mimeType || call.recordingMimeType || "audio/ogg";
+  }
+
+  // Same gate the voice-note pipeline uses: transcription runs on the
+  // workspace's own AI config (OpenAI key). Off ⇒ skip quietly — the
+  // recording itself is already stored.
+  const aiConfig = await loadAiConfig(call.workspaceId);
+  if (!configEnabled(aiConfig)) {
+    console.warn(
+      `[call-transcript] AI not configured for team=${call.workspaceId} — skipping in-app transcription for call=${callId}`,
+    );
+    return false;
+  }
+
+  const result = await transcribeInboundAudio({
+    bytes,
+    filename: `call-${call.id}.ogg`,
+    mimeType: mimeType ?? "audio/ogg",
+  });
+  const doc = {
+    metadata: {
+      processed_at: new Date().toISOString(),
+      source: "inapp",
+    },
+    transcript: {
+      text: result.text,
+      language: result.language ?? null,
+      segments: [],
+    },
+  };
+  const key = `call-transcripts/${call.workspaceId}/${call.id}.json`;
+  await blobStorage.putObject({
+    key,
+    bytes: new TextEncoder().encode(JSON.stringify(doc)),
+    contentType: "application/json",
+  });
+  await db.call.updateMany({
+    where: { id: call.id, transcriptKey: null },
+    data: {
+      transcriptKey: key,
+      ...(result.language
+        ? { transcriptLanguage: result.language.slice(0, 16) }
+        : {}),
     },
   });
   return true;

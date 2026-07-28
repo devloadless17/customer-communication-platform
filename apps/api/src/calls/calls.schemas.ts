@@ -218,10 +218,15 @@ export const RecordingPolicySchema = z
         ],
       )
       .optional(),
+    /** The number's artifact mode, sent by the UI so the announcement fields
+     *  are only required when they'll actually be used ("meta" mode). Not
+     *  stored from here — the mode has its own endpoint. */
+    mode: z.enum(["meta", "inapp"]).optional(),
   })
   .strict()
   .superRefine((p, ctx) => {
-    if (!p.enabled) return;
+    // In-app mode plays no announcement, so purpose/language are moot.
+    if (!p.enabled || p.mode === "inapp") return;
     if (!p.purpose) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -250,6 +255,19 @@ export const ConsentMessageSchema = z
   })
   .strict();
 export type ConsentMessageInput = z.infer<typeof ConsentMessageSchema>;
+
+/**
+ * How the number produces call artifacts: the provider's built-in features
+ * ("meta" — spoken announcement, ~1min delivery) or in-app ("inapp" — the
+ * agent's browser records silently, transcripts via our own Whisper pipeline,
+ * consent via the written notice).
+ */
+export const ArtifactModeSchema = z
+  .object({
+    mode: z.enum(["meta", "inapp"]),
+  })
+  .strict();
+export type ArtifactModeInput = z.infer<typeof ArtifactModeSchema>;
 
 /** Listing — keyset cursor on (ringingAt DESC, id DESC). */
 export const ListCallsQuerySchema = z

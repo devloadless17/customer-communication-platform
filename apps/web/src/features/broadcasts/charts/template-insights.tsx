@@ -15,6 +15,7 @@ import {
 
 import { apiFetch } from "@/lib/api/client-fetch";
 import { Button } from "@/components/ui/button";
+import { LocalTime } from "@/components/local-time";
 import {
   AXIS_PROPS,
   ChartEmpty,
@@ -86,6 +87,12 @@ const HEIGHT = 200;
 export function TemplateInsights({ templateId }: { templateId: string }) {
   const [days, setDays] = useState<Day[] | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
+  // When Meta started recording this WABA — nothing before it is ever
+  // backfilled, so an old template's early days read zero by design.
+  const [analyticsSince, setAnalyticsSince] = useState<string | null>(null);
+  // Meta serves EU/Japan accounts no template analytics at all — a permanent
+  // empty chart that otherwise reads as a broken integration.
+  const [regionUnsupported, setRegionUnsupported] = useState(false);
   const [range, setRange] = useState<(typeof RANGES)[number]>(30);
   const [notSynced, setNotSynced] = useState(false);
   const [pending, startTransition] = useTransition();
@@ -103,9 +110,16 @@ export function TemplateInsights({ templateId }: { templateId: string }) {
           if (body.error === "template_not_synced") setNotSynced(true);
           return;
         }
-        const body = (await res.json()) as { days: Day[]; summary: Summary };
+        const body = (await res.json()) as {
+          days: Day[];
+          summary: Summary;
+          analyticsSince: string | null;
+          regionUnsupported: boolean;
+        };
         setDays(body.days);
         setSummary(body.summary);
+        setAnalyticsSince(body.analyticsSince);
+        setRegionUnsupported(body.regionUnsupported);
       } catch {
         // Keep whatever is on screen; the next action reconciles.
       }
@@ -214,6 +228,27 @@ export function TemplateInsights({ templateId }: { templateId: string }) {
             nullReason="Meta reports reads for 7 days only"
           />
         </dl>
+      )}
+
+      {/* A permanent zero, not a slow one — say it before the enablement
+          caption, because on these accounts the enablement date explains
+          nothing and re-fetching will never help. */}
+      {regionUnsupported && (
+        <p className="mt-2 text-3xs text-warning-fg">
+          Meta excludes this account&apos;s region (the EU and Japan) from
+          template analytics, so this chart stays empty no matter what is sent.
+          Delivery receipts in the inbox and campaign funnels are unaffected.
+        </p>
+      )}
+
+      {/* The one caption that stops "why is my old template all zeros"
+          tickets: Meta records only from the enablement date, never before. */}
+      {!regionUnsupported && analyticsSince && (
+        <p className="mt-2 text-3xs text-muted-foreground/80">
+          Meta has recorded this account&apos;s templates since{" "}
+          <LocalTime iso={analyticsSince} format="localeDate" /> — activity
+          before that reads zero and cannot be backfilled.
+        </p>
       )}
 
       {summary && summary.clickedButtons && summary.clickedButtons.length > 0 && (

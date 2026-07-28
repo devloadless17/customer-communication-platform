@@ -117,6 +117,9 @@ export function MoreFilterMenu({
   onSourceChange,
   channelFilter = "any",
   onChannelChange,
+  accountFilter = null,
+  onAccountChange,
+  accounts = [],
   windowFilter,
   onWindowChange,
   fieldFilter,
@@ -128,6 +131,12 @@ export function MoreFilterMenu({
   channelFilter?: ChannelFilter;
   /** Omit to hide the channel section (e.g. surfaces scoped to one channel). */
   onChannelChange?: (v: ChannelFilter) => void;
+  /** ONE account on the channel — a specific number / Page / handle. */
+  accountFilter?: string | null;
+  /** Omit to hide the account section. */
+  onAccountChange?: (v: string | null) => void;
+  /** The workspace's accounts, already filtered to the live channels. */
+  accounts?: Array<{ id: string; channel: string; name: string }>;
   windowFilter: WindowFilter;
   /** Omit to hide the 24h-window section (e.g. surfaces that don't filter on it). */
   onWindowChange?: (v: WindowFilter) => void;
@@ -175,6 +184,42 @@ export function MoreFilterMenu({
           ))}
         </>
       )}
+
+      {/* WHICH of our numbers / Pages / handles the contact talks to. Only
+          worth showing when there is more than one to choose between — on a
+          single-account workspace it is a menu with one option. When a channel
+          is also selected, narrow to that channel's accounts so the two
+          controls can't contradict each other. */}
+      {onAccountChange &&
+        (() => {
+          const visible = accounts.filter(
+            (a) => channelFilter === "any" || a.channel === channelFilter,
+          );
+          if (visible.length < 2) return null;
+          return (
+            <>
+              <MenuLabel>Account</MenuLabel>
+              <RadioRow active={accountFilter === null} onClick={() => onAccountChange(null)}>
+                Any account
+              </RadioRow>
+              {visible.map((a) => (
+                <RadioRow
+                  key={a.id}
+                  active={accountFilter === a.id}
+                  onClick={() => onAccountChange(a.id)}
+                  leading={
+                    <ChannelBadge
+                      channel={a.channel as Parameters<typeof ChannelBadge>[0]["channel"]}
+                      className="size-3.5 shrink-0"
+                    />
+                  }
+                >
+                  {a.name}
+                </RadioRow>
+              ))}
+            </>
+          );
+        })()}
 
       {onWindowChange && (
         <>

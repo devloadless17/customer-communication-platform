@@ -48,6 +48,21 @@ export interface WorkflowConversationSnapshot {
   /** Channel this thread lives on (`meta_cloud` = WhatsApp). Source of truth
    *  for the conversation's channel — see Conversation.channel. */
   channel: Channel;
+  /**
+   * WHICH of the workspace's accounts on that channel this thread belongs to
+   * (the `ChannelConnection` id) — the specific WhatsApp number, Facebook Page
+   * or Instagram handle the customer is talking to.
+   *
+   * `channel` alone is not enough to act on a multi-account workspace. It is
+   * what lets a workflow branch on "this came in on the Sales number" and what
+   * the outbound-webhook envelope reports as `channel.id`; before this existed
+   * that envelope resolved the workspace's DEFAULT account for the channel, so
+   * every partner integration was told the wrong number.
+   *
+   * Null when the thread predates account binding or the channel has no
+   * connected account (webchatwidget keeps its config elsewhere).
+   */
+  channelConnectionId?: string | null;
   status: ConversationStatus;
   assignedUserId: string | null;
   /** AI Autopilot state. Surfaced as `ai_enabled` on the message.received /

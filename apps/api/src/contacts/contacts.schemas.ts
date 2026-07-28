@@ -87,6 +87,9 @@ export const ListContactsQuerySchema = z.object({
   tagIds: z.string().optional(),
   /** Filter to one channel (whatsapp / messenger / instagram). */
   channel: zLiveChannel().optional().catch(undefined),
+  /** Filter to ONE account on that channel (a specific WhatsApp number, Page
+   *  or IG handle). Matched through the contact's conversation. */
+  accountId: z.string().min(1).optional().catch(undefined),
   /** "Group by person" view — one row per unified Customer (offset mode). */
   groupByPerson: z.coerce.boolean().optional().catch(undefined),
   window: z.enum(["open", "closed"]).optional().catch(undefined),
@@ -236,6 +239,9 @@ export const BulkFilterSchema = z.object({
   // list is scoped to one channel silently targets every channel's contacts —
   // the superset the agent explicitly filtered out and never saw.
   channel: zLiveChannel().optional(),
+  // Exactly the same hazard one level down: scoped to the Sales number, "select
+  // all matching" must not reach the Support number's contacts.
+  accountId: z.string().min(1).optional(),
 });
 export type BulkFilterInput = z.infer<typeof BulkFilterSchema>;
 

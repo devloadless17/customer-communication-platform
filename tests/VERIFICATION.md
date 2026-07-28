@@ -81,7 +81,7 @@ table/queue/cache/socket-room that references the dying entity.
 | contacts (+import/export/transfer) | 2 | R (adversarial) | ✅ 2026-07-27 — bulk-tag storm a2b6de83, reaper pagination 73317ffd, unknownStages + resume marker 112ac0c3, export directory filter f4f4318d (errorRows heap = ACCEPTED: bounded by the 50MB upload itself, only reachable on a fully-mismapped file) |
 | customers / identity | 2 | R (adversarial) + N (visibility spec) | ✅ 2026-07-27 — profile visibility 3e137336, tombstone reap + §18 scoping f4f4318d, drift-sweeper starvation 73317ffd |
 | inbox-views | 2 | R (adversarial) | ✅ 2026-07-27 — and-not-spread invariant HELD across all 3 callers; `channels` now validated via zLiveChannel (was free-text: one bogus value permanently 500'd counts for every member seeing a shared view) |
-| channels / multi-account | 2 | R (adversarial) | ✅ 2026-07-27 — batched-webhook attribution fixed by the CONCURRENT SESSION (3ff49296); viable-default promotion f4f4318d; phone-claim check-then-act = ACCEPTED (needs a cross-workspace unique, migration-bearing, recorded for the next schema change) |
+| channels / multi-account | 2 | R (adversarial) + N (account-binding spec) | ✅ 2026-07-27 — batched-webhook attribution fixed by the CONCURRENT SESSION (3ff49296); viable-default promotion f4f4318d; phone-claim check-then-act = ACCEPTED (needs a cross-workspace unique, migration-bearing, recorded for the next schema change). **2026-07-28**: reported from PRODUCTION — 5 of 9 conversation-create paths never stamped the account, call ingest was never passed it, and every outbound webhook reported the workspace DEFAULT number. All fixed + backfilled; see the account-attribution audit |
 | outbound-webhooks (delivery/retry) | 2 | R (adversarial) | ✅ 2026-07-27 — SSRF/HMAC/dedupe VERIFIED HELD; unbounded retention DELETE FIXED 29deb9c8 |
 | calls (WhatsApp calling) | 2 | R (adversarial) | ✅ 2026-07-27 — post-CAS throw 29deb9c8; live-vs-history scoping split DOCUMENTED 112ac0c3 (deliberate, was only noted on endCall) |
 | media / R2 | 2 | R (adversarial) | ✅ 2026-07-27 — tenancy + XSS VERIFIED HELD; download regression 37c0a2b9, recovery sweeper + mime + parked echo a2b6de83, SSRF fetchUrlBytes 73317ffd |
@@ -685,7 +685,7 @@ NOT DONE (the plan's F4): routing the ~18 web call sites that discard the
 API's `detail` through one helper. Independent of the key rename and worth
 its own pass — those sites currently show a bare key where a sentence exists.
 
-## Checkers (6) — each negative-tested, all in `pnpm run check` + CI
+## Checkers (7) — each negative-tested, all in `pnpm run check` + CI
 1. `check:prisma-fields` — stale select/where/data/orderBy keys (the #1
    outage class; Prisma's XOR unions make them compile clean).
 2. `check-test-isolation` — unfiltered bulk writes in tests/.
@@ -695,6 +695,11 @@ its own pass — those sites currently show a bare key where a sentence exists.
 5. `check-route-params` — a Next dynamic handler must destructure the param
    names its DIRECTORY declares (caught a 5-day live outage).
 6. `check-error-keys` — API error keys stay snake_case identifiers.
+7. `check-channel-account` — every provider-credential resolution names an
+   ACCOUNT (or is allowlisted with a reason). A workspace holds several
+   numbers/Pages/handles per channel, so resolving without one is a guess the
+   loaders refuse once a second account goes live — and the symptom is always
+   silent and unrelated. Found by hand five times before this existed.
 
 ### B-M4 seam traces (2026-07-27) — 19 findings, 2 HIGH fixed (4e4925ec)
 
@@ -931,6 +936,189 @@ VERIFIED HELD (real coverage — the good news):
 - **Calls**: dedup unique key, terminal-state CAS genuinely idempotent under
   redelivery, permission is a provider READ not a local ledger, SIP never
   enabled, recording correctly unbuilt.
+
+### ACCOUNT-SCOPING INVENTORY + CHECKER 7 (2026-07-28)
+
+Maintainer's ask: not another round of spot fixes — a GUARANTEE that everywhere
+in the system that needs a channel account, has one. So the pass was mechanical,
+and it ends in a checker rather than a list.
+
+**Credential resolution: 48 call sites enumerated by script, 1 real gap.**
+`teamConnectedChannels` probed each channel with `getSendConfig(workspaceId)` and
+no account — which since the guard THROWS the moment a workspace has two live
+accounts on that channel. So a workspace with two healthy WhatsApp numbers
+reported WhatsApp as **not connected**, `bestChannelForCustomer` could never pick
+it, and a workflow targeting a person failed with "target customer has no
+reachable channel". Fixed by probing a concrete account (default, else any
+active). A second apparent hit was my scanner matching inside a docblock — which
+is why the checker strips comments and strings before matching.
+
+**CHECKER 7 — `scripts/check-channel-account.mjs`.** Every credential
+resolution must name an account, or be allowlisted WITH A REASON (one entry
+today: the first-party webchat widget, whose config lives outside
+`ChannelConnection`). Negative-tested BOTH directions per the standing lesson:
+reintroducing the `teamConnectedChannels` bug fails it, and a file full of
+`getSendConfig(workspaceId)` inside comments and string literals does not.
+In `pnpm run check` + the deploy workflow. This is what replaces finding these
+one at a time, months apart — the five prior instances are listed in its header.
+
+**Data-model grain, verified correct where it already was**: templates are
+`@@unique([workspaceId, wabaId, name, language])` (Meta templates belong to a
+WABA, several numbers can share one — WABA is the right grain, not the
+connection); `Broadcast.channelConnectionId` (sending is per-number);
+`TemplateAnalyticsDaily` keyed on Meta's globally-unique template id; calling
+enforcement per `ChannelConnection`; call settings not stored at all — read live
+per account. All 14 conversation-scoped models are workspace-scoped and none
+carries the account, which is correct: the Conversation is its single owner.
+
+**Broadcast cross-account semantics — verified, and a wrong comment corrected.**
+The default audience is the sending account's own contacts plus contacts with no
+account yet (imported/manual — the cold-campaign case); contacts belonging to
+ANOTHER account are dropped with a count, and `includeOtherAccounts` is an
+explicit opt-in. The service's own comment justified this by claiming a reply
+"opens a SEPARATE thread". It cannot — `Conversation` is unique per contact and
+a WhatsApp contact is unique per phone. The real cost is MIGRATION: the reply
+lands on the campaign's number, ingest re-stamps, and ownership moves silently.
+Corrected, and pinned by a test that proves one row / two messages / flipped
+account.
+
+**Reply UX — the bug behind the report.** `account-unresolved` surfaced to the
+agent as *"Team <id> is missing WhatsApp config: account-unresolved. Reconnect it
+in /settings/whatsapp."* Wrong diagnosis (config is fine), wrong remedy (nothing
+to reconnect), and it leaked the workspace id. Now names the real cause and the
+real remedy, with `ProviderNotConfiguredError.accountUnresolved` as the
+structured fact. The existing spec was string-matching the OLD sentence — the
+prose-coupling this repo already has a checker for — so it now asserts the flag.
+
+**"Always clear WHICH account" — the display half.** Verified present: inbox
+thread header, broadcast detail ("Sent from …"), templates (per-account picker).
+Added: **calls history** carried no account at all (two calls from one customer
+to two different numbers were indistinguishable) — the list now returns
+`accountId`/`accountName` and renders "via <number>", shown only when the
+workspace actually has more than one. Added: **contacts directory filter by
+account** ("who writes to the Sales number") — an EXISTS through the
+conversation, served by the FK index; the bulk `BulkFilterSchema` carries it too,
+for exactly the reason its `channel` sibling documents (a "select all N matching"
+op must not escape the filter the agent is looking at).
+
+Evidence: `pnpm run check` 0 errors / **7 checkers** · vitest **739/739** ·
+meta e2e **170/170**. Every behavioural fix negative-tested.
+
+### CONVERSATION PROVENANCE sweep (2026-07-28) — workspace → channel → account → conversation
+
+Follow-up to the account-attribution audit: verify that EVERYTHING hanging off
+a conversation is consistently attributed, and that the chain is complete on the
+wire so an n8n flow knows exactly where a message came from.
+
+**Data model: CLEAN.** All 14 conversation-scoped models carry `workspaceId`
+(the one that doesn't, `BroadcastRecipient`, is the documented parent-scoped
+tenancy exception). None carries the account, and that is correct — the
+Conversation is the single owner of that fact and every consumer resolves
+through it. `Message`, `Ticket` and `Call` denormalize `channel` only.
+
+**Webhook coverage was 3 of 10.** Of the ten conversation-scoped public events,
+only `message.received`, `conversation.assigned` and
+`conversation.status_changed` carry a conversation snapshot. The other seven —
+`message.sent`, `message.status_changed`, `conversation.ai_changed`, `note.*`,
+`message.flag_changed`, `ticket.changed` — carried no account, so
+`resolveChannel` fell through to the workspace DEFAULT connection and reported
+the wrong number. Fixed by resolving from `conversationId`, which all ten carry,
+rather than threading a field onto seven event types and ~20 publish sites where
+missing ONE silently reintroduces the bug — the exact failure mode that produced
+this class. One indexed lookup (the FK index added the same day), only for
+events that need it, and it cannot go stale the way a cached mapping would when
+ingest re-stamps a thread.
+
+**`channel.id` was an opaque cuid.** It identifies the ROW, not the number, so a
+receiver had to hardcode database ids that mean nothing to whoever maintains the
+flow. The block now also carries `account_label` (the name set in Settings),
+`account_address` (E.164 for WhatsApp) and `account_external_id` (Meta's own
+phone_number_id / Page id). Additive, per the §9 payload rule.
+
+**THE CATCH, and it was my own.** `wireChannel` REBUILDS the channel block field
+by field instead of spreading `WireChannelBase`. The three new fields were on
+the type, set by the subscriber, present in the docs sample — and silently
+absent from the delivered body. Nothing failed: not typecheck, not a test, not
+the docs page. It surfaced only because the payload was RENDERED and read.
+**A type that describes a wire shape does not prove the wire carries it when a
+mapper rebuilds the object.** The spec now asserts the DELIVERED body, and the
+rebuild-not-spread hazard is documented at the function.
+
+Also verified present on every delivery: `team_id` (stamped in the subscriber,
+outside `toWirePayload`), `conversation.id`, `message.conversationId`,
+`message.contactId`, `message.channelMessageId`. The chain is complete.
+
+Pinned by `apps/api/test/webhook-channel-provenance.spec.ts` (5 tests: carried
+account wins; conversation fallback; the fallback stays workspace-scoped;
+the account is named on the block; the DELIVERED body carries the whole chain).
+Three of the five NEGATIVE-TESTED. Evidence: vitest 726/726 · meta e2e 166/166 ·
+6 checkers green.
+
+### CHANNEL-ACCOUNT ATTRIBUTION audit (2026-07-28) — reported from production
+
+Maintainer report: conversations with no channel connection, and calling /
+sending picking the wrong account. Traced end to end — schema, every
+create path, ingest re-stamp, calling, events, webhooks, workflow triggers, UI.
+
+**The root cause: 5 of the 9 conversation-create paths never stamped the
+account.** Only inbound ingest (×3) and `startConversation` did. The other five
+— broadcast runner, workflow `target` ×2, message forward, `/v1` conversation
+start — created the thread with `channelConnectionId` NULL. Invisible for as
+long as `getSendConfig(null)` silently fell back to the channel default; once
+the `account-unresolved` guard landed, a workspace with two active accounts on
+a channel could not send on those threads AT ALL. `startConversation` had
+already diagnosed and solved exactly this (its comment names the symptom); the
+fix was to make its logic THE rule — `lib/conversations/account.ts`
+`resolveOutboundAccountId` — and call it from all five.
+
+**Calling was structurally blind to the account.** `Call` has no account column
+by design: every call path resolves credentials from
+`Conversation.channelConnectionId`, and calls.service does that correctly
+everywhere. But `ingestCallEvent` was never PASSED the account — the value sat
+in scope at its one call site and was dropped. So a customer who CALLS before
+they ever message created a thread with no account, and answer / reject / end /
+permission all resolved the default → unanswerable in a multi-number workspace.
+Now threaded through, and it re-stamps like the message path.
+
+**Every outbound webhook reported the WRONG number.** `resolveChannel` looked up
+the `isDefault: true` connection for the medium and cached it per
+`(workspace, channel)` — so `channel.id`, which the wire contract documents as
+"the ChannelConnection cuid", named the workspace default on EVERY event
+regardless of which number the customer actually messaged. Consistently wrong,
+not intermittently. Fixed by carrying the account on the event and resolving
+from it (`deriveEventAccountId`, sibling to the existing `deriveEventChannel`);
+the id is still workspace-scoped in the WHERE because it now rides on a payload.
+
+**Automation could not route by number.** The workflow conversation snapshot
+carried `channel` but not the account, and no trigger's condition vocabulary
+could express "which number". Added `channelConnectionId` to the snapshot
+(which serves the webhook AND the trigger from one field) plus a
+`channel_account_id` condition on `message_received` / `conversation_created`.
+Note found on the way: `WorkflowConversationSnapshot` exists in THREE places —
+`@ccp/shared`, `lib/workflows/events.ts`, and a fourth builder
+(`toWorkflowConversation`) inlined in `ingest.ts`. All four had to change
+together; worth collapsing.
+
+**A missing index.** `Broadcast.channelConnectionId` carries an `@@index` with a
+comment explaining it is needed for the `onDelete: SetNull`. `Conversation` —
+orders of magnitude larger — had none, so disconnecting an account ran a
+sequential scan that row-locked the whole table inside the delete transaction
+under a 30s statement timeout, and the inbox's per-account filter scanned too.
+Migration `20260728100000`.
+
+**Backfill** (`20260728110000`): existing NULL threads take the channel's default
+active account — behaviour-preserving, because null already MEANT default
+everywhere until the guard. Deliberately conservative: only NULL rows, and only
+where such an account exists (verified in dev — the rows left NULL were in
+workspaces with zero connections, which is correct). The one imprecision is
+stated in the migration: a call-first thread on a non-default number is set to
+the default, which ingest re-stamps on the customer's next message.
+
+Pinned by two tests in `webhook-account-attribution.spec.ts` (thread stamped +
+re-stamped when the customer switches numbers; the account reaching the
+`message.received` payload), both NEGATIVE-TESTED. Evidence: vitest 721/721 ·
+meta e2e 166/166 · 6 checkers green. (The double-assertion ratchet caught a
+redundant cast in the fix itself — collapsed rather than baselined.)
 
 ### POST-MATRIX DELTA review (2026-07-28) — the 137 files that landed AFTER 28/28
 

@@ -5,6 +5,8 @@ import {
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 
+import { getCountryFromPhone } from "@ccp/shared/utils";
+
 import { db } from "@/lib/db";
 import { getProviderBinding } from "@/lib/providers";
 import { invalidateProviderConfig } from "@/lib/providers/config";
@@ -291,12 +293,156 @@ async function upsertRollup(
       -- The breakdown can't GREATEST; the parser maps a post-reset (all-zero)
       -- breakdown to null instead, so COALESCE keeps the captured one.
       "clickedButtons" = COALESCE(EXCLUDED."clickedButtons", "TemplateAnalyticsDaily"."clickedButtons"),
-      "costAmountSpent" = COALESCE(EXCLUDED."costAmountSpent", "TemplateAnalyticsDaily"."costAmountSpent"),
+      -- Cost is monotone for the same reason the volume metrics are, and Meta's
+      -- doc says why outright: amount_spent is "total amount spent on
+      -- conversations opened WITHIN THE START AND END TIMEFRAME". It is scoped
+      -- to the REQUESTED WINDOW, not just the day bucket — so the campaign
+      -- report's narrow refresh legitimately returns a smaller figure for a day
+      -- than the sweeper's wide one, and COALESCE (newest non-null wins) let the
+      -- narrower read shrink a captured cost. Widening the window can only add
+      -- conversations to a fixed day, so the high-water mark is the complete
+      -- figure. The RATIOS below stay on COALESCE — GREATEST on a rate would
+      -- keep whichever window happened to divide most favourably, and the
+      -- summary derives its own cost-per-delivered from the totals anyway.
+      "costAmountSpent" = GREATEST(EXCLUDED."costAmountSpent", "TemplateAnalyticsDaily"."costAmountSpent"),
       "costPerDelivered" = COALESCE(EXCLUDED."costPerDelivered", "TemplateAnalyticsDaily"."costPerDelivered"),
       "costPerUrlClick" = COALESCE(EXCLUDED."costPerUrlClick", "TemplateAnalyticsDaily"."costPerUrlClick"),
       "currency" = COALESCE(EXCLUDED."currency", "TemplateAnalyticsDaily"."currency"),
       "fetchedAt" = NOW()
   `;
+}
+
+/**
+ * Resolve a campaign's template to Meta's id + the WABA its analytics live under.
+ *
+ * A campaign records the template NAME and LANGUAGE it sent, never a foreign key,
+ * and `@@unique([workspaceId, wabaId, name, language])` lets two WABAs in one
+ * workspace each hold a row with that pair. The name is therefore ambiguous — and
+ * the two callers broke the tie DIFFERENTLY: the report took `syncedAt desc`, the
+ * campaign refresh took whatever Postgres happened to return first. When they
+ * disagreed, Fetch wrote the rollup under one externalId while the report read the
+ * other, so a successful "Updated N days from Meta" toast sat above a panel that
+ * never changed — and no error was raised anywhere, because both halves worked.
+ *
+ * The tie is broken by the account the campaign actually SENT from
+ * (`Broadcast.channelConnectionId` → `ChannelConnection.wabaId`). That is not a
+ * heuristic: templates live on a WABA's catalog, `template_analytics` is scoped to
+ * the WABA node, so the sending account's WABA is the only one whose figures can
+ * hold this campaign at all. `syncedAt desc` survives only as the fallback for
+ * pre-multi-account rows that carry no connection.
+ */
+export async function resolveCampaignTemplate(
+  workspaceId: string,
+  campaign: {
+    templateName: string | null;
+    templateLanguage: string | null;
+    channelConnectionId: string | null;
+  },
+): Promise<{ externalId: string; wabaId: string | null } | null> {
+  if (!campaign.templateName) return null;
+
+  const sendingWabaId = campaign.channelConnectionId
+    ? (
+        await db.channelConnection.findFirst({
+          // workspaceId even though the id is unique — the row is reached from
+          // request-derived state and tenancy is manual everywhere in this app.
+          where: { id: campaign.channelConnectionId, workspaceId },
+          select: { wabaId: true },
+        })
+      )?.wabaId || null
+    : null;
+
+  const where = {
+    workspaceId,
+    name: campaign.templateName,
+    ...(campaign.templateLanguage ? { language: campaign.templateLanguage } : {}),
+    externalId: { not: null },
+  };
+  const select = { externalId: true, wabaId: true };
+
+  const row =
+    (sendingWabaId
+      ? await db.messageTemplate.findFirst({ where: { ...where, wabaId: sendingWabaId }, select })
+      : null) ??
+    // Fallback only: no sending account recorded, or its catalog no longer holds
+    // the template. Most-recently-synced beats an arbitrary pick, and every
+    // caller now lands on the SAME arbitrary pick, which is the property that
+    // was actually missing.
+    (await db.messageTemplate.findFirst({ where, orderBy: { syncedAt: "desc" }, select }));
+
+  if (!row?.externalId) return null;
+  // `""` is the legacy/unknown-WABA sentinel — normalise it to "no opinion" so
+  // callers pass null and get the workspace's default account.
+  return { externalId: row.externalId, wabaId: row.wabaId || null };
+}
+
+/**
+ * Countries where Meta does not serve template analytics AT ALL.
+ *
+ * Its Analytics doc: "WABAs owned by or shared with Meta Business Accounts in
+ * the European Union or Japan, or that have a business phone number with a
+ * country calling code from any of those countries or regions, are not
+ * supported." Meta does not error on those accounts — the fetch succeeds and
+ * every figure comes back zero, which is indistinguishable from a campaign
+ * nobody read, forever. It is also indistinguishable from OUR bugs, which is
+ * why it has to be named on screen rather than left to look like one.
+ *
+ * ISO-3166 alpha-2, matched against the connected number's own country (Meta's
+ * "business phone number with a country calling code" half of the rule). The
+ * ownership half — an EU/JP Meta Business Account behind a non-EU number — is
+ * not knowable from any field we hold, so this detects most of the rule and
+ * never claims to detect all of it.
+ */
+const TEMPLATE_ANALYTICS_BLOCKED_COUNTRIES = new Set([
+  // EU 27
+  "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR",
+  "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK",
+  "SI", "ES", "SE",
+  // Japan
+  "JP",
+]);
+
+/** What the account behind a template says about its analytics. */
+export interface TemplateAnalyticsAccountContext {
+  /** When Meta STARTED recording for this WABA. Nothing before it is ever
+   *  backfilled, so days earlier than this read zero by design. */
+  analyticsSince: string | null;
+  /** The connected number sits in a region Meta excludes from template
+   *  analytics — every figure will be zero no matter what we do. */
+  regionUnsupported: boolean;
+}
+
+/**
+ * Why this WABA's numbers might be zero — resolved once, for every surface.
+ *
+ * Both analytics readers (the campaign report and the template drawer) need the
+ * same two facts about the same connection, and both had grown their own copy
+ * of the lookup. One definition keeps them from drifting into telling an
+ * operator two different stories about one account.
+ */
+export async function templateAnalyticsAccountContext(
+  workspaceId: string,
+  wabaId: string | null,
+): Promise<TemplateAnalyticsAccountContext> {
+  const connection = await db.channelConnection.findFirst({
+    where: {
+      workspaceId,
+      channel: "whatsapp",
+      // `""`/null WABA = a pre-multi-account row; fall back to the default
+      // account, which is the only one it could have meant.
+      ...(wabaId ? { wabaId } : { isDefault: true }),
+    },
+    select: { insightsEnabledAt: true, config: true },
+  });
+  const config = (connection?.config ?? {}) as { displayPhoneNumber?: string };
+  const country = getCountryFromPhone(config.displayPhoneNumber ?? null);
+  return {
+    analyticsSince: connection?.insightsEnabledAt?.toISOString() ?? null,
+    // An unparseable or absent number leaves `country` null — treat that as
+    // supported. Claiming "Meta doesn't cover your region" on a guess is worse
+    // than the unexplained zero it was meant to explain.
+    regionUnsupported: country !== null && TEMPLATE_ANALYTICS_BLOCKED_COUNTRIES.has(country),
+  };
 }
 
 /** One day of a template's stored analytics, as the API returns it. */

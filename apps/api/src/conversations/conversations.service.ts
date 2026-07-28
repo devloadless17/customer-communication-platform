@@ -16,6 +16,7 @@ import {
   visibilityWhere,
   type ConversationViewer,
 } from "@/lib/conversations/visibility";
+import { resolveOutboundAccountId } from "@/lib/conversations/account";
 import { blobStorage } from "@/lib/blob-storage";
 import { getProviderBinding } from "@/lib/providers";
 import { resolveContactChannel } from "@/lib/providers/channel";
@@ -980,27 +981,17 @@ export class ConversationsService {
       /* keep default */
     }
 
-    // Bind the thread to a real ACCOUNT at creation.
-    //
-    // Leaving it null still SENT — `getSendConfig(null)` falls back to the
-    // channel default — but the thread was unattributed in the inbox, invisible
-    // to the per-account filter, and silently migrated to whichever number
-    // became the default later. Resolving it now makes compose-new behave like
-    // an inbound thread: bound, labelled, and stable.
-    //
-    // An explicit id is validated against this workspace + channel, so a caller
-    // cannot start a conversation on another workspace's number or on an
-    // account belonging to a different channel.
-    const account = input.channelConnectionId
-      ? await this.db.channelConnection.findFirst({
-          where: { id: input.channelConnectionId, workspaceId, channel, isActive: true },
-          select: { id: true },
-        })
-      : await this.db.channelConnection.findFirst({
-          where: { workspaceId, channel, isDefault: true, isActive: true },
-          select: { id: true },
-        });
-    if (input.channelConnectionId && !account) {
+    // Bind the thread to a real ACCOUNT at creation — via the shared rule, so
+    // compose-new, forward, broadcast-opened and /v1-started threads all bind
+    // identically. See lib/conversations/account.ts for why null is not a
+    // neutral default.
+    const account = await resolveOutboundAccountId(
+      this.db,
+      workspaceId,
+      channel,
+      input.channelConnectionId,
+    );
+    if (account.explicitNotFound) {
       throw new NotFoundException({ error: "account_not_found" });
     }
 
@@ -1015,7 +1006,7 @@ export class ConversationsService {
           // Null when the channel has no active account at all — the send then
           // fails with the same actionable error it always did, rather than
           // this create throwing and losing the contact too.
-          channelConnectionId: account?.id ?? null,
+          channelConnectionId: account.accountId,
         },
         select: { id: true },
       });

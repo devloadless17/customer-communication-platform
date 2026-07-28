@@ -24,7 +24,11 @@ import { createTestPrismaClient } from "./_prisma";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { parseTemplateAnalytics } from "@/lib/providers/meta";
-import { readTemplateAnalytics } from "@/lib/analytics/template-analytics";
+import {
+  readTemplateAnalytics,
+  resolveCampaignTemplate,
+  templateAnalyticsAccountContext,
+} from "@/lib/analytics/template-analytics";
 import { setSharedDb } from "@/lib/db";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
@@ -296,7 +300,7 @@ describe("the daily rollup", () => {
         "read" = GREATEST(EXCLUDED."read", "TemplateAnalyticsDaily"."read"),
         "clicked" = GREATEST(EXCLUDED."clicked", "TemplateAnalyticsDaily"."clicked"),
         "clickedButtons" = COALESCE(EXCLUDED."clickedButtons", "TemplateAnalyticsDaily"."clickedButtons"),
-        "costAmountSpent" = COALESCE(EXCLUDED."costAmountSpent", "TemplateAnalyticsDaily"."costAmountSpent"),
+        "costAmountSpent" = GREATEST(EXCLUDED."costAmountSpent", "TemplateAnalyticsDaily"."costAmountSpent"),
         "currency" = COALESCE(EXCLUDED."currency", "TemplateAnalyticsDaily"."currency"),
         "fetchedAt" = NOW()
     `;
@@ -351,6 +355,24 @@ describe("the daily rollup", () => {
     });
     expect(row.clickedButtons).toEqual(captured);
     expect(row.clicked).toBe(16);
+  });
+
+  it("NEVER lets a NARROWER window shrink a captured cost", async () => {
+    // Meta defines amount_spent as the spend on "conversations opened within
+    // the start and end timeframe" — it is scoped to the REQUESTED WINDOW, not
+    // just the day bucket. So the campaign report's narrow refresh honestly
+    // returns less for a day than the sweeper's wide one, and the two run
+    // against the same row on their own schedules. Under COALESCE the last
+    // writer won and the captured cost silently shrank.
+    await prisma.templateAnalyticsDaily.deleteMany({ where: { workspaceId } });
+    await seed({ read: 80, clicked: 12, cost: 5.5 });
+
+    await mergeIn({ read: 80, clicked: 12, cost: 2 });
+
+    const row = await prisma.templateAnalyticsDaily.findFirstOrThrow({
+      where: { workspaceId, templateExternalId: TPL },
+    });
+    expect(Number(row.costAmountSpent)).toBe(5.5);
   });
 
   it("DOES accept a newer, higher value", async () => {
@@ -459,5 +481,169 @@ describe("readTemplateAnalytics", () => {
     // "fetched, and it was a quiet week".
     expect(summary.days).toBe(0);
     expect(summary.sent).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Resolving a campaign's template
+// ---------------------------------------------------------------------------
+
+/**
+ * The report READ and the campaign REFRESH must land on the same template row.
+ *
+ * `@@unique([workspaceId, wabaId, name, language])` lets two WABAs in one
+ * workspace each hold a template of the same name+language. The two callers
+ * used to tie-break differently — `syncedAt desc` on the read, no ordering at
+ * all on the refresh — so on a multi-account workspace Fetch could write the
+ * rollup under one externalId while the report read the other. Nothing errored:
+ * the toast said "Updated N days from Meta" and the panel never moved.
+ */
+describe("resolveCampaignTemplate", () => {
+  const NAME = `dup_${S}`;
+  let connA = "";
+  let connB = "";
+
+  beforeAll(async () => {
+    connA = (
+      await prisma.channelConnection.create({
+        data: { workspaceId, channel: "whatsapp", externalAccountId: `pnA_${S}`, wabaId: `wabaA_${S}`, isDefault: true },
+      })
+    ).id;
+    connB = (
+      await prisma.channelConnection.create({
+        data: { workspaceId, channel: "whatsapp", externalAccountId: `pnB_${S}`, wabaId: `wabaB_${S}` },
+      })
+    ).id;
+    await prisma.messageTemplate.createMany({
+      data: [
+        {
+          workspaceId,
+          wabaId: `wabaA_${S}`,
+          name: NAME,
+          language: "en",
+          externalId: `ext_A_${S}`,
+          category: "utility",
+          status: "approved",
+          components: [],
+          // Deliberately the OLDER row: `syncedAt desc` alone would pick B.
+          syncedAt: new Date(Date.UTC(2026, 0, 1)),
+        },
+        {
+          workspaceId,
+          wabaId: `wabaB_${S}`,
+          name: NAME,
+          language: "en",
+          externalId: `ext_B_${S}`,
+          category: "utility",
+          status: "approved",
+          components: [],
+          syncedAt: new Date(Date.UTC(2026, 6, 1)),
+        },
+      ],
+    });
+  });
+
+  it("picks the template belonging to the account the campaign SENT from", async () => {
+    const ref = await resolveCampaignTemplate(workspaceId, {
+      templateName: NAME,
+      templateLanguage: "en",
+      channelConnectionId: connA,
+    });
+    // Not the most recently synced — the one whose WABA actually served the send.
+    expect(ref?.externalId).toBe(`ext_A_${S}`);
+    expect(ref?.wabaId).toBe(`wabaA_${S}`);
+
+    const other = await resolveCampaignTemplate(workspaceId, {
+      templateName: NAME,
+      templateLanguage: "en",
+      channelConnectionId: connB,
+    });
+    expect(other?.externalId).toBe(`ext_B_${S}`);
+  });
+
+  it("falls back to the most recently synced row for a pre-multi-account campaign", async () => {
+    const ref = await resolveCampaignTemplate(workspaceId, {
+      templateName: NAME,
+      templateLanguage: "en",
+      channelConnectionId: null,
+    });
+    expect(ref?.externalId).toBe(`ext_B_${S}`);
+  });
+
+  it("returns null for a freeform campaign or an unsynced template", async () => {
+    expect(
+      await resolveCampaignTemplate(workspaceId, {
+        templateName: null,
+        templateLanguage: null,
+        channelConnectionId: connA,
+      }),
+    ).toBeNull();
+    expect(
+      await resolveCampaignTemplate(workspaceId, {
+        templateName: `missing_${S}`,
+        templateLanguage: "en",
+        channelConnectionId: connA,
+      }),
+    ).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Why an account's figures can be honestly zero
+// ---------------------------------------------------------------------------
+
+/**
+ * Meta serves EU and Japan accounts NO template analytics — the fetch succeeds
+ * and every number comes back zero. Undetected, that is indistinguishable from
+ * a campaign nobody read and from a bug in this code, permanently.
+ */
+describe("templateAnalyticsAccountContext", () => {
+  const waba = (n: string) => `ctx_${n}_${S}`;
+
+  async function connect(n: string, phone: string | null, enabledAt: Date | null) {
+    await prisma.channelConnection.create({
+      data: {
+        workspaceId,
+        channel: "whatsapp",
+        externalAccountId: `ctx_pn_${n}_${S}`,
+        wabaId: waba(n),
+        insightsEnabledAt: enabledAt,
+        config: phone ? { displayPhoneNumber: phone } : {},
+      },
+    });
+  }
+
+  beforeAll(async () => {
+    await connect("de", "+49 151 23456789", new Date(Date.UTC(2026, 0, 15)));
+    await connect("jp", "+81 90 1234 5678", null);
+    await connect("lb", "+961 71 234567", new Date(Date.UTC(2026, 0, 15)));
+    await connect("unknown", null, null);
+  });
+
+  it("flags an EU number as unsupported, and carries the enablement date", async () => {
+    const ctx = await templateAnalyticsAccountContext(workspaceId, waba("de"));
+    expect(ctx.regionUnsupported).toBe(true);
+    expect(ctx.analyticsSince).toBe(new Date(Date.UTC(2026, 0, 15)).toISOString());
+  });
+
+  it("flags a Japanese number as unsupported", async () => {
+    expect((await templateAnalyticsAccountContext(workspaceId, waba("jp"))).regionUnsupported).toBe(
+      true,
+    );
+  });
+
+  it("leaves a supported region alone", async () => {
+    const ctx = await templateAnalyticsAccountContext(workspaceId, waba("lb"));
+    expect(ctx.regionUnsupported).toBe(false);
+    expect(ctx.analyticsSince).not.toBeNull();
+  });
+
+  it("does not cry wolf when the number is unknown", async () => {
+    // An unparseable or absent number must not produce "Meta doesn't cover
+    // your region" — a wrong explanation is worse than the bare zero it
+    // replaces, because it sends the operator to Meta support for nothing.
+    const ctx = await templateAnalyticsAccountContext(workspaceId, waba("unknown"));
+    expect(ctx.regionUnsupported).toBe(false);
+    expect(ctx.analyticsSince).toBeNull();
   });
 });

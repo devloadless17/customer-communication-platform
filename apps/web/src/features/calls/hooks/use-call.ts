@@ -191,6 +191,25 @@ export function useCall(): {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteAudioElRef = useRef<HTMLAudioElement | null>(null);
+
+  // ── In-app call recorder (artifact mode "inapp") ─────────────────────────
+  // The server's initiate/answer response says whether THIS call should be
+  // recorded in the browser (recordInApp). The recorder mixes the agent mic
+  // (left channel) and the customer (right channel) into one stereo stream —
+  // the channel split is what keeps per-speaker transcription possible later.
+  // Uploads: full-file-so-far every 30s (crash resilience without a chunk
+  // protocol — the server overwrites the same key), then a final upload on
+  // teardown that triggers the OGG remux + Whisper transcription server-side.
+  const remoteStreamRef = useRef<MediaStream | null>(null);
+  const recordArmedRef = useRef(false);
+  const recorderRef = useRef<{
+    recorder: MediaRecorder;
+    ctx: AudioContext;
+    chunks: Blob[];
+    mimeType: string;
+    flushTimer: ReturnType<typeof setInterval>;
+    callId: string;
+  } | null>(null);
   // Mirror liveCall in a ref so socket handlers (bound once) read the
   // current call state without forcing the effect to re-subscribe.
   const liveCallRef = useRef<LiveCallState | null>(null);
@@ -251,8 +270,133 @@ export function useCall(): {
   // every setupPeer, so a rapid re-dial can never leave a prior getUserMedia
   // stream live — that leak is what keeps Chrome's mic indicator lit after a
   // call ends when calls overlap.
+  // Drop the recorder WITHOUT uploading (re-dial safety; the teardown path
+  // finalizes-with-upload first, so reaching here with a live recorder means
+  // an abnormal path — better to lose one recording than to double-upload
+  // against the wrong call).
+  const disposeInAppRecorder = useCallback(() => {
+    const rec = recorderRef.current;
+    if (!rec) return;
+    recorderRef.current = null;
+    clearInterval(rec.flushTimer);
+    try {
+      if (rec.recorder.state !== "inactive") rec.recorder.stop();
+    } catch {
+      // ignore
+    }
+    void rec.ctx.close().catch(() => undefined);
+  }, []);
+
+  /**
+   * Upload the recording-so-far. `final` stops the recorder, retries the
+   * upload (it's the one that matters — it triggers remux + transcription),
+   * and disposes the mixer.
+   */
+  const uploadInAppRecording = useCallback(
+    async (final: boolean) => {
+      const rec = recorderRef.current;
+      if (!rec) return;
+      if (final) {
+        recorderRef.current = null;
+        clearInterval(rec.flushTimer);
+        if (rec.recorder.state !== "inactive") {
+          // stop() flushes the buffered tail through ondataavailable before
+          // onstop — awaited so the final blob carries the last words.
+          await new Promise<void>((resolve) => {
+            rec.recorder.onstop = () => resolve();
+            try {
+              rec.recorder.stop();
+            } catch {
+              resolve();
+            }
+          });
+        }
+        void rec.ctx.close().catch(() => undefined);
+      } else if (rec.recorder.state === "recording") {
+        // Flush the in-progress slice so the periodic upload is current.
+        try {
+          rec.recorder.requestData();
+        } catch {
+          // ignore
+        }
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      if (rec.chunks.length === 0) return;
+      const blob = new Blob(rec.chunks, { type: rec.mimeType });
+      const fd = new FormData();
+      fd.append(
+        "file",
+        blob,
+        `call.${rec.mimeType.includes("mp4") ? "mp4" : "webm"}`,
+      );
+      const url = `/api/calls/${rec.callId}/recording-upload${final ? "?final=1" : ""}`;
+      const attempts = final ? 3 : 1;
+      for (let i = 0; i < attempts; i++) {
+        try {
+          // No content-type header — the browser must set the multipart boundary.
+          const res = await fetchWithSessionGuard(url, { method: "POST", body: fd });
+          if (res.ok) return;
+        } catch {
+          // retry below
+        }
+        if (i < attempts - 1) await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+      }
+      if (final) console.warn("[useCall] final recording upload failed after retries");
+    },
+    [],
+  );
+
+  /** Start the recorder once the call is actually flowing. Idempotent; no-op
+   *  unless the server armed this call (`recordInApp`) and both media legs
+   *  exist with a REAL call id. */
+  const startInAppRecorder = useCallback(() => {
+    if (!recordArmedRef.current || recorderRef.current) return;
+    const local = localStreamRef.current;
+    const remote = remoteStreamRef.current;
+    const live = liveCallRef.current;
+    if (!local || !remote || !live || live.callId.startsWith("tmp_")) return;
+    try {
+      const ctx = new AudioContext();
+      const dest = ctx.createMediaStreamDestination();
+      const merger = ctx.createChannelMerger(2);
+      // Agent → left, customer → right. See the recorder header comment.
+      ctx.createMediaStreamSource(local).connect(merger, 0, 0);
+      ctx.createMediaStreamSource(remote).connect(merger, 0, 1);
+      merger.connect(dest);
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/mp4")
+          ? "audio/mp4" // Safari
+          : "";
+      const recorder = new MediaRecorder(dest.stream, {
+        ...(mimeType ? { mimeType } : {}),
+        audioBitsPerSecond: 64_000,
+      });
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunks.push(e.data);
+      };
+      recorder.start(5_000);
+      const flushTimer = setInterval(() => {
+        void uploadInAppRecording(false);
+      }, 30_000);
+      recorderRef.current = {
+        recorder,
+        ctx,
+        chunks,
+        mimeType: mimeType || "audio/webm",
+        flushTimer,
+        callId: live.callId,
+      };
+    } catch (err) {
+      console.warn("[useCall] in-app recorder failed to start", err);
+    }
+  }, [uploadInAppRecording]);
+
   const releaseMedia = useCallback(() => {
     clearDisconnectGrace();
+    disposeInAppRecorder();
+    remoteStreamRef.current = null;
     const pc = pcRef.current;
     if (pc) {
       // Detach handlers BEFORE closing. close() fires `connectionstatechange`
@@ -289,7 +433,7 @@ export function useCall(): {
       remoteAudioElRef.current.pause();
       remoteAudioElRef.current.srcObject = null;
     }
-  }, [clearDisconnectGrace]);
+  }, [clearDisconnectGrace, disposeInAppRecorder]);
 
   // Apply an outbound call's answer SDP to the live peer connection. Returns
   // true if applied. Matches STRICTLY on callId (live.callId === callId): the
@@ -331,11 +475,17 @@ export function useCall(): {
   );
 
   const tearDown = useCallback(() => {
+    // Finalize the in-app recording FIRST: the synchronous part stops the
+    // MediaRecorder before releaseMedia kills its source tracks, and the
+    // upload continues async after the UI is torn down (with retries — the
+    // final upload is what triggers remux + transcription).
+    void uploadInAppRecording(true);
+    recordArmedRef.current = false;
     releaseMedia();
     // Clear any stashed answers so they can't leak into the next call's PC.
     pendingAnswersRef.current.clear();
     setLiveCall(null);
-  }, [releaseMedia]);
+  }, [releaseMedia, uploadInAppRecording]);
 
   // Socket subscribers. Bound once on mount; read liveCallRef inside
   // handlers so a callId change doesn't force a re-subscribe.
@@ -687,6 +837,13 @@ export function useCall(): {
       if (el && e.streams[0]) {
         el.srcObject = e.streams[0];
       }
+      if (e.streams[0]) {
+        remoteStreamRef.current = e.streams[0];
+        // Both legs may now exist — the recorder start is idempotent and
+        // guards on the armed flag, so calling from here AND from the
+        // connected state covers either arrival order.
+        startInAppRecorder();
+      }
     };
 
     // Connection-state lifecycle. `failed`/`closed` are TERMINAL — tear down
@@ -741,12 +898,13 @@ export function useCall(): {
       } else if (state === "connected" || state === "connecting") {
         // Recovered (or progressing) — cancel any pending disconnect teardown.
         clearDisconnectGrace();
+        if (state === "connected") startInAppRecorder();
       }
     };
 
     pcRef.current = pc;
     return pc;
-  }, [tearDown, releaseMedia, clearDisconnectGrace]);
+  }, [tearDown, releaseMedia, clearDisconnectGrace, startInAppRecorder]);
 
   /**
    * Finish a two-hop accept: hold our audio, wait for the peer connection to
@@ -873,7 +1031,14 @@ export function useCall(): {
         const answerBody = (await res.json().catch(() => ({}))) as {
           sdpAnswer?: string;
           acceptPending?: boolean;
+          recordInApp?: boolean;
         };
+        // Arm the in-app recorder for this call (artifact mode "inapp"). The
+        // connection usually establishes AFTER this response, so the
+        // connected-state hook starts it; the direct attempt covers the
+        // social path where the answer applies synchronously.
+        recordArmedRef.current = answerBody.recordInApp === true;
+        if (recordArmedRef.current) startInAppRecorder();
         if (isSocialAnswer && answerBody.sdpAnswer) {
           await pc.setRemoteDescription({ type: "answer", sdp: answerBody.sdpAnswer });
         }
@@ -913,7 +1078,7 @@ export function useCall(): {
         busyRef.current = false;
       }
     },
-    [setupPeer, tearDown, fail, completePendingAccept],
+    [setupPeer, tearDown, fail, completePendingAccept, startInAppRecorder],
   );
 
   const initiateOutbound = useCallback(
@@ -994,7 +1159,12 @@ export function useCall(): {
             // Messenger only — Meta returns the SDP answer synchronously from the
             // `connect` call. WhatsApp omits it (its answer arrives via webhook).
             sdpAnswer?: string;
+            recordInApp?: boolean;
           };
+          // Arm the in-app recorder (artifact mode "inapp") — it starts once
+          // the media leg reaches `connected`, after the rebind below gives
+          // the live call its REAL id.
+          recordArmedRef.current = body.recordInApp === true;
           if (!res.ok || body.ok === false) {
             tearDown();
             return { ok: false, reason: body.reason ?? `http_${res.status}` };

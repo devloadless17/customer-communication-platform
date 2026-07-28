@@ -595,7 +595,17 @@ export interface PublicEnvelope<T extends PublicEventType, P> {
    *  wire `timestamp` (epoch ms) — stamped in the subscriber's payload. */
   occurred_at: string;
   team_id: string;
-  /** Multi-channel forward-compat — populated by the subscriber from the team's Meta config. */
+  /**
+   * WHICH account the event happened on — `channel.id` is that
+   * `ChannelConnection`'s cuid, i.e. the specific WhatsApp number / Page / IG
+   * handle, and `channel.name` is the medium.
+   *
+   * Resolved by the subscriber from the account carried on the event
+   * (`deriveEventAccountId`). It previously resolved the workspace's DEFAULT
+   * connection for the medium, so on a multi-number workspace every partner
+   * was told the same wrong number for every conversation. Null only for
+   * genuinely channel-less events.
+   */
   channel: ChannelInfo | null;
   data: P;
 }
@@ -1357,6 +1367,30 @@ export interface WireChannelBase {
   /** Partner-style source string, e.g. "whatsapp_business". */
   source: string;
   created_at: number | null;
+  /**
+   * The ACCOUNT's own identity — which number / Page / handle, in terms a
+   * receiver can actually act on.
+   *
+   * `id` alone is an opaque cuid: it says WHICH ROW, not which number, so an
+   * n8n flow branching on it has to hardcode database ids that mean nothing to
+   * the person maintaining the flow. These three make the envelope
+   * self-describing.
+   *
+   * `account_label` — the admin-set name in Settings ("Sales", "Support"), null
+   *   if never named.
+   * `account_address` — the customer-visible address: the E.164 phone number
+   *   for WhatsApp, else null (a Page/IG account has no address of this kind).
+   * `account_external_id` — the provider's own id for the account (WhatsApp
+   *   phone_number_id, Facebook Page id, Instagram account id), for correlating
+   *   against data pulled straight from Meta.
+   *
+   * All three are null when the channel has no ChannelConnection row (the
+   * first-party webchat widget keeps its config elsewhere) — the same case in
+   * which `id` is already null.
+   */
+  account_label: string | null;
+  account_address: string | null;
+  account_external_id: string | null;
 }
 
 /** Map our `Channel` medium to the partner's `source` convention. */
@@ -1407,6 +1441,19 @@ function wireChannel(
     waId,
     profileName,
     created_at: base.created_at,
+    // WHICH of the workspace's accounts on this channel — the number/Page the
+    // customer is actually talking to. `id` is the ChannelConnection cuid,
+    // which identifies the row but tells a receiver nothing it can route on;
+    // these three make the block readable without a lookup.
+    //
+    // This function REBUILDS the block rather than spreading `base`, so a new
+    // field on WireChannelBase does not reach the wire until it is listed here.
+    // (That is exactly what happened when these three were added — the type,
+    // the subscriber and the docs sample all carried them and the delivered
+    // body did not.)
+    account_label: base.account_label,
+    account_address: base.account_address,
+    account_external_id: base.account_external_id,
   };
 }
 

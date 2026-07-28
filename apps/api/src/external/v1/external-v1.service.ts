@@ -229,12 +229,15 @@ export class ExternalV1Service {
   async getTemplateExternalId(
     workspaceId: string,
     templateId: string,
-  ): Promise<string | null> {
+  ): Promise<{ externalId: string; wabaId: string | null } | null> {
     const row = await this.db.messageTemplate.findFirst({
       where: { id: templateId, workspaceId },
-      select: { externalId: true },
+      // The WABA comes back too: analytics are scoped to it, and so are the
+      // reasons they can be empty (enablement date, excluded region).
+      select: { externalId: true, wabaId: true },
     });
-    return row?.externalId ?? null;
+    // `""` is the legacy/unknown-WABA sentinel — normalise to "no opinion".
+    return row?.externalId ? { externalId: row.externalId, wabaId: row.wabaId || null } : null;
   }
 
   listConversations(
@@ -435,6 +438,11 @@ export class ExternalV1Service {
         answeredAt: true,
         endedAt: true,
         durationSeconds: true,
+        ctaPayload: true,
+        deeplinkPayload: true,
+        recordingKey: true,
+        transcriptKey: true,
+        transcriptLanguage: true,
         conversation: { select: { contactId: true } },
       },
     });
@@ -457,6 +465,16 @@ export class ExternalV1Service {
         answered_at: c.answeredAt?.toISOString() ?? null,
         ended_at: c.endedAt?.toISOString() ?? null,
         duration_seconds: c.durationSeconds,
+        // Origin attribution: the opaque tag from a call button / deep link
+        // that produced an inbound call, so a campaign can be credited.
+        cta_payload: c.ctaPayload,
+        deeplink_payload: c.deeplinkPayload,
+        // Artifact flags — true once stored and streamable via
+        // GET /v1/calls/:callId/recording | /transcript.
+        has_recording: c.recordingKey !== null,
+        has_transcript: c.transcriptKey !== null,
+        /** Auto-detected spoken language of the transcript (ISO 639, e.g. "ar"). */
+        transcript_language: c.transcriptLanguage,
       })),
       next_cursor:
         hasMore && last ? `${last.ringingAt.getTime()}_${last.id}` : null,

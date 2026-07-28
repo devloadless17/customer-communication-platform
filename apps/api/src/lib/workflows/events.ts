@@ -130,6 +130,15 @@ export interface WorkflowConversationSnapshot {
   /** Channel this thread lives on (`meta_cloud` = WhatsApp). Source of truth
    *  for the conversation's channel — mirrors Conversation.channel. */
   channel: Channel;
+  /**
+   * WHICH of the workspace's accounts on that channel (the `ChannelConnection`
+   * id) — the specific number / Page / handle the customer is talking to.
+   * `channel` alone cannot answer that on a multi-account workspace. Mirrors
+   * the field on `@ccp/shared`'s copy of this interface; see there for the full
+   * rationale (the outbound-webhook envelope used to report the workspace
+   * DEFAULT account for every event).
+   */
+  channelConnectionId?: string | null;
   status: ConversationStatus;
   assignedUserId: string | null;
   /** AI Autopilot state. Surfaced as `ai_enabled` on the message.received /
@@ -216,6 +225,10 @@ export interface WorkflowContactSnapshot {
 export function workflowConversationSnapshot(c: {
   id: string;
   channel: Channel;
+  /** The account this thread belongs to. Optional on the INPUT so the handful
+   *  of call sites with a lean select stay valid, but every site that can
+   *  select it should — see the field's doc on the snapshot type. */
+  channelConnectionId?: string | null;
   status: ConversationStatus;
   assignedUserId: string | null;
   unreadCount: number;
@@ -241,6 +254,7 @@ export function workflowConversationSnapshot(c: {
   return {
     id: c.id,
     channel: c.channel,
+    channelConnectionId: c.channelConnectionId ?? null,
     status: c.status,
     assignedUserId: c.assignedUserId,
     aiEnabled: c.aiEnabled ?? true,

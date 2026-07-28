@@ -28,7 +28,7 @@ import { PrismaClient } from "@prisma/client";
 import { createTestPrismaClient } from "./_prisma";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { getMetaSendConfig, invalidateProviderConfig } from "@/lib/providers/config";
+import { getMetaSendConfig, invalidateProviderConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
 import { setSharedDb } from "@/lib/db";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
@@ -92,11 +92,22 @@ describe("send-account resolution when the thread's account is gone", () => {
    * WHICH reason is what actually proves the guard, and it keeps the test
    * honest without minting live credentials.
    */
+  /**
+   * Returns the STRUCTURED reason, not the sentence. It used to match
+   * `/account-unresolved/` against `err.message` — which coupled the test to
+   * user-facing copy, so improving that copy (it used to claim the channel was
+   * misconfigured and tell admins to reconnect a healthy integration) broke the
+   * test for no behavioural reason. `ProviderNotConfiguredError.accountUnresolved`
+   * is the fact; the sentence is presentation.
+   */
   const reasonOf = async (accountId: string | null): Promise<string> => {
     try {
       await getMetaSendConfig(WS_ID, accountId);
       return "resolved";
     } catch (err) {
+      if (err instanceof ProviderNotConfiguredError) {
+        return err.accountUnresolved ? "account-unresolved" : "other-config-problem";
+      }
       return err instanceof Error ? err.message : String(err);
     }
   };
@@ -134,5 +145,35 @@ describe("send-account resolution when the thread's account is gone", () => {
     });
     invalidateProviderConfig(WS_ID);
     expect(await reasonOf(null)).not.toMatch(/account-unresolved/);
+  });
+});
+
+describe("what the agent is told", () => {
+  /**
+   * The refusal is correct — replying from a sibling number the customer never
+   * wrote to has no service window and shows an unknown sender. The MESSAGE was
+   * not: it said the channel was "missing config: account-unresolved" and told
+   * the admin to reconnect, which diagnoses a healthy integration as broken and
+   * offers a fix that changes nothing. It also leaked the internal workspace id.
+   */
+  it("explains the real cause and a real remedy — not 'reconnect the channel'", async () => {
+    await makeAccount("alpha", true);
+    await makeAccount("beta", false);
+    let err: unknown;
+    try {
+      await getMetaSendConfig(WS_ID, null);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ProviderNotConfiguredError);
+    const e = err as ProviderNotConfiguredError;
+    expect(e.accountUnresolved).toBe(true);
+    // Names the actual problem...
+    expect(e.message).toContain("isn't linked to one of your WhatsApp accounts");
+    // ...and does NOT send them to reconnect a working channel, or leak an id.
+    expect(e.message).not.toContain("Reconnect it");
+    expect(e.message).not.toContain(WS_ID);
+    // ...and says what clears it.
+    expect(e.message).toMatch(/sends another message/);
   });
 });

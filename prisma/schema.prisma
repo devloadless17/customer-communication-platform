@@ -1935,6 +1935,16 @@ model Conversation {
   // inbox structurally impossible. Doubles as the index the broadcast runner's
   // per-recipient `findFirst({ workspaceId, contactId })` + contact-detail pages use.
   @@unique([workspaceId, contactId])
+  // FK index for the `channelConnection` relation's onDelete: SetNull — the
+  // same reason Broadcast carries one, and far more load-bearing here because
+  // Conversation is orders of magnitude larger. Without it, disconnecting an
+  // account runs `UPDATE "Conversation" SET "channelConnectionId" = NULL WHERE
+  // "channelConnectionId" = $1` as a SEQUENTIAL SCAN that row-locks its way
+  // through the whole table — inside the delete transaction, under a 30s
+  // statement timeout. It also serves the inbox's per-account filter
+  // (`listConversations({ accountId })`), which is a plain equality on this
+  // column on the hottest read in the product.
+  @@index([channelConnectionId])
   @@index([workspaceId, status, lastMessageAt(sort: Desc)])
   @@index([workspaceId, assignedUserId])
   // "Mine" inbox — the view an agent lives in all day. The filter is

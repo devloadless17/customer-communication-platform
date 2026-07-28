@@ -342,7 +342,7 @@ export async function ingestEvents(
             }),
           );
         } else {
-          await ingestCallEvent(workspaceId, channel, evt);
+          await ingestCallEvent(workspaceId, channel, evt, channelConnectionId);
         }
       } else {
         await ingestStatusUpdate(workspaceId, channel, evt);
@@ -3686,6 +3686,10 @@ function toWorkflowMessage(m: {
 function toWorkflowConversation(c: {
   id: string;
   channel: Channel;
+  /** WHICH account on that channel — see the snapshot type. Carried so the
+   *  `message.received` webhook envelope and the workflow trigger both know
+   *  the number/Page the customer actually wrote to. */
+  channelConnectionId?: string | null;
   status: string;
   assignedUserId: string | null;
   unreadCount: number;
@@ -3709,6 +3713,7 @@ function toWorkflowConversation(c: {
   return {
     id: c.id,
     channel: c.channel,
+    channelConnectionId: c.channelConnectionId ?? null,
     status: c.status as WorkflowConversationSnapshot["status"],
     assignedUserId: c.assignedUserId,
     // Surfaced as `ai_enabled` on the message.received outbound webhook (the

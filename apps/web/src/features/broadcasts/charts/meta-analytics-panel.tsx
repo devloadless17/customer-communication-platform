@@ -41,6 +41,12 @@ export interface MetaAnalytics {
   costWithheld: boolean;
   /** When these figures were last pulled from Meta. */
   fetchedAt: string | null;
+  /** When Meta started recording for this WABA (insights enablement). */
+  analyticsSince: string | null;
+  /** The account's number is in a region Meta excludes from template analytics
+   *  (EU / Japan). A permanent zero, not a slow one — worth saying outright
+   *  rather than listing among "common causes". */
+  regionUnsupported: boolean;
 }
 
 /** Meta's aggregate moves on a scale of hours; fresher than this and an
@@ -59,10 +65,17 @@ export function MetaAnalyticsPanel({
   broadcastId,
   analytics,
   onRefreshed,
+  campaignAccepted = 0,
+  campaignStartedAt = null,
 }: {
   broadcastId: string;
   analytics: MetaAnalytics | null;
   onRefreshed?: () => void;
+  /** How many sends Meta ACCEPTED per our funnel — lets the panel notice
+   *  "Meta says zero but the campaign plainly happened" and explain it. */
+  campaignAccepted?: number;
+  /** When the campaign started sending, for the enabled-too-late check. */
+  campaignStartedAt?: string | null;
 }) {
   const [pending, startTransition] = useTransition();
   const [dismissedHint, setDismissedHint] = useState(false);
@@ -76,6 +89,9 @@ export function MetaAnalyticsPanel({
   const autoFetchedRef = useRef(false);
   useEffect(() => {
     if (autoFetchedRef.current) return;
+    // Meta serves this region no template analytics at all, so the auto-fetch
+    // is a Graph call that provably returns nothing — every 6h, forever.
+    if (analytics?.regionUnsupported) return;
     const stale =
       !analytics?.fetchedAt ||
       Date.now() - Date.parse(analytics.fetchedAt) > AUTO_FETCH_STALE_MS;
@@ -127,7 +143,11 @@ export function MetaAnalyticsPanel({
       }
       const body = (await res.json()) as { rows: number; costWithheld: boolean };
       if (body.rows === 0) {
-        toast.warning("Meta has no data for this campaign's dates yet.");
+        toast.warning(
+          analytics?.regionUnsupported
+            ? "Meta doesn't report template analytics for this account's region (EU/Japan) — there is nothing to fetch."
+            : "Meta has no data for this campaign's dates yet.",
+        );
       } else {
         toast.success(`Updated ${body.rows} day${body.rows === 1 ? "" : "s"} from Meta`);
       }
@@ -247,6 +267,53 @@ export function MetaAnalyticsPanel({
               value={`${analytics.days} day${analytics.days === 1 ? "" : "s"}`}
             />
           </dl>
+
+          {/* Meta says ZERO while our funnel shows the campaign plainly
+              happened. Without an explanation this contradiction reads as
+              "the feature is broken" — when the real story is that Meta
+              records nothing before the insights switch was flipped (no
+              backfill, ever), doesn't track its test numbers, and doesn't
+              support EU/Japan WABAs. State the one that provably applies. */}
+          {analytics.sent === 0 && campaignAccepted > 0 && (
+            <div className="mt-4 flex items-start gap-2 rounded-lg border border-warning-border bg-warning-bg p-3 text-2xs text-warning-fg">
+              <Info className="mt-0.5 size-3.5 shrink-0" />
+              <span>
+                {analytics.regionUnsupported ? (
+                  <>
+                    Meta does not serve template analytics for this account:
+                    its number is registered in a{" "}
+                    <strong>region Meta excludes</strong> (the EU and Japan).
+                    Every figure in this panel will stay zero permanently, and
+                    re-fetching cannot change that. The funnel above is
+                    unaffected — it comes from delivery receipts, which Meta
+                    sends everywhere.
+                  </>
+                ) : analytics.analyticsSince &&
+                campaignStartedAt &&
+                Date.parse(analytics.analyticsSince) > Date.parse(campaignStartedAt) ? (
+                  <>
+                    Meta reports zero for this campaign because template
+                    analytics was switched on{" "}
+                    <LocalTime iso={analytics.analyticsSince} format="localeDate" /> —{" "}
+                    <strong>after this campaign was sent</strong>. Meta records
+                    nothing retroactively; campaigns sent from now on will have
+                    full figures. The funnel above is unaffected — it comes from
+                    delivery receipts, not from Meta&apos;s analytics.
+                  </>
+                ) : (
+                  <>
+                    Meta reports zero activity for this template on these days,
+                    even though the campaign was delivered. Common causes: the
+                    campaign ran before template analytics was enabled (Meta
+                    never backfills), the sender is one of Meta&apos;s test
+                    numbers (not tracked), or the WABA is in a region Meta
+                    doesn&apos;t support (EU/Japan). The funnel above is
+                    unaffected — it comes from delivery receipts.
+                  </>
+                )}
+              </span>
+            </div>
+          )}
 
           {analytics.clickedButtons && analytics.clickedButtons.length > 0 && (
             <div className="mt-4">

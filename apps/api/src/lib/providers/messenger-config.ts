@@ -1,6 +1,6 @@
 import { decryptSecret } from "@/lib/crypto/envelope";
 import { db } from "@/lib/db";
-import { ProviderNotConfiguredError } from "@/lib/providers/config";
+import { ProviderNotConfiguredError, ACCOUNT_UNRESOLVED } from "@/lib/providers/config";
 import { TtlCache } from "@/lib/providers/config-cache";
 import { getMetaConnection, resolveWebhookSecrets } from "@/lib/providers/meta-connection";
 
@@ -97,7 +97,7 @@ async function loadSendCipher(
     const active = await db.channelConnection.count({
       where: { workspaceId, channel: "messenger", isActive: true },
     });
-    if (active > 1) return { kind: "err", missing: ["account-unresolved"] };
+    if (active > 1) return { kind: "err", missing: [ACCOUNT_UNRESOLVED] };
   }
   const conn = await db.channelConnection.findFirst({
     where: accountId

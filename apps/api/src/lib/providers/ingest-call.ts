@@ -89,6 +89,20 @@ export async function ingestCallEvent(
   workspaceId: string,
   channel: Channel,
   evt: NormalizedCallEvent,
+  /**
+   * The account (ChannelConnection) this call arrived on — the same one
+   * `ingestEvents` resolved for the batch.
+   *
+   * Load-bearing, not decorative. A customer who CALLS before they ever
+   * message creates the thread here, and every later call action
+   * (answer / reject / end / permission) resolves its credentials from
+   * `Conversation.channelConnectionId`. Leaving it null meant those threads
+   * fell back to the workspace default account — and since the
+   * account-unresolved guard, a multi-number workspace could not answer the
+   * call at all. The message path has always stamped and re-stamped this; call
+   * ingest was simply never handed the value.
+   */
+  channelConnectionId?: string | null,
 ): Promise<void> {
   // Permission events take a side-path: they mutate Contact, not Call.
   if (evt.phase === "permission_granted" || evt.phase === "permission_revoked") {
@@ -273,11 +287,22 @@ export async function ingestCallEvent(
             workspaceId,
             contactId: contact.id,
             channel,
+            ...(channelConnectionId ? { channelConnectionId } : {}),
             status: "pending",
             lastMessageAt: evt.timestamp,
             lastMessagePreview: "",
           },
         });
+      } else if (channelConnectionId && conversation.channelConnectionId !== channelConnectionId) {
+        // RE-STAMP, same rule as the message path: the customer reached a
+        // DIFFERENT one of our numbers, so the live thread now belongs to it
+        // and the reply (or the call-back) must go out from there. Guarded so
+        // the common case writes nothing.
+        conversation = await tx.conversation.update({
+          where: { id: conversation.id },
+          data: { channelConnectionId },
+        });
+        if (conversation.status === "closed" && evt.direction === "in") reopen = true;
       } else if (conversation.status === "closed" && evt.direction === "in") {
         // Only INBOUND calls reopen a closed thread. An outbound call to a
         // closed-thread contact stays closed at the conversation level (the

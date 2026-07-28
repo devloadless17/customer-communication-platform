@@ -1,0 +1,18 @@
+-- FK index for Conversation.channelConnectionId (onDelete: SetNull).
+--
+-- Broadcast already carried the equivalent index with a comment explaining
+-- why; Conversation — the far bigger table — never got one. Two hot paths
+-- were doing a sequential scan on it:
+--   1. Disconnecting a channel account. The SetNull cascade issues
+--      `UPDATE "Conversation" SET "channelConnectionId" = NULL WHERE
+--      "channelConnectionId" = $1`, which scanned and row-locked the entire
+--      table inside the delete transaction, under a 30s statement timeout.
+--   2. The inbox per-account filter (`listConversations({ accountId })`) —
+--      a plain equality on this column on the product's hottest read.
+--
+-- CONCURRENTLY is deliberately NOT used: Prisma wraps each migration in a
+-- transaction, and CREATE INDEX CONCURRENTLY cannot run inside one. The table
+-- is small enough at current scale (single VPS, ~30 orgs) that the brief lock
+-- is acceptable; revisit with a manual concurrent build if a tenant ever makes
+-- this migration slow.
+CREATE INDEX "Conversation_channelConnectionId_idx" ON "Conversation"("channelConnectionId");

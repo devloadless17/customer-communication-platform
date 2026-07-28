@@ -55,6 +55,18 @@ import {
  * `bus.ts` already isolates a thrown handler, but we want to log + carry on
  * with subsequent webhooks even when one match fails to persist.
  */
+/** Everything the wire `channel` block needs about an account. One definition
+ *  so the three resolution branches below cannot drift in what they select. */
+const ACCOUNT_IDENTITY_SELECT = {
+  id: true,
+  channel: true,
+  createdAt: true,
+  label: true,
+  externalAccountId: true,
+  config: true,
+} as const;
+
+
 @Injectable()
 export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(OutboundWebhooksSubscriber.name);
@@ -241,9 +253,13 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     // Also degrade-on-failure: a null channelBase is tolerated by toWirePayload.
     let channelBase: Awaited<ReturnType<typeof this.resolveChannel>> | null = null;
     try {
+      // One cast, read twice — the medium and the ACCOUNT are both derived
+      // from the same payload.
+      const raw = event as unknown as Record<string, unknown>;
       channelBase = await this.resolveChannel(
         event.workspaceId,
-        deriveEventChannel(event as unknown as Record<string, unknown>),
+        deriveEventChannel(raw),
+        await this.resolveEventAccountId(event.workspaceId, raw),
       );
     } catch (err) {
       this.logger.warn(
@@ -774,6 +790,42 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
   }
 
   /**
+   * WHICH account the event belongs to — payload first, conversation second.
+   *
+   * `deriveEventAccountId` is the fast path and covers the events whose payload
+   * already carries the account. It does NOT cover all of them: of the ten
+   * conversation-scoped public events, only `message.received`,
+   * `conversation.assigned` and `conversation.status_changed` carry a
+   * conversation snapshot. `message.sent`, `message.status_changed`,
+   * `conversation.ai_changed`, `note.*`, `message.flag_changed` and
+   * `ticket.changed` do not — and for those the resolver fell back to the
+   * workspace DEFAULT connection, i.e. reported the wrong number.
+   *
+   * Rather than thread the field onto seven more event types and roughly twenty
+   * publish sites — where missing ONE reintroduces the bug silently, which is
+   * exactly how this class started — every one of them already carries
+   * `conversationId`, and the conversation is the single owner of the account.
+   * So fall back to reading it. One indexed lookup (the FK index added in
+   * migration 20260728100000), only for events that need it, and it cannot go
+   * stale the way a cached mapping would when ingest re-stamps a thread.
+   */
+  private async resolveEventAccountId(
+    workspaceId: string,
+    raw: Record<string, unknown>,
+  ): Promise<string | null> {
+    const carried = deriveEventAccountId(raw);
+    if (carried) return carried;
+    const conversationId = raw.conversationId;
+    if (typeof conversationId !== "string" || !conversationId) return null;
+    // workspaceId stays in the WHERE — the id arrives on an event payload.
+    const conv = await this.db.conversation.findFirst({
+      where: { id: conversationId, workspaceId },
+      select: { channelConnectionId: true },
+    });
+    return conv?.channelConnectionId ?? null;
+  }
+
+  /**
    * Resolve a team's ChannelConnection into a public ChannelInfo, keyed by the
    * EVENT's channel (not hardcoded). The channel medium is derived per-event
    * from the data already in the payload (`deriveEventChannel`), so a Telegram
@@ -789,20 +841,34 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
   private async resolveChannel(
     workspaceId: string,
     channel: ChannelMedium | null,
+    /**
+     * The account the event ACTUALLY belongs to (`deriveEventAccountId`).
+     * Preferred over the channel default whenever the event carries it — see
+     * that helper for what reporting the default instead cost partners.
+     * Still workspace-scoped in the WHERE: the id rides on an event payload,
+     * so scoping by id alone would let a mis-stamped row surface another
+     * tenant's connection.
+     */
+    accountId?: string | null,
   ): Promise<WireChannelBase | null> {
-    const key = `${workspaceId}:${channel ?? "_primary"}`;
+    const key = `${workspaceId}:${accountId ?? channel ?? "_primary"}`;
     const cached = this.channelCache.get(key);
     if (cached) return cached;
 
-    const conn = channel
+    const conn = accountId
+      ? await this.db.channelConnection.findFirst({
+          where: { id: accountId, workspaceId },
+          select: ACCOUNT_IDENTITY_SELECT,
+        })
+      : channel
       ? await this.db.channelConnection.findFirst({
           where: { workspaceId, channel, isDefault: true },
-          select: { id: true, channel: true, createdAt: true },
+          select: ACCOUNT_IDENTITY_SELECT,
         })
       : await this.db.channelConnection.findFirst({
           where: { workspaceId, isActive: true },
           orderBy: { createdAt: "asc" },
-          select: { id: true, channel: true, createdAt: true },
+          select: ACCOUNT_IDENTITY_SELECT,
         });
     if (!conn) {
       // A KNOWN medium with no `ChannelConnection` row — first-party channels
@@ -818,6 +884,11 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
           name: channel,
           source: channelSourceFor(channel),
           created_at: null,
+          // No ChannelConnection row exists for this medium, so there is no
+          // account identity to report — null, exactly like `id`.
+          account_label: null,
+          account_address: null,
+          account_external_id: null,
         };
         this.channelCache.set(key, synthetic);
         return synthetic;
@@ -834,6 +905,12 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
       // Epoch MS, consistent with every other wire timestamp (message/contact/
       // assignee). Was epoch-seconds — the one field that didn't match.
       created_at: conn.createdAt.getTime(),
+      // Who this account IS, so a receiver can route on the number rather than
+      // on an opaque cuid. See WireChannelBase.
+      account_label: conn.label,
+      account_address:
+        (conn.config as { displayPhoneNumber?: string } | null)?.displayPhoneNumber ?? null,
+      account_external_id: conn.externalAccountId || null,
     };
     this.channelCache.set(key, base);
     return base;
@@ -850,6 +927,29 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
  * null only for events that genuinely carry no channel reference (the resolver
  * then falls back to the team's primary connection).
  */
+/**
+ * WHICH account (ChannelConnection) the event belongs to, from data already on
+ * the payload — no DB read, same discipline as `deriveEventChannel`.
+ *
+ * Without this, `resolveChannel` fell back to the channel's DEFAULT connection,
+ * so on a workspace with three WhatsApp numbers EVERY webhook reported the
+ * default number's id as `channel.id` — the field the wire contract documents
+ * as "the ChannelConnection cuid". A partner routing on it was told the wrong
+ * number for every conversation, and the per-(workspace, channel) cache made it
+ * consistently wrong rather than occasionally.
+ */
+function deriveEventAccountId(event: Record<string, unknown>): string | null {
+  // Top-level, for events with no conversation snapshot (message.sent,
+  // message.status_changed).
+  const topLevel = event.channelConnectionId as string | null | undefined;
+  if (topLevel) return topLevel;
+  const conversation = event.conversation as
+    | { channelConnectionId?: string | null }
+    | undefined;
+  if (conversation?.channelConnectionId) return conversation.channelConnectionId;
+  return null;
+}
+
 function deriveEventChannel(event: Record<string, unknown>): ChannelMedium | null {
   // Top-level `channel` — carried by message.status_changed (which has no
   // `message`/`conversation` snapshot to read it from), so a delivery/read

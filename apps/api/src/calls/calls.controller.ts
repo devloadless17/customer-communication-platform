@@ -36,6 +36,7 @@ import {
   InitiateCallSchema,
   ListCallsQuerySchema,
   ListTeamCallsQuerySchema,
+  ArtifactModeSchema,
   ConsentMessageSchema,
   MediaUpdateSchema,
   RecordingPolicySchema,
@@ -47,6 +48,7 @@ import {
   type InitiateCallInput,
   type ListCallsQuery,
   type ListTeamCallsQuery,
+  type ArtifactModeInput,
   type ConsentMessageInput,
   type MediaUpdateInput,
   type RecordingPolicyInput,
@@ -266,6 +268,59 @@ export class CallsController {
       body,
       this.channelOf(channel),
       accountId ?? null,
+    );
+  }
+
+  /**
+   * How the number produces call artifacts: "meta" (provider built-in —
+   * spoken announcement) or "inapp" (the agent's browser records silently;
+   * transcripts via our own Whisper pipeline). ADMIN-only — it changes the
+   * consent posture of every call on the number.
+   */
+  @Patch("api/calls/admin/artifact-mode")
+  @HttpCode(200)
+  @RequireRole("admin")
+  async updateArtifactMode(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(ArtifactModeSchema)) body: ArtifactModeInput,
+    @Query("channel") channel?: string,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.calls.updateCallArtifactMode(
+      session,
+      body.mode,
+      this.channelOf(channel),
+      accountId ?? null,
+    );
+  }
+
+  /**
+   * In-app recording upload from the agent's browser. Periodic flushes carry
+   * the full file-so-far; `?final=1` marks the end-of-call upload that remuxes
+   * to OGG and (policy permitting) triggers transcription. Capability +
+   * mode-gated in the service.
+   */
+  @Post("api/calls/:callId/recording-upload")
+  @HttpCode(200)
+  @UseInterceptors(
+    // Memory storage; an hour-long browser opus recording is ~30 MB — the cap
+    // is a slack heap guard for the 4-wide worst case.
+    FileInterceptor("file", { limits: { fileSize: 64 * 1024 * 1024 } }),
+  )
+  async uploadCallRecording(
+    @CurrentSession() session: ApiSession,
+    @Param("callId") callId: string,
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Query("final") final?: string,
+  ) {
+    if (!file?.buffer?.length) {
+      throw new BadRequestException({ error: "file_required" });
+    }
+    return this.calls.uploadInAppRecording(
+      session,
+      callId,
+      { bytes: new Uint8Array(file.buffer), mimeType: file.mimetype || "audio/webm" },
+      final === "1" || final === "true",
     );
   }
 

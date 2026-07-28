@@ -17,6 +17,7 @@ import {
 } from "@nestjs/common";
 
 import { blobStorage } from "@/lib/blob-storage";
+import { resolveOutboundAccountId } from "@/lib/conversations/account";
 import { extractVideoPosterFrame } from "@/lib/media-thumbnail";
 import { publish } from "@/lib/events/bus";
 import { kickOutbox, publishInTx } from "@/lib/events/outbox";
@@ -2476,6 +2477,17 @@ export class MessagesService {
       });
       let conversation;
       if (!existing) {
+        // Bind the new thread to an account through the shared rule. The send
+        // below resolves credentials from `conversation.channelConnectionId`,
+        // so a null here used to mean "workspace default" — which was fine
+        // while that was the only possibility, and became a hard failure
+        // (`account-unresolved`) the moment a workspace ran two numbers. A
+        // forward to a never-messaged contact simply stopped working there.
+        const { accountId } = await resolveOutboundAccountId(
+          this.db,
+          workspaceId,
+          channel.channel,
+        );
         try {
           conversation = await this.db.conversation.create({
             data: {
@@ -2483,6 +2495,7 @@ export class MessagesService {
               contactId: contact.id,
               // Thread channel = the channel resolved for this send.
               channel: channel.channel,
+              channelConnectionId: accountId,
               status: "pending",
               lastMessagePreview: "",
             },

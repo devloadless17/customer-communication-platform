@@ -109,6 +109,39 @@ const server = createServer(async (req, res) => {
   if (path === "/__mock/health" && method === "GET") {
     return json(res, 200, { ok: true });
   }
+  // Binary host for call-artifact downloads (recordings / transcript docs).
+  // The Graph media descriptor below points its `url` here, mirroring Meta's
+  // lookaside CDN. Ids containing "json" serve a transcript document (Arabic,
+  // with segments); everything else serves deterministic fake OGG bytes.
+  if (path.startsWith("/__mock/media-bytes/") && method === "GET") {
+    const id = path.split("/").pop() ?? "";
+    if (id.includes("json")) {
+      const doc = JSON.stringify({
+        metadata: { processed_at: "2026-07-28T00:00:00Z" },
+        transcript: {
+          text: "[Customer] مرحبا كيف حالك [Business] أهلاً وسهلاً",
+          language: "ar",
+          duration: 4.2,
+          confidence: 0.9,
+          segments: [
+            { id: 1, speaker: "Customer", channel: 1, start: 0.5, end: 2.0, text: "مرحبا كيف حالك" },
+            { id: 2, speaker: "Business", channel: 0, start: 2.4, end: 4.2, text: "أهلاً وسهلاً" },
+          ],
+        },
+      });
+      res.writeHead(200, {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(doc),
+      });
+      return res.end(doc);
+    }
+    const bytes = Buffer.from(`OGGMOCKAUDIO_${id}`);
+    res.writeHead(200, {
+      "content-type": "audio/ogg",
+      "content-length": bytes.length,
+    });
+    return res.end(bytes);
+  }
 
   // ---- Record every Graph call ------------------------------------------
   const query = Object.fromEntries(url.searchParams.entries());
@@ -206,6 +239,22 @@ const server = createServer(async (req, res) => {
   // POST /{v}/{id}/media  → WhatsApp media upload
   if (method === "POST" && last === "media") {
     return json(res, 200, { id: `media_${n}` });
+  }
+
+  // GET /{v}/{media-id} for artifact media (call recordings / transcript
+  // docs) → the Media API descriptor whose short-lived `url` points back at
+  // this mock's binary host above. Only ids the artifact specs mint
+  // (`artifact_…`) take this branch, so the generic GET fallthroughs below
+  // keep their historical shapes.
+  if (method === "GET" && segments.length === 2 && String(segments[1]).startsWith("artifact_")) {
+    const id = segments[1];
+    return json(res, 200, {
+      id,
+      url: `http://127.0.0.1:${PORT}/__mock/media-bytes/${id}`,
+      mime_type: id.includes("json") ? "application/json" : "audio/ogg",
+      file_size: 64,
+      messaging_product: "whatsapp",
+    });
   }
 
   // GET /{v}/{pageOrIgId}?fields=name,access_token → page validation + Page

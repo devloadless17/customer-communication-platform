@@ -186,6 +186,53 @@ export function ContactsClient({
   // user had to refresh the browser. Local optimistic mutations are
   // still visible until the next refresh, then the server snapshot
   // takes over (correct: server is authoritative).
+  // The workspace's channel accounts, for the "Account" filter. Fetched once —
+  // the list changes only when an admin connects/disconnects a number, and the
+  // menu hides itself when there are fewer than two to choose between.
+  const [channelAccounts, setChannelAccounts] = useState<
+    Array<{ id: string; channel: string; name: string }>
+  >([]);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await apiFetch("/api/workspace/channel-accounts");
+        if (!res.ok) return;
+        const data = (await res.json()) as {
+          accounts?: Array<{
+            id: string;
+            channel: string;
+            label?: string | null;
+            displayPhoneNumber?: string | null;
+            externalAccountId?: string | null;
+            isActive?: boolean;
+          }>;
+        };
+        if (cancelled) return;
+        setChannelAccounts(
+          (data.accounts ?? [])
+            .filter((a) => a.isActive !== false)
+            .map((a) => ({
+              id: a.id,
+              channel: a.channel,
+              // Same precedence the rest of the app uses: the operator's label,
+              // else the number, else the provider id — never a bare cuid.
+              name:
+                (a.label && a.label.trim()) ||
+                a.displayPhoneNumber ||
+                a.externalAccountId ||
+                "Unnamed account",
+            })),
+        );
+      } catch {
+        // Non-fatal: the filter section simply stays hidden.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const [fieldDefinitions, setFieldDefinitions] =
     useState<ContactFieldDefinition[]>(initialFieldDefinitions);
   const [tags, setTags] = useState<Tag[]>(initialTags);
@@ -493,6 +540,7 @@ export function ContactsClient({
       window?: "open" | "closed";
       stageId?: string;
       channel?: Channel;
+      accountId?: string;
     } = {};
     if (list.search.trim()) f.search = list.search.trim();
     if (list.fieldFilter) {
@@ -508,6 +556,8 @@ export function ContactsClient({
     // Sending it here would resolve a channel-scoped SUBSET of the N persons the
     // user is looking at and clicked "select all N matching" on.
     if (!list.groupByPerson && list.channelFilter !== "any") f.channel = list.channelFilter;
+    // Same person-mode carve-out as `channel`: a person spans accounts.
+    if (!list.groupByPerson && list.accountFilter) f.accountId = list.accountFilter;
     return f;
   }, [
     list.search,
@@ -517,6 +567,7 @@ export function ContactsClient({
     list.tagIds,
     list.stageFilter,
     list.channelFilter,
+    list.accountFilter,
     list.groupByPerson,
   ]);
 
@@ -623,6 +674,9 @@ export function ContactsClient({
           onSourceChange={list.setSourceFilter}
           channelFilter={list.channelFilter}
           onChannelChange={list.setChannelFilter}
+          accountFilter={list.accountFilter}
+          onAccountChange={list.setAccountFilter}
+          accounts={channelAccounts}
           windowFilter={list.windowFilter}
           onWindowChange={list.setWindowFilter}
           fieldFilter={list.fieldFilter}

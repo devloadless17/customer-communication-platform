@@ -117,6 +117,7 @@ async function sweepOnce(): Promise<void> {
   // Only workspaces that have actually TURNED ANALYTICS ON. Meta refuses the
   // read otherwise, so sweeping the rest would be a guaranteed error per tick —
   // noisy logs and wasted Graph budget for a workspace that opted out.
+  const candidates = [...new Set(recent.map((b) => b.workspaceId))];
   const enabled = new Set(
     (
       await db.channelConnection.findMany({
@@ -124,12 +125,28 @@ async function sweepOnce(): Promise<void> {
           channel: "whatsapp",
           isActive: true,
           insightsEnabledAt: { not: null },
-          workspaceId: { in: [...new Set(recent.map((b) => b.workspaceId))] },
+          workspaceId: { in: candidates },
         },
         select: { workspaceId: true },
       })
     ).map((c) => c.workspaceId),
   );
+
+  // `insightsEnabledAt` is stamped ONLY by our own enable button, but Meta
+  // documents WhatsApp Manager as an equally valid way to confirm insights —
+  // so a workspace switched on there reads as opted-out here and was skipped
+  // forever. That is the one failure this sweeper exists to prevent: read and
+  // click counts are perishable at ~7 days and recoverable from no other
+  // source. A stored rollup row is proof Meta served this workspace analytics
+  // (a manual Fetch or the report's auto-fetch got through), so it counts as
+  // enablement regardless of which switch was flipped.
+  for (const row of await db.templateAnalyticsDaily.findMany({
+    where: { workspaceId: { in: candidates.filter((id) => !enabled.has(id)) } },
+    select: { workspaceId: true },
+    distinct: ["workspaceId"],
+  })) {
+    enabled.add(row.workspaceId);
+  }
   if (enabled.size === 0) return;
 
   // Per workspace: which templates, and the widest window their campaigns

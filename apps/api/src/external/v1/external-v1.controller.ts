@@ -165,6 +165,7 @@ import { getMessagingHealthSummary } from "@/lib/providers/meta-health";
 import {
   getInsightsStatus,
   readTemplateAnalytics,
+  templateAnalyticsAccountContext,
 } from "@/lib/analytics/template-analytics";
 import { getBroadcastTimeseries } from "@/lib/broadcast-timeseries";
 import {
@@ -2012,7 +2013,20 @@ export class ExternalV1Controller {
     const start = query.start
       ? new Date(query.start)
       : new Date(end.getTime() - 30 * 86_400_000);
-    return readTemplateAnalytics(auth.workspaceId, template, start, end);
+    const result = await readTemplateAnalytics(
+      auth.workspaceId,
+      template.externalId,
+      start,
+      end,
+    );
+    // Parity with the in-app drawer: an integration reading zeros needs the
+    // same two reasons a human does — Meta backfills nothing before the
+    // enablement date, and serves EU/Japan accounts nothing at all. Without
+    // them a partner's dashboard can only report the zero as a measurement.
+    return {
+      ...result,
+      ...(await templateAnalyticsAccountContext(auth.workspaceId, template.wabaId)),
+    };
   }
 
   /**

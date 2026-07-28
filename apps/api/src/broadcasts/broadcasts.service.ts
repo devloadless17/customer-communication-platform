@@ -39,7 +39,10 @@ import {
   getBroadcastReport,
   recipientOutcomeWhere,
 } from "@/lib/broadcast-report";
-import { refreshTemplateAnalytics } from "@/lib/analytics/template-analytics";
+import {
+  refreshTemplateAnalytics,
+  resolveCampaignTemplate,
+} from "@/lib/analytics/template-analytics";
 import { csvHeader, csvRows } from "@/lib/csv";
 import { countTemplatePlaceholders } from "@/lib/providers/meta";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
@@ -767,11 +770,19 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // A workspace can hold several accounts on one channel (WhatsApp numbers
     // under a portfolio, Pages, IG handles). Broadcasting from account B to a
     // contact who has only ever talked to account A shows them a sender they
-    // don't recognise, and their reply opens a SEPARATE thread on B — the
-    // customer's history looks split in two.
+    // don't recognise — and when they reply, the thread MIGRATES to B.
     //
-    // So the default audience is the sending account's own contacts, and
-    // reaching the rest is an explicit opt-in rather than a silent default.
+    // (It does NOT split in two, which an earlier version of this comment
+    // claimed. `Conversation` is `@@unique([workspaceId, contactId])` and a
+    // WhatsApp contact is unique per (workspace, phone), so one customer has
+    // exactly one thread no matter which of our numbers they write to. The
+    // reply lands on B, ingest re-stamps `channelConnectionId` to B, and from
+    // then on the agent who owned that customer on A replies from B. History
+    // stays unified; the OWNERSHIP moves, silently.)
+    //
+    // That migration is the real cost, and it is why the default audience is
+    // the sending account's own contacts and reaching the rest is an explicit
+    // opt-in (`includeOtherAccounts`) rather than a silent default.
     if (sendingAccountId && recipientIds.length > 0 && !input.includeOtherAccounts) {
       // Only contacts that BELONG TO ANOTHER account are dropped.
       //
@@ -1404,6 +1415,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       select: {
         templateName: true,
         templateLanguage: true,
+        channelConnectionId: true,
         startedAt: true,
         createdAt: true,
         completedAt: true,
@@ -1415,16 +1427,11 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       throw new BadRequestException({ error: "broadcast_has_no_template" });
     }
 
-    const template = await this.db.messageTemplate.findFirst({
-      where: {
-        workspaceId,
-        name: broadcast.templateName,
-        ...(broadcast.templateLanguage ? { language: broadcast.templateLanguage } : {}),
-        externalId: { not: null },
-      },
-      select: { externalId: true, wabaId: true },
-    });
-    if (!template?.externalId) {
+    // Shared with the report's read: writing the rollup under a different
+    // template row than the one the report reads is silent — both halves
+    // succeed and the panel simply never moves. See resolveCampaignTemplate.
+    const template = await resolveCampaignTemplate(workspaceId, broadcast);
+    if (!template) {
       throw new BadRequestException({ error: "template_not_synced" });
     }
 
@@ -1435,7 +1442,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       // Meta's day buckets for days AFTER completion (see analyticsWindowEnd).
       end: analyticsWindowEnd(broadcast.completedAt),
       // Scope to the template's own WABA — see refreshTemplateAnalytics.
-      wabaId: template.wabaId || null,
+      wabaId: template.wabaId,
     });
   }
 

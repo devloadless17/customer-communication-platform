@@ -108,6 +108,7 @@ export class ContactsService {
       source: query.source,
       tagIds,
       channel: query.channel,
+      accountId: query.accountId,
       window: query.window,
       stageId: query.stageId,
       groupByPerson: query.groupByPerson,
@@ -787,6 +788,7 @@ export class ContactsService {
       window: filter.window,
       stageId: filter.stageId,
       channel: filter.channel,
+      accountId: filter.accountId,
     };
   }
 

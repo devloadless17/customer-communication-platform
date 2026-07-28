@@ -95,11 +95,24 @@ export function TranscriptPanel({ callId }: { callId: string }) {
     );
   }
   const segments = doc?.transcript?.segments ?? [];
+  const flatText = doc?.transcript?.text?.trim();
   if (segments.length === 0) {
+    // In-app transcripts (our Whisper pipeline) carry the conversation as one
+    // text block without per-speaker segments — render it rather than calling
+    // a perfectly good transcript "empty".
+    if (flatText) {
+      return (
+        <div className="my-1 max-h-72 overflow-y-auto rounded-md border bg-muted/30 p-3">
+          <p dir="auto" className="whitespace-pre-wrap text-sm leading-snug">
+            {flatText}
+          </p>
+        </div>
+      );
+    }
     return (
       <p className="py-2 text-xs text-muted-foreground">
         The transcript is empty — the call may have had no clear speech, or was
-        in a language WhatsApp can&apos;t transcribe yet.
+        in a language that couldn&apos;t be transcribed.
       </p>
     );
   }

@@ -17,7 +17,11 @@
  */
 
 import { db } from "@/lib/db";
-import { readTemplateAnalytics } from "@/lib/analytics/template-analytics";
+import {
+  readTemplateAnalytics,
+  resolveCampaignTemplate,
+  templateAnalyticsAccountContext,
+} from "@/lib/analytics/template-analytics";
 import type { TemplateButtonClicks } from "@ccp/shared/providers/types";
 import { TtlCache } from "@/lib/providers/config-cache";
 import { failureBucket } from "@/lib/providers/meta-send-error";
@@ -142,6 +146,15 @@ export interface BroadcastReport {
     /** When these figures were last pulled from Meta — the panel's freshness
      *  stamp, so an aggregate snapshot is never mistaken for a live feed. */
     fetchedAt: string | null;
+    /** When Meta STARTED recording for this WABA (`insightsEnabledAt`). Meta
+     *  backfills nothing, so a campaign sent before this date reads zero at
+     *  Meta forever — the panel uses it to say so instead of looking broken. */
+    analyticsSince: string | null;
+    /** This account's number sits in a region Meta excludes from template
+     *  analytics (EU / Japan). Every figure here will be zero permanently, and
+     *  no amount of re-fetching changes that — so the panel says so rather
+     *  than letting it read as a quiet campaign or a broken integration. */
+    regionUnsupported: boolean;
   } | null;
   generatedAt: string;
 }
@@ -223,6 +236,9 @@ export async function getBroadcastReport(
       // template over the days it actually sent on.
       templateName: true,
       templateLanguage: true,
+      // The account the campaign SENT from — it decides which WABA's catalog
+      // (and therefore which template row's analytics) this report belongs to.
+      channelConnectionId: true,
     },
   });
   if (!broadcast) return null;
@@ -347,8 +363,7 @@ export async function getBroadcastReport(
   // attribute its whole history to this report.
   const metaAnalytics = await loadMetaAnalytics(
     workspaceId,
-    broadcast.templateName,
-    broadcast.templateLanguage,
+    broadcast,
     startedAt,
     analyticsWindowEnd(broadcast.completedAt),
   );
@@ -576,28 +591,30 @@ export function analyticsWindowEnd(completedAt: Date | null): Date {
 
 async function loadMetaAnalytics(
   workspaceId: string,
-  templateName: string | null,
-  templateLanguage: string | null,
+  campaign: {
+    templateName: string | null;
+    templateLanguage: string | null;
+    channelConnectionId: string | null;
+  },
   start: Date,
   end: Date,
 ): Promise<BroadcastReport["metaAnalytics"]> {
-  if (!templateName) return null;
   // Name+language can match more than one row on a multi-WABA workspace (the
-  // uniqueness key includes wabaId). Prefer the most recently updated so a
-  // stale duplicate from an old catalog doesn't win — and the READ below is by
-  // externalId anyway, so at worst this picks the wrong sibling's rollup rather
-  // than inventing data.
-  const template = await db.messageTemplate.findFirst({
-    where: {
-      workspaceId,
-      name: templateName,
-      ...(templateLanguage ? { language: templateLanguage } : {}),
-      externalId: { not: null },
-    },
-    orderBy: { syncedAt: "desc" },
-    select: { externalId: true },
-  });
-  if (!template?.externalId) return null;
+  // uniqueness key includes wabaId), so the resolver breaks the tie on the
+  // account the campaign sent from — and, critically, the campaign REFRESH
+  // resolves through the same function. The two used to tie-break differently,
+  // which let Fetch write the rollup under one externalId while this read
+  // looked under another: a "Updated N days from Meta" toast over a panel that
+  // never moved, with no error on either side.
+  const template = await resolveCampaignTemplate(workspaceId, campaign);
+  if (!template) return null;
+
+  // The two reasons Meta's figures can be honestly zero next to a funnel full
+  // of real receipts: it captures NOTHING before the insights switch was
+  // flipped (no backfill), and it excludes EU/Japan accounts from template
+  // analytics entirely. Both are carried so the panel can state them plainly
+  // instead of presenting a zero as a measurement.
+  const account = await templateAnalyticsAccountContext(workspaceId, template.wabaId);
 
   const { summary } = await readTemplateAnalytics(
     workspaceId,
@@ -605,7 +622,12 @@ async function loadMetaAnalytics(
     start,
     end,
   );
-  if (summary.days === 0) return null;
+  // Nothing stored. Normally that means "never fetched", and the panel says so
+  // and offers the button — but on an EXCLUDED region the button will never
+  // produce anything, so the block is returned anyway (zeros and all) purely to
+  // carry the reason. Offering someone a Fetch that cannot work is worse than
+  // an empty panel.
+  if (summary.days === 0 && !account.regionUnsupported) return null;
 
   return {
     sent: summary.sent,
@@ -622,5 +644,7 @@ async function loadMetaAnalytics(
     // WHY the cost is blank instead of showing an unexplained dash.
     costWithheld: summary.costAmountSpent === null,
     fetchedAt: summary.fetchedAt,
+    analyticsSince: account.analyticsSince,
+    regionUnsupported: account.regionUnsupported,
   };
 }

@@ -15,6 +15,12 @@ const SAMPLE_CHANNEL: WireChannelBase = {
   name: "whatsapp",
   source: "whatsapp_business",
   created_at: 1773145944,
+  // WHICH account the event happened on, in terms a receiver can route on —
+  // `id` alone is an opaque cuid. Shown in the samples so integrators see the
+  // fields exist without having to fire a real event to discover them.
+  account_label: "Sales",
+  account_address: "+15550100001",
+  account_external_id: "109876543210987",
 };
 
 export const metadata = { title: "API reference" };
@@ -519,6 +525,17 @@ export default function ApiDocsPage() {
           everything). Report on <code>deliveryState</code>, not{" "}
           <code>sendStatus</code> — the latter is the send-side outcome and does
           not change when a message is later found undeliverable.
+          <br />
+          <br />
+          <code>billable</code> is <strong>Meta&apos;s own per-message flag</strong>,
+          stored verbatim — never computed here — so expect it to vary{" "}
+          <em>within</em> one campaign. Meta bills per recipient: a{" "}
+          <code>utility</code> template is <strong>free</strong> when it lands
+          inside that contact&apos;s open 24-hour customer service window and
+          charged when it doesn&apos;t. Marketing and authentication templates
+          always bill, so only utility campaigns come back mixed. Pair it with{" "}
+          <code>pricingCategory</code>; we deliberately store no amount, because
+          rates are per-country cards that change.
         </Endpoint>
       </Section>
 
@@ -538,24 +555,25 @@ export default function ApiDocsPage() {
           that did connect. Inbound calls placed from a call button or a{" "}
           <code>wa.me/call</code> deep link carry your opaque tag back as{" "}
           <code>ctaPayload</code> / <code>deeplinkPayload</code>, so a campaign
-          can be credited for the calls it produced. <code>hasRecording</code> /{" "}
-          <code>hasTranscript</code> flip true once each opted-in artifact has
-          been stored, and <code>transcriptLanguage</code> carries the
+          can be credited for the calls it produced (<code>cta_payload</code> /{" "}
+          <code>deeplink_payload</code>). <code>has_recording</code> /{" "}
+          <code>has_transcript</code> flip true once each artifact has been
+          stored, and <code>transcript_language</code> carries the
           auto-detected spoken language (ISO 639, e.g. <code>ar</code>).
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/calls/:callId/recording">
           Stream a call&apos;s stored recording (OGG/OPUS audio). 404 until{" "}
-          <code>hasRecording</code> is true — recordings land about a minute
-          after the call ends, and only for calls the number&apos;s recording
-          policy opted in (both parties hear WhatsApp&apos;s consent
-          announcement first).
+          <code>has_recording</code> is true. In the WhatsApp built-in method
+          recordings land about a minute after the call (with the spoken
+          consent announcement); in the in-app method they appear the moment
+          the call ends.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/calls/:callId/transcript">
           The call&apos;s transcript as JSON: speaker-attributed segments
           (Business / Customer) with word-level timings and confidences, plus{" "}
-          <code>transcript.language</code> — the spoken language WhatsApp
-          auto-detected (Arabic supported). 404 until <code>hasTranscript</code>{" "}
-          is true on the call.
+          <code>transcript.language</code> — the auto-detected spoken language
+          (Arabic supported). 404 until <code>has_transcript</code> is true on
+          the call.
         </Endpoint>
         <Endpoint
           method="GET"
@@ -775,6 +793,16 @@ export default function ApiDocsPage() {
           URL-button clicks when Meta reports them). The same block appears as{" "}
           <code>metaAnalytics.clickedButtons</code> on{" "}
           <code>/broadcasts/:id/report</code>.
+          <br />
+          <br />
+          Two fields explain an all-zero result before you treat it as one.{" "}
+          <code>analyticsSince</code> is when Meta started recording for this
+          WABA — it backfills <strong>nothing</strong>, so anything sent earlier
+          reads zero permanently. <code>regionUnsupported: true</code> means the
+          number sits in a region Meta excludes from template analytics (the EU
+          and Japan): every figure stays zero forever and re-fetching cannot
+          change it. Both also appear on{" "}
+          <code>metaAnalytics</code> in <code>/broadcasts/:id/report</code>.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/whatsapp/insights/status">
           Whether Meta&apos;s template analytics are switched on. Enabling is a{" "}

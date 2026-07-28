@@ -93,6 +93,7 @@ interface Readiness {
   recordingPolicy: RecordingPolicy | null;
   transcriptionPolicy: RecordingPolicy | null;
   consentMessage: string | null;
+  artifactMode: "meta" | "inapp";
 }
 
 /** "HHMM" → "HH:MM" for an <input type="time">, and back. */
@@ -140,6 +141,8 @@ export function CallingSettings({
   const [trLanguage, setTrLanguage] = useState("en");
   // The written consent notice — ours end-to-end, so fully Arabic-capable.
   const [consentMessage, setConsentMessage] = useState("");
+  // How artifacts are produced: WhatsApp built-in vs in-app (browser records).
+  const [artifactMode, setArtifactMode] = useState<"meta" | "inapp">("meta");
 
   // Same account-qualification the sibling panels use: explicit account when
   // the picker chose one, the legacy no-param request otherwise.
@@ -185,6 +188,7 @@ export function CallingSettings({
       setTrPurpose(tr?.purpose ?? "");
       setTrLanguage(tr?.announcementLanguage ?? "en");
       setConsentMessage(data.consentMessage ?? "");
+      setArtifactMode(data.artifactMode ?? "meta");
     } catch {
       setReadiness(null);
     } finally {
@@ -289,13 +293,41 @@ export function CallingSettings({
     });
   }
 
+  async function saveArtifactMode(mode: "meta" | "inapp") {
+    setSaving(true);
+    try {
+      const res = await apiFetch(
+        `/api/calls/admin/artifact-mode${accountQuery}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ mode }),
+        },
+      );
+      if (!res.ok) {
+        const err = (await res.json().catch(() => ({}))) as { detail?: string };
+        toast.error(err.detail ?? "Couldn't change the recording method.");
+        return;
+      }
+      setArtifactMode(mode);
+      toast.success(
+        mode === "inapp"
+          ? "In-app method active — calls record silently in the agent's browser, no announcement."
+          : "WhatsApp built-in method active — calls open with the spoken consent announcement.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function saveArtifactPolicy(
     path: "recording-policy" | "transcription-policy",
     draft: { enabled: boolean; purpose: string; language: string },
     onMessage: string,
     offMessage: string,
   ) {
-    if (draft.enabled && !draft.purpose.trim()) {
+    // In-app mode plays no announcement, so the purpose is optional there.
+    if (artifactMode === "meta" && draft.enabled && !draft.purpose.trim()) {
       toast.error("Write the purpose — it's spoken to both parties.");
       return;
     }
@@ -308,8 +340,11 @@ export function CallingSettings({
           draft.enabled
             ? {
                 enabled: true,
-                purpose: draft.purpose.trim(),
+                ...(draft.purpose.trim()
+                  ? { purpose: draft.purpose.trim() }
+                  : {}),
                 announcementLanguage: draft.language,
+                mode: artifactMode,
               }
             : { enabled: false },
         ),
@@ -469,7 +504,41 @@ export function CallingSettings({
           </div>
 
           <div className="border-t pt-4">
+            <div className="flex flex-col gap-1.5">
+              <p className="text-sm font-medium">Recording method</p>
+              <p className="text-xs text-muted-foreground">
+                <span className="font-medium">In-app</span> records silently in
+                the agent&apos;s browser — no spoken announcement, recordings
+                appear instantly, and transcripts come from your own AI with
+                native Arabic. Your written consent message below becomes the
+                notice your customers see.{" "}
+                <span className="font-medium">WhatsApp built-in</span> opens
+                every call with WhatsApp&apos;s spoken consent announcement
+                (English/French voices only) and delivers artifacts about a
+                minute after the call.
+              </p>
+              <Select
+                value={artifactMode}
+                onChange={(e) =>
+                  void saveArtifactMode(e.target.value as "meta" | "inapp")
+                }
+                disabled={saving}
+                className="max-w-xs"
+                aria-label="Recording method"
+              >
+                <option value="inapp">
+                  In-app — silent, Arabic-first (recommended)
+                </option>
+                <option value="meta">
+                  WhatsApp built-in — spoken announcement
+                </option>
+              </Select>
+            </div>
+          </div>
+
+          <div className="border-t pt-4">
             <ArtifactPolicyEditor
+              mode={artifactMode}
               title="Record calls"
               description="Every placed and answered call on this number is recorded. WhatsApp first speaks a legally required consent announcement to BOTH parties — recording starts only after it finishes, and a customer can hang up to decline. The finished audio appears on the Calls page about a minute after the call ends."
               warning="WhatsApp's announcement voice does not support Arabic yet — for Arabic-speaking customers the closest options are English or French. The purpose text below is spoken as-is by that same voice; if you write it in Arabic, place a test call first to hear how it renders. For a fully-Arabic consent experience, send an Arabic message telling the customer the call will be recorded before you dial."
@@ -495,6 +564,7 @@ export function CallingSettings({
 
           <div className="border-t pt-4">
             <ArtifactPolicyEditor
+              mode={artifactMode}
               title="Transcribe calls"
               description="Every placed and answered call on this number is transcribed into text — WhatsApp auto-detects the spoken language, and Arabic is fully supported, so Arabic calls produce Arabic transcripts. The same consent announcement rule applies (one combined announcement when recording is also on, using the recording settings). Transcripts appear on the Calls page about a minute after the call ends."
               warning="Only the short spoken announcement lacks Arabic — the transcript itself will be in Arabic automatically. If recording is also enabled, WhatsApp uses the RECORDING purpose and language for the combined announcement and ignores these."
@@ -637,6 +707,7 @@ function ToggleRow({
  * opens with.
  */
 function ArtifactPolicyEditor({
+  mode,
   title,
   description,
   warning,
@@ -651,6 +722,9 @@ function ArtifactPolicyEditor({
   onLanguageChange,
   onSave,
 }: {
+  /** "meta" shows the announcement fields; "inapp" plays no announcement so
+   *  they're hidden and the copy explains the silent flow. */
+  mode: "meta" | "inapp";
   title: string;
   description: string;
   warning: string;
@@ -679,7 +753,15 @@ function ArtifactPolicyEditor({
           aria-label={title}
         />
       </div>
-      {enabled && (
+      {enabled && mode === "inapp" && (
+        <p className="text-xs text-muted-foreground">
+          In-app method: no announcement plays. The call records silently in
+          the answering agent&apos;s browser and is stored the moment the call
+          ends — make sure your written consent message below says what your
+          customers need to hear, in Arabic.
+        </p>
+      )}
+      {enabled && mode === "meta" && (
         <>
           <p className="flex items-start gap-1.5 text-xs text-amber-600 dark:text-amber-500">
             <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />

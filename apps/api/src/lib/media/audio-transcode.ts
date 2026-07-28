@@ -93,6 +93,29 @@ export async function transcodeToOggOpus(
  * file (with `+faststart` so the moov leads) and reads it back, rather than
  * piping to stdout. Stereo 44.1kHz, source metadata stripped.
  */
+/**
+ * In-app call recordings: browser MediaRecorder output (webm/opus, or mp4/aac
+ * on Safari) → OGG/OPUS for universal in-app playback and a stable archival
+ * format. STEREO is load-bearing, not a quality nicety: the browser mixer
+ * puts the agent on the left channel and the customer on the right, so the
+ * separation survives for future per-speaker transcription — the mono voip
+ * profile above would collapse it irreversibly.
+ */
+export async function transcodeCallRecordingToOgg(
+  input: Uint8Array,
+): Promise<Uint8Array<ArrayBuffer>> {
+  return transcode(input, [
+    "-map_metadata", "-1",
+    "-vn",
+    "-ac", "2",
+    "-ar", "48000",
+    "-c:a", "libopus",
+    "-b:a", "48k",
+    "-f", "ogg",
+    "pipe:1",
+  ]);
+}
+
 export async function transcodeToM4a(
   input: Uint8Array,
 ): Promise<Uint8Array<ArrayBuffer>> {
