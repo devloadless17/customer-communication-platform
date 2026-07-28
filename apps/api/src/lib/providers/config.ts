@@ -57,13 +57,14 @@ interface MetaChannelConfig {
   callConsentMessage?: string;
   /**
    * HOW call artifacts are produced for this number:
-   *   - "meta" (default): the provider's built-in recording/transcription —
-   *     zero infra, but every call opens with Meta's spoken consent
-   *     announcement (no Arabic voice) and artifacts arrive ~1min post-call.
-   *   - "inapp": the agent's BROWSER records (silently — no announcement),
-   *     uploads to our R2, and the transcript comes from our own Whisper
-   *     pipeline (Arabic-native). Consent is the business's responsibility;
-   *     the written consent notice above is the built-in way to give it.
+   *   - "inapp" (DEFAULT — maintainer decision 2026-07-28): the agent's
+   *     BROWSER records (silently — no announcement), uploads to our R2, and
+   *     the transcript comes from our own Whisper pipeline (Arabic-native).
+   *     Consent is the business's responsibility; the written consent notice
+   *     above is the built-in way to give it when wanted.
+   *   - "meta": explicit opt-in to the provider's built-in features — every
+   *     call opens with Meta's spoken consent announcement (no Arabic voice)
+   *     and artifacts arrive ~1min post-call.
    */
   callArtifactMode?: "meta" | "inapp";
 }

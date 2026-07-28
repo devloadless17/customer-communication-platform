@@ -100,6 +100,12 @@ export function WhatsappSettings({
       Boolean(current.needsReconnect) ||
       expandAdvanced,
   );
+  // ADD vs UPDATE. The same form serves both (it upserts on phone-number id),
+  // but its fields are prefilled from `current` — which is the DEFAULT number.
+  // Prefilling an ADD would hand the admin number 1's WABA id under a heading
+  // that says "unchanged fields keep their current value", so "Add another"
+  // opens it blank instead.
+  const [addingAccount, setAddingAccount] = useState(false);
 
   async function save(form: FormData) {
     setError(null);
@@ -275,6 +281,7 @@ export function WhatsappSettings({
           channelLabel="WhatsApp"
           accountNoun="number"
           onAddAnother={() => {
+            setAddingAccount(true);
             setShowForm(true);
             requestAnimationFrame(() => {
               document
@@ -354,7 +361,14 @@ export function WhatsappSettings({
 
       {canManage && !showForm && (
         <div className="flex gap-2">
-          <Button type="button" variant="outline" onClick={() => setShowForm(true)}>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => {
+              setAddingAccount(false);
+              setShowForm(true);
+            }}
+          >
             <PlugZap className="size-4" />
             Update credentials
           </Button>
@@ -367,15 +381,23 @@ export function WhatsappSettings({
 
       {canManage && showForm && (
         <ManualForm
+          // Uncontrolled inputs read `defaultValue` once, so flipping add/update
+          // has to remount the form or the stale prefill survives the switch.
+          key={addingAccount ? "add" : "update"}
           pending={pending}
           current={current}
+          addMode={addingAccount}
           defaultExpandAdvanced={expandAdvanced}
-          onCancel={() => setShowForm(false)}
+          onCancel={() => {
+            setShowForm(false);
+            setAddingAccount(false);
+          }}
           onSubmit={(form) =>
             startTransition(async () => {
               const ok = await save(form);
               if (ok) {
                 setShowForm(false);
+                setAddingAccount(false);
                 softRefresh();
               }
             })
@@ -522,6 +544,7 @@ function ManualForm({
   onCancel,
   stepLabel,
   defaultExpandAdvanced,
+  addMode,
 }: {
   pending: boolean;
   current: WhatsappCurrent;
@@ -529,9 +552,16 @@ function ManualForm({
   onCancel?: () => void;
   stepLabel?: string;
   defaultExpandAdvanced?: boolean;
+  /** Adding an ADDITIONAL number rather than editing the default one: start
+   *  blank, since every prefilled value belongs to a different number. */
+  addMode?: boolean;
 }) {
+  // In add mode the advanced block opens regardless — the WABA id lives in it
+  // and a second number almost always needs its own.
   const advancedOpen =
-    Boolean(current.wabaId || current.appId) || Boolean(defaultExpandAdvanced);
+    Boolean(addMode) ||
+    Boolean(current.wabaId || current.appId) ||
+    Boolean(defaultExpandAdvanced);
   return (
     <form
       id="whatsapp-connect-form"
@@ -548,12 +578,18 @@ function ManualForm({
           </div>
         )}
         <div className="text-sm font-medium">
-          {current.connected ? "Update credentials" : "Paste credentials"}
+          {addMode
+            ? "Add another number"
+            : current.connected
+              ? "Update credentials"
+              : "Paste credentials"}
         </div>
         <p className="mt-1 text-2xs text-muted-foreground">
-          {current.connected
-            ? "Edit any field and save. Unchanged fields keep their current value."
-            : "From Meta’s Business dashboard → WhatsApp → API Setup."}
+          {addMode
+            ? "Paste the IDs for the NEW number. If it sits under a different WhatsApp Business Account, give it that WABA id — templates are per-WABA."
+            : current.connected
+              ? "Edit any field and save. Unchanged fields keep their current value."
+              : "From Meta’s Business dashboard → WhatsApp → API Setup."}
         </p>
       </div>
       <div className="flex flex-col gap-3">
@@ -570,7 +606,7 @@ function ManualForm({
           label="Phone number ID"
           placeholder="e.g. 1083229888211508"
           required
-          defaultValue={current.phoneNumberId ?? ""}
+          defaultValue={addMode ? "" : (current.phoneNumberId ?? "")}
           hint="Meta Business Suite → WhatsApp → API Setup → Phone numbers table → Phone number ID column. 15–16 digit number."
         />
         <details
@@ -590,7 +626,7 @@ function ManualForm({
               label="WhatsApp Business Account ID"
               placeholder="e.g. 102290016451234"
               mono
-              defaultValue={current.wabaId ?? ""}
+              defaultValue={addMode ? "" : (current.wabaId ?? "")}
               hint="Meta Business Suite → WhatsApp → API Setup → WhatsApp Business Account section → ID under the account name."
             />
             <Field

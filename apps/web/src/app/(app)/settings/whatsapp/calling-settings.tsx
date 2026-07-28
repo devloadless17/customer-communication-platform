@@ -11,8 +11,6 @@ import {
   X,
 } from "lucide-react";
 
-import { RECORDING_ANNOUNCEMENT_LANGUAGES } from "@ccp/shared/providers/types";
-
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
@@ -82,8 +80,6 @@ interface ReadinessCheck {
 
 interface RecordingPolicy {
   enabled: boolean;
-  purpose?: string;
-  announcementLanguage?: string;
 }
 
 interface Readiness {
@@ -93,7 +89,6 @@ interface Readiness {
   recordingPolicy: RecordingPolicy | null;
   transcriptionPolicy: RecordingPolicy | null;
   consentMessage: string | null;
-  artifactMode: "meta" | "inapp";
 }
 
 /** "HHMM" → "HH:MM" for an <input type="time">, and back. */
@@ -130,19 +125,11 @@ export function CallingSettings({
   const [vmTimeout, setVmTimeout] = useState(20);
   const [vmMediaId, setVmMediaId] = useState<string | null>(null);
   const [vmUploading, setVmUploading] = useState(false);
-  // Draft recording/transcription policies — draft-then-Save like
-  // hours/voicemail, because enabling makes every future call open with a
-  // consent announcement.
+  // Per-number artifact toggles (draft-then-Save like hours/voicemail).
   const [recEnabled, setRecEnabled] = useState(false);
-  const [recPurpose, setRecPurpose] = useState("");
-  const [recLanguage, setRecLanguage] = useState("en");
   const [trEnabled, setTrEnabled] = useState(false);
-  const [trPurpose, setTrPurpose] = useState("");
-  const [trLanguage, setTrLanguage] = useState("en");
-  // The written consent notice — ours end-to-end, so fully Arabic-capable.
+  // The optional written consent notice — ours end-to-end, Arabic-capable.
   const [consentMessage, setConsentMessage] = useState("");
-  // How artifacts are produced: WhatsApp built-in vs in-app (browser records).
-  const [artifactMode, setArtifactMode] = useState<"meta" | "inapp">("meta");
 
   // Same account-qualification the sibling panels use: explicit account when
   // the picker chose one, the legacy no-param request otherwise.
@@ -179,16 +166,9 @@ export function CallingSettings({
       setVmTriggers(knownTriggers.length ? knownTriggers : ["TIMEOUT"]);
       setVmTimeout(vm?.timeoutSeconds ?? 20);
       setVmMediaId(vm?.announcementMediaId ?? null);
-      const rec = data.recordingPolicy;
-      setRecEnabled(rec?.enabled ?? false);
-      setRecPurpose(rec?.purpose ?? "");
-      setRecLanguage(rec?.announcementLanguage ?? "en");
-      const tr = data.transcriptionPolicy;
-      setTrEnabled(tr?.enabled ?? false);
-      setTrPurpose(tr?.purpose ?? "");
-      setTrLanguage(tr?.announcementLanguage ?? "en");
+      setRecEnabled(data.recordingPolicy?.enabled ?? false);
+      setTrEnabled(data.transcriptionPolicy?.enabled ?? false);
       setConsentMessage(data.consentMessage ?? "");
-      setArtifactMode(data.artifactMode ?? "meta");
     } catch {
       setReadiness(null);
     } finally {
@@ -293,68 +273,25 @@ export function CallingSettings({
     });
   }
 
-  async function saveArtifactMode(mode: "meta" | "inapp") {
-    setSaving(true);
-    try {
-      const res = await apiFetch(
-        `/api/calls/admin/artifact-mode${accountQuery}`,
-        {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ mode }),
-        },
-      );
-      if (!res.ok) {
-        const err = (await res.json().catch(() => ({}))) as { detail?: string };
-        toast.error(err.detail ?? "Couldn't change the recording method.");
-        return;
-      }
-      setArtifactMode(mode);
-      toast.success(
-        mode === "inapp"
-          ? "In-app method active — calls record silently in the agent's browser, no announcement."
-          : "WhatsApp built-in method active — calls open with the spoken consent announcement.",
-      );
-    } finally {
-      setSaving(false);
-    }
-  }
-
   async function saveArtifactPolicy(
     path: "recording-policy" | "transcription-policy",
-    draft: { enabled: boolean; purpose: string; language: string },
+    enabled: boolean,
     onMessage: string,
     offMessage: string,
   ) {
-    // In-app mode plays no announcement, so the purpose is optional there.
-    if (artifactMode === "meta" && draft.enabled && !draft.purpose.trim()) {
-      toast.error("Write the purpose — it's spoken to both parties.");
-      return;
-    }
     setSaving(true);
     try {
       const res = await apiFetch(`/api/calls/admin/${path}${accountQuery}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(
-          draft.enabled
-            ? {
-                enabled: true,
-                ...(draft.purpose.trim()
-                  ? { purpose: draft.purpose.trim() }
-                  : {}),
-                announcementLanguage: draft.language,
-                mode: artifactMode,
-              }
-            : { enabled: false },
-        ),
+        body: JSON.stringify({ enabled }),
       });
       if (!res.ok) {
         const err = (await res.json().catch(() => ({}))) as { detail?: string };
         toast.error(err.detail ?? "Couldn't save the policy.");
         return;
       }
-      toast.success(draft.enabled ? onMessage : offMessage);
+      toast.success(enabled ? onMessage : offMessage);
     } finally {
       setSaving(false);
     }
@@ -504,58 +441,18 @@ export function CallingSettings({
           </div>
 
           <div className="border-t pt-4">
-            <div className="flex flex-col gap-1.5">
-              <p className="text-sm font-medium">Recording method</p>
-              <p className="text-xs text-muted-foreground">
-                <span className="font-medium">In-app</span> records silently in
-                the agent&apos;s browser — no spoken announcement, recordings
-                appear instantly, and transcripts come from your own AI with
-                native Arabic. Your written consent message below becomes the
-                notice your customers see.{" "}
-                <span className="font-medium">WhatsApp built-in</span> opens
-                every call with WhatsApp&apos;s spoken consent announcement
-                (English/French voices only) and delivers artifacts about a
-                minute after the call.
-              </p>
-              <Select
-                value={artifactMode}
-                onChange={(e) =>
-                  void saveArtifactMode(e.target.value as "meta" | "inapp")
-                }
-                disabled={saving}
-                className="max-w-xs"
-                aria-label="Recording method"
-              >
-                <option value="inapp">
-                  In-app — silent, Arabic-first (recommended)
-                </option>
-                <option value="meta">
-                  WhatsApp built-in — spoken announcement
-                </option>
-              </Select>
-            </div>
-          </div>
-
-          <div className="border-t pt-4">
             <ArtifactPolicyEditor
-              mode={artifactMode}
               title="Record calls"
-              description="Every placed and answered call on this number is recorded. WhatsApp first speaks a legally required consent announcement to BOTH parties — recording starts only after it finishes, and a customer can hang up to decline. The finished audio appears on the Calls page about a minute after the call ends."
-              warning="WhatsApp's announcement voice does not support Arabic yet — for Arabic-speaking customers the closest options are English or French. The purpose text below is spoken as-is by that same voice; if you write it in Arabic, place a test call first to hear how it renders. For a fully-Arabic consent experience, send an Arabic message telling the customer the call will be recorded before you dial."
-              purposeLabel="Recording purpose"
+              description="Calls are recorded silently in the answering agent's browser — nothing is spoken, the call starts instantly. The audio is stored in your own storage and appears on the Calls page the moment the call ends."
               saveLabel="Save recording"
               enabled={recEnabled}
-              purpose={recPurpose}
-              language={recLanguage}
               disabled={saving || !settings.enabled}
               onEnabledChange={setRecEnabled}
-              onPurposeChange={setRecPurpose}
-              onLanguageChange={setRecLanguage}
               onSave={() =>
                 void saveArtifactPolicy(
                   "recording-policy",
-                  { enabled: recEnabled, purpose: recPurpose, language: recLanguage },
-                  "Call recording is on — every new call starts with the consent announcement.",
+                  recEnabled,
+                  "Call recording is on — silent, stored the moment each call ends.",
                   "Call recording turned off.",
                 )
               }
@@ -564,24 +461,17 @@ export function CallingSettings({
 
           <div className="border-t pt-4">
             <ArtifactPolicyEditor
-              mode={artifactMode}
               title="Transcribe calls"
-              description="Every placed and answered call on this number is transcribed into text — WhatsApp auto-detects the spoken language, and Arabic is fully supported, so Arabic calls produce Arabic transcripts. The same consent announcement rule applies (one combined announcement when recording is also on, using the recording settings). Transcripts appear on the Calls page about a minute after the call ends."
-              warning="Only the short spoken announcement lacks Arabic — the transcript itself will be in Arabic automatically. If recording is also enabled, WhatsApp uses the RECORDING purpose and language for the combined announcement and ignores these."
-              purposeLabel="Transcription purpose"
+              description="Every recorded call is transcribed by your own AI — the spoken language is auto-detected, and Arabic, English and French (even mixed in one call) come out as written text moments after the call ends. Requires your workspace AI (OpenAI) to be configured, the same one that transcribes voice notes."
               saveLabel="Save transcription"
               enabled={trEnabled}
-              purpose={trPurpose}
-              language={trLanguage}
               disabled={saving || !settings.enabled}
               onEnabledChange={setTrEnabled}
-              onPurposeChange={setTrPurpose}
-              onLanguageChange={setTrLanguage}
               onSave={() =>
                 void saveArtifactPolicy(
                   "transcription-policy",
-                  { enabled: trEnabled, purpose: trPurpose, language: trLanguage },
-                  "Call transcription is on — Arabic calls will produce Arabic transcripts.",
+                  trEnabled,
+                  "Call transcription is on — Arabic calls produce Arabic transcripts.",
                   "Call transcription turned off.",
                 )
               }
@@ -701,42 +591,25 @@ function ToggleRow({
 }
 
 /**
- * Shared editor for the two per-number call-artifact policies (recording and
- * transcription): identical provider request shape, identical consent rules,
- * different copy. Draft-then-Save — enabling changes what every future call
- * opens with.
+ * A per-number artifact toggle (recording / transcription). Just an on/off
+ * with a Save — artifacts are produced in-app (silent browser recording +
+ * own-AI transcripts), so there is nothing else to configure.
  */
 function ArtifactPolicyEditor({
-  mode,
   title,
   description,
-  warning,
-  purposeLabel,
   saveLabel,
   enabled,
-  purpose,
-  language,
   disabled,
   onEnabledChange,
-  onPurposeChange,
-  onLanguageChange,
   onSave,
 }: {
-  /** "meta" shows the announcement fields; "inapp" plays no announcement so
-   *  they're hidden and the copy explains the silent flow. */
-  mode: "meta" | "inapp";
   title: string;
   description: string;
-  warning: string;
-  purposeLabel: string;
   saveLabel: string;
   enabled: boolean;
-  purpose: string;
-  language: string;
   disabled?: boolean;
   onEnabledChange: (next: boolean) => void;
-  onPurposeChange: (next: string) => void;
-  onLanguageChange: (next: string) => void;
   onSave: () => void;
 }) {
   return (
@@ -753,55 +626,6 @@ function ArtifactPolicyEditor({
           aria-label={title}
         />
       </div>
-      {enabled && mode === "inapp" && (
-        <p className="text-xs text-muted-foreground">
-          In-app method: no announcement plays. The call records silently in
-          the answering agent&apos;s browser and is stored the moment the call
-          ends — make sure your written consent message below says what your
-          customers need to hear, in Arabic.
-        </p>
-      )}
-      {enabled && mode === "meta" && (
-        <>
-          <p className="flex items-start gap-1.5 text-xs text-amber-600 dark:text-amber-500">
-            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-            {warning}
-          </p>
-          <div className="flex flex-col gap-1.5">
-            <p className="text-sm font-medium">Announcement language</p>
-            <Select
-              value={language}
-              onChange={(e) => onLanguageChange(e.target.value)}
-              disabled={disabled}
-              className="max-w-xs"
-              aria-label={`${title} announcement language`}
-            >
-              {RECORDING_ANNOUNCEMENT_LANGUAGES.map((l) => (
-                <option key={l.code} value={l.code}>
-                  {l.label}
-                </option>
-              ))}
-            </Select>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <p className="text-sm font-medium">{purposeLabel}</p>
-            <p className="text-xs text-muted-foreground">
-              Spoken to both parties right after the announcement phrase, e.g.
-              “quality assurance”. Up to 250 characters — write it in the
-              announcement language above.
-            </p>
-            <Input
-              value={purpose}
-              maxLength={250}
-              onChange={(e) => onPurposeChange(e.target.value)}
-              placeholder="quality assurance"
-              disabled={disabled}
-              className="max-w-md"
-              aria-label={purposeLabel}
-            />
-          </div>
-        </>
-      )}
       <div>
         <Button type="button" size="sm" disabled={disabled} onClick={onSave}>
           {saveLabel}

@@ -36,7 +36,6 @@ import {
   InitiateCallSchema,
   ListCallsQuerySchema,
   ListTeamCallsQuerySchema,
-  ArtifactModeSchema,
   ConsentMessageSchema,
   MediaUpdateSchema,
   RecordingPolicySchema,
@@ -48,7 +47,6 @@ import {
   type InitiateCallInput,
   type ListCallsQuery,
   type ListTeamCallsQuery,
-  type ArtifactModeInput,
   type ConsentMessageInput,
   type MediaUpdateInput,
   type RecordingPolicyInput,
@@ -266,29 +264,6 @@ export class CallsController {
       session,
       "callRecording",
       body,
-      this.channelOf(channel),
-      accountId ?? null,
-    );
-  }
-
-  /**
-   * How the number produces call artifacts: "meta" (provider built-in —
-   * spoken announcement) or "inapp" (the agent's browser records silently;
-   * transcripts via our own Whisper pipeline). ADMIN-only — it changes the
-   * consent posture of every call on the number.
-   */
-  @Patch("api/calls/admin/artifact-mode")
-  @HttpCode(200)
-  @RequireRole("admin")
-  async updateArtifactMode(
-    @CurrentSession() session: ApiSession,
-    @Body(zBody(ArtifactModeSchema)) body: ArtifactModeInput,
-    @Query("channel") channel?: string,
-    @Query("accountId") accountId?: string,
-  ) {
-    return this.calls.updateCallArtifactMode(
-      session,
-      body.mode,
       this.channelOf(channel),
       accountId ?? null,
     );

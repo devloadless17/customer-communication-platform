@@ -37,10 +37,8 @@ import type { Capability } from "@ccp/shared/auth/permissions";
 import { resolvePermissions } from "@ccp/shared/auth/permissions";
 import type {
   CallPermissionState,
-  CallRecordingOptions,
   CallSettings,
   CallSettingsState,
-  CallTranscriptionOptions,
 } from "@ccp/shared/providers/types";
 import type { Channel } from "@ccp/shared/types";
 
@@ -113,14 +111,12 @@ export interface CallingReadiness {
   checks: CallingReadinessCheck[];
   /** Null when the provider's settings couldn't be read. */
   settings: CallSettingsState | null;
-  /** OUR per-number recording policy (local, not a provider setting). */
-  recordingPolicy: CallRecordingOptions | null;
-  /** OUR per-number transcription policy (independent of recording). */
-  transcriptionPolicy: CallTranscriptionOptions | null;
-  /** OUR written in-thread consent notice (Arabic-capable). */
+  /** Per-number toggle: record calls (silently, in the agent's browser). */
+  recordingPolicy: { enabled: boolean } | null;
+  /** Per-number toggle: transcribe calls (our own Whisper pipeline). */
+  transcriptionPolicy: { enabled: boolean } | null;
+  /** OUR optional written in-thread consent notice (Arabic-capable). */
   consentMessage: string | null;
-  /** How artifacts are produced on this number ("meta" | "inapp"). */
-  artifactMode: "meta" | "inapp";
 }
 
 export interface InitiateCallSuccess {
@@ -454,31 +450,26 @@ export class CallsService {
     // return — tells the browser to run the in-app recorder for this call.
     let recordInApp = false;
     try {
-      // The number's standing recording/transcription policies. In "meta"
-      // mode the provider objects are attached below and Meta plays the
-      // consent announcement; in "inapp" mode nothing is attached (silent
-      // call) and the BROWSER records — `recordInApp` on the response is what
-      // tells it to.
+      // The number's recording/transcription toggles. Nothing is attached to
+      // the provider call — recording is silent in-app; `recordInApp` on the
+      // response is what tells the browser to run its recorder.
       const policies = await this.callArtifactPolicies(
         session.workspaceId,
         channelForCall,
         conversation.channelConnectionId,
       );
-      const { recording, transcription, consentMessage } = policies;
       const artifactsWanted =
         policies.recordingEnabled || policies.transcriptionEnabled;
-      recordInApp = policies.mode === "inapp" && artifactsWanted;
-      // Written notice BEFORE dialing, so the customer reads it (in their own
-      // language — this is the Arabic-capable half of consent) before the
-      // phone rings. Best-effort: an out-of-window failure never blocks the
-      // call. In "inapp" mode this message IS the notice (no announcement
-      // plays), which is exactly why it fires on the enabled flags rather
-      // than the mode-gated provider objects.
-      if (artifactsWanted && consentMessage) {
+      recordInApp = artifactsWanted;
+      // Optional written notice BEFORE dialing, so the customer reads it (in
+      // their own language) before the phone rings. Best-effort: an
+      // out-of-window failure never blocks the call. Clearing the message in
+      // settings disables this entirely — consent is the business's call.
+      if (artifactsWanted && policies.consentMessage) {
         await this.sendConsentNotice(
           session.workspaceId,
           conversationId,
-          consentMessage,
+          policies.consentMessage,
         );
       }
       placed = await providerPlaceCall(binding.provider, channelForCall, sendConfig, {
@@ -491,8 +482,6 @@ export class CallsService {
         // cuid only: Meta hands this string to EVERY app subscribed to the
         // WABA's calls field, so it must never carry PII.
         correlationId: conversation.id,
-        ...(recording ? { recording } : {}),
-        ...(transcription ? { transcription } : {}),
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -801,24 +790,23 @@ export class CallsService {
     channel: Channel,
     channelConnectionId: string | null,
   ): Promise<{
-    /** How artifacts are produced on this number. Default "meta". */
-    mode: "meta" | "inapp";
-    /** Provider objects to attach — ONLY populated in "meta" mode (they are
-     *  what triggers the spoken announcement). */
-    recording?: CallRecordingOptions;
-    transcription?: CallTranscriptionOptions;
-    /** Raw enabled flags, mode-independent — drive the consent notice and,
-     *  in "inapp" mode, tell the browser to record. */
+    /** Per-number toggles: does this workspace want the call recorded /
+     *  transcribed? Drives the browser recorder (`recordInApp` on the
+     *  initiate/answer responses) and the optional consent notice. */
     recordingEnabled: boolean;
     transcriptionEnabled: boolean;
-    /** OUR written in-thread consent notice (fully Arabic-capable — exists
-     *  because the provider's spoken announcement has no Arabic voice). */
+    /** OUR optional written in-thread consent notice (fully Arabic-capable). */
     consentMessage?: string;
   }> {
-    // Provider recording/transcription are WhatsApp Cloud API features;
-    // Messenger's unified calling carries neither object.
+    // Artifacts are produced IN-APP only (maintainer decision 2026-07-28):
+    // the agent's browser records silently and our own Whisper transcribes.
+    // Meta's built-in recording/transcription objects are NEVER attached to a
+    // call — they are what triggered Meta's spoken consent announcement, and
+    // that flow was removed outright, not made optional. (The webhook ingest
+    // for `call_recording_available`/`call_transcript_available` remains as a
+    // safety net for artifacts of historical calls.)
     if (channel !== "whatsapp") {
-      return { mode: "meta", recordingEnabled: false, transcriptionEnabled: false };
+      return { recordingEnabled: false, transcriptionEnabled: false };
     }
     const conn = await this.db.channelConnection.findFirst({
       where: channelConnectionId
@@ -827,44 +815,12 @@ export class CallsService {
       select: { config: true },
     });
     const config = conn?.config as {
-      callRecording?: {
-        enabled?: boolean;
-        purpose?: string;
-        announcementLanguage?: string;
-      };
-      callTranscription?: {
-        enabled?: boolean;
-        purpose?: string;
-        announcementLanguage?: string;
-      };
+      callRecording?: { enabled?: boolean };
+      callTranscription?: { enabled?: boolean };
       callConsentMessage?: string;
-      callArtifactMode?: string;
     } | null;
-    const mode: "meta" | "inapp" =
-      config?.callArtifactMode === "inapp" ? "inapp" : "meta";
-    const valid = (p?: {
-      enabled?: boolean;
-      purpose?: string;
-      announcementLanguage?: string;
-    }): CallRecordingOptions | undefined =>
-      p?.enabled && p.purpose && p.announcementLanguage
-        ? {
-            enabled: true,
-            purpose: p.purpose,
-            announcementLanguage: p.announcementLanguage,
-          }
-        : undefined;
-    // In "inapp" mode the provider objects are deliberately NOT built — they
-    // are exactly what triggers Meta's spoken announcement, and the whole
-    // point of the mode is a silent call with our own artifacts.
-    const recording = mode === "meta" ? valid(config?.callRecording) : undefined;
-    const transcription =
-      mode === "meta" ? valid(config?.callTranscription) : undefined;
     const consentMessage = config?.callConsentMessage?.trim();
     return {
-      mode,
-      ...(recording ? { recording } : {}),
-      ...(transcription ? { transcription } : {}),
       recordingEnabled: config?.callRecording?.enabled === true,
       transcriptionEnabled: config?.callTranscription?.enabled === true,
       ...(consentMessage ? { consentMessage } : {}),
@@ -907,14 +863,14 @@ export class CallsService {
   async updateCallArtifactPolicy(
     session: ApiSession,
     kind: "callRecording" | "callTranscription",
-    input: { enabled: boolean; purpose?: string; announcementLanguage?: string },
+    input: { enabled: boolean },
     channel: Channel = "whatsapp",
     accountId?: string | null,
-  ): Promise<{ policy: CallRecordingOptions | null }> {
+  ): Promise<{ policy: { enabled: boolean } | null }> {
     if (channel !== "whatsapp") {
       throw new BadRequestException({
         error: "recording_not_supported",
-        detail: `${channel} calls can't be recorded or transcribed through the provider.`,
+        detail: `${channel} calls can't be recorded or transcribed.`,
       });
     }
     const conn = await this.db.channelConnection.findFirst({
@@ -925,13 +881,10 @@ export class CallsService {
     });
     if (!conn) throw new NotFoundException({ error: "channel_not_connected" });
     const config = (conn.config ?? {}) as Prisma.JsonObject;
-    const policy = input.enabled
-      ? {
-          enabled: true,
-          purpose: input.purpose,
-          announcementLanguage: input.announcementLanguage,
-        }
-      : { enabled: false };
+    // A bare enabled flag — announcement purpose/language belonged to Meta's
+    // removed built-in flow; legacy keys in stored configs are simply
+    // overwritten here.
+    const policy = { enabled: input.enabled };
     await this.db.channelConnection.update({
       where: { id: conn.id },
       data: { config: { ...config, [kind]: policy } as Prisma.InputJsonValue },
@@ -939,9 +892,7 @@ export class CallsService {
     // The policy itself is read fresh per call, but the send-config cache
     // snapshots `config` — invalidate so every cached view converges.
     invalidateProviderConfig(session.workspaceId);
-    return {
-      policy: input.enabled ? (policy as CallRecordingOptions) : null,
-    };
+    return { policy: input.enabled ? policy : null };
   }
 
   /**
@@ -1244,88 +1195,16 @@ export class CallsService {
       channel,
       accountId ?? null,
     );
-    // The readiness payload feeds the settings UI, which edits the RAW stored
-    // policies — so report enabled-ness from the flags (mode-independent), not
-    // from the mode-gated provider objects (empty in "inapp" mode).
-    const rawPolicies = await this.rawArtifactPolicies(
-      session.workspaceId,
-      channel,
-      accountId ?? null,
-    );
     return {
       ready: checks.every((c) => c.ok),
       checks,
       settings,
-      recordingPolicy: rawPolicies.recording,
-      transcriptionPolicy: rawPolicies.transcription,
-      consentMessage: policies.consentMessage ?? null,
-      artifactMode: policies.mode,
-    };
-  }
-
-  /** The stored policy JSONs verbatim (for the settings UI), unlike
-   *  callArtifactPolicies which mode-gates them for the call paths. */
-  private async rawArtifactPolicies(
-    workspaceId: string,
-    channel: Channel,
-    accountId: string | null,
-  ): Promise<{
-    recording: CallRecordingOptions | null;
-    transcription: CallTranscriptionOptions | null;
-  }> {
-    if (channel !== "whatsapp") return { recording: null, transcription: null };
-    const conn = await this.db.channelConnection.findFirst({
-      where: accountId
-        ? { id: accountId, workspaceId }
-        : { workspaceId, channel, isDefault: true },
-      select: { config: true },
-    });
-    const config = conn?.config as {
-      callRecording?: CallRecordingOptions;
-      callTranscription?: CallTranscriptionOptions;
-    } | null;
-    return {
-      recording: config?.callRecording?.enabled ? config.callRecording : null,
-      transcription: config?.callTranscription?.enabled
-        ? config.callTranscription
+      recordingPolicy: policies.recordingEnabled ? { enabled: true } : null,
+      transcriptionPolicy: policies.transcriptionEnabled
+        ? { enabled: true }
         : null,
+      consentMessage: policies.consentMessage ?? null,
     };
-  }
-
-  /**
-   * Admin: choose HOW artifacts are produced on the number — the provider's
-   * built-in features ("meta": spoken announcement, artifacts ~1min post-call)
-   * or in-app ("inapp": the agent's browser records silently, transcripts via
-   * our own Whisper pipeline, consent via the written notice).
-   */
-  async updateCallArtifactMode(
-    session: ApiSession,
-    mode: "meta" | "inapp",
-    channel: Channel = "whatsapp",
-    accountId?: string | null,
-  ): Promise<{ artifactMode: "meta" | "inapp" }> {
-    if (channel !== "whatsapp") {
-      throw new BadRequestException({
-        error: "recording_not_supported",
-        detail: `${channel} calls can't be recorded or transcribed.`,
-      });
-    }
-    const conn = await this.db.channelConnection.findFirst({
-      where: accountId
-        ? { id: accountId, workspaceId: session.workspaceId, channel }
-        : { workspaceId: session.workspaceId, channel, isDefault: true },
-      select: { id: true, config: true },
-    });
-    if (!conn) throw new NotFoundException({ error: "channel_not_connected" });
-    const config = (conn.config ?? {}) as Prisma.JsonObject;
-    await this.db.channelConnection.update({
-      where: { id: conn.id },
-      data: {
-        config: { ...config, callArtifactMode: mode } as Prisma.InputJsonValue,
-      },
-    });
-    invalidateProviderConfig(session.workspaceId);
-    return { artifactMode: mode };
   }
 
   /**
@@ -1368,10 +1247,7 @@ export class CallsService {
       call.channel,
       call.conversation.channelConnectionId,
     );
-    if (
-      policies.mode !== "inapp" ||
-      (!policies.recordingEnabled && !policies.transcriptionEnabled)
-    ) {
+    if (!policies.recordingEnabled && !policies.transcriptionEnabled) {
       throw new BadRequestException({ error: "inapp_recording_not_enabled" });
     }
     if (!file.bytes.length) {
@@ -1999,10 +1875,7 @@ export class CallsService {
           call.channel,
           call.conversation.channelConnectionId,
         );
-        return (
-          policies.mode === "inapp" &&
-          (policies.recordingEnabled || policies.transcriptionEnabled)
-        );
+        return policies.recordingEnabled || policies.transcriptionEnabled;
       })(),
     };
   }
@@ -2055,28 +1928,24 @@ export class CallsService {
         session.workspaceId,
         call.conversation.channelConnectionId,
       );
-      // Recording/transcription ride ACCEPT for inbound calls. In "meta" mode
-      // the provider objects attach here (announcement plays before either
-      // starts); in "inapp" mode nothing attaches — the browser is already
-      // recording (told by answerCall's `recordInApp`).
+      // Inbound accept: nothing artifact-related is attached to the provider
+      // call — the browser is already recording (told by answerCall's
+      // `recordInApp`). The optional written notice lands in the thread the
+      // moment we answer (the customer just called, so the service window is
+      // open). Detached — never delays media start.
       const policies = await this.callArtifactPolicies(
         session.workspaceId,
         call.channel,
         call.conversation.channelConnectionId,
       );
-      const { recording, transcription, consentMessage } = policies;
-      // Written notice in the thread the moment we answer (the customer just
-      // called, so the service window is open and the free-form send lands).
-      // Detached — never delays media start. Gated on the enabled flags, not
-      // the mode-gated objects: in "inapp" mode this message IS the notice.
       if (
         (policies.recordingEnabled || policies.transcriptionEnabled) &&
-        consentMessage
+        policies.consentMessage
       ) {
         void this.sendConsentNotice(
           session.workspaceId,
           call.conversationId,
-          consentMessage,
+          policies.consentMessage,
         );
       }
       await providerCompleteAccept(binding.provider, call.channel, config, {
@@ -2085,8 +1954,6 @@ export class CallsService {
         // Echoed (biz_opaque_callback_data) on the terminate webhook — same
         // opaque-cuid-only correlation as placeCall.
         correlationId: call.conversationId,
-        ...(recording ? { recording } : {}),
-        ...(transcription ? { transcription } : {}),
       });
     } catch (err) {
       this.logger.warn(

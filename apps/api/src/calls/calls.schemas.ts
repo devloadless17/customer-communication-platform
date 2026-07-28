@@ -1,7 +1,5 @@
 import { z } from "zod";
 
-import { RECORDING_ANNOUNCEMENT_LANGUAGES } from "@ccp/shared/providers/types";
-
 /**
  * Request body schemas for the WhatsApp calling endpoints. Validation lives
  * here so the controller stays declarative — zBody(...) at the route, then
@@ -200,48 +198,17 @@ export const EndCallSchema = z.object({}).strict();
 export type EndCallInput = z.infer<typeof EndCallSchema>;
 
 /**
- * The number's standing recording policy. `announcementLanguage` is validated
- * against the provider's OWN supported locales (RECORDING_ANNOUNCEMENT_LANGUAGES
- * — notably WITHOUT Arabic as of 2026-07): an unsupported code fails the whole
- * call request at the provider, so it must never be storable here.
+ * A per-number artifact toggle (recording / transcription). Just an on/off —
+ * artifacts are produced in-app (silent browser recording + our own Whisper
+ * transcripts), so there is no announcement to configure. Meta's built-in
+ * flow (spoken announcement, purpose, announcement language) was removed
+ * outright on 2026-07-28.
  */
 export const RecordingPolicySchema = z
   .object({
     enabled: z.boolean(),
-    /** Spoken to both parties after the fixed consent phrase. Provider cap. */
-    purpose: z.string().trim().min(1).max(250).optional(),
-    announcementLanguage: z
-      .enum(
-        RECORDING_ANNOUNCEMENT_LANGUAGES.map((l) => l.code) as [
-          string,
-          ...string[],
-        ],
-      )
-      .optional(),
-    /** The number's artifact mode, sent by the UI so the announcement fields
-     *  are only required when they'll actually be used ("meta" mode). Not
-     *  stored from here — the mode has its own endpoint. */
-    mode: z.enum(["meta", "inapp"]).optional(),
   })
-  .strict()
-  .superRefine((p, ctx) => {
-    // In-app mode plays no announcement, so purpose/language are moot.
-    if (!p.enabled || p.mode === "inapp") return;
-    if (!p.purpose) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["purpose"],
-        message: "a recording purpose is required when recording is enabled",
-      });
-    }
-    if (!p.announcementLanguage) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["announcementLanguage"],
-        message: "an announcement language is required when recording is enabled",
-      });
-    }
-  });
+  .strict();
 export type RecordingPolicyInput = z.infer<typeof RecordingPolicySchema>;
 
 /**
@@ -256,18 +223,6 @@ export const ConsentMessageSchema = z
   .strict();
 export type ConsentMessageInput = z.infer<typeof ConsentMessageSchema>;
 
-/**
- * How the number produces call artifacts: the provider's built-in features
- * ("meta" — spoken announcement, ~1min delivery) or in-app ("inapp" — the
- * agent's browser records silently, transcripts via our own Whisper pipeline,
- * consent via the written notice).
- */
-export const ArtifactModeSchema = z
-  .object({
-    mode: z.enum(["meta", "inapp"]),
-  })
-  .strict();
-export type ArtifactModeInput = z.infer<typeof ArtifactModeSchema>;
 
 /** Listing — keyset cursor on (ringingAt DESC, id DESC). */
 export const ListCallsQuerySchema = z

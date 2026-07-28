@@ -63,6 +63,9 @@ export function InstagramSettings({
   });
   const setField = (k: keyof typeof form) => (v: string) =>
     setForm((f) => ({ ...f, [k]: v }));
+  // Adding an ADDITIONAL account rather than editing the default one — changes
+  // the form's heading + submit label so the two intents don't look identical.
+  const [addingAccount, setAddingAccount] = useState(false);
 
   async function save() {
     setError(null);
@@ -120,8 +123,12 @@ export function InstagramSettings({
           channelLabel="Instagram"
           accountNoun="account"
           // Reveals the connect form (collapsed once connected) and scrolls to
-          // it, so "Add another" visibly does something.
+          // it, so "Add another" visibly does something. The Page id is cleared
+          // first: it is prefilled from the DEFAULT account, and submitting that
+          // unchanged would re-save the existing one instead of adding another.
           onAddAnother={() => {
+            setForm((f) => ({ ...f, pageId: "" }));
+            setAddingAccount(true);
             setShowForm(true);
             requestAnimationFrame(() => {
               document
@@ -164,7 +171,17 @@ export function InstagramSettings({
           </div>
           {canManage && current.connected && (
             <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" onClick={() => setShowForm((s) => !s)}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  // Leaving add mode (either direction) restores the default
+                  // Page id, so "Edit" always edits the connected account.
+                  setAddingAccount(false);
+                  setForm((f) => ({ ...f, pageId: current.pageId ?? "" }));
+                  setShowForm((s) => !s);
+                }}
+              >
                 {showForm ? "Cancel" : "Edit"}
               </Button>
               <Button
@@ -214,12 +231,15 @@ export function InstagramSettings({
               if (await save()) {
                 toast.success("Instagram connected");
                 setShowForm(false);
+                setAddingAccount(false);
                 softRefresh();
               }
             });
           }}
         >
-          <h3 className="text-sm font-medium">Account</h3>
+          <h3 className="text-sm font-medium">
+            {addingAccount ? "Add another account" : "Account"}
+          </h3>
           <p className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
             Instagram DMs run through the Facebook Page your professional account
             is linked to. Enter that <strong>Page ID</strong> — we read the
@@ -256,7 +276,7 @@ export function InstagramSettings({
               ) : (
                 <PlugZap className="mr-1.5 size-4" />
               )}
-              {current.connected ? "Update" : "Connect"}
+              {addingAccount ? "Add account" : current.connected ? "Update" : "Connect"}
             </Button>
           </div>
         </form>

@@ -408,32 +408,22 @@ describe("voicemail schema pre-flight", () => {
 });
 
 describe("recording policy + consent message schemas", () => {
-  it("requires purpose and announcement language when enabled", () => {
-    expect(RecordingPolicySchema.safeParse({ enabled: true }).success).toBe(
-      false,
-    );
+  it("policy is a bare on/off — Meta's announcement fields were removed outright", () => {
+    expect(RecordingPolicySchema.safeParse({ enabled: true }).success).toBe(true);
+    expect(RecordingPolicySchema.safeParse({ enabled: false }).success).toBe(true);
+    // Strict: the removed announcement fields must not silently round-trip.
     expect(
       RecordingPolicySchema.safeParse({
         enabled: true,
         purpose: "quality assurance",
       }).success,
     ).toBe(false);
-  });
-
-  it("rejects Arabic as an ANNOUNCEMENT language (no provider voice) but accepts Arabic purpose TEXT", () => {
     expect(
       RecordingPolicySchema.safeParse({
         enabled: true,
-        purpose: "quality assurance",
-        announcementLanguage: "ar",
+        announcementLanguage: "en",
       }).success,
     ).toBe(false);
-    const arabicPurpose = RecordingPolicySchema.safeParse({
-      enabled: true,
-      purpose: "ضمان الجودة وتحسين الخدمة",
-      announcementLanguage: "en",
-    });
-    expect(arabicPurpose.success).toBe(true);
   });
 
   it("accepts an Arabic consent message and a null clear", () => {

@@ -357,11 +357,35 @@ export class WhatsappService {
       });
     }
 
-    const existing = await this.db.channelConnection.findFirst({
-      where: { workspaceId, channel: META_PROVIDER, isDefault: true },
-      select: { config: true },
-    });
+    // TWO reads, because the fields here have two different scopes and one
+    // read cannot serve both:
+    //   - verifyToken / appId are WORKSPACE-shared (one Meta App, one callback
+    //     URL), so the default account is a fine fallback source.
+    //   - wabaId is PER-ACCOUNT. Sourcing its "leave unchanged" value from the
+    //     default account cross-contaminates every other number: `resyncChannels`
+    //     (meta.service.ts) re-saves EVERY connected number with only its
+    //     phoneNumberId after a Meta App credential change, so a workspace with
+    //     number A (WABA-1, default) + number B (WABA-2) would stamp WABA-1 onto
+    //     B — pointing B's template catalog at A's account. Read it from the row
+    //     actually being written.
+    const [existing, self] = await Promise.all([
+      this.db.channelConnection.findFirst({
+        where: { workspaceId, channel: META_PROVIDER, isDefault: true },
+        select: { config: true },
+      }),
+      this.db.channelConnection.findUnique({
+        where: {
+          workspaceId_channel_externalAccountId: {
+            workspaceId,
+            channel: META_PROVIDER,
+            externalAccountId: phoneNumberId,
+          },
+        },
+        select: { config: true },
+      }),
+    ]);
     const existingConfig = (existing?.config ?? {}) as MetaChannelConfig;
+    const selfConfig = (self?.config ?? {}) as MetaChannelConfig;
 
     // Verify-token resolution order:
     //   1. Explicit value from input (legacy callers / future re-rotate UI).
@@ -429,8 +453,11 @@ export class WhatsappService {
     // wabaId can also survive a phone-number/token change untouched, so we
     // validate the RESOLVED value on every save that carries one, not just when
     // the field itself changed.
+    // `selfConfig`, not `existingConfig` — see the two-read note above. On a
+    // first connect `self` is null, so an omitted wabaId correctly stays unset
+    // rather than inheriting a sibling number's.
     const nextWabaId =
-      input.wabaId === undefined ? existingConfig.wabaId : input.wabaId || undefined;
+      input.wabaId === undefined ? selfConfig.wabaId : input.wabaId || undefined;
     if (nextWabaId) {
       const wabaWarning = await this.assertWabaOwnsNumber(
         nextWabaId,

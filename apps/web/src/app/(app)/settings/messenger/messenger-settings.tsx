@@ -61,6 +61,9 @@ export function MessengerSettings({
   });
   const setField = (k: keyof typeof form) => (v: string) =>
     setForm((f) => ({ ...f, [k]: v }));
+  // Adding an ADDITIONAL Page rather than editing the default one — changes the
+  // form's heading + submit label so the two intents don't look identical.
+  const [addingAccount, setAddingAccount] = useState(false);
 
   async function save() {
     setError(null);
@@ -118,8 +121,12 @@ export function MessengerSettings({
           channelLabel="Messenger"
           accountNoun="Page"
           // Reveals the connect form (collapsed once connected) and scrolls to
-          // it, so "Add another" visibly does something.
+          // it, so "Add another" visibly does something. The Page id is cleared
+          // first: it is prefilled from the DEFAULT Page, and submitting that
+          // unchanged would re-save the existing account instead of adding one.
           onAddAnother={() => {
+            setForm((f) => ({ ...f, pageId: "" }));
+            setAddingAccount(true);
             setShowForm(true);
             requestAnimationFrame(() => {
               document
@@ -161,7 +168,17 @@ export function MessengerSettings({
           </div>
           {canManage && current.connected && (
             <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" onClick={() => setShowForm((s) => !s)}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  // Leaving add mode (either direction) restores the default
+                  // Page id, so "Edit" always edits the connected account.
+                  setAddingAccount(false);
+                  setForm((f) => ({ ...f, pageId: current.pageId ?? "" }));
+                  setShowForm((s) => !s);
+                }}
+              >
                 {showForm ? "Cancel" : "Edit"}
               </Button>
               <Button
@@ -218,12 +235,15 @@ export function MessengerSettings({
               if (await save()) {
                 toast.success("Messenger connected");
                 setShowForm(false);
+                setAddingAccount(false);
                 softRefresh();
               }
             });
           }}
         >
-          <h3 className="text-sm font-medium">Page</h3>
+          <h3 className="text-sm font-medium">
+            {addingAccount ? "Add another Page" : "Page"}
+          </h3>
           <p className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
             Enter the Facebook <strong>Page ID</strong> — the App secret + token
             come from your{" "}
@@ -260,7 +280,7 @@ export function MessengerSettings({
               ) : (
                 <PlugZap className="mr-1.5 size-4" />
               )}
-              {current.connected ? "Update" : "Connect"}
+              {addingAccount ? "Add Page" : current.connected ? "Update" : "Connect"}
             </Button>
           </div>
         </form>
