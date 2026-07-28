@@ -227,8 +227,12 @@ export interface TicketEscalationInfo {
   id: string;
   /** Which side of the pair THIS ticket is. */
   role: "source" | "target";
+  /** The sibling workspace — id + name so "Open it there" can switch this
+   *  device's active workspace and deep-link the twin. */
+  otherWorkspaceId: string;
   otherWorkspaceName: string;
   /** Null when severed (the twin was deleted). */
+  otherTicketId: string | null;
   otherTicketNumber: number | null;
   otherTicketStatus: TicketStatus | null;
   /** True when the twin ticket no longer exists. */

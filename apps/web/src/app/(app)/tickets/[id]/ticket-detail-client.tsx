@@ -300,6 +300,33 @@ export function TicketDetailClient({
     }
   };
 
+  /**
+   * Jump to the OTHER side of the escalation pair. A ticket only exists inside
+   * its own workspace, so this switches this DEVICE's active workspace first
+   * and then hard-navigates to the twin (full navigation, never a soft route —
+   * the socket must leave the old `ws:` room). Fails with a toast for agents
+   * who have no seat in the other workspace.
+   */
+  const openTwin = async (workspaceId: string, ticketId: string) => {
+    setBusy(true);
+    try {
+      const res = await apiFetch("/api/workspaces/active", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId }),
+      });
+      if (!res.ok) {
+        toast.error("You don't have access to that workspace — ask its admin for a seat.");
+        setBusy(false);
+        return;
+      }
+      window.location.assign(`/tickets/${ticketId}`);
+    } catch {
+      toast.error("Couldn't switch workspace. Please try again.");
+      setBusy(false);
+    }
+  };
+
   /** Start OUR chat with the escalated customer and jump into it. */
   const messageCustomer = async () => {
     setBusy(true);
@@ -582,6 +609,30 @@ export function TicketDetailClient({
               </>
             )}
           </p>
+
+          {!ticket.escalation.severed && ticket.escalation.otherTicketId ? (
+            <div className="mb-3">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={busy}
+                onClick={() => {
+                  const esc = ticket.escalation;
+                  if (esc?.otherTicketId) void openTwin(esc.otherWorkspaceId, esc.otherTicketId);
+                }}
+                className="h-8 gap-1.5 text-xs"
+              >
+                <ArrowUpRight aria-hidden className="size-3.5" />
+                Open ticket #{ticket.escalation.otherTicketNumber} in{" "}
+                {ticket.escalation.otherWorkspaceName}
+              </Button>
+              <p className="mt-1 text-3xs text-muted-foreground">
+                Switches this tab to {ticket.escalation.otherWorkspaceName} — tickets never
+                leave their workspace.
+              </p>
+            </div>
+          ) : null}
 
           {/* The customer as the source workspace handed them over — a snapshot,
               not a live profile; edits over there don't change this. */}

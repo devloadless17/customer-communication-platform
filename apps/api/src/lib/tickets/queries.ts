@@ -74,6 +74,8 @@ export const TICKET_SELECT = {
     select: {
       id: true,
       sourceTicketId: true,
+      targetTicketId: true,
+      targetWorkspaceId: true,
       targetTicket: { select: { number: true, status: true } },
       targetWorkspace: { select: { name: true } },
     },
@@ -82,6 +84,7 @@ export const TICKET_SELECT = {
     select: {
       id: true,
       sourceTicketId: true,
+      sourceWorkspaceId: true,
       contactSnapshot: true,
       sourceTicket: { select: { number: true, status: true } },
       sourceWorkspace: { select: { name: true } },
@@ -127,7 +130,9 @@ function mapEscalation(t: TicketRow): TicketEscalationInfo | undefined {
     return {
       id: e.id,
       role: "source",
+      otherWorkspaceId: e.targetWorkspaceId,
       otherWorkspaceName: e.targetWorkspace.name,
+      otherTicketId: e.targetTicketId,
       otherTicketNumber: e.targetTicket.number,
       otherTicketStatus: e.targetTicket.status,
       // The target FK is Cascade — from the source side the row existing means
@@ -140,7 +145,9 @@ function mapEscalation(t: TicketRow): TicketEscalationInfo | undefined {
     return {
       id: e.id,
       role: "target",
+      otherWorkspaceId: e.sourceWorkspaceId,
       otherWorkspaceName: e.sourceWorkspace.name,
+      otherTicketId: e.sourceTicketId,
       otherTicketNumber: e.sourceTicket?.number ?? null,
       otherTicketStatus: e.sourceTicket?.status ?? null,
       severed: e.sourceTicketId === null,
