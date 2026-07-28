@@ -1,0 +1,616 @@
+{
+  "info": {
+    "name": "WhatsApp Shared Inbox — Organization API (/v1)",
+    "description": "Ready-to-use collection for the per-organization External API.\n\n## Quick start\n1. Import this collection AND the `ccp-local.postman_environment.json` environment.\n2. In the environment, set **apiKey** to your org's API key (Settings → Integrations → create key). It starts with `ccp_`.\n3. (Optional) set **baseUrl** — defaults to `http://localhost:4000` for local dev. In production use your `https://<host>` (no port).\n4. Fill the id variables (**conversationId**, **contactId**, **tagId**, …) as you go — most GET-list requests return ids you can paste in.\n\n## Auth\nEvery request inherits collection-level **Bearer auth** = `{{apiKey}}`. One key per organization; it scopes every call to that org automatically — you can change stages, send messages, manage contacts, etc., only within your own org.\n\n## Sends require an Idempotency-Key\nThe two send routes (POST conversations/:id/messages and POST messages) require an `Idempotency-Key` header so a retry can never double-send to WhatsApp. These requests pre-fill it with Postman's `{{$guid}}` (a fresh UUID per click). For a real integration, key it on something stable per logical send (e.g. the inbound message id).\n\n## The 24-hour window\nFree-form text sends only work to a customer who messaged you within the last 24h. Outside that window use a pre-approved template (POST messages with a `template` block).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{apiKey}}", "type": "string" }]
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:4000", "type": "string" },
+    { "key": "apiKey", "value": "", "type": "string" },
+    { "key": "conversationId", "value": "", "type": "string" },
+    { "key": "contactId", "value": "", "type": "string" },
+    { "key": "messageId", "value": "", "type": "string" },
+    { "key": "tagId", "value": "", "type": "string" },
+    { "key": "stageId", "value": "", "type": "string" },
+    { "key": "userIdOrEmail", "value": "", "type": "string" },
+    { "key": "fieldIdOrKey", "value": "", "type": "string" },
+    { "key": "phone", "value": "+15555550100", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Conversations & Messages",
+      "item": [
+        {
+          "name": "List conversations",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/conversations?limit=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "conversations"],
+              "query": [
+                { "key": "limit", "value": "50", "description": "1-100, default 50" },
+                { "key": "status", "value": "open", "description": "open | pending | closed", "disabled": true },
+                { "key": "phone", "value": "{{phone}}", "description": "Exact E.164 match", "disabled": true },
+                { "key": "cursor", "value": "", "description": "Pagination cursor from a prior page", "disabled": true }
+              ]
+            },
+            "description": "List conversations, newest first. Cursor-paginated. Scope: read:conversations."
+          }
+        },
+        {
+          "name": "Get conversation",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/conversations/{{conversationId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "conversations", "{{conversationId}}"]
+            },
+            "description": "Fetch one conversation (contact, assignee, status, channel). Scope: read:conversations."
+          }
+        },
+        {
+          "name": "List messages in conversation",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/conversations/{{conversationId}}/messages?limit=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "conversations", "{{conversationId}}", "messages"],
+              "query": [
+                { "key": "limit", "value": "50", "description": "1-200, default 50" },
+                { "key": "cursor", "value": "", "disabled": true }
+              ]
+            },
+            "description": "List the thread's messages, newest first. Scope: read:messages."
+          }
+        },
+        {
+          "name": "Send message (in conversation) ⚑ requires Idempotency-Key",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{$guid}}", "description": "REQUIRED. Unique per logical send. A retry with the same key returns the cached response (never double-sends)." }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"body\": \"Hello from the API 👋\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/conversations/{{conversationId}}/messages",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "conversations", "{{conversationId}}", "messages"]
+            },
+            "description": "Send a free-form text reply into an existing conversation. Goes out over WhatsApp. Optional `replyToMessageId` to quote a message. Only works inside the 24h window. Scope: write:messages."
+          }
+        },
+        {
+          "name": "Send message (by contact / phone) ⚑ requires Idempotency-Key",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{$guid}}", "description": "REQUIRED. Unique per logical send." }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contact\": { \"phone\": \"{{phone}}\" },\n  \"text\": \"Hello from the API 👋\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/messages",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "messages"]
+            },
+            "description": "Resolve a contact (by `{ \"id\": \"...\" }` OR `{ \"phone\": \"+...\" }`) → find-or-open its conversation → send. Use `contact.id` for channel-agnostic addressing; `phone` is a WhatsApp convenience.\n\nSwap the `text` field for a `media` or `template` block to send those instead:\n- media: `\"media\": { \"url\": \"https://.../file.jpg\", \"mime_type\": \"image/jpeg\", \"caption\": \"optional\" }`\n- template (works OUTSIDE the 24h window): `\"template\": { \"name\": \"hello_world\", \"language\": \"en_US\", \"variables\": { \"body\": [\"Ali\"] } }`\n\nScope: write:messages."
+          }
+        },
+        {
+          "name": "Get message",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/messages/{{messageId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "messages", "{{messageId}}"]
+            },
+            "description": "Fetch a single message by id. Scope: read:messages."
+          }
+        },
+        {
+          "name": "Assign conversation",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"assignedUserId\": \"{{userIdOrEmail}}\",\n  \"silent\": false\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/conversations/{{conversationId}}/assign",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "conversations", "{{conversationId}}", "assign"]
+            },
+            "description": "Assign (or unassign with `\"assignedUserId\": null`). `silent: true` suppresses workflow/webhook re-triggers. Scope: write:conversations."
+          }
+        },
+        {
+          "name": "Set conversation status",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"closed\",\n  \"silent\": false\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/conversations/{{conversationId}}/status",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "conversations", "{{conversationId}}", "status"]
+            },
+            "description": "Set status: open | pending | closed. Scope: write:conversations."
+          }
+        },
+        {
+          "name": "Toggle AI Autopilot (pause / resume)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"aiEnabled\": false,\n  \"silent\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/conversations/{{conversationId}}/ai",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "conversations", "{{conversationId}}", "ai"]
+            },
+            "description": "Pause (aiEnabled:false) or resume (true) AI Autopilot for a conversation. The AI escalation branch in n8n calls this with false to hand off to a human. `silent:true` skips the outbound-webhook echo so the AI doesn't get its own ai_changed delivery back. After pausing, every message.received for this conversation carries ai_enabled:false. Note: a human reply in the inbox auto-pauses, and closing the conversation auto-resumes — so you usually only need the false call on escalation. Scope: write:conversations."
+          }
+        },
+        {
+          "name": "Add internal note",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"body\": \"Customer asked about pricing — following up.\",\n  \"silent\": false\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/conversations/{{conversationId}}/notes",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "conversations", "{{conversationId}}", "notes"]
+            },
+            "description": "Add an internal note (NEVER sent to the customer). Optional `authorUserId`. Scope: write:notes."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Contacts",
+      "item": [
+        {
+          "name": "List / search contacts",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/contacts?limit=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "contacts"],
+              "query": [
+                { "key": "limit", "value": "50", "description": "1-100, default 50" },
+                { "key": "search", "value": "", "description": "Free text across name / phone / email / customFields", "disabled": true },
+                { "key": "phone", "value": "{{phone}}", "description": "Exact E.164 match", "disabled": true },
+                { "key": "email", "value": "", "description": "Exact email match", "disabled": true },
+                { "key": "externalContactId", "value": "", "description": "Your own CRM id stamped at create", "disabled": true },
+                { "key": "stageId", "value": "{{stageId}}", "disabled": true },
+                { "key": "tagIds", "value": "", "description": "Comma-separated tag ids, ANY-match", "disabled": true },
+                { "key": "cursor", "value": "", "disabled": true }
+              ]
+            },
+            "description": "List or filter contacts. Scope: read:contacts."
+          }
+        },
+        {
+          "name": "Get contact",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/contacts/{{contactId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "contacts", "{{contactId}}"]
+            },
+            "description": "Fetch one contact. Scope: read:contacts."
+          }
+        },
+        {
+          "name": "Create contact",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phoneNumber\": \"{{phone}}\",\n  \"name\": \"Jane Doe\",\n  \"firstName\": \"Jane\",\n  \"lastName\": \"Doe\",\n  \"email\": \"jane@example.com\",\n  \"countryCode\": \"US\",\n  \"stageId\": \"{{stageId}}\",\n  \"tagIds\": [],\n  \"customFields\": { \"plan\": \"pro\" }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/contacts",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "contacts"]
+            },
+            "description": "Create a contact. `phoneNumber` is the WhatsApp identity and is required. Scope: write:contacts."
+          }
+        },
+        {
+          "name": "Upsert contact (find-or-create by phone)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phoneNumber\": \"{{phone}}\",\n  \"name\": \"Jane Doe\",\n  \"tagIds\": [],\n  \"customFields\": { \"plan\": \"pro\" }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/contacts/upsert",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "contacts", "upsert"]
+            },
+            "description": "Find-or-create on phoneNumber. On an existing contact, fields are updated and `tagIds` are ADDED (never removed). Accepts an optional Idempotency-Key header. Scope: write:contacts."
+          }
+        },
+        {
+          "name": "Update contact",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Jane D.\",\n  \"stageId\": \"{{stageId}}\",\n  \"customFields\": { \"plan\": \"enterprise\", \"churned\": null }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/contacts/{{contactId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "contacts", "{{contactId}}"]
+            },
+            "description": "Partial update. Send a customField value of `null` to remove that key. Phone number is immutable (it's the WhatsApp identity). Scope: write:contacts."
+          }
+        },
+        {
+          "name": "Delete contact",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/contacts/{{contactId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "contacts", "{{contactId}}"]
+            },
+            "description": "Soft-delete a contact. Scope: delete:contacts."
+          }
+        },
+        {
+          "name": "Get contact channels",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/contacts/{{contactId}}/channels",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "contacts", "{{contactId}}", "channels"]
+            },
+            "description": "List the channels (e.g. whatsapp) this contact is reachable on. Scope: read:contacts."
+          }
+        },
+        {
+          "name": "Assign by contact",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"assignedUserId\": \"{{userIdOrEmail}}\",\n  \"silent\": false\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/contacts/{{contactId}}/assign",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "contacts", "{{contactId}}", "assign"]
+            },
+            "description": "Assign the contact's most-recent conversation (or unassign with null). Scope: write:conversations."
+          }
+        },
+        {
+          "name": "Set status by contact",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"pending\",\n  \"silent\": false\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/contacts/{{contactId}}/status",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "contacts", "{{contactId}}", "status"]
+            },
+            "description": "Set the status of the contact's most-recent conversation. Scope: write:conversations."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Contact Tags",
+      "item": [
+        {
+          "name": "Add tags to contact",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tagIds\": [\"{{tagId}}\"],\n  \"silent\": false\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/contacts/{{contactId}}/tags",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "contacts", "{{contactId}}", "tags"]
+            },
+            "description": "Add one or more tags to a contact. Scope: write:contacts."
+          }
+        },
+        {
+          "name": "Remove one tag from contact",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/contacts/{{contactId}}/tags/{{tagId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "contacts", "{{contactId}}", "tags", "{{tagId}}"]
+            },
+            "description": "Remove a single tag from a contact. Scope: write:contacts."
+          }
+        },
+        {
+          "name": "Remove tags from contact (bulk)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tagIds\": [\"{{tagId}}\"],\n  \"silent\": false\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/contacts/{{contactId}}/tags/remove",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "contacts", "{{contactId}}", "tags", "remove"]
+            },
+            "description": "Remove several tags from one contact in a single call. Scope: write:contacts."
+          }
+        },
+        {
+          "name": "Bulk add tags (many contacts)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contactIds\": [\"{{contactId}}\"],\n  \"tagIds\": [\"{{tagId}}\"],\n  \"silent\": false\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/contacts/tags/add",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "contacts", "tags", "add"]
+            },
+            "description": "Add tags to up to 500 contacts at once. Accepts an optional Idempotency-Key header. Scope: write:contacts."
+          }
+        },
+        {
+          "name": "Bulk remove tags (many contacts)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contactIds\": [\"{{contactId}}\"],\n  \"tagIds\": [\"{{tagId}}\"],\n  \"silent\": false\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/contacts/tags/remove",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "contacts", "tags", "remove"]
+            },
+            "description": "Remove tags from up to 500 contacts at once. Scope: write:contacts."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Catalog (Tags, Stages, Fields, Channels, Users)",
+      "item": [
+        {
+          "name": "List tags",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/tags",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "tags"]
+            },
+            "description": "List the org's tags. Scope: read:catalog."
+          }
+        },
+        {
+          "name": "Create tag",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"VIP\",\n  \"color\": \"amber\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/tags",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "tags"]
+            },
+            "description": "Create a tag. `color` is optional. Scope: write:catalog."
+          }
+        },
+        {
+          "name": "Update tag",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"VIP customer\",\n  \"color\": \"emerald\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/tags/{{tagId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "tags", "{{tagId}}"]
+            },
+            "description": "Rename or recolor a tag. Scope: write:catalog."
+          }
+        },
+        {
+          "name": "Delete tag",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/tags/{{tagId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "tags", "{{tagId}}"]
+            },
+            "description": "Delete a tag. Scope: write:catalog."
+          }
+        },
+        {
+          "name": "List stages",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/stages",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "stages"]
+            },
+            "description": "List lifecycle stages (use a stage id with create/update contact). Scope: read:catalog."
+          }
+        },
+        {
+          "name": "List contact fields",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/contact-fields",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "contact-fields"]
+            },
+            "description": "List custom field definitions. Scope: read:catalog."
+          }
+        },
+        {
+          "name": "Find contact field",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/contact-fields/{{fieldIdOrKey}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "contact-fields", "{{fieldIdOrKey}}"]
+            },
+            "description": "Find a custom field by id or key. Scope: read:catalog."
+          }
+        },
+        {
+          "name": "Create contact field",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"label\": \"Account tier\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/contact-fields",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "contact-fields"]
+            },
+            "description": "Create a custom field definition (key is derived from the label). Scope: write:catalog."
+          }
+        },
+        {
+          "name": "List channels",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/channels",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "channels"]
+            },
+            "description": "List the org's connected channels (e.g. whatsapp). Scope: read:catalog."
+          }
+        },
+        {
+          "name": "List users",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/users",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "users"]
+            },
+            "description": "List org team members (use a user id as an assignee). Scope: read:catalog."
+          }
+        },
+        {
+          "name": "Find user",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/users/{{userIdOrEmail}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "users", "{{userIdOrEmail}}"]
+            },
+            "description": "Find a team member by id or email. Scope: read:catalog."
+          }
+        }
+      ]
+    }
+  ]
+}
