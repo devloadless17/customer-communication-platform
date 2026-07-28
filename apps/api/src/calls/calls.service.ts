@@ -16,6 +16,7 @@ import {
 
 import { getProviderBinding, requireProviderMethod } from "@/lib/providers";
 import { sendInteractiveInternal } from "@/lib/messaging/send-interactive-internal";
+import { sendTextInternal } from "@/lib/messaging/send-text-internal";
 import {
   providerPlaceCall,
   providerAnswerCall,
@@ -26,14 +27,19 @@ import {
   usesUnifiedCalling,
 } from "@/lib/messaging/call-actions";
 import { normalizeMetaSendError } from "@/lib/providers/meta";
-import { getBusinessNumberCountry } from "@/lib/providers/config";
+import {
+  getBusinessNumberCountry,
+  invalidateProviderConfig,
+} from "@/lib/providers/config";
 import { isBicAllowedForBusinessNumber } from "@ccp/shared/providers/calling-regions";
 import type { Capability } from "@ccp/shared/auth/permissions";
 import { resolvePermissions } from "@ccp/shared/auth/permissions";
 import type {
   CallPermissionState,
+  CallRecordingOptions,
   CallSettings,
   CallSettingsState,
+  CallTranscriptionOptions,
 } from "@ccp/shared/providers/types";
 import type { Channel } from "@ccp/shared/types";
 
@@ -106,6 +112,12 @@ export interface CallingReadiness {
   checks: CallingReadinessCheck[];
   /** Null when the provider's settings couldn't be read. */
   settings: CallSettingsState | null;
+  /** OUR per-number recording policy (local, not a provider setting). */
+  recordingPolicy: CallRecordingOptions | null;
+  /** OUR per-number transcription policy (independent of recording). */
+  transcriptionPolicy: CallTranscriptionOptions | null;
+  /** OUR written in-thread consent notice (Arabic-capable). */
+  consentMessage: string | null;
 }
 
 export interface InitiateCallSuccess {
@@ -159,6 +171,12 @@ export class CallsService {
       select: {
         id: true,
         channel: true,
+        // The THREAD's account. Calling belongs to the phone number exactly
+        // like messaging does — permission grants, quotas, restrictions and
+        // the call itself are all per business number, so every provider call
+        // below must target the number the customer is actually talking to,
+        // never the workspace default.
+        channelConnectionId: true,
         contact: {
           select: {
             id: true,
@@ -222,7 +240,10 @@ export class CallsService {
     // a PSID carries no country, and Messenger's per-Page feature status is its
     // own region gate.) Defense-in-depth; the UI already hides the button.
     if (!isUnified) {
-      const businessCountry = await getBusinessNumberCountry(session.workspaceId);
+      const businessCountry = await getBusinessNumberCountry(
+        session.workspaceId,
+        conversation.channelConnectionId,
+      );
       if (!isBicAllowedForBusinessNumber(businessCountry)) {
         return { ok: false, reason: "bic_blocked_region" };
       }
@@ -232,11 +253,30 @@ export class CallsService {
     // low pickup rate). Every attempt would fail anyway; refusing here gives the
     // agent the real reason and the date it lifts instead of a generic
     // rejection, and avoids adding failed attempts to the record that caused it.
+    // Restrictions are per NUMBER: read the thread's own connection when the
+    // conversation is bound to one, the workspace default only as the legacy
+    // single-account fallback. A restriction on a sibling number must neither
+    // block this call nor mask a restriction on the number actually calling.
     const restriction = await this.db.channelConnection.findFirst({
-      where: { workspaceId: session.workspaceId, channel: channelForCall, isDefault: true },
-      select: { callingRestrictedUntil: true },
+      where: conversation.channelConnectionId
+        ? { id: conversation.channelConnectionId, workspaceId: session.workspaceId }
+        : { workspaceId: session.workspaceId, channel: channelForCall, isDefault: true },
+      select: { callingRestrictedUntil: true, callingRestrictionType: true },
     });
+    // Only a restriction that pauses OUR direction blocks here. Meta pauses
+    // each direction independently: RESTRICTED_USER_INITIATED_CALLING (and the
+    // low-pickup _CALL_BUTTON_HIDDEN variant) stop inbound calls + the call
+    // icon while business-initiated calls stay allowed — blocking outbound on
+    // one would tighten beyond Meta's own rule. Unknown/legacy types (null,
+    // or anything not clearly user-initiated-only) still block, matching the
+    // conservative behavior this gate always had.
+    const restrictionType = restriction?.callingRestrictionType;
+    const pausesOutbound =
+      !restrictionType ||
+      !restrictionType.includes("USER_INITIATED") ||
+      restrictionType.includes("BUSINESS_INITIATED");
     if (
+      pausesOutbound &&
       restriction?.callingRestrictedUntil &&
       restriction.callingRestrictedUntil.getTime() > Date.now()
     ) {
@@ -278,7 +318,10 @@ export class CallsService {
     // Everything past here needs provider credentials.
     let sendConfig: unknown;
     try {
-      sendConfig = await binding.getSendConfig(session.workspaceId);
+      sendConfig = await binding.getSendConfig(
+        session.workspaceId,
+        conversation.channelConnectionId,
+      );
     } catch (err) {
       this.logger.warn(
         `getSendConfig failed for team=${session.workspaceId}: ${
@@ -354,6 +397,7 @@ export class CallsService {
               contact.id,
               conversation.channel,
               { to, recipient },
+              conversation.channelConnectionId,
             );
             return {
               ok: false,
@@ -398,10 +442,38 @@ export class CallsService {
     // Gateway" in console) is the failure mode we just hit in prod.
     let placed: { externalCallId: string; sdpAnswer?: string };
     try {
+      // The number's standing recording/transcription policies — when set,
+      // the provider plays the consent announcement (one combined phrase if
+      // both) to both parties before either feature starts.
+      const { recording, transcription, consentMessage } =
+        await this.callArtifactPolicies(
+          session.workspaceId,
+          channelForCall,
+          conversation.channelConnectionId,
+        );
+      // Written notice BEFORE dialing, so the customer reads it (in their own
+      // language — this is the Arabic-capable half of consent) before the
+      // phone rings. Best-effort: an out-of-window failure never blocks the
+      // call, and the spoken announcement still plays either way.
+      if ((recording || transcription) && consentMessage) {
+        await this.sendConsentNotice(
+          session.workspaceId,
+          conversationId,
+          consentMessage,
+        );
+      }
       placed = await providerPlaceCall(binding.provider, channelForCall, sendConfig, {
         ...(to ? { to } : {}),
         ...(recipient ? { recipient } : {}),
         sdpOffer,
+        // Echoed back (biz_opaque_callback_data) on every status/terminate
+        // webhook for this call — stored in each frame's rawPayload, so
+        // forensics can tie a webhook to the thread without a join. Opaque
+        // cuid only: Meta hands this string to EVERY app subscribed to the
+        // WABA's calls field, so it must never carry PII.
+        correlationId: conversation.id,
+        ...(recording ? { recording } : {}),
+        ...(transcription ? { transcription } : {}),
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -501,7 +573,10 @@ export class CallsService {
           } — terminating the orphaned Meta call`,
         );
         try {
-          const cfg = await binding.getSendConfig(session.workspaceId);
+          const cfg = await binding.getSendConfig(
+            session.workspaceId,
+            conversation.channelConnectionId,
+          );
           await providerEndCall(binding.provider, channelForCall, cfg, {
             externalCallId: placed.externalCallId,
           });
@@ -552,6 +627,7 @@ export class CallsService {
   async getPhoneNumberSettings(
     session: ApiSession,
     channel: Channel = "whatsapp",
+    accountId?: string | null,
   ): Promise<{ raw: unknown }> {
     const binding = getProviderBinding(channel);
     const fn = binding.provider.getPhoneNumberSettings;
@@ -560,7 +636,7 @@ export class CallsService {
         error: "calling_not_supported", detail: "This channel's provider can't report phone-number calling settings.",
       });
     }
-    const config = await binding.getSendConfig(session.workspaceId);
+    const config = await binding.getSendConfig(session.workspaceId, accountId);
     try {
       return await fn(config);
     } catch (err) {
@@ -582,6 +658,7 @@ export class CallsService {
   async enableCallingForTeam(
     session: ApiSession,
     channel: Channel = "whatsapp",
+    accountId?: string | null,
   ): Promise<{ ok: true; raw: unknown }> {
     // Only calling-capable channels expose enableCalling (WhatsApp: enable Cloud
     // API Calling; Messenger: route inbound calls to us + show the call icon).
@@ -598,7 +675,7 @@ export class CallsService {
         error: "calling_not_supported", detail: "This channel's provider can't enable calling.",
       });
     }
-    const config = await binding.getSendConfig(session.workspaceId);
+    const config = await binding.getSendConfig(session.workspaceId, accountId);
     try {
       return await fn(config);
     } catch (err) {
@@ -628,6 +705,7 @@ export class CallsService {
   async getCallSettings(
     session: ApiSession,
     channel: Channel = "whatsapp",
+    accountId?: string | null,
   ): Promise<CallSettingsState> {
     const binding = getProviderBinding(channel);
     const fn = binding.provider.getCallSettings;
@@ -637,7 +715,7 @@ export class CallsService {
         detail: `${channel} has no configurable calling settings.`,
       });
     }
-    const config = await binding.getSendConfig(session.workspaceId);
+    const config = await binding.getSendConfig(session.workspaceId, accountId);
     try {
       return await fn(config);
     } catch (err) {
@@ -660,6 +738,7 @@ export class CallsService {
     session: ApiSession,
     settings: CallSettings,
     channel: Channel = "whatsapp",
+    accountId?: string | null,
   ): Promise<CallSettingsState> {
     const binding = getProviderBinding(channel);
     const fn = binding.provider.updateCallSettings;
@@ -669,12 +748,296 @@ export class CallsService {
         detail: `${channel} has no configurable calling settings.`,
       });
     }
-    const config = await binding.getSendConfig(session.workspaceId);
+    const config = await binding.getSendConfig(session.workspaceId, accountId);
     try {
       return await fn(settings, config);
     } catch (err) {
       this.logger.warn(
         `updateCallSettings failed for team=${session.workspaceId}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+      throw new HttpException(
+        {
+          error: "provider_rejected",
+          detail: err instanceof Error ? err.message : String(err),
+        },
+        502,
+      );
+    }
+  }
+
+  /**
+   * The number's standing recording policy, read fresh from its connection
+   * config (OURS — the provider stores no such setting; recording is a
+   * per-call opt-in that this policy applies to every placed/answered call).
+   * Returns undefined unless the policy is enabled AND complete: the provider
+   * hard-rejects ENABLED without purpose + announcement_language, and a
+   * half-configured policy must degrade to "don't record", never to a call
+   * that fails outright.
+   */
+  private async callArtifactPolicies(
+    workspaceId: string,
+    channel: Channel,
+    channelConnectionId: string | null,
+  ): Promise<{
+    recording?: CallRecordingOptions;
+    transcription?: CallTranscriptionOptions;
+    /** OUR written in-thread consent notice (fully Arabic-capable — exists
+     *  because the provider's spoken announcement has no Arabic voice). */
+    consentMessage?: string;
+  }> {
+    // Provider recording/transcription are WhatsApp Cloud API features;
+    // Messenger's unified calling carries neither object.
+    if (channel !== "whatsapp") return {};
+    const conn = await this.db.channelConnection.findFirst({
+      where: channelConnectionId
+        ? { id: channelConnectionId, workspaceId }
+        : { workspaceId, channel, isDefault: true },
+      select: { config: true },
+    });
+    const config = conn?.config as {
+      callRecording?: {
+        enabled?: boolean;
+        purpose?: string;
+        announcementLanguage?: string;
+      };
+      callTranscription?: {
+        enabled?: boolean;
+        purpose?: string;
+        announcementLanguage?: string;
+      };
+      callConsentMessage?: string;
+    } | null;
+    const valid = (p?: {
+      enabled?: boolean;
+      purpose?: string;
+      announcementLanguage?: string;
+    }): CallRecordingOptions | undefined =>
+      p?.enabled && p.purpose && p.announcementLanguage
+        ? {
+            enabled: true,
+            purpose: p.purpose,
+            announcementLanguage: p.announcementLanguage,
+          }
+        : undefined;
+    const recording = valid(config?.callRecording);
+    const transcription = valid(config?.callTranscription);
+    const consentMessage = config?.callConsentMessage?.trim();
+    return {
+      ...(recording ? { recording } : {}),
+      ...(transcription ? { transcription } : {}),
+      ...(consentMessage ? { consentMessage } : {}),
+    };
+  }
+
+  /**
+   * Best-effort written consent notice into the thread around a
+   * recorded/transcribed call. Never blocks or fails the call: on outbound
+   * the 24h window may be closed (the free-form send fails and the spoken
+   * announcement remains the notice); everywhere else a failure just logs.
+   */
+  private async sendConsentNotice(
+    workspaceId: string,
+    conversationId: string,
+    consentMessage: string,
+  ): Promise<void> {
+    try {
+      await sendTextInternal({
+        workspaceId,
+        conversationId,
+        body: consentMessage,
+        sentVia: "call-consent",
+      });
+    } catch (err) {
+      this.logger.warn(
+        `call consent notice not sent for conversation=${conversationId}: ${
+          err instanceof Error ? err.message : err
+        } — the provider's spoken announcement still plays`,
+      );
+    }
+  }
+
+  /**
+   * Admin: set the number's standing recording policy. Stored on the
+   * connection's config (local, not a provider write) and applied to every
+   * subsequent placed/answered call on that number, which then plays the
+   * provider's consent announcement to both parties before recording starts.
+   */
+  async updateCallArtifactPolicy(
+    session: ApiSession,
+    kind: "callRecording" | "callTranscription",
+    input: { enabled: boolean; purpose?: string; announcementLanguage?: string },
+    channel: Channel = "whatsapp",
+    accountId?: string | null,
+  ): Promise<{ policy: CallRecordingOptions | null }> {
+    if (channel !== "whatsapp") {
+      throw new BadRequestException({
+        error: "recording_not_supported",
+        detail: `${channel} calls can't be recorded or transcribed through the provider.`,
+      });
+    }
+    const conn = await this.db.channelConnection.findFirst({
+      where: accountId
+        ? { id: accountId, workspaceId: session.workspaceId, channel }
+        : { workspaceId: session.workspaceId, channel, isDefault: true },
+      select: { id: true, config: true },
+    });
+    if (!conn) throw new NotFoundException({ error: "channel_not_connected" });
+    const config = (conn.config ?? {}) as Prisma.JsonObject;
+    const policy = input.enabled
+      ? {
+          enabled: true,
+          purpose: input.purpose,
+          announcementLanguage: input.announcementLanguage,
+        }
+      : { enabled: false };
+    await this.db.channelConnection.update({
+      where: { id: conn.id },
+      data: { config: { ...config, [kind]: policy } as Prisma.InputJsonValue },
+    });
+    // The policy itself is read fresh per call, but the send-config cache
+    // snapshots `config` — invalidate so every cached view converges.
+    invalidateProviderConfig(session.workspaceId);
+    return {
+      policy: input.enabled ? (policy as CallRecordingOptions) : null,
+    };
+  }
+
+  /**
+   * Resolve a call's stored recording for streaming. Same capability gate as
+   * the call lists (a recording is the most sensitive call artifact there is)
+   * plus the agent-visibility boundary via the conversation relation.
+   */
+  async getRecordingRef(
+    session: ApiSession,
+    callId: string,
+  ): Promise<{ key: string; filename: string }> {
+    const perms = resolvePermissions(session.role, session.rolePermissions);
+    if (
+      !perms["calls:make" as Capability] &&
+      !perms["calls:receive" as Capability]
+    ) {
+      throw new ForbiddenException({ error: "forbidden" });
+    }
+    const call = await this.db.call.findFirst({
+      where: {
+        id: callId,
+        workspaceId: session.workspaceId,
+        ...conversationRelationWhere(session),
+      },
+      select: { id: true, recordingKey: true },
+    });
+    if (!call) throw new NotFoundException({ error: "call_not_found" });
+    if (!call.recordingKey) {
+      throw new NotFoundException({ error: "no_recording" });
+    }
+    return { key: call.recordingKey, filename: `call-${call.id}.ogg` };
+  }
+
+  /** Team-scoped variant for the /v1 API (scope-gated by the caller). */
+  async getRecordingRefForTeam(
+    workspaceId: string,
+    callId: string,
+  ): Promise<{ key: string; filename: string }> {
+    const call = await this.db.call.findFirst({
+      where: { id: callId, workspaceId },
+      select: { id: true, recordingKey: true },
+    });
+    if (!call) throw new NotFoundException({ error: "call_not_found" });
+    if (!call.recordingKey) {
+      throw new NotFoundException({ error: "no_recording" });
+    }
+    return { key: call.recordingKey, filename: `call-${call.id}.ogg` };
+  }
+
+  /** Transcript document ref — same gates as the recording ref. */
+  async getTranscriptRef(
+    session: ApiSession,
+    callId: string,
+  ): Promise<{ key: string; filename: string }> {
+    const perms = resolvePermissions(session.role, session.rolePermissions);
+    if (
+      !perms["calls:make" as Capability] &&
+      !perms["calls:receive" as Capability]
+    ) {
+      throw new ForbiddenException({ error: "forbidden" });
+    }
+    const call = await this.db.call.findFirst({
+      where: {
+        id: callId,
+        workspaceId: session.workspaceId,
+        ...conversationRelationWhere(session),
+      },
+      select: { id: true, transcriptKey: true },
+    });
+    if (!call) throw new NotFoundException({ error: "call_not_found" });
+    if (!call.transcriptKey) {
+      throw new NotFoundException({ error: "no_transcript" });
+    }
+    return { key: call.transcriptKey, filename: `call-${call.id}-transcript.json` };
+  }
+
+  /** Team-scoped transcript ref for the /v1 API. */
+  async getTranscriptRefForTeam(
+    workspaceId: string,
+    callId: string,
+  ): Promise<{ key: string; filename: string }> {
+    const call = await this.db.call.findFirst({
+      where: { id: callId, workspaceId },
+      select: { id: true, transcriptKey: true },
+    });
+    if (!call) throw new NotFoundException({ error: "call_not_found" });
+    if (!call.transcriptKey) {
+      throw new NotFoundException({ error: "no_transcript" });
+    }
+    return { key: call.transcriptKey, filename: `call-${call.id}-transcript.json` };
+  }
+
+  /**
+   * Admin: upload a voicemail announcement recording and return the media id
+   * the settings PATCH pins as `voicemail.announcementMediaId`.
+   *
+   * The mime gate is a pre-flight for the one hard, checkable provider rule
+   * (audio/ogg OPUS); duration (<60s) is left to the provider — probing a
+   * container server-side buys nothing over Meta's own clear rejection, which
+   * the 502 detail already surfaces verbatim.
+   */
+  async uploadVoicemailAnnouncement(
+    session: ApiSession,
+    file: { bytes: Uint8Array; mimeType: string; filename: string },
+    channel: Channel = "whatsapp",
+    accountId?: string | null,
+  ): Promise<{ mediaId: string }> {
+    const binding = getProviderBinding(channel);
+    const fn = binding.provider.uploadMedia;
+    if (!fn) {
+      throw new BadRequestException({
+        error: "calling_settings_unsupported",
+        detail: `${channel} has no voicemail support.`,
+      });
+    }
+    if (!file.mimeType.toLowerCase().startsWith("audio/ogg")) {
+      throw new BadRequestException({
+        error: "invalid_announcement_audio",
+        detail:
+          "The announcement must be an OGG (OPUS) audio file under 60 seconds.",
+      });
+    }
+    const config = await binding.getSendConfig(session.workspaceId, accountId);
+    try {
+      const out = await fn(
+        {
+          ...file,
+          useCase: "call_voicemail_announcement",
+          description: "Voicemail announcement",
+        },
+        config,
+      );
+      return { mediaId: out.mediaId };
+    } catch (err) {
+      this.logger.warn(
+        `uploadVoicemailAnnouncement failed for team=${session.workspaceId}: ${
           err instanceof Error ? err.message : err
         }`,
       );
@@ -701,12 +1064,16 @@ export class CallsService {
   async getCallingReadiness(
     session: ApiSession,
     channel: Channel = "whatsapp",
+    accountId?: string | null,
   ): Promise<CallingReadiness> {
     const checks: CallingReadinessCheck[] = [];
 
     // Business-initiated calling isn't offered in every market, and eligibility
     // follows OUR number's country. A team here can still RECEIVE calls.
-    const businessCountry = await getBusinessNumberCountry(session.workspaceId);
+    const businessCountry = await getBusinessNumberCountry(
+      session.workspaceId,
+      accountId,
+    );
     const regionOk = isBicAllowedForBusinessNumber(businessCountry);
     checks.push({
       key: "region",
@@ -721,7 +1088,9 @@ export class CallsService {
     // be enabled. We already track the tier from the broadcast work, so this
     // costs no extra call.
     const connection = await this.db.channelConnection.findFirst({
-      where: { workspaceId: session.workspaceId, channel, isDefault: true },
+      where: accountId
+        ? { id: accountId, workspaceId: session.workspaceId }
+        : { workspaceId: session.workspaceId, channel, isDefault: true },
       select: {
         // Messaging limit is portfolio-scoped (Meta, 2025-10-07).
         portfolio: { select: { messagingDailyCap: true, messagingTier: true } },
@@ -747,7 +1116,7 @@ export class CallsService {
     // The provider's own view: is calling on, and is anything restricted?
     let settings: CallSettingsState | null = null;
     try {
-      settings = await this.getCallSettings(session, channel);
+      settings = await this.getCallSettings(session, channel, accountId);
     } catch {
       // Leave null — reported as "unknown" below rather than failing the whole
       // checklist on one unreachable read.
@@ -762,6 +1131,35 @@ export class CallsService {
           : "Turn calling on below to start placing and receiving calls."
         : "Couldn't read your calling settings — check that WhatsApp is still connected.",
     });
+    // SIP signaling excludes the Graph calling endpoints this platform is
+    // built on — a tenant (or partner) enabling it in WhatsApp Manager
+    // silently breaks every place/answer here with nothing in our logs.
+    // Named check so "calling randomly stopped" has a dated explanation.
+    if (settings?.sipEnabled) {
+      checks.push({
+        key: "sip_disabled",
+        ok: false,
+        label: "SIP signaling is off (required for calling here)",
+        detail:
+          "SIP is enabled on this number, which disables the calling API this platform uses. Turn SIP off in WhatsApp Manager (Phone numbers → Calls) to place or receive calls here.",
+      });
+    }
+    // Same class of silent breakage: browser WebRTC only speaks DTLS-SRTP.
+    // SDES set out-of-band makes every media negotiation fail while the
+    // signaling still looks healthy. A warning, not a hard failure — the read
+    // may lag a fix.
+    if (
+      settings?.srtpKeyExchangeProtocol &&
+      settings.srtpKeyExchangeProtocol.toUpperCase() !== "DTLS"
+    ) {
+      checks.push({
+        key: "srtp_dtls",
+        ok: false,
+        label: "Media encryption uses DTLS (required by browsers)",
+        detail: `This number's SRTP key exchange is set to ${settings.srtpKeyExchangeProtocol}, which browsers can't negotiate — calls will connect signaling but carry no audio. Switch it back to DTLS.`,
+      });
+    }
+
     // Restrictions from two sources: whatever the provider reports right now,
     // and whatever its account webhook told us (which arrives the moment
     // enforcement starts, without waiting for someone to open this page).
@@ -801,11 +1199,57 @@ export class CallsService {
       });
     }
 
+    const policies = await this.callArtifactPolicies(
+      session.workspaceId,
+      channel,
+      accountId ?? null,
+    );
     return {
       ready: checks.every((c) => c.ok),
       checks,
       settings,
+      recordingPolicy: policies.recording ?? null,
+      transcriptionPolicy: policies.transcription ?? null,
+      consentMessage: policies.consentMessage ?? null,
     };
+  }
+
+  /**
+   * Admin: set the written consent notice auto-sent around
+   * recorded/transcribed calls. Ours end-to-end, so it is fully
+   * Arabic-capable — the counterweight to the provider's announcement voice,
+   * which has no Arabic. Null/empty clears it.
+   */
+  async updateCallConsentMessage(
+    session: ApiSession,
+    message: string | null,
+    channel: Channel = "whatsapp",
+    accountId?: string | null,
+  ): Promise<{ consentMessage: string | null }> {
+    if (channel !== "whatsapp") {
+      throw new BadRequestException({
+        error: "recording_not_supported",
+        detail: `${channel} calls can't be recorded or transcribed through the provider.`,
+      });
+    }
+    const conn = await this.db.channelConnection.findFirst({
+      where: accountId
+        ? { id: accountId, workspaceId: session.workspaceId, channel }
+        : { workspaceId: session.workspaceId, channel, isDefault: true },
+      select: { id: true, config: true },
+    });
+    if (!conn) throw new NotFoundException({ error: "channel_not_connected" });
+    const config = (conn.config ?? {}) as Prisma.JsonObject;
+    const trimmed = message?.trim() || null;
+    const next: Prisma.JsonObject = { ...config };
+    if (trimmed) next.callConsentMessage = trimmed;
+    else delete next.callConsentMessage;
+    await this.db.channelConnection.update({
+      where: { id: conn.id },
+      data: { config: next as Prisma.InputJsonValue },
+    });
+    invalidateProviderConfig(session.workspaceId);
+    return { consentMessage: trimmed };
   }
 
   /**
@@ -826,6 +1270,11 @@ export class CallsService {
       where: { id: conversationId, workspaceId: session.workspaceId },
       select: {
         channel: true,
+        // The thread's OWN account — calling permission is per business phone
+        // number (mirrors requestPermissionForTeam): reading or requesting it
+        // against the workspace default answers about a different number than
+        // the one the customer is talking to.
+        channelConnectionId: true,
         contact: { select: { id: true, phoneNumber: true, bsuid: true } },
       },
     });
@@ -842,7 +1291,10 @@ export class CallsService {
     };
 
     const binding = getProviderBinding(conversation.channel);
-    const config = await binding.getSendConfig(session.workspaceId);
+    const config = await binding.getSendConfig(
+      session.workspaceId,
+      conversation.channelConnectionId,
+    );
 
     // Already permitted? Hand back the live grant rather than asking again.
     const readPermission = binding.provider.getCallPermission;
@@ -1032,12 +1484,15 @@ export class CallsService {
     contactId: string,
     channel: Channel,
     identity: { to?: string; recipient?: string },
+    // The thread's account — permission is per (business number, customer)
+    // pair, so the request must go out the number the call would use.
+    channelConnectionId?: string | null,
   ): Promise<boolean> {
     try {
       const binding = getProviderBinding(channel);
       const sendPerm = binding.provider.sendCallPermissionRequest;
       if (!sendPerm) return false;
-      const config = await binding.getSendConfig(workspaceId);
+      const config = await binding.getSendConfig(workspaceId, channelConnectionId);
       const out = await sendPerm(
         {
           ...(identity.to ? { to: identity.to } : {}),
@@ -1207,6 +1662,12 @@ export class CallsService {
         channel: true,
         status: true,
         answeredByUserId: true,
+        // contactId: for the customer-service-window bump after the provider
+        // accepts — a connected inbound call opens the 24h window on the
+        // CONTACT. channelConnectionId: the number the call lives on; every
+        // Graph call action must hit that number's /calls endpoint, not the
+        // workspace default's.
+        conversation: { select: { contactId: true, channelConnectionId: true } },
       },
     });
     if (!call) throw new NotFoundException({ error: "call_not_found" });
@@ -1269,7 +1730,10 @@ export class CallsService {
       // escape uncaught, skipping the rollback block below and stranding the
       // row `in_progress` for the full 2h stale-call horizon while the whole
       // team saw a live call that never existed.
-      const config = await binding.getSendConfig(session.workspaceId);
+      const config = await binding.getSendConfig(
+        session.workspaceId,
+        call.conversation.channelConnectionId,
+      );
       answerResult = await providerAnswerCall(binding.provider, call.channel, config, {
         externalCallId: call.externalCallId,
         sdp: sdpAnswer,
@@ -1322,6 +1786,21 @@ export class CallsService {
       throw new HttpException({ error: "provider_rejected" }, 502);
     }
 
+    // Customer-service window: answering a user-initiated call opens/resets
+    // the 24h window (service-messages doc: "When a WhatsApp user messages you
+    // or calls you, a 24-hour timer … starts") — stamped HERE, after the
+    // provider accepted, so the agent can free-form reply DURING the call
+    // instead of waiting for the terminate webhook. Monotonic, matching the
+    // ingest-call bump and the contact-drift sweeper's recompute; the answer
+    // CAS above pinned direction=in, so no outbound call reaches this line.
+    await this.db.contact.updateMany({
+      where: {
+        id: call.conversation.contactId,
+        OR: [{ lastInboundAt: null }, { lastInboundAt: { lt: answeredAt } }],
+      },
+      data: { lastInboundAt: answeredAt },
+    });
+
     await this.bus.publish({
       type: "call.answered_by_agent",
       workspaceId: session.workspaceId,
@@ -1365,10 +1844,12 @@ export class CallsService {
       where: { id: callId, workspaceId: session.workspaceId },
       select: {
         id: true,
+        conversationId: true,
         externalCallId: true,
         channel: true,
         status: true,
         answeredByUserId: true,
+        conversation: { select: { channelConnectionId: true } },
       },
     });
     if (!call) throw new NotFoundException({ error: "call_not_found" });
@@ -1385,10 +1866,37 @@ export class CallsService {
       // Resolved INSIDE the try — the state CAS above has already committed,
       // so a credential/account-resolution throw here must degrade through
       // this catch rather than escape and strand the row (see answerCall).
-      const config = await binding.getSendConfig(session.workspaceId);
+      const config = await binding.getSendConfig(
+        session.workspaceId,
+        call.conversation.channelConnectionId,
+      );
+      // Recording/transcription ride ACCEPT for inbound calls — the standing
+      // policies are applied here, and the provider plays the consent
+      // announcement (one combined phrase if both) before either starts.
+      const { recording, transcription, consentMessage } =
+        await this.callArtifactPolicies(
+          session.workspaceId,
+          call.channel,
+          call.conversation.channelConnectionId,
+        );
+      // Written notice in the thread the moment we answer (the customer just
+      // called, so the service window is open and the free-form send lands).
+      // Detached — never delays media start.
+      if ((recording || transcription) && consentMessage) {
+        void this.sendConsentNotice(
+          session.workspaceId,
+          call.conversationId,
+          consentMessage,
+        );
+      }
       await providerCompleteAccept(binding.provider, call.channel, config, {
         externalCallId: call.externalCallId,
         sdp: sdpAnswer,
+        // Echoed (biz_opaque_callback_data) on the terminate webhook — same
+        // opaque-cuid-only correlation as placeCall.
+        correlationId: call.conversationId,
+        ...(recording ? { recording } : {}),
+        ...(transcription ? { transcription } : {}),
       });
     } catch (err) {
       this.logger.warn(
@@ -1442,6 +1950,7 @@ export class CallsService {
         externalCallId: true,
         channel: true,
         status: true,
+        conversation: { select: { channelConnectionId: true } },
       },
     });
     if (!call) throw new NotFoundException({ error: "call_not_found" });
@@ -1454,7 +1963,10 @@ export class CallsService {
       // Resolved INSIDE the try — the state CAS above has already committed,
       // so a credential/account-resolution throw here must degrade through
       // this catch rather than escape and strand the row (see answerCall).
-      const config = await binding.getSendConfig(session.workspaceId);
+      const config = await binding.getSendConfig(
+        session.workspaceId,
+        call.conversation.channelConnectionId,
+      );
       result = await providerMediaUpdate(binding.provider, call.channel, config, {
         externalCallId: call.externalCallId,
         sdp,
@@ -1495,6 +2007,7 @@ export class CallsService {
         externalCallId: true,
         channel: true,
         status: true,
+        conversation: { select: { channelConnectionId: true } },
       },
     });
     if (!call) throw new NotFoundException({ error: "call_not_found" });
@@ -1523,7 +2036,10 @@ export class CallsService {
       // Resolved INSIDE the try — the state CAS above has already committed,
       // so a credential/account-resolution throw here must degrade through
       // this catch rather than escape and strand the row (see answerCall).
-      const config = await binding.getSendConfig(session.workspaceId);
+      const config = await binding.getSendConfig(
+        session.workspaceId,
+        call.conversation.channelConnectionId,
+      );
       await providerRejectCall(binding.provider, call.channel, config, {
         externalCallId: call.externalCallId,
         ...(reason ? { reason } : {}),
@@ -1602,6 +2118,7 @@ export class CallsService {
         status: true,
         ringingAt: true,
         answeredAt: true,
+        conversation: { select: { channelConnectionId: true } },
       },
     });
     if (!call) throw new NotFoundException({ error: "call_not_found" });
@@ -1700,7 +2217,10 @@ export class CallsService {
       // multi-account workspace resolves no account — none of which should
       // cost the operator a stuck call. The existing catch is already the
       // right handling: non-fatal, local state is what matters.
-      const config = await binding.getSendConfig(session.workspaceId);
+      const config = await binding.getSendConfig(
+        session.workspaceId,
+        call.conversation.channelConnectionId,
+      );
       await providerEndCall(binding.provider, call.channel, config, {
         externalCallId: call.externalCallId,
       });
@@ -1836,6 +2356,12 @@ export class CallsService {
         answeredAt: true,
         endedAt: true,
         durationSeconds: true,
+        ctaPayload: true,
+        deeplinkPayload: true,
+        recordingKey: true,
+        transcriptKey: true,
+        transcriptLanguage: true,
+        errorTitle: true,
       },
     });
     const hasMore = rows.length > take;
@@ -1942,6 +2468,12 @@ export class CallsService {
         ringingAt: true,
         answeredAt: true,
         durationSeconds: true,
+        ctaPayload: true,
+        deeplinkPayload: true,
+        recordingKey: true,
+        transcriptKey: true,
+        transcriptLanguage: true,
+        errorTitle: true,
         initiatedBy: { select: { id: true, name: true } },
         answeredBy: { select: { id: true, name: true } },
         conversation: {
@@ -1966,6 +2498,12 @@ export class CallsService {
       connected:
         c.answeredAt !== null ||
         (c.durationSeconds !== null && c.durationSeconds > 0),
+      ctaPayload: c.ctaPayload,
+      deeplinkPayload: c.deeplinkPayload,
+      hasRecording: c.recordingKey !== null,
+      hasTranscript: c.transcriptKey !== null,
+      transcriptLanguage: c.transcriptLanguage,
+      errorTitle: c.errorTitle,
     }));
     const last = page.at(-1);
     // Offset mode uses page numbers (from totalCount), not a cursor. The count
@@ -2022,6 +2560,18 @@ export interface TeamCallRow {
   ringingAt: string;
   durationSeconds: number | null;
   connected: boolean;
+  /** Opaque payload from the call BUTTON that produced an inbound call. */
+  ctaPayload: string | null;
+  /** Opaque `biz_payload` from the wa.me/call deep link that produced it. */
+  deeplinkPayload: string | null;
+  /** True once an opted-in recording is stored and streamable. */
+  hasRecording: boolean;
+  /** True once the opted-in transcript document is stored. */
+  hasTranscript: boolean;
+  /** Auto-detected spoken language of the transcript (ISO 639, e.g. "ar"). */
+  transcriptLanguage: string | null;
+  /** Why a FAILED call failed, from the provider's terminate webhook. */
+  errorTitle: string | null;
 }
 
 /**
@@ -2054,6 +2604,18 @@ export interface SerializedCall {
   answeredAt: string | null;
   endedAt: string | null;
   durationSeconds: number | null;
+  /** Opaque payload from the call BUTTON that produced this inbound call. */
+  ctaPayload: string | null;
+  /** Opaque `biz_payload` from the wa.me/call deep link that produced it. */
+  deeplinkPayload: string | null;
+  /** True once an opted-in recording is stored and streamable. */
+  hasRecording: boolean;
+  /** True once the opted-in transcript document is stored. */
+  hasTranscript: boolean;
+  /** Auto-detected spoken language of the transcript (ISO 639, e.g. "ar"). */
+  transcriptLanguage: string | null;
+  /** Why a FAILED call failed, from the provider's terminate webhook. */
+  errorTitle: string | null;
 }
 
 function serializeCall(row: {
@@ -2068,6 +2630,12 @@ function serializeCall(row: {
   answeredAt: Date | null;
   endedAt: Date | null;
   durationSeconds: number | null;
+  ctaPayload: string | null;
+  deeplinkPayload: string | null;
+  recordingKey: string | null;
+  transcriptKey: string | null;
+  transcriptLanguage: string | null;
+  errorTitle: string | null;
 }): SerializedCall {
   return {
     id: row.id,
@@ -2081,5 +2649,11 @@ function serializeCall(row: {
     answeredAt: row.answeredAt?.toISOString() ?? null,
     endedAt: row.endedAt?.toISOString() ?? null,
     durationSeconds: row.durationSeconds,
+    ctaPayload: row.ctaPayload,
+    deeplinkPayload: row.deeplinkPayload,
+    hasRecording: row.recordingKey !== null,
+    hasTranscript: row.transcriptKey !== null,
+    transcriptLanguage: row.transcriptLanguage,
+    errorTitle: row.errorTitle,
   };
 }

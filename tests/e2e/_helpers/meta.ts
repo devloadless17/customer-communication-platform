@@ -186,6 +186,16 @@ export async function seedMetaTestTeam(): Promise<MetaTestTeam> {
           },
         },
         create: {
+          // DETERMINISTIC id — load-bearing for the whole suite. The api
+          // process caches provider config (connection id included) for 60s;
+          // a mid-suite wipeMetaTestTeam() + re-seed used to mint a FRESH
+          // cuid, so any file running inside that window had ingest resolve
+          // the cached, now-deleted connection id → FK failure → fail-soft
+          // 200 with no row ("posted 200, row never appeared" — the classic
+          // meta-suite flake). With a fixed id, wipe + re-seed reproduces the
+          // row byte-identically and a stale cache is indistinguishable from
+          // a fresh one.
+          id: `${META_TEST_TEAM_ID}_conn_${c.channel}`,
           workspaceId: META_TEST_TEAM_ID,
           channel: c.channel,
           externalAccountId: c.accountId,
@@ -199,6 +209,36 @@ export async function seedMetaTestTeam(): Promise<MetaTestTeam> {
       });
     });
   }
+
+  // Deterministic DEFAULT STAGE — same reasoning as the fixed connection ids
+  // above, and the actual root of the historical "posted 200, row never
+  // appeared" flake: the api caches (workspaceId → default stage id) inside
+  // ensureDefaultStage, so a wipe + re-seed that let the api mint a FRESH
+  // stage id left every contact.create in the next file failing
+  // `Contact_stageId_fkey` against the cached, deleted id — swallowed as
+  // per-event poison with a 200 (see tests/e2e/.meta-logs/test-api.log for
+  // the `ingest.event_failed` trail that finally exposed it, 2026-07-28).
+  // Demote any stray default first so the one-default-per-team partial
+  // unique can't reject the upsert on a dirty database.
+  await d.contactStage.updateMany({
+    where: {
+      workspaceId: META_TEST_TEAM_ID,
+      isDefault: true,
+      NOT: { id: `${META_TEST_TEAM_ID}_stage_default` },
+    },
+    data: { isDefault: false },
+  });
+  await d.contactStage.upsert({
+    where: { id: `${META_TEST_TEAM_ID}_stage_default` },
+    create: {
+      id: `${META_TEST_TEAM_ID}_stage_default`,
+      workspaceId: META_TEST_TEAM_ID,
+      name: "New",
+      position: 0,
+      isDefault: true,
+    },
+    update: { isDefault: true },
+  });
 
   // Unrestricted API key so /v1 sends run without a browser session.
   const key = generateApiKey();

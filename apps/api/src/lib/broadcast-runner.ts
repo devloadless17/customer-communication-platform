@@ -9,6 +9,7 @@ import { getProviderBinding } from "@/lib/providers";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import {
   countTemplatePlaceholders,
+  isPairRateLimitError,
   MetaSendError,
   normalizeMetaSendError,
   renderTemplateBody,
@@ -313,6 +314,27 @@ function reset429Streak(broadcastId: string): void {
  */
 const PAUSE_429_MS = 60_000;
 const PAUSE_429: Map<string, number> = new Map();
+
+/**
+ * WhatsApp PAIR rate limit (131056) — scoped to (number, recipient), NOT the
+ * number. One recipient mid-heavy-conversation when a campaign fires must not
+ * engage the number-wide machinery above (streak → cross-lane pause → whole-run
+ * park); instead that single recipient is retried and, if still limited,
+ * DEFERRED — pushed back onto the in-memory queue with a not-before timestamp —
+ * while every lane keeps sending to everyone else.
+ *
+ * The numbers come from Meta's published pair limit: one message per 6s
+ * sustained, with a ~45-message burst allowance that BORROWS future quota — a
+ * fully drained burst needs ~45 × 6s ≈ 4.5 min to repay. So:
+ *   - first in-lane retry waits ONE token period (6.5s) — the 3s number-level
+ *     sleep is guaranteed wasted against a 6s refill;
+ *   - each defer waits 90s, and 3 defers (+ retries) cover the worst-case
+ *     burst debt before the recipient is honestly failed (`rate_limited`,
+ *     retryable later via the campaign report's Retry-failed).
+ */
+const PAIR_LIMIT_RETRY_MS = 6_500;
+const PAIR_LIMIT_DEFER_MS = 90_000;
+const PAIR_LIMIT_MAX_DEFERS = 3;
 function pauseAllLanes(broadcastId: string, ms: number): void {
   PAUSE_429.set(broadcastId, Date.now() + ms);
 }
@@ -1153,6 +1175,9 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         // suppression can't cover a contact who opts out during the create→fire
         // gap of a scheduled MARKETING broadcast.
         marketingOptOutAt: true,
+        // Same fire-time re-check: a contact blocked after create must be
+        // skipped, not handed to Meta for a guaranteed rejection.
+        blockedAt: true,
         customFields: true,
       },
     },
@@ -1178,6 +1203,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
             lastInboundAt: true,
             deletedAt: true,
             marketingOptOutAt: true,
+            blockedAt: true,
           },
         },
       } as unknown as typeof RECIPIENT_SELECT_FULL);
@@ -1213,6 +1239,13 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     string,
     { id: string; status: string; unreadCount: number }
   >();
+
+  // Pair-limit (131056) defer state — see the PAIR_LIMIT_* constants. Keyed by
+  // recipient id. Per-run locals on purpose: a resume (pause / crash / restart)
+  // starts the count fresh, which is correct — by then the pair window has had
+  // ample time to repay.
+  const pairDeferCounts = new Map<string, number>();
+  const pairDeferNotBefore = new Map<string, number>();
 
   async function refill(): Promise<void> {
     if (exhausted) return;
@@ -1347,6 +1380,27 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         }
         const recipient = queue.shift();
         if (!recipient) return;
+        // A pair-limit-deferred recipient is only retried after its not-before
+        // timestamp. If the next queued recipient is ready NOW, rotate the
+        // deferred one to the back and send to them instead — a defer must
+        // never idle a lane mid-run. Only when nothing else is ready (the
+        // drain tail) does the lane sleep out the remainder.
+        const pairNotBefore = pairDeferNotBefore.get(recipient.id) ?? 0;
+        if (pairNotBefore > Date.now()) {
+          const head = queue[0];
+          if (head && (pairDeferNotBefore.get(head.id) ?? 0) <= Date.now()) {
+            queue.push(recipient);
+            continue;
+          }
+          await sleep(pairNotBefore - Date.now());
+          // The sleep can be 90s — re-run the loop-top exit checks before
+          // sending. A recipient dropped here still has a `queued` DB row, so
+          // the cancel finalize / boot reconciler accounts for them exactly
+          // like any other not-yet-pulled row.
+          if ((await checkCanceled()) || FATAL_PAUSE.has(broadcast.id) || shuttingDown) {
+            return;
+          }
+        }
         // L7: customFields may have been omitted from the runtime select.
         // Coerce to `{}` so processOneRecipient + the resolvers see a
         // consistent JsonValue shape. (Has zero effect when the field WAS
@@ -1370,8 +1424,9 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         // running broadcast, not just one tenant's share.
         await acquireGlobalSendSlot();
         await acquireTeamRecipientSlot(broadcast.workspaceId);
+        let deferSignal: "defer_pair_limit" | void;
         try {
-          await processOneRecipient(
+          deferSignal = await processOneRecipient(
             broadcast,
             recipient,
             bindingByChannel,
@@ -1389,6 +1444,38 @@ async function runBroadcast(broadcastId: string): Promise<void> {
           // would permanently shrink the process's send capacity.
           releaseTeamRecipientSlot(broadcast.workspaceId);
           releaseGlobalSendSlot();
+        }
+        if (deferSignal === "defer_pair_limit") {
+          const defers = (pairDeferCounts.get(recipient.id) ?? 0) + 1;
+          if (defers > PAIR_LIMIT_MAX_DEFERS) {
+            pairDeferCounts.delete(recipient.id);
+            pairDeferNotBefore.delete(recipient.id);
+            // ~5 minutes of retries didn't clear it — fail honestly rather
+            // than hold the run's tail open forever. The reason stays
+            // `rate_limited`, so the campaign report buckets this recipient
+            // as RETRYABLE and Retry-failed re-sends them once the pair
+            // window has repaid.
+            await failRecipientAndCount(
+              recipient.id,
+              "WhatsApp is limiting how fast this person can be messaged (pair rate limit, code 131056) — retries over several minutes did not clear it. Use Retry failed to re-send them later.",
+              broadcast.id,
+              broadcast.workspaceId,
+              pendingBumps,
+              "rate_limited",
+            );
+          } else {
+            pairDeferCounts.set(recipient.id, defers);
+            pairDeferNotBefore.set(recipient.id, Date.now() + PAIR_LIMIT_DEFER_MS);
+            queue.push(recipient);
+            console.warn(
+              `[broadcast ${broadcast.id}] recipient ${recipient.id} pair-rate-limited (131056) — defer ${defers}/${PAIR_LIMIT_MAX_DEFERS}, retry in ${PAIR_LIMIT_DEFER_MS / 1000}s`,
+            );
+          }
+        } else if (pairDeferNotBefore.has(recipient.id)) {
+          // A previously-deferred recipient resolved (sent, or failed for a
+          // different reason) — drop the defer state so the maps stay small.
+          pairDeferCounts.delete(recipient.id);
+          pairDeferNotBefore.delete(recipient.id);
         }
         // The bucket, when on, IS the rate — the fixed gap on top of it would
         // only push the achieved rate below the target. When off, today's
@@ -1616,6 +1703,7 @@ async function processOneRecipient(
       lastInboundAt: Date | null;
       deletedAt: Date | null;
       marketingOptOutAt: Date | null;
+      blockedAt: Date | null;
       customFields: Prisma.JsonValue;
     };
   },
@@ -1632,7 +1720,11 @@ async function processOneRecipient(
   // first id-mode failure disables the id for all of them at once, rather than
   // each lane rediscovering it.
   mediaState: BroadcastMediaState,
-): Promise<void> {
+  // `"defer_pair_limit"`: the recipient hit WhatsApp's per-(number, recipient)
+  // pair limit twice (row left `queued`, attempt claim released) — the lane
+  // loop re-queues them with a not-before timestamp instead of the run-wide
+  // park every other send error resolves to internally.
+): Promise<"defer_pair_limit" | void> {
   // Resolve the broadcast's single channel + its provider binding. A missing
   // binding fails the recipient individually — never poisons the run.
   const sendChannel: Channel = broadcast.channel;
@@ -1719,6 +1811,23 @@ async function processOneRecipient(
       broadcast.workspaceId,
       pendingBumps,
       "marketing_opt_out",
+    );
+    return;
+  }
+  // Re-check the provider-level block at FIRE time, same reasoning as the two
+  // guards above: the workspace can block a contact in the create→fire gap,
+  // and Meta rejects every send to a blocked user anyway — skipping keeps the
+  // campaign report honest ("blocked", not a generic provider failure) and
+  // saves the doomed Graph call. Applies to EVERY kind, not just marketing —
+  // a block stops all messaging, unlike a marketing opt-out.
+  if (recipient.contact.blockedAt) {
+    await failRecipientAndCount(
+      recipient.id,
+      "Contact is blocked.",
+      broadcast.id,
+      broadcast.workspaceId,
+      pendingBumps,
+      "contact_blocked",
     );
     return;
   }
@@ -1931,11 +2040,13 @@ async function processOneRecipient(
       send = { externalId: attemptClaim.externalId, timestamp: attemptClaim.timestamp };
     } else {
       // Meta FETCHES the header-media link and our R2 bucket is private, so a
-      // stored own (stable, non-fetchable) URL must be presigned per send —
-      // mirror send-template-internal's choke-point behaviour. A foreign link
-      // (not ours) passes through untouched. Minted per-recipient so the
-      // rate-limit retry below (bounded well under the 1h presign TTL) reuses a
-      // still-valid signature.
+      // stored own (stable, non-fetchable) URL must be presigned — via the
+      // RUN-SCOPED cache (mediaState.presignedLink), so every recipient in a
+      // 25-minute window shares ONE URL and Meta's 10-minute media cache
+      // actually hits instead of fetching R2 once per recipient. A foreign
+      // link (not ours) passes through untouched. The rate-limit retry below
+      // is bounded well under the cache's re-mint window, so it always rides
+      // a still-valid signature.
       let headerMedia: typeof variables.headerMedia;
       try {
         headerMedia = !variables.headerMedia
@@ -1955,7 +2066,7 @@ async function processOneRecipient(
               : {
                   ...variables.headerMedia,
                   link: blobStorage.isOwnUrl(variables.headerMedia.link)
-                    ? await blobStorage.presignGetUrl(variables.headerMedia.link)
+                    ? await mediaState.presignedLink(variables.headerMedia.link)
                     : variables.headerMedia.link,
                 };
       } catch (err) {
@@ -2090,27 +2201,41 @@ async function processOneRecipient(
         // on the errors broadcasts actually hit. Without a backoff, the entire
         // broadcast becomes a wall of "rate_limited"-failed recipients — and Meta
         // charges quality score for it. One sleep+retry is the cheapest mitigation:
-        // we wait for ~3s of cooldown then send the same recipient again.
-        // Only ONE retry — a permanently-flagged number shouldn't loop.
+        // ~3s of cooldown for number-level limits, a full 6.5s token period for
+        // the per-recipient pair limit (131056), then send the same recipient
+        // again. Only ONE in-lane retry — a permanently-flagged number shouldn't
+        // loop (a persistently pair-limited RECIPIENT is deferred instead; see
+        // the lane loop's "defer_pair_limit" handling).
         if (normalizeMetaSendError(err)?.code === "rate_limited") {
-          // Global per-broadcast 429 streak: when Meta rate-limits N
-          // consecutive sends within ~30s the number's quality rating is
-          // sliding — keep hammering at 25 msg/sec and we drain quality
-          // AND mark thousands of recipients as false-failed. Pause the
-          // broadcast for 60s before retrying this recipient so the rate
-          // limit window has time to clear.
-          track429Hit(broadcast.id);
-          if (rate429Streak(broadcast.id) >= 10) {
-            console.warn(
-              `[broadcast ${broadcast.id}] 10 consecutive 429s — pausing all lanes 60s`,
-            );
-            // Signal the OTHER lanes to back off too (they check at their loop
-            // top), then wait it out here before this lane's own retry.
-            pauseAllLanes(broadcast.id, PAUSE_429_MS);
-            await sleep(PAUSE_429_MS);
-            reset429Streak(broadcast.id);
+          // 131056 is the (number, recipient) PAIR limit — it says nothing
+          // about the number's own throughput, so it must not feed the
+          // number-wide streak/pause below (see PAIR_LIMIT_* rationale).
+          const pairLimited = isPairRateLimitError(err);
+          if (!pairLimited) {
+            // Global per-broadcast 429 streak: when Meta rate-limits N
+            // consecutive sends within ~30s the number's quality rating is
+            // sliding — keep hammering at 25 msg/sec and we drain quality
+            // AND mark thousands of recipients as false-failed. Pause the
+            // broadcast for 60s before retrying this recipient so the rate
+            // limit window has time to clear.
+            track429Hit(broadcast.id);
+            if (rate429Streak(broadcast.id) >= 10) {
+              console.warn(
+                `[broadcast ${broadcast.id}] 10 consecutive 429s — pausing all lanes 60s`,
+              );
+              // Signal the OTHER lanes to back off too (they check at their loop
+              // top), then wait it out here before this lane's own retry.
+              pauseAllLanes(broadcast.id, PAUSE_429_MS);
+              await sleep(PAUSE_429_MS);
+              reset429Streak(broadcast.id);
+            }
           }
-          await sleep(3_000 + Math.floor(Math.random() * 1_000));
+          // Pair limit refills one token per 6s — a 3s sleep guarantees a
+          // wasted retry, so wait a full token period for that case.
+          await sleep(
+            (pairLimited ? PAIR_LIMIT_RETRY_MS : 3_000) +
+              Math.floor(Math.random() * 1_000),
+          );
           try {
             send = isFreeform
               ? await provider.sendText({ to: toPhone, body: broadcast.bodyText ?? "", useHumanAgentTag }, config)
@@ -2140,6 +2265,14 @@ async function processOneRecipient(
             // rate-limit window has cleared. Nobody is marked failed, nobody is
             // double-sent — the queued→sent CAS still guarantees exactly-once.
             if (normalizeMetaSendError(retryErr)?.code === "rate_limited") {
+              // Still PAIR-limited after a full 6s token period → this one
+              // recipient has burst debt (can take minutes to repay). That is
+              // no reason to park a whole campaign: signal the lane loop to
+              // defer just this recipient (row stays `queued`, claim already
+              // released above) and keep every lane sending to everyone else.
+              if (isPairRateLimitError(retryErr)) {
+                return "defer_pair_limit";
+              }
               await pauseForSustainedRateLimit(broadcast);
               return;
             }
@@ -2183,7 +2316,7 @@ async function processOneRecipient(
                   ...variables.headerMedia,
                   id: undefined,
                   link: blobStorage.isOwnUrl(variables.headerMedia.link)
-                    ? await blobStorage.presignGetUrl(variables.headerMedia.link)
+                    ? await mediaState.presignedLink(variables.headerMedia.link)
                     : variables.headerMedia.link,
                 }
               : undefined;
@@ -2588,7 +2721,18 @@ async function failRecipientAndCount(
  */
 function isPermanentCredentialError(err: unknown): boolean {
   if (err instanceof ProviderNotConfiguredError) return true;
-  return normalizeMetaSendError(err)?.code === "auth_expired";
+  const code = normalizeMetaSendError(err)?.code;
+  // Beyond a dead token, three account-level states fail every remaining
+  // recipient identically until the operator repairs the account (error-codes
+  // reference): a policy restriction/lock (368/131031), a billing problem
+  // (131042), and an unregistered number (131045/133010). Feeding them into
+  // the same streak breaker pauses the run instead of burning the audience.
+  return (
+    code === "auth_expired" ||
+    code === "account_restricted" ||
+    code === "billing_issue" ||
+    code === "number_not_registered"
+  );
 }
 
 /**
@@ -2600,7 +2744,12 @@ function isPermanentCredentialError(err: unknown): boolean {
  * retry) rather than "reconnect WhatsApp".
  */
 function isFatalTemplateError(err: unknown): boolean {
-  return normalizeMetaSendError(err)?.code === "template_unavailable";
+  const code = normalizeMetaSendError(err)?.code;
+  // marketing_disabled (131063) rides the template leg of the breaker: the
+  // WABA's WhatsApp Manager flag refuses every MARKETING template send, and
+  // the recovery guidance is template-side (re-enable the flag or switch
+  // templates), not "reconnect WhatsApp".
+  return code === "template_unavailable" || code === "marketing_disabled";
 }
 
 /**
@@ -3878,12 +4027,32 @@ interface BroadcastMediaState {
   /** True once an id-mode send has failed and the run fell back to links. */
   fellBack: boolean;
   disable(reason: string, broadcastId: string): void;
+  /**
+   * Presign an own-storage link with a RUN-SCOPED cache. Link-mode sends used
+   * to mint a FRESH signature per recipient, which made every recipient's URL
+   * unique — so Meta's documented 10-minute media cache (service-messages doc
+   * §media caching) never hit once, and a link-mode campaign fetched our R2
+   * bucket once per recipient. Serving the SAME URL keeps Meta's cache warm;
+   * the entry is re-minted once it ages past PRESIGN_REUSE_MS so a long
+   * campaign can never ride a signature into its 1h expiry. Two lanes racing
+   * the first mint may both presign — both URLs are valid, last write wins.
+   */
+  presignedLink(link: string): Promise<string>;
 }
+
+/**
+ * Re-mint a cached presigned link after 25 minutes. Presigns carry a 1h TTL
+ * (Meta may fetch + retry over minutes), so 25 keeps every URL Meta ever
+ * receives at least ~35 minutes from expiry, while staying far above the
+ * 10-minute cache window the reuse exists to exploit.
+ */
+const PRESIGN_REUSE_MS = 25 * 60_000;
 
 /**
  * Per-recipient carousel card values. Mirrors the header-media rule exactly:
  * a run-scoped uploaded id wins (nothing is fetched from our storage at all),
- * otherwise an own-storage link is presigned fresh for this send.
+ * otherwise an own-storage link is served from the run-scoped presign cache
+ * (stable URL → Meta's 10-minute media cache hits across recipients).
  *
  * Returns undefined when the campaign has no cards, so callers can spread it
  * away rather than putting an empty array on the wire.
@@ -3917,7 +4086,7 @@ async function buildCardsForSend(
           : {
               kind: card.kind,
               link: blobStorage.isOwnUrl(card.link)
-                ? await blobStorage.presignGetUrl(card.link)
+                ? await mediaState.presignedLink(card.link)
                 : card.link,
             },
       ...(card.body ? { body: card.body.map(resolve) } : {}),
@@ -3941,6 +4110,7 @@ async function prepareBroadcastMedia(
   broadcast: { id: string; channel: Channel; variables: Prisma.JsonValue },
   bindingByChannel: Map<Channel, ChannelBinding>,
 ): Promise<BroadcastMediaState> {
+  const presignCache = new Map<string, { url: string; mintedAt: number }>();
   const state: BroadcastMediaState = {
     mediaId: null,
     cardMediaIds: null,
@@ -3954,6 +4124,13 @@ async function prepareBroadcastMedia(
         `[broadcast ${broadcastId}] header-media id rejected (${reason}); ` +
           `falling back to per-recipient links for the rest of this run`,
       );
+    },
+    async presignedLink(link) {
+      const hit = presignCache.get(link);
+      if (hit && Date.now() - hit.mintedAt < PRESIGN_REUSE_MS) return hit.url;
+      const url = await blobStorage.presignGetUrl(link);
+      presignCache.set(link, { url, mintedAt: Date.now() });
+      return url;
     },
   };
 

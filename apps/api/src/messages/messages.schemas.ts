@@ -222,7 +222,12 @@ export const SendInteractiveSchema = z
   .object({
     conversationId: z.string().min(1),
     body: z.string().trim().min(1).max(1024),
-    kind: z.enum(["buttons", "list"]),
+    // `location_request` renders WhatsApp's own "send location" button
+    // (interactive.type "location_request_message") — it carries NO authored
+    // options, so `options` is optional and must stay EMPTY for it (refined
+    // below); buttons/list keep requiring at least one. `cta_url` likewise:
+    // one vendor-drawn URL button, configured via `ctaUrl` below.
+    kind: z.enum(["buttons", "list", "location_request", "cta_url", "carousel"]),
     options: z
       .array(
         z.object({
@@ -231,9 +236,73 @@ export const SendInteractiveSchema = z
           description: z.string().max(72).optional(),
         }),
       )
-      .min(1)
-      .max(10),
+      .max(10)
+      .default([]),
+    // `cta_url` only — the single URL-opening button (interactive.type
+    // "cta_url"): label + destination, optional text header/footer. Required
+    // for that kind, forbidden otherwise (refined below). URL is opened by
+    // the CUSTOMER's browser, never fetched by us — http(s) shape only.
+    ctaUrl: z
+      .object({
+        displayText: z.string().trim().min(1).max(20),
+        url: z.string().trim().url().max(2000).regex(/^https?:\/\//i, "must be http(s)"),
+        headerText: z.string().trim().min(1).max(60).optional(),
+        footerText: z.string().trim().min(1).max(60).optional(),
+      })
+      .optional(),
     listCtaLabel: z.string().min(1).max(20).optional(),
+    // `carousel` only — 2-10 media cards (interactive-carousel doc). Card
+    // rules: image/video header LINK required (Meta fetches it); body ≤160
+    // chars with ≤2 line breaks; EITHER one `ctaUrl` button OR 1-3
+    // `quickReplies` — and the variant + button COUNT must be uniform across
+    // cards (Meta rejects mixed carousels; refined below). The doc states no
+    // explicit quick-reply max — 3 matches the reply-buttons ceiling and
+    // keeps a clean 400 here instead of an opaque Meta error.
+    carouselCards: z
+      .array(
+        z
+          .object({
+            headerMedia: z.object({
+              kind: z.enum(["image", "video"]),
+              link: z.string().trim().url().max(2048).regex(/^https?:\/\//i, "must be http(s)"),
+            }),
+            body: z
+              .string()
+              .trim()
+              .min(1)
+              .max(160)
+              .refine((t) => (t.match(/\n/g) ?? []).length <= 2, {
+                message: "card body allows at most 2 line breaks",
+              })
+              .optional(),
+            ctaUrl: z
+              .object({
+                displayText: z.string().trim().min(1).max(20),
+                url: z.string().trim().url().max(2000).regex(/^https?:\/\//i, "must be http(s)"),
+              })
+              .optional(),
+            quickReplies: z
+              .array(
+                z.object({
+                  id: z.string().min(1).max(256),
+                  title: z.string().min(1).max(20),
+                }),
+              )
+              .min(1)
+              .max(3)
+              .optional(),
+          })
+          .refine((c) => Boolean(c.ctaUrl) !== Boolean(c.quickReplies), {
+            message: "each card needs exactly one of ctaUrl or quickReplies",
+          }),
+      )
+      .min(2)
+      .max(10)
+      .optional(),
+    // Buttons + list — optional text header/footer (reply-buttons +
+    // interactive-list docs; both ≤60 chars, text headers only today).
+    headerText: z.string().trim().min(1).max(60).optional(),
+    footerText: z.string().trim().min(1).max(60).optional(),
     // One-tap "share your phone / email" consent chips. Messenger + Instagram
     // only (capability `contactShareChips`); the send helper rejects the rest.
     // Meta renders these beside the options and pre-fills them from the
@@ -253,6 +322,58 @@ export const SendInteractiveSchema = z
   })
   .refine((b) => b.kind !== "buttons" || b.options.length <= 3, {
     message: "buttons supports at most 3 options — use kind=list for more",
+  })
+  .refine((b) => ["location_request", "cta_url", "carousel"].includes(b.kind) || b.options.length >= 1, {
+    message: "at least one option is required",
+  })
+  .refine((b) => !["location_request", "cta_url", "carousel"].includes(b.kind) || b.options.length === 0, {
+    message: "this kind carries no options — WhatsApp renders the button",
+  })
+  .refine(
+    // LIST row ids cap at 200 (interactive-list-messages doc) vs 256 for
+    // button reply ids. Enforced at authoring time — the provider refuses to
+    // truncate (a truncated id silently breaks reply matching).
+    (b) => b.kind !== "list" || b.options.every((o) => o.id.length <= 200),
+    { message: "list row ids cap at 200 characters" },
+  )
+  .refine((b) => b.kind !== "carousel" || b.carouselCards !== undefined, {
+    message: "carousel requires carouselCards (2-10 cards)",
+  })
+  .refine((b) => b.kind === "carousel" || b.carouselCards === undefined, {
+    message: "carouselCards is only valid with kind carousel",
+  })
+  .refine(
+    // Uniformity across cards: all-ctaUrl or all-quickReplies, and equal
+    // quick-reply counts (the doc: "button types and numbers must match").
+    (b) => {
+      const cards = b.carouselCards;
+      if (b.kind !== "carousel" || !cards) return true;
+      const urlCount = cards.filter((c) => c.ctaUrl).length;
+      if (urlCount !== 0 && urlCount !== cards.length) return false;
+      if (urlCount === 0) {
+        const n = cards[0]?.quickReplies?.length ?? 0;
+        return cards.every((c) => (c.quickReplies?.length ?? 0) === n);
+      }
+      return true;
+    },
+    { message: "button type and count must match across all cards", },
+  )
+  .refine(
+    // Quick-reply ids must be unique across the WHOLE carousel — the reply
+    // webhook carries only the id, so a duplicate is unroutable.
+    (b) => {
+      const ids = (b.carouselCards ?? []).flatMap((c) =>
+        (c.quickReplies ?? []).map((q) => q.id),
+      );
+      return new Set(ids).size === ids.length;
+    },
+    { message: "quick-reply ids must be unique across all cards", },
+  )
+  .refine((b) => b.kind !== "cta_url" || b.ctaUrl !== undefined, {
+    message: "cta_url requires ctaUrl { displayText, url }",
+  })
+  .refine((b) => b.kind === "cta_url" || b.ctaUrl === undefined, {
+    message: "ctaUrl is only valid with kind cta_url",
   })
   .refine(
     (b) => new Set(b.options.map((o) => o.id)).size === b.options.length,

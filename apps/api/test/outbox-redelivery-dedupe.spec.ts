@@ -198,7 +198,10 @@ describe("ConversationEvent.eventKey", () => {
     return convo.id;
   }
 
-  it("rejects a duplicate pill from a replayed row but allows one pill PER TAG", async () => {
+  // 30s: DB-backed writes against the shared dev database can crawl when the
+  // full suite's 50 parallel files contend for the pool — observed >5.3s under
+  // load (same class as call-csw-window.spec's sweep timeout).
+  it("rejects a duplicate pill from a replayed row but allows one pill PER TAG", { timeout: 30_000 }, async () => {
     const conversationId = await seedConversation();
     const base = {
       conversationId,

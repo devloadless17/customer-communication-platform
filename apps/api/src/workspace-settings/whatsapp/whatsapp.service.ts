@@ -698,6 +698,60 @@ export class WhatsappService {
   }
 
   /**
+   * Toggle button-click tracking on one template (Meta's
+   * `cta_url_link_tracking_opted_out`). `enabled` speaks the operator's
+   * language — "track clicks: on/off" — and is inverted to Meta's opt-OUT
+   * flag here, in exactly one place.
+   *
+   * Meta requires the template's CURRENT category on the request; it is read
+   * from the stored row and passed through verbatim, because sending a
+   * different value flips the template back into review.
+   */
+  async setTemplateLinkTracking(
+    workspaceId: string,
+    templateId: string,
+    enabled: boolean,
+  ): Promise<{ linkTrackingOptedOut: boolean }> {
+    const row = await this.db.messageTemplate.findFirst({
+      where: { id: templateId, workspaceId },
+      select: { externalId: true, wabaId: true, category: true },
+    });
+    if (!row) throw new NotFoundException({ error: "template_not_found" });
+    if (!row.externalId) {
+      throw new BadRequestException({ error: "template_not_synced" });
+    }
+
+    const config = await this.templateOpConfig(workspaceId, { wabaId: row.wabaId || null });
+    const provider = getMetaProvider();
+    if (!provider.setTemplateLinkTracking) {
+      throw new HttpException({ error: "provider_does_not_support_link_tracking" }, 501);
+    }
+    const optedOut = !enabled;
+    try {
+      await provider.setTemplateLinkTracking(
+        { externalId: row.externalId, optedOut, category: row.category },
+        config,
+      );
+    } catch (err) {
+      this.throwIfMissingWaba(err);
+      this.throwIfMetaSendError(err);
+      this.logger.error("template link-tracking toggle failed", err);
+      throw new BadGatewayException({
+        error: "link_tracking_toggle_failed",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    // Mirror locally only AFTER Meta accepted — the stored flag is what the
+    // insights UI reads to explain an empty click series.
+    await this.db.messageTemplate.updateMany({
+      where: { id: templateId, workspaceId },
+      data: { linkTrackingOptedOut: optedOut },
+    });
+    return { linkTrackingOptedOut: optedOut };
+  }
+
+  /**
    * Head-to-head comparison of two templates.
    *
    * Every one of Meta's constraints is checked HERE, before the Graph call,
@@ -2424,6 +2478,7 @@ function toTemplateDto(row: {
   qualityScore: string | null;
   qualityScoreAt: Date | null;
   libraryTemplateName: string | null;
+  linkTrackingOptedOut: boolean | null;
   bodyText: string;
   components: Prisma.JsonValue;
   variableBindings: Prisma.JsonValue;
@@ -2455,6 +2510,7 @@ function toTemplateDto(row: {
     qualityScore: row.qualityScore,
     qualityScoreAt: row.qualityScoreAt?.toISOString() ?? null,
     libraryTemplateName: row.libraryTemplateName,
+    linkTrackingOptedOut: row.linkTrackingOptedOut,
     messageSendTtlSeconds: row.messageSendTtlSeconds,
     bodyText: row.bodyText,
     components: Array.isArray(row.components)

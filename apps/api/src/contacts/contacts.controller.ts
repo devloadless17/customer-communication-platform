@@ -20,6 +20,8 @@ import type { Response } from "express";
 import { resolvePermissions } from "@ccp/shared/auth/permissions";
 
 import { contactAvatarObjectKey } from "../lib/blob-storage/avatar";
+import { setContactBlocked } from "../lib/messaging/block-contact";
+import { mapBlockContactError } from "../common/block-contact-http";
 import { streamBlob } from "../media/stream-blob";
 import { RequireCapability } from "../auth/capability.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
@@ -57,6 +59,8 @@ import { ContactsService } from "./contacts.service";
  *   PATCH  /api/contacts/:id            — partial update (publishes contact.updated)
  *   DELETE /api/contacts/:id            — hard delete + blob cleanup
  *   PUT    /api/contacts/:id/tags       — replace tag set
+ *   POST   /api/contacts/:id/block      — block at the provider (WhatsApp Block Users API)
+ *   POST   /api/contacts/:id/unblock    — lift the provider block
  *
  * Route order in this file is by URL specificity (static paths above :id
  * paths). Express matches in registration order; even though no HTTP-verb
@@ -241,5 +245,43 @@ export class ContactsController {
       body,
     );
     return { ok: true, tagIds: out.tagIds };
+  }
+
+  /**
+   * Block / unblock this contact at the provider (WhatsApp Block Users API).
+   * The provider is called first and the local mirror only flips on success,
+   * so `blockedAt` never claims a block Meta doesn't enforce. Meta constraint:
+   * blocking needs an inbound within the last 24h (`reengagement_required`).
+   */
+  @Post(":id/block")
+  @HttpCode(200)
+  async block(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+  ) {
+    return this.setBlocked(session, id, true);
+  }
+
+  @Post(":id/unblock")
+  @HttpCode(200)
+  async unblock(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+  ) {
+    return this.setBlocked(session, id, false);
+  }
+
+  private async setBlocked(session: ApiSession, id: string, blocked: boolean) {
+    try {
+      const contact = await setContactBlocked({
+        workspaceId: session.workspaceId,
+        contactId: id,
+        blocked,
+        userId: session.userId,
+      });
+      return { contact };
+    } catch (err) {
+      throw mapBlockContactError(err);
+    }
   }
 }

@@ -1737,6 +1737,7 @@ function MessageThreadImpl({
         contactId={contact.id}
         contactName={contact.name}
         contactAvatarUrl={contact.avatarUrl ?? null}
+        contactBlockedAt={contact.blockedAt ?? null}
         phone={contact.phoneNumber}
         status={conversation.status}
         assignedUserId={assignedUser?.id ?? null}

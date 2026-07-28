@@ -243,6 +243,14 @@ export interface Contact {
    */
   callPermissionRevokedUntil?: string | null;
   /**
+   * When set, the workspace has BLOCKED this contact on its channel (WhatsApp
+   * Block Users API today): the person can no longer message the business, and
+   * every outbound send to them is rejected by the provider. Drives the inbox
+   * reply-box lock + the Block/Unblock menu action; cleared by unblocking.
+   * ISO 8601, or null/undefined when not blocked.
+   */
+  blockedAt?: string | null;
+  /**
    * How many business-initiated calls in a row this customer hasn't answered.
    * Resets on any connected call in either direction.
    *
@@ -500,6 +508,12 @@ export interface TemplateDto {
    * that the COPY IS FIXED — the editor must not offer to change it.
    */
   libraryTemplateName: string | null;
+  /**
+   * True = button-click tracking is DISABLED on this template (Meta's
+   * `cta_url_link_tracking_opted_out`), so an empty click series is a choice,
+   * not a bug. Null = Meta hasn't reported the flag yet.
+   */
+  linkTrackingOptedOut: boolean | null;
   syncedAt: string;
 }
 
@@ -854,7 +868,12 @@ export type ConversationEventKind =
   | "ticket_opened"
   | "ticket_solved"
   | "ticket_reopened"
-  | "ticket_closed";
+  | "ticket_closed"
+  // Provider-level block/unblock (WhatsApp Block Users API). `after` carries
+  // { contactId }; the actor rides the standard attribution columns. The pill
+  // explains the locked composer to anyone reading the thread later.
+  | "contact_blocked"
+  | "contact_unblocked";
 
 /**
  * Who triggered the change.
@@ -1088,6 +1107,19 @@ export interface CallSnapshot {
   answeredAt: string | null;
   endedAt: string | null;
   durationSeconds: number | null;
+  /**
+   * Call artifacts (recording / transcript). OPTIONAL because live socket
+   * frames build snapshots before artifacts exist — they arrive ~1min after
+   * the call ends and resolve on the next thread hydrate, the same
+   * eventual-refetch pattern the attribution fields use.
+   */
+  hasRecording?: boolean;
+  hasTranscript?: boolean;
+  /** Auto-detected spoken language of the transcript (ISO 639, e.g. "ar"). */
+  transcriptLanguage?: string | null;
+  /** Why a FAILED call failed, from the provider's terminate webhook (e.g.
+   *  "Media receive timeout"). Hydrate-only like the artifact fields. */
+  errorTitle?: string | null;
 }
 
 /** Patch shape accepted by `PATCH /api/contacts/[id]`. All fields optional. */

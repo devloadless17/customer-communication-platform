@@ -65,7 +65,14 @@ export class SendTextValidationError extends Error {
     | "contact_share_not_supported"
     // Reaction target message not found / has no provider id yet (outbound
     // reaction path).
-    | "message_not_found";
+    | "message_not_found"
+    // Reaction target older than WhatsApp's 30-day horizon — Meta would accept
+    // the send and drop it with an ASYNC 131009 nobody sees (outbound
+    // reaction path; see send-reaction-internal.ts).
+    | "message_too_old"
+    // The workspace blocked this contact (Block Users API) — the provider
+    // rejects every send to them, so refuse up front with the reason.
+    | "contact_blocked";
   detail?: string;
 
   constructor(
@@ -108,6 +115,7 @@ export async function sendTextInternal(
           identityChannel: true,
           externalContactId: true,
           lastInboundAt: true,
+          blockedAt: true,
         },
       },
     },
@@ -116,6 +124,13 @@ export async function sendTextInternal(
     throw new SendTextValidationError(
       "conversation_not_found",
       "conversation not found",
+    );
+  }
+  if (conversation.contact.blockedAt) {
+    throw new SendTextValidationError(
+      "contact_blocked",
+      "contact_blocked",
+      "This contact is blocked. Unblock them to send messages.",
     );
   }
 

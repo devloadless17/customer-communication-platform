@@ -13,7 +13,11 @@ import {
   NoChannelDestinationError,
   resolveContactChannel,
 } from "@/lib/providers/channel";
-import { ProviderNotConfiguredError } from "@/lib/providers/config";
+import {
+  getBusinessNumberCountry,
+  ProviderNotConfiguredError,
+} from "@/lib/providers/config";
+import { isBicAllowedForBusinessNumber } from "@ccp/shared/providers/calling-regions";
 import type { Message } from "@ccp/shared/types";
 import type { ContactShareField, InteractiveOption } from "@ccp/shared/providers/types";
 import {
@@ -40,10 +44,26 @@ export interface SendInteractiveInternalArgs {
   workspaceId: string;
   conversationId: string;
   bodyText: string;
-  kind: "buttons" | "list" | "voice_call";
+  kind: "buttons" | "list" | "voice_call" | "location_request" | "cta_url" | "carousel";
+  /** Empty for `voice_call` / `location_request` / `cta_url` — those render a
+   *  single vendor-drawn CTA instead of authored options. */
   options: InteractiveOption[];
+  /** `cta_url` only — button label + URL (+ optional text header/footer).
+   *  Shape documented on SendInteractiveArgs. */
+  ctaUrl?: { displayText: string; url: string; headerText?: string; footerText?: string };
+  /** `carousel` only — 2-10 media cards. Shape + rules on SendInteractiveArgs;
+   *  uniformity/caps enforced by the request schemas. */
+  carouselCards?: Array<{
+    headerMedia: { kind: "image" | "video"; link: string };
+    body?: string;
+    ctaUrl?: { displayText: string; url: string };
+    quickReplies?: Array<{ id: string; title: string }>;
+  }>;
   listCtaLabel?: string;
   listSectionTitle?: string;
+  /** Buttons + list — optional text header / footer (≤60 each). */
+  headerText?: string;
+  footerText?: string;
   /** WhatsApp call-button CTA. Only meaningful with `kind: "voice_call"`,
    *  which carries no `options`. */
   voiceCall?: { displayText?: string; ttlMinutes?: number; payload?: string };
@@ -95,12 +115,20 @@ export async function sendInteractiveInternal(
           identityChannel: true,
           externalContactId: true,
           lastInboundAt: true,
+          blockedAt: true,
         },
       },
     },
   });
   if (!conversation) {
     throw new SendTextValidationError("conversation_not_found", "conversation not found");
+  }
+  if (conversation.contact.blockedAt) {
+    throw new SendTextValidationError(
+      "contact_blocked",
+      "contact_blocked",
+      "This contact is blocked. Unblock them to send messages.",
+    );
   }
 
   let channel;
@@ -188,6 +216,60 @@ export async function sendInteractiveInternal(
     );
   }
 
+  // Location requests are WhatsApp's interactive type
+  // ("location_request_message"); the social channels have no equivalent and
+  // their providers would reject the kind. Same capability-not-channel-name
+  // rule as the chips gate above.
+  if (
+    args.kind === "location_request" &&
+    !binding.provider.capabilities.locationRequest
+  ) {
+    throw new SendTextValidationError(
+      "provider_not_configured",
+      "location_request_not_supported",
+      `${channel.channel} cannot request a contact's location`,
+    );
+  }
+
+  // Same rule for the URL button ("cta_url") — WhatsApp only today.
+  if (args.kind === "cta_url" && !binding.provider.capabilities.ctaUrlButton) {
+    throw new SendTextValidationError(
+      "provider_not_configured",
+      "cta_url_not_supported",
+      `${channel.channel} cannot send a URL button message`,
+    );
+  }
+
+  // Same rule for interactive carousels — WhatsApp only today.
+  if (args.kind === "carousel" && !binding.provider.capabilities.interactiveCarousel) {
+    throw new SendTextValidationError(
+      "provider_not_configured",
+      "carousel_not_supported",
+      `${channel.channel} cannot send a media carousel message`,
+    );
+  }
+
+  // A call button obeys the business-initiated-calling region rule — Meta
+  // rejects the SEND itself with a cryptic 131009 ("voice_call not
+  // supported") when the business number's country is calling-blocked
+  // (troubleshooting doc). Pre-flight with the same authority the place-call
+  // gauntlet uses, on the thread's own number, so the agent gets a sentence
+  // instead of a mystery. Conservative on null (unknown country ⇒ let the
+  // provider decide), same as the gauntlet.
+  if (args.kind === "voice_call" && channel.channel === "whatsapp") {
+    const businessCountry = await getBusinessNumberCountry(
+      args.workspaceId,
+      conversation.channelConnectionId,
+    );
+    if (!isBicAllowedForBusinessNumber(businessCountry)) {
+      throw new SendTextValidationError(
+        "provider_not_configured",
+        "call_button_region_blocked",
+        `WhatsApp doesn't offer business calling for ${businessCountry ?? "this"} numbers, so a call button can't be sent from this number.`,
+      );
+    }
+  }
+
   const send = await sendInteractive(
     {
       to: channel.to,
@@ -196,9 +278,13 @@ export async function sendInteractiveInternal(
       options: args.options,
       useHumanAgentTag,
       ...(args.voiceCall ? { voiceCall: args.voiceCall } : {}),
+      ...(args.ctaUrl ? { ctaUrl: args.ctaUrl } : {}),
+      ...(args.carouselCards ? { carouselCards: args.carouselCards } : {}),
       ...(contactShare.length > 0 ? { contactShare } : {}),
       ...(args.listCtaLabel ? { listCtaLabel: args.listCtaLabel } : {}),
       ...(args.listSectionTitle ? { listSectionTitle: args.listSectionTitle } : {}),
+      ...(args.headerText ? { headerText: args.headerText } : {}),
+      ...(args.footerText ? { footerText: args.footerText } : {}),
     },
     sendConfig,
   );
@@ -224,6 +310,8 @@ export async function sendInteractiveInternal(
       kind: args.kind,
       options: args.options.map((o) => ({ id: o.id, title: o.title })),
       ...(args.voiceCall ? { voiceCall: args.voiceCall } : {}),
+      ...(args.ctaUrl ? { ctaUrl: args.ctaUrl } : {}),
+      ...(args.carouselCards ? { carouselCards: args.carouselCards } : {}),
       ...(contactShare.length > 0 ? { contactShare } : {}),
     },
   };

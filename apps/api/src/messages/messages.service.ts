@@ -25,11 +25,16 @@ import {
   MEDIA_SIZE_CAPS,
   META_DOCUMENT_MIME_ALLOWED,
   mediaPolicyForChannel,
+  isAnimatedWebp,
   kindFromMime,
   normalizeMimeType,
 } from "@/lib/media-storage";
-import { channelSupportsMediaKind } from "@ccp/shared/providers/media-caps";
+import {
+  WHATSAPP_STATIC_STICKER_MAX_BYTES,
+  channelSupportsMediaKind,
+} from "@ccp/shared/providers/media-caps";
 import { transcodeToM4a, transcodeToOggOpus, VOICE_IOS_PROFILE } from "@/lib/media/audio-transcode";
+import { ensureWhatsappPlayableVideo } from "@/lib/media/video-transcode";
 import {
   consumeConversationSendBudget,
   ConversationSendRateLimitedError,
@@ -1809,6 +1814,26 @@ export class MessagesService {
     // `.m4a` name on transcoded ogg bytes makes it reject as octet-stream.
     let filename = file.originalname || "upload";
 
+    // WhatsApp splits the sticker cap by KIND — animated 500 KB, static
+    // 100 KB (sticker-messages doc) — which the coarse per-kind table can't
+    // express (it carries the 500 KB animated ceiling). The mime is identical
+    // either way, so the answer lives in the webp container header: sniff it
+    // now that the bytes are readable, and hold a STATIC sticker to its own
+    // ceiling here instead of letting Meta reject it after the upload.
+    if (
+      kind === "sticker" &&
+      provider === "whatsapp" &&
+      bytes.length > WHATSAPP_STATIC_STICKER_MAX_BYTES &&
+      !isAnimatedWebp(bytes)
+    ) {
+      throw new UnprocessableEntityException({
+        error: "media_too_large",
+        detail:
+          `WhatsApp caps static stickers at 100 KB (this one is ${Math.ceil(bytes.length / 1024)} KB; ` +
+          "only animated stickers get 500 KB). Compress the .webp and try again.",
+      });
+    }
+
     // Voice notes must be ogg/opus to DELIVER on WhatsApp. Firefox records that
     // natively; Chrome/Safari can only record audio/mp4, which Meta accepts then
     // fails to DELIVER. Transcode genuine recordings (`form.voice` is the FE's
@@ -1883,6 +1908,29 @@ export class MessagesService {
       this.logger.log(
         `audio send: recording=${isRecording} mime=${mimeType} iosProfile=${VOICE_IOS_PROFILE} voiceNote=${willSendAsVoice}`,
       );
+    }
+
+    // WhatsApp video codec conformance (video-messages doc). The mime gate
+    // above only sees the container — Meta requires H.264 + AAC (≤1 audio
+    // stream), and H.264 High-profile-with-B-frames uploads FINE but Android
+    // recipients can't play it: the worst silent-failure class (wamid
+    // returned, message "delivered", video dead on most phones). The funnel
+    // (lib/media/video-transcode.ts) remuxes conforming files with
+    // +faststart, re-encodes non-conforming ones to the doc's recommended
+    // profile, and only when THAT fails do we reject — with the reason —
+    // rather than knowingly ship an unplayable video. `.3gp` passes through
+    // (doc-supported as-is); channels other than WhatsApp have laxer codecs.
+    if (kind === "video" && provider === "whatsapp" && mimeType === "video/mp4") {
+      const ensured = await ensureWhatsappPlayableVideo(bytes);
+      if (!ensured.ok) {
+        throw new UnprocessableEntityException({
+          error: "video_codec_unsupported",
+          detail:
+            `This video can't be sent on WhatsApp: ${ensured.reason}. ` +
+            "Re-export it as H.264 (Main or Baseline profile) with AAC audio and try again.",
+        });
+      }
+      if (ensured.changed) bytes = ensured.bytes;
     }
 
     const toPhone = channel.to;
@@ -3116,7 +3164,11 @@ export class MessagesService {
         bodyText: input.body,
         kind: input.kind,
         options: input.options,
+        ...(input.ctaUrl ? { ctaUrl: input.ctaUrl } : {}),
+        ...(input.carouselCards ? { carouselCards: input.carouselCards } : {}),
         ...(input.listCtaLabel ? { listCtaLabel: input.listCtaLabel } : {}),
+        ...(input.headerText ? { headerText: input.headerText } : {}),
+        ...(input.footerText ? { footerText: input.footerText } : {}),
         ...(input.contactShare?.length ? { contactShare: input.contactShare } : {}),
         senderUserId: userId,
         sentVia: "api/messages/interactive",
@@ -3357,6 +3409,9 @@ const TEMPLATE_ERROR_STATUS: Record<SendTemplateValidationError["code"], number>
   limited_time_offer_expiry_required: 400,
   carousel_cards_required: 400,
   contact_has_no_phone: 400,
+  // The workspace blocked this contact — every provider send would be
+  // rejected. Same shape as the other pre-flight refusals: actionable 400.
+  contact_blocked: 400,
   provider_not_configured: 409,
   provider_no_template_support: 501,
 };

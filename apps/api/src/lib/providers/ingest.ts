@@ -19,6 +19,7 @@ import {
   createOutboundMessageIdempotentDetailed,
 } from "@/lib/messages/idempotent-create";
 import { ingestCallEvent } from "@/lib/providers/ingest-call";
+import { reconcileCanonicalWaId } from "@/lib/identity/canonical-wa-id";
 import { syncTemplateCatalog } from "@/lib/templates/catalog-sync";
 import { resumeOnReopen } from "@/lib/ai/conversation-state";
 import { routeMessageToTicket } from "@/lib/tickets/mutations";
@@ -180,8 +181,14 @@ export async function ingestEvents(
       } else if (evt.kind === "marketing_preference") {
         // Marketing opt-out / resume from Meta. Resolve the contact by phone
         // within this team, then set or clear consent.
+        // EXACT match, deliberately. Both sides are digits-only through the
+        // one normalizer (wa_id wire shape), and this toggles CONSENT — the
+        // old `contains` could cross-match ("1234567890" is a substring of
+        // "11234567890") and flip the wrong contact's opt-out. A miss fails
+        // closed (no-op), and the wa_id-vs-stored-digits divergence cases
+        // (BR/MX prefixes) are the canonical-wa-id reconciler's job now.
         const contact = await db.contact.findFirst({
-          where: { workspaceId, phoneNumber: { contains: evt.contactPhone }, deletedAt: null },
+          where: { workspaceId, phoneNumber: evt.contactPhone, deletedAt: null },
           select: { id: true },
         });
         if (contact) {
@@ -204,17 +211,45 @@ export async function ingestEvents(
             ...(evt.wabaId ? { wabaId: evt.wabaId } : {}),
           }));
         if (nameTarget) {
-          const approved = evt.decision === "APPROVED";
+          // Meta's DECISION vocabulary (phone-number-name-update reference:
+          // APPROVED | REJECTED | PENDING | DEFERRED) maps onto name_status's
+          // richer set. The old binary mapping branded a merely-PENDING review
+          // as DECLINED — an alarming false "no certificate" state while Meta
+          // was still deciding. An unknown future decision writes NOTHING
+          // (never-clobber; the periodic Graph poll remains the reconciler).
+          const decision = evt.decision.toUpperCase();
+          const nameStatus =
+            decision === "APPROVED"
+              ? "APPROVED"
+              : decision === "REJECTED"
+                ? "DECLINED"
+                : decision === "PENDING" || decision === "DEFERRED"
+                  ? "PENDING_REVIEW"
+                  : null;
+          const approved = decision === "APPROVED";
           await db.channelConnection.updateMany({
             where: { id: nameTarget, workspaceId, channel: "whatsapp" },
             data: {
-              // Meta's decision vocabulary maps onto name_status's:
-              // APPROVED → APPROVED; REJECTED → DECLINED.
-              nameStatus: approved ? "APPROVED" : "DECLINED",
+              ...(nameStatus ? { nameStatus } : {}),
               // Only an approval changes the live name; a rejection keeps the
               // previous verified name in service.
               ...(approved && evt.requestedVerifiedName
                 ? { verifiedName: evt.requestedVerifiedName }
+                : {}),
+              // A rejection's WHY (NAME_EMPLOYEE_ISSUE, NAME_NOT_CONSISTENT, …)
+              // is the operator's fix guidance — stamp it as this number's
+              // last-alert so the health panel explains the DECLINED badge.
+              ...(decision === "REJECTED"
+                ? {
+                    lastAccountAlert: {
+                      source: "phone_number_name_update",
+                      event: evt.rejectionReason ?? "REJECTED",
+                      detail: `Display name "${evt.requestedVerifiedName ?? "(unknown)"}" was rejected${evt.rejectionReason ? ` (${evt.rejectionReason})` : ""} — edit it in WhatsApp Manager per the display-name guidelines.`,
+                      // Same field name persistWhatsappHealth stamps, so the
+                      // slot's shape is uniform whichever path wrote it.
+                      observedAt: new Date().toISOString(),
+                    } as Prisma.InputJsonValue,
+                  }
                 : {}),
             },
           });
@@ -235,6 +270,7 @@ export async function ingestEvents(
         const healthTarget =
           channelConnectionId ??
           (await resolveWhatsappHealthAccount(workspaceId, {
+            ...(evt.phoneNumberId ? { phoneNumberId: evt.phoneNumberId } : {}),
             ...(evt.displayPhoneNumber
               ? { displayPhoneNumber: evt.displayPhoneNumber }
               : {}),
@@ -263,6 +299,19 @@ export async function ingestEvents(
             ? {
                 utilityRestrictionType: evt.utilityRestrictionType,
                 utilityRestrictedUntil: evt.utilityRestrictedUntil ?? null,
+              }
+            : {}),
+          ...(evt.bizMessagingRestrictionType !== undefined
+            ? {
+                bizMessagingRestrictionType: evt.bizMessagingRestrictionType,
+                bizMessagingRestrictedUntil: evt.bizMessagingRestrictedUntil ?? null,
+              }
+            : {}),
+          ...(evt.customerMessagingRestrictionType !== undefined
+            ? {
+                customerMessagingRestrictionType: evt.customerMessagingRestrictionType,
+                customerMessagingRestrictedUntil:
+                  evt.customerMessagingRestrictedUntil ?? null,
               }
             : {}),
           ...(evt.accountAlert !== undefined ? { accountAlert: evt.accountAlert } : {}),
@@ -586,12 +635,13 @@ async function ingestMessageCorrection(
   });
   // Correction for a message we never stored — nothing to patch.
   if (!target) return;
-  // A customer edit/unsend applies ONLY to their own (inbound) message — never
-  // to one WE sent. Mirrors the `direction !== "out"` guard on ingestStatusUpdate
-  // (added the inverse-direction protection there); without this, a malformed/
-  // replayed correction whose target wamid/mid resolves to an agent's outbound
-  // row would silently tombstone or rewrite a sent message.
-  if (target.direction !== "in") return;
+  // Direction PIN. A customer edit/unsend applies ONLY to their own (inbound)
+  // message — never to one WE sent — and, symmetrically, an owner-echo
+  // correction (Coexistence Business-App revoke/edit, expectedDirection:"out")
+  // applies only to OUTBOUND rows and must never tombstone a customer's
+  // message. Without the pin, a malformed/replayed correction whose target
+  // wamid resolves to the other side's row would silently rewrite it.
+  if (target.direction !== (evt.expectedDirection ?? "in")) return;
   // Already tombstoned (re-delivery) — skip write + fanout.
   if (evt.action === "delete" && target.deletedAt) return;
 
@@ -915,7 +965,11 @@ async function ingestStatusUpdate(
       // extra lookup and no index on the wamid. Null for every ordinary send,
       // which is what makes the propagation free for non-broadcast traffic.
       broadcastId: true,
-      conversation: { select: { contactId: true } },
+      // contact.phoneNumber rides the same read so the canonical-wa_id
+      // mismatch check below costs nothing on the (overwhelming) match case.
+      conversation: {
+        select: { contactId: true, contact: { select: { phoneNumber: true } } },
+      },
     },
   });
   // Status arriving for an unknown message: classic race where Meta delivers
@@ -938,6 +992,29 @@ async function ingestStatusUpdate(
   // read receipts target a specific `mid`; guard against a mid ever resolving to
   // an inbound row so a status write can't corrupt a customer message.
   if (existing.direction !== "out") return;
+
+  // Canonical-recipient reconcile: Meta's `recipient_id` is the wa_id it
+  // actually delivered to, and for some regions (Brazil's mobile "9",
+  // Mexico's legacy "1") it differs from the number we dialed. Left alone,
+  // the customer's REPLY — which arrives FROM that wa_id — forks a duplicate
+  // contact + thread. The equality check is free (phone rides the select
+  // above); the reconcile itself fires only on a true mismatch, and is
+  // fire-and-forget like the broadcast propagation below — an identity
+  // normalization must never cost us a delivery receipt.
+  if (
+    channel === "whatsapp" &&
+    evt.recipientId &&
+    existing.conversation.contact.phoneNumber &&
+    existing.conversation.contact.phoneNumber !== evt.recipientId
+  ) {
+    void reconcileCanonicalWaId(
+      workspaceId,
+      existing.conversation.contactId,
+      evt.recipientId,
+    ).catch((err) => {
+      console.error("[ingest] canonical wa_id reconcile failed", err);
+    });
+  }
 
   // Campaign reporting: mirror this delivery outcome onto the broadcast's
   // recipient row. Before this existed, a message Meta accepted and then failed
@@ -1015,6 +1092,32 @@ async function ingestStatusUpdate(
   }
   if (written.count === 0) return;
 
+  // 130403 = this business has BLOCKED the recipient (Block Users API). Seeing
+  // it on a status webhook means the blocklist was changed OUTSIDE the app
+  // (WhatsApp Manager) — mirror it onto the contact so the reply-box lock,
+  // broadcast suppression, and the send guards reflect reality instead of
+  // letting every subsequent send fail with the same error. Backstop only:
+  // in-app blocks stamp `blockedAt` at block time. Guarded on `blockedAt:
+  // null` so a redelivered status can't move an existing block's timestamp,
+  // and fire-safe like the 131049/131050 mirrors — bookkeeping must never
+  // cost us the status write (Meta would redeliver the whole batch).
+  if (evt.status === "failed" && evt.errorCode === 130403) {
+    await db.contact
+      .updateMany({
+        where: {
+          workspaceId,
+          id: existing.conversation.contactId,
+          blockedAt: null,
+        },
+        data: { blockedAt: evt.timestamp ?? new Date() },
+      })
+      .catch((err) => {
+        console.warn(
+          `[status] could not mirror provider block for contact ${existing.conversation.contactId}:`,
+          err instanceof Error ? err.message : err,
+        );
+      });
+  }
 
   await publish({
     type: "message.status_changed",
@@ -2821,7 +2924,10 @@ async function ingestOutboundEcho(
         body: evt.body,
         direction: "out",
         channel,
-        status: "sent",
+        // History backfill stamps the state the message already earned
+        // (history_context.status) so old echoes show their real ticks; live
+        // echoes carry no status and default to "sent" as before.
+        status: evt.status ?? "sent",
         rawPayload: evt.rawPayload as Prisma.InputJsonValue,
         timestamp: messageTimestamp,
         ...(evt.media

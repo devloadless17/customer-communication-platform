@@ -13,7 +13,12 @@ import type IORedis from "ioredis";
 
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
-import { MetaSendError, normalizeMetaSendError } from "@/lib/providers/meta";
+import {
+  MetaSendError,
+  isPairRateLimitBody,
+  isPairRateLimitError,
+  normalizeMetaSendError,
+} from "@/lib/providers/meta";
 import { flagChannelNeedsReconnect, clearChannelNeedsReconnect } from "@/lib/providers/channel-health";
 import { createWorkerConnection } from "@/lib/workflows/queue";
 
@@ -115,8 +120,10 @@ function deferDelayMs(gen: number): number {
  * 200 ms-each sends well under that ceiling. Bumping concurrency higher risks
  * tripping Meta's pacing.
  *
- * Retry policy: BullMQ retries 3× on exponential backoff (configured at queue
- * creation). We classify errors first: transient (network, 5xx, "rate_limited"
+ * Retry policy: BullMQ retries 3× with spacing from the custom backoffStrategy
+ * below — 1.5s exponential for transient errors, a full 7s pair-limit token
+ * period when Meta answered 131056. We classify errors first: transient
+ * (network, 5xx, "rate_limited"
  * with a Retry-After) → re-throw so BullMQ retries; permanent (24h closed,
  * auth_expired, unrecoverable Meta 4xx) → `UnrecoverableError` so BullMQ
  * stops immediately. In either case we publish `message.send_failed` first
@@ -216,6 +223,19 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
         // then surface as a stuck-sent ghost in the UI).
         stalledInterval: 30_000,
         maxStalledCount: 3,
+        // Jobs enqueue with `backoff: {type:"custom"}` (send-queue.ts), which
+        // routes retry SPACING here. Two schedules:
+        //  - pair limit (WhatsApp 131056): flat 7s. The limit refills one send
+        //    per 6s to the same person, so the old 1.5s/3s retries both landed
+        //    inside the refill window — three guaranteed-failed attempts and a
+        //    red bubble for a message that would have sent 4s later. 7s puts
+        //    each retry past a full token period.
+        //  - everything else: 1500 × 2^(n−1) — byte-identical to the
+        //    `exponential` schedule this queue always used.
+        settings: {
+          backoffStrategy: (attemptsMade: number, _type?: string, err?: Error) =>
+            sendBackoffDelayMs(attemptsMade, err),
+        },
       },
     );
     this.worker = worker;
@@ -419,6 +439,36 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
       throw err;
     }
   }
+}
+
+/**
+ * Pair-limit (131056) detection across BOTH error shapes the worker sees: the
+ * raw `MetaSendError`, and the executor's HTTP re-wrap whose response `detail`
+ * carries the raw Meta body slice (the same duck-typing categorizeSendError
+ * uses for the wrapped shape). Drives the backoffStrategy above — spacing
+ * only, never classification.
+ */
+function isPairRateLimited(err: unknown): boolean {
+  if (isPairRateLimitError(err)) return true;
+  if (typeof err === "object" && err !== null && "getResponse" in err) {
+    const response = (err as { getResponse: () => unknown }).getResponse();
+    if (typeof response === "object" && response !== null) {
+      const detail = (response as { detail?: unknown }).detail;
+      if (typeof detail === "string") return isPairRateLimitBody(detail);
+    }
+  }
+  return false;
+}
+
+/**
+ * Retry spacing for the message-sends queue (jobs enqueue with
+ * `backoff: {type:"custom"}`). Exported for the pair-rate-limit spec —
+ * production entry is the Worker `settings.backoffStrategy` above.
+ */
+export function sendBackoffDelayMs(attemptsMade: number, err: unknown): number {
+  return isPairRateLimited(err)
+    ? 7_000
+    : 1_500 * 2 ** Math.max(0, attemptsMade - 1);
 }
 
 interface CategorizedError {

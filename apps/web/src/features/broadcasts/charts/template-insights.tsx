@@ -55,11 +55,24 @@ interface Summary {
   delivered: number;
   read: number | null;
   clicked: number | null;
+  /** Per-button click totals over the window; null when Meta reported none. */
+  clickedButtons: Array<{
+    type: string;
+    buttonContent: string | null;
+    count: number;
+  }> | null;
   costAmountSpent: number | null;
   costPerDelivered: number | null;
   currency: string | null;
   days: number;
 }
+
+/** Same labels the campaign report uses — the two surfaces must agree. */
+const CLICK_TYPE_LABELS: Record<string, string> = {
+  url_button: "clicks",
+  unique_url_button: "unique clicks",
+  quick_reply_button: "taps",
+};
 
 const SERIES = [
   { key: "sent", label: "Sent", color: SERIES_COLORS[0] },
@@ -111,13 +124,20 @@ export function TemplateInsights({ templateId }: { templateId: string }) {
         { method: "POST" },
       );
       if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        const body = (await res.json().catch(() => ({}))) as {
+          error?: string;
+          detail?: string;
+        };
         toast.error(
           body.error === "template_insights_not_enabled"
             ? "Turn on template analytics in Settings → WhatsApp first."
             : body.error === "template_not_synced"
               ? "This template isn't approved by Meta yet."
-              : "Couldn't fetch from Meta.",
+              : // Meta's own sentence when we have it — same rule as the
+                // campaign report panel: a reason the operator can act on.
+                body.detail
+                ? `Meta refused the fetch: ${body.detail}`
+                : "Couldn't fetch from Meta.",
         );
         return;
       }
@@ -192,6 +212,25 @@ export function TemplateInsights({ templateId }: { templateId: string }) {
             nullReason="Meta reports reads for 7 days only"
           />
         </dl>
+      )}
+
+      {summary && summary.clickedButtons && summary.clickedButtons.length > 0 && (
+        <ul className="mt-3 space-y-1">
+          {summary.clickedButtons.map((b, i) => (
+            <li
+              key={`${b.type}-${b.buttonContent ?? i}`}
+              className="flex items-center justify-between gap-3 rounded-md border border-border bg-muted/20 px-2.5 py-1.5 text-xs"
+            >
+              <span className="min-w-0 truncate">{b.buttonContent ?? "Button"}</span>
+              <span className="shrink-0 tabular-nums font-medium">
+                {b.count.toLocaleString()}{" "}
+                <span className="font-normal text-muted-foreground">
+                  {CLICK_TYPE_LABELS[b.type] ?? b.type.replaceAll("_", " ")}
+                </span>
+              </span>
+            </li>
+          ))}
+        </ul>
       )}
 
       <div className="mt-3" style={{ height: HEIGHT }}>

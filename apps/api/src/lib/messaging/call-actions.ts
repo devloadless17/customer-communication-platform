@@ -16,7 +16,10 @@
 
 import { requireProviderMethod } from "@/lib/providers";
 import type { Channel } from "@ccp/shared/types";
-import type { MessagingProvider } from "@ccp/shared/providers/types";
+import type {
+  CallRecordingOptions,
+  MessagingProvider,
+} from "@ccp/shared/providers/types";
 
 export interface PlaceCallResult {
   externalCallId: string;
@@ -53,6 +56,7 @@ export async function providerPlaceCall(
     recipient?: string;
     sdpOffer: string;
     correlationId?: string;
+    recording?: CallRecordingOptions;
   },
 ): Promise<PlaceCallResult> {
   if (provider.callAction) {
@@ -118,11 +122,24 @@ export async function providerCompleteAccept(
   provider: MessagingProvider,
   channel: Channel,
   config: unknown,
-  args: { externalCallId: string; sdp: string },
+  args: {
+    externalCallId: string;
+    sdp: string;
+    correlationId?: string;
+    recording?: CallRecordingOptions;
+  },
 ): Promise<void> {
   if (provider.callAction) return;
   const accept = requireProviderMethod(provider, "acceptCall", channel);
-  await accept({ externalCallId: args.externalCallId, sdpAnswer: args.sdp }, config);
+  await accept(
+    {
+      externalCallId: args.externalCallId,
+      sdpAnswer: args.sdp,
+      ...(args.correlationId ? { correlationId: args.correlationId } : {}),
+      ...(args.recording ? { recording: args.recording } : {}),
+    },
+    config,
+  );
 }
 
 /**

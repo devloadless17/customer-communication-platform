@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { RECORDING_ANNOUNCEMENT_LANGUAGES } from "@ccp/shared/providers/types";
+
 /**
  * Request body schemas for the WhatsApp calling endpoints. Validation lives
  * here so the controller stays declarative — zBody(...) at the route, then
@@ -91,6 +93,55 @@ export const UpdateCallSettingsSchema = z
     enabled: z.boolean().optional(),
     callIconVisible: z.boolean().optional(),
     callbackPermissionEnabled: z.boolean().optional(),
+    /** Countries whose customers see the call icon (ISO alpha-2, matched on
+     *  the customer's phone country code). `[]` clears the restriction —
+     *  meaningfully different from omitting the field, which leaves it. */
+    callIconCountries: z
+      .array(
+        z
+          .string()
+          .regex(/^[A-Za-z]{2}$/, "expected an ISO alpha-2 country code")
+          .transform((c) => c.toUpperCase()),
+      )
+      .max(100)
+      .optional(),
+    /** Voicemail for missed/rejected inbound calls. Meta's own rules,
+     *  pre-flighted here for a field error instead of a Graph rejection:
+     *  enabling needs ≥1 trigger + an announcement; a TIMEOUT trigger needs
+     *  timeoutSeconds (0–30) or the provider silently disables it. */
+    voicemail: z
+      .object({
+        enabled: z.boolean(),
+        triggers: z.array(z.enum(["REJECT", "TIMEOUT"])).max(2).optional(),
+        announcementMediaId: z.string().min(1).max(64).optional(),
+        timeoutSeconds: z.number().int().min(0).max(30).optional(),
+      })
+      .strict()
+      .superRefine((vm, ctx) => {
+        if (!vm.enabled) return;
+        if (!vm.triggers?.length) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["triggers"],
+            message: "voicemail needs at least one trigger when enabled",
+          });
+        }
+        if (!vm.announcementMediaId) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["announcementMediaId"],
+            message: "voicemail needs an announcement recording when enabled",
+          });
+        }
+        if (vm.triggers?.includes("TIMEOUT") && vm.timeoutSeconds === undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["timeoutSeconds"],
+            message: "the TIMEOUT trigger needs timeoutSeconds (0–30)",
+          });
+        }
+      })
+      .optional(),
     hours: z
       .object({
         timezoneId: z.string().min(1).max(64),
@@ -98,6 +149,47 @@ export const UpdateCallSettingsSchema = z
         windows: z.array(CallHoursWindowSchema).max(14),
       })
       .strict()
+      // Meta's own call_hours rules, checked here so the admin gets a field
+      // error instead of a cryptic Graph rejection: open before close, at most
+      // two windows per day, no overlap within a day.
+      .superRefine((hours, ctx) => {
+        const byDay = new Map<string, { open: number; close: number }[]>();
+        for (const [i, w] of hours.windows.entries()) {
+          const open = Number(w.openTime);
+          const close = Number(w.closeTime);
+          if (open >= close) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["windows", i],
+              message: "openTime must be before closeTime",
+            });
+          }
+          const list = byDay.get(w.dayOfWeek) ?? [];
+          list.push({ open, close });
+          byDay.set(w.dayOfWeek, list);
+        }
+        for (const [day, list] of byDay) {
+          if (list.length > 2) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["windows"],
+              message: `${day}: at most two windows per day`,
+            });
+            continue;
+          }
+          const [x, y] = list;
+          if (x && y) {
+            const [a, b] = x.open <= y.open ? [x, y] : [y, x];
+            if (b.open < a.close) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: ["windows"],
+                message: `${day}: windows overlap`,
+              });
+            }
+          }
+        }
+      })
       .optional(),
   })
   .strict();
@@ -106,6 +198,58 @@ export type UpdateCallSettingsInput = z.infer<typeof UpdateCallSettingsSchema>;
 /** End body — no fields. */
 export const EndCallSchema = z.object({}).strict();
 export type EndCallInput = z.infer<typeof EndCallSchema>;
+
+/**
+ * The number's standing recording policy. `announcementLanguage` is validated
+ * against the provider's OWN supported locales (RECORDING_ANNOUNCEMENT_LANGUAGES
+ * — notably WITHOUT Arabic as of 2026-07): an unsupported code fails the whole
+ * call request at the provider, so it must never be storable here.
+ */
+export const RecordingPolicySchema = z
+  .object({
+    enabled: z.boolean(),
+    /** Spoken to both parties after the fixed consent phrase. Provider cap. */
+    purpose: z.string().trim().min(1).max(250).optional(),
+    announcementLanguage: z
+      .enum(
+        RECORDING_ANNOUNCEMENT_LANGUAGES.map((l) => l.code) as [
+          string,
+          ...string[],
+        ],
+      )
+      .optional(),
+  })
+  .strict()
+  .superRefine((p, ctx) => {
+    if (!p.enabled) return;
+    if (!p.purpose) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["purpose"],
+        message: "a recording purpose is required when recording is enabled",
+      });
+    }
+    if (!p.announcementLanguage) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["announcementLanguage"],
+        message: "an announcement language is required when recording is enabled",
+      });
+    }
+  });
+export type RecordingPolicyInput = z.infer<typeof RecordingPolicySchema>;
+
+/**
+ * The written consent notice auto-sent around recorded/transcribed calls.
+ * Fully Arabic-capable (it's OUR message, not the provider's announcement
+ * voice). Null or empty clears it.
+ */
+export const ConsentMessageSchema = z
+  .object({
+    message: z.string().trim().max(1000).nullable(),
+  })
+  .strict();
+export type ConsentMessageInput = z.infer<typeof ConsentMessageSchema>;
 
 /** Listing — keyset cursor on (ringingAt DESC, id DESC). */
 export const ListCallsQuerySchema = z

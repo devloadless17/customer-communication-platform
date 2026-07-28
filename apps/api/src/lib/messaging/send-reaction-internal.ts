@@ -25,6 +25,10 @@ import { SendTextValidationError } from "./send-text-internal";
  * (all 3 consumers). An empty emoji REMOVES our reaction (Meta's convention).
  * No new Message row — a reaction mutates its target.
  */
+/** Meta's reaction-target horizon: a reaction to a message older than this is
+ *  accepted on the wire and then dropped with an async 131009 status. */
+const REACTION_TARGET_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
 export interface SendReactionInternalArgs {
   workspaceId: string;
   conversationId: string;
@@ -49,6 +53,7 @@ export async function sendReactionInternal(args: SendReactionInternalArgs): Prom
           identityChannel: true,
           externalContactId: true,
           lastInboundAt: true,
+          blockedAt: true,
         },
       },
     },
@@ -56,16 +61,42 @@ export async function sendReactionInternal(args: SendReactionInternalArgs): Prom
   if (!conversation) {
     throw new SendTextValidationError("conversation_not_found", "conversation not found");
   }
+  if (conversation.contact.blockedAt) {
+    throw new SendTextValidationError(
+      "contact_blocked",
+      "contact_blocked",
+      "This contact is blocked. Unblock them to send messages.",
+    );
+  }
 
   const target = await db.message.findFirst({
     where: { id: args.messageId, workspaceId: args.workspaceId, conversationId: args.conversationId },
-    select: { id: true, externalId: true, agentReaction: true },
+    select: { id: true, externalId: true, agentReaction: true, timestamp: true },
   });
   if (!target || !target.externalId) {
     throw new SendTextValidationError(
       "message_not_found",
       "message_not_found",
       "This message can't be reacted to yet.",
+    );
+  }
+
+  // WhatsApp refuses reactions to messages older than 30 days
+  // (reaction-messages doc) — and it refuses them ASYNCHRONOUSLY: the send is
+  // accepted (a wamid comes back) and the 131009 failure arrives later as a
+  // status webhook for a wamid we deliberately hold no Message row for, so it
+  // parks and drops unseen. Without this gate the agent's UI shows a reaction
+  // the customer never received. We know the target's age — refuse up front.
+  // WhatsApp-scoped: the social channels' reaction windows are their own
+  // (unverified) rules, and their failures surface synchronously.
+  if (
+    conversation.channel === "whatsapp" &&
+    target.timestamp.getTime() < Date.now() - REACTION_TARGET_MAX_AGE_MS
+  ) {
+    throw new SendTextValidationError(
+      "message_too_old",
+      "message_too_old",
+      "WhatsApp only allows reacting to messages from the last 30 days.",
     );
   }
 

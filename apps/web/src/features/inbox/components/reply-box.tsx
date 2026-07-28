@@ -1898,6 +1898,9 @@ function ReplyBoxImpl({
                 onClose={() => setInteractiveOpen(false)}
                 conversationId={conversationId}
                 initialBody={value}
+                // Capability-gated: WhatsApp-only interactive kinds.
+                allowLocationRequest={caps.locationRequest === true}
+                allowCtaUrl={caps.ctaUrlButton === true}
                 onSent={() => {
                   // Mirror the text-send post-success path: clear the
                   // composer + drop any persisted draft so the next focus
@@ -2157,4 +2160,29 @@ function ReplyBoxImpl({
   );
 }
 
-export const ReplyBox = memo(ReplyBoxImpl);
+/**
+ * Blocked-contact lock. Rendered INSTEAD of the composer while the contact is
+ * blocked (Block Users API): the provider rejects every send, so offering a
+ * live composer would just funnel agents into server 400s. Gating here — not
+ * inside ReplyBoxImpl — keeps the hook order of the (large) composer intact,
+ * and the whole composer swaps back in live when the unblock's
+ * `contact.updated` frame lands. Unblocking lives in the thread-header menu.
+ */
+function BlockedComposerNotice() {
+  return (
+    <div className="border-t border-border bg-muted/30 px-4 py-3">
+      <p className="text-center text-xs text-muted-foreground">
+        This contact is blocked — they can&apos;t message you, and messages
+        can&apos;t be sent to them. Unblock them from the conversation menu
+        (&#8942;) to resume messaging.
+      </p>
+    </div>
+  );
+}
+
+function ReplyBoxGate(props: Parameters<typeof ReplyBoxImpl>[0]) {
+  if (props.contact.blockedAt) return <BlockedComposerNotice />;
+  return <ReplyBoxImpl {...props} />;
+}
+
+export const ReplyBox = memo(ReplyBoxGate);

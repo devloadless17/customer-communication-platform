@@ -2017,6 +2017,7 @@ export class ExternalV1Service {
         components: true,
         qualityScore: true,
         qualityScoreAt: true,
+        linkTrackingOptedOut: true,
         archivedAt: true,
         lastUsedAt: true,
         syncedAt: true,

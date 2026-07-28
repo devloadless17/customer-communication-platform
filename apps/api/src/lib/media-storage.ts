@@ -263,6 +263,26 @@ export function kindFromMime(mime: string, channel?: Channel): MediaKind {
 }
 
 /**
+ * Is this webp ANIMATED? Header sniff only — no decoder. WhatsApp's sticker
+ * size cap is split by kind (animated 500 KB, static 100 KB — sticker-messages
+ * doc), and the mime can't tell them apart, so the send path reads the answer
+ * off the container: a RIFF/WEBP whose first chunk is `VP8X` carries a flags
+ * byte at offset 20 where bit 1 (0x02) is the Animation flag. Plain `VP8 ` /
+ * `VP8L` first chunks (simple lossy/lossless) are static by definition.
+ * Non-webp / truncated input returns false — the caller's static cap is the
+ * conservative outcome, and a non-webp "sticker" was already rejected by the
+ * mime gate anyway.
+ */
+export function isAnimatedWebp(bytes: Uint8Array): boolean {
+  if (bytes.length < 21) return false;
+  const ascii = (off: number, len: number) =>
+    String.fromCharCode(...bytes.subarray(off, off + len));
+  if (ascii(0, 4) !== "RIFF" || ascii(8, 4) !== "WEBP") return false;
+  if (ascii(12, 4) !== "VP8X") return false;
+  return (bytes[20]! & 0x02) !== 0;
+}
+
+/**
  * The single canonical mime normalizer: strip codec/charset params
  * (`audio/ogg;codecs=opus` → `audio/ogg`), trim, lowercase, and fall back to
  * `application/octet-stream` for empty/blank input. Every site that used to

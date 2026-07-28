@@ -665,15 +665,21 @@ export function useCall(): {
     releaseMedia();
     const pc = new RTCPeerConnection(DEFAULT_RTC_CONFIG);
 
-    // Local mic → outbound audio track.
+    // Local mic → outbound audio track. EXACTLY ONE, by contract, not
+    // convenience: WhatsApp's media relay handles a single audio SSRC per
+    // peer, and Meta documents multiple SSRCs as undefined behavior up to
+    // "total media failure" (calling integration-patterns doc, mandatory
+    // requirements). So never addTrack a second audio source here (screen
+    // audio, hold music, a second mic) — mix into this one track via the Web
+    // Audio API instead if that day comes. getUserMedia({audio:true}) yields
+    // one track per spec; the [0] pin makes the invariant explicit.
     const local = await navigator.mediaDevices.getUserMedia({
       audio: true,
       video: false,
     });
     localStreamRef.current = local;
-    for (const track of local.getAudioTracks()) {
-      pc.addTrack(track, local);
-    }
+    const micTrack = local.getAudioTracks()[0];
+    if (micTrack) pc.addTrack(micTrack, local);
 
     // Remote audio → hidden <audio> element so the user can hear it.
     pc.ontrack = (e) => {

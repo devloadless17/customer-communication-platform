@@ -109,6 +109,7 @@ export function BroadcastReport({
   refreshKey,
   onRefreshed,
   onFilter,
+  hasTemplate = true,
 }: {
   report: BroadcastReportDto;
   /** Bumped by the parent after a Meta fetch, so the curve refetches in step. */
@@ -117,6 +118,9 @@ export function BroadcastReport({
   onRefreshed?: () => void;
   /** Deep-link the recipient table to a segment — the funnel's whole point. */
   onFilter?: (filter: string) => void;
+  /** False for freeform / People campaigns: Meta has no template to report
+   *  on, so the panel (and its auto-fetch) would only ever produce a 400. */
+  hasTemplate?: boolean;
 }) {
   const { funnel, rates, benchmark, failures, diagnostics } = report;
 
@@ -372,12 +376,15 @@ export function BroadcastReport({
       <DeliveryCurve broadcastId={report.broadcastId} refreshKey={refreshKey} />
 
       {/* Meta's aggregate figures, deliberately side by side with the funnel
-          above rather than blended into it. */}
-      <MetaAnalyticsPanel
-        broadcastId={report.broadcastId}
-        analytics={report.metaAnalytics}
-        onRefreshed={onRefreshed}
-      />
+          above rather than blended into it. Template campaigns only — a
+          freeform send has no template node at Meta for these to exist on. */}
+      {hasTemplate && (
+        <MetaAnalyticsPanel
+          broadcastId={report.broadcastId}
+          analytics={report.metaAnalytics}
+          onRefreshed={onRefreshed}
+        />
+      )}
     </div>
   );
 }

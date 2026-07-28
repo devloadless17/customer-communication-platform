@@ -16,6 +16,14 @@
  * Tagged `@pressure` and excluded from CI (playwright.meta.config.ts) — it is a
  * measurement harness, not a gate. Run it deliberately:
  *
+ * FILENAME IS LOAD-BEARING: the `zz-` prefix makes this file sort LAST.
+ * The burst deliberately drains most of the team's 600/min webhook budget,
+ * and the shed guard answers `200 (dropped)` (never 4xx — Meta would disable
+ * the subscription). Any spec file that runs within the next ~minute gets its
+ * webhooks silently dropped — which is exactly what happened when this file
+ * sat at `p` in the alphabet: the four files after it failed with "posted
+ * 200, row never appeared", deterministically, full-suite only.
+ *
  *   pnpm test:e2e:meta -- --grep @pressure
  *
  * Numbers go in tests/VERIFICATION.md under "Pressure numbers" WITH the commit
@@ -102,7 +110,18 @@ async function runBurst(label: string, indices?: number[]): Promise<Timing[]> {
 /** Burst indices with no committed row yet. */
 async function missingIndices(): Promise<number[]> {
   const rows = await db().message.findMany({
-    where: { workspaceId: META_TEST_TEAM_ID, channel: "messenger", direction: "in" },
+    // Scoped to THIS spec's artifacts (the `m.pressure.` mid prefix): in a
+    // full-suite run, earlier files legitimately leave their own messenger
+    // rows in the shared team, and counting team-wide made the convergence
+    // assertions fail on THEIR residue (508 != 500) while passing in
+    // isolation. Every count below carries the same scope for the same
+    // reason.
+    where: {
+      workspaceId: META_TEST_TEAM_ID,
+      channel: "messenger",
+      direction: "in",
+      externalId: { startsWith: "m.pressure." },
+    },
     select: { externalId: true },
   });
   const present = new Set(rows.map((r) => r.externalId));
@@ -113,7 +132,12 @@ async function missingIndices(): Promise<number[]> {
 
 function countMessages(): Promise<number> {
   return db().message.count({
-    where: { workspaceId: META_TEST_TEAM_ID, channel: "messenger", direction: "in" },
+    where: {
+      workspaceId: META_TEST_TEAM_ID,
+      channel: "messenger",
+      direction: "in",
+      externalId: { startsWith: "m.pressure." },
+    },
   });
 }
 
@@ -153,7 +177,12 @@ test("@pressure 500-webhook burst sheds only retryably, then converges on redeli
   // wire said about it. "499 != 500" is not actionable; "m.pressure.N was
   // answered 200 on every delivery and never committed" is a data-loss report.
   const committed = await db().message.findMany({
-    where: { workspaceId: META_TEST_TEAM_ID, channel: "messenger", direction: "in" },
+    where: {
+      workspaceId: META_TEST_TEAM_ID,
+      channel: "messenger",
+      direction: "in",
+      externalId: { startsWith: "m.pressure." },
+    },
     select: { externalId: true },
   });
   const present = new Set(committed.map((m) => m.externalId));
@@ -180,7 +209,14 @@ test("@pressure 500-webhook burst sheds only retryably, then converges on redeli
   // check-then-create fragments a thread — this is what Serializable buys.
   expect(
     await db().conversation.count({
-      where: { workspaceId: META_TEST_TEAM_ID, channel: "messenger" },
+      // The burst's senders are the `700XXXXXXX` PSIDs minted above — no other
+      // spec file uses that prefix (checked 2026-07-28), so this counts
+      // exactly this spec's threads even with other files' residue present.
+      where: {
+        workspaceId: META_TEST_TEAM_ID,
+        channel: "messenger",
+        contact: { externalContactId: { startsWith: "700" } },
+      },
     }),
     "one conversation per sender, no fragmentation and no duplicates",
   ).toBe(SENDERS);
@@ -192,8 +228,10 @@ test("@pressure 500-webhook burst sheds only retryably, then converges on redeli
   const drifted = await db().$queryRaw<{ id: string }[]>`
     SELECT c.id
     FROM "Conversation" c
+    JOIN "Contact" ct ON ct.id = c."contactId"
     WHERE c."workspaceId" = ${META_TEST_TEAM_ID}
       AND c.channel = 'messenger'
+      AND ct."externalContactId" LIKE '700%'
       AND c."unreadCount" <> (
         SELECT COUNT(*) FROM "Message" m
         WHERE m."conversationId" = c.id AND m.direction = 'in'

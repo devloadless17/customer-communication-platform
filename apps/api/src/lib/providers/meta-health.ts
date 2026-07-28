@@ -98,6 +98,13 @@ export interface WhatsappHealthSnapshot {
    *  rate-limited / utility templates restricted), with Meta's own expiry. */
   utilityRestrictionType?: string | null;
   utilityRestrictedUntil?: Date | null;
+  /** Policy/spam MESSAGING enforcement on this number's WABA, one (type,
+   *  until) pair per blocked direction. Type is the presence marker — an
+   *  indefinite lock/ban has no expiry. See the schema comment. */
+  bizMessagingRestrictionType?: string | null;
+  bizMessagingRestrictedUntil?: Date | null;
+  customerMessagingRestrictionType?: string | null;
+  customerMessagingRestrictedUntil?: Date | null;
 }
 
 /**
@@ -140,12 +147,26 @@ export interface WhatsappHealthUpdate {
   utilityRestrictionType?: string | null;
   utilityRestrictedUntil?: Date | null;
   /**
+   * Policy/spam messaging enforcement, per blocked direction. `null` clears
+   * (a DISABLED_UPDATE REINSTATE); `undefined` untouched — a webhook that
+   * restricts one direction must not wipe the other. WABA-scoped.
+   */
+  bizMessagingRestrictionType?: string | null;
+  bizMessagingRestrictedUntil?: Date | null;
+  customerMessagingRestrictionType?: string | null;
+  customerMessagingRestrictedUntil?: Date | null;
+  /**
    * An account-level alert with no dedicated field (unparsed `account_update`
    * events, `account_alerts` envelopes). One slot, last-writer-wins,
    * WABA-scoped like the calling/policy fields. `undefined` untouched.
    */
   accountAlert?: {
-    source: "account_update" | "account_alerts";
+    source:
+      | "account_update"
+      | "account_alerts"
+      | "account_review_update"
+      | "security"
+      | "webhook_errors";
     event: string | null;
     detail: string | null;
   };
@@ -197,6 +218,11 @@ export function normalizeMessagingTier(raw: unknown): string | null {
  * over-estimate that would wave a 10k campaign through on a 2k number.)
  */
 function numberToTier(n: number): string | null {
+  // The legacy `max_daily_conversation_per_phone` field documents `-1` as
+  // UNLIMITED (business-capability-update reference). Without this, an
+  // unlimited business normalized to null — "unknown" — and the eligibility
+  // gate conservatively capped campaigns on the one portfolio that has no cap.
+  if (n === -1) return "TIER_UNLIMITED";
   if (!Number.isFinite(n) || n <= 0) return null;
   if (n <= 50) return "TIER_50";
   if (n <= 250) return "TIER_250";
@@ -243,16 +269,24 @@ export function normalizeThroughputLevel(raw: unknown): string | null {
  */
 export async function resolveWhatsappHealthAccount(
   workspaceId: string,
-  hints: { displayPhoneNumber?: string; wabaId?: string },
+  hints: { phoneNumberId?: string; displayPhoneNumber?: string; wabaId?: string },
 ): Promise<string | null> {
-  if (!hints.displayPhoneNumber && !hints.wabaId) return null;
+  if (!hints.phoneNumberId && !hints.displayPhoneNumber && !hints.wabaId) return null;
   // A workspace holds a handful of numbers at most — fetch once, match in JS
   // (the display number needs digit-normalization Prisma can't express).
   const connections = await db.channelConnection.findMany({
     where: { workspaceId, channel: "whatsapp" },
-    select: { id: true, wabaId: true, config: true },
+    select: { id: true, wabaId: true, config: true, externalAccountId: true },
   });
   if (connections.length === 0) return null;
+
+  // Strongest hint first: the provider's own phone-number id (account_alerts
+  // `entity_id`) IS our externalAccountId — an exact match with no
+  // normalization and no ambiguity.
+  if (hints.phoneNumberId) {
+    const byId = connections.find((c) => c.externalAccountId === hints.phoneNumberId);
+    if (byId) return byId.id;
+  }
 
   if (hints.displayPhoneNumber) {
     const digits = hints.displayPhoneNumber.replace(/\D/g, "");
@@ -321,6 +355,10 @@ export async function persistWhatsappHealth(
     policyViolationAt?: Date | null;
     utilityRestrictionType?: string | null;
     utilityRestrictedUntil?: Date | null;
+    bizMessagingRestrictionType?: string | null;
+    bizMessagingRestrictedUntil?: Date | null;
+    customerMessagingRestrictionType?: string | null;
+    customerMessagingRestrictedUntil?: Date | null;
     lastAccountAlert?: Prisma.InputJsonValue;
   } = {};
 
@@ -359,6 +397,15 @@ export async function persistWhatsappHealth(
   if (update.utilityRestrictionType !== undefined) {
     wabaScoped.utilityRestrictionType = update.utilityRestrictionType;
     wabaScoped.utilityRestrictedUntil = update.utilityRestrictedUntil ?? null;
+  }
+  if (update.bizMessagingRestrictionType !== undefined) {
+    wabaScoped.bizMessagingRestrictionType = update.bizMessagingRestrictionType;
+    wabaScoped.bizMessagingRestrictedUntil = update.bizMessagingRestrictedUntil ?? null;
+  }
+  if (update.customerMessagingRestrictionType !== undefined) {
+    wabaScoped.customerMessagingRestrictionType = update.customerMessagingRestrictionType;
+    wabaScoped.customerMessagingRestrictedUntil =
+      update.customerMessagingRestrictedUntil ?? null;
   }
   if (update.accountAlert !== undefined) {
     wabaScoped.lastAccountAlert = {
@@ -787,6 +834,10 @@ export async function getWhatsappHealth(
       policyViolationAt: true,
       utilityRestrictionType: true,
       utilityRestrictedUntil: true,
+      bizMessagingRestrictionType: true,
+      bizMessagingRestrictedUntil: true,
+      customerMessagingRestrictionType: true,
+      customerMessagingRestrictedUntil: true,
       portfolioId: true,
       // The 24h messaging limit is PORTFOLIO-scoped since 2025-10-07 (shared by
       // every number in the portfolio), so tier + cap come off the portfolio,
@@ -812,6 +863,10 @@ export async function getWhatsappHealth(
     policyViolationAt: row.policyViolationAt,
     utilityRestrictionType: row.utilityRestrictionType,
     utilityRestrictedUntil: row.utilityRestrictedUntil,
+    bizMessagingRestrictionType: row.bizMessagingRestrictionType,
+    bizMessagingRestrictedUntil: row.bizMessagingRestrictedUntil,
+    customerMessagingRestrictionType: row.customerMessagingRestrictionType,
+    customerMessagingRestrictedUntil: row.customerMessagingRestrictedUntil,
     messagingHealthUpdatedAt: row.messagingHealthUpdatedAt,
     portfolioId: row.portfolioId,
     externalPortfolioId: row.portfolio?.externalPortfolioId ?? null,
@@ -1065,7 +1120,29 @@ export interface MessagingHealthSummary {
    *  utility templates restricted. Null = none active. */
   utilityRestrictionType: string | null;
   utilityRestrictedUntil: string | null;
+  /** ACTIVE policy/spam messaging enforcement (expired restrictions filtered
+   *  server-side; a set type with a null `until` is an indefinite lock/ban).
+   *  Business-initiated covers broadcasts/templates; customer-initiated covers
+   *  even replies. Null = that direction is not restricted. */
+  bizMessagingRestrictionType: string | null;
+  bizMessagingRestrictedUntil: string | null;
+  customerMessagingRestrictionType: string | null;
+  customerMessagingRestrictedUntil: string | null;
   messagingHealthUpdatedAt: string | null;
+}
+
+/** Active-restriction filter shared by the summary fields below: expired →
+ *  gone (a missed recovery webhook must not warn forever), null expiry with a
+ *  type set → active indefinitely (locks/bans carry no end date). */
+function activeRestriction(
+  type: string | null | undefined,
+  until: Date | null | undefined,
+): { type: string | null; until: string | null } {
+  const active = !!type && (!until || until > new Date());
+  return {
+    type: active ? (type ?? null) : null,
+    until: active && until ? until.toISOString() : null,
+  };
 }
 
 export async function getMessagingHealthSummary(
@@ -1084,6 +1161,14 @@ export async function getMessagingHealthSummary(
   // mirrors checkBroadcastEligibility so the two never disagree.
   const used =
     cap === null ? null : await countRecentUniqueRecipients(workspaceId, health?.portfolioId);
+  const bizRestriction = activeRestriction(
+    health?.bizMessagingRestrictionType,
+    health?.bizMessagingRestrictedUntil,
+  );
+  const customerRestriction = activeRestriction(
+    health?.customerMessagingRestrictionType,
+    health?.customerMessagingRestrictedUntil,
+  );
   return {
     messagingTier: health?.messagingTier ?? null,
     messagingDailyCap: cap,
@@ -1115,6 +1200,11 @@ export async function getMessagingHealthSummary(
       health?.utilityRestrictedUntil && health.utilityRestrictedUntil > new Date()
         ? health.utilityRestrictedUntil.toISOString()
         : null,
+    // Policy/spam messaging enforcement, same expiry posture as utility above.
+    bizMessagingRestrictionType: bizRestriction.type,
+    bizMessagingRestrictedUntil: bizRestriction.until,
+    customerMessagingRestrictionType: customerRestriction.type,
+    customerMessagingRestrictedUntil: customerRestriction.until,
     messagingHealthUpdatedAt: health?.messagingHealthUpdatedAt?.toISOString() ?? null,
   };
 }

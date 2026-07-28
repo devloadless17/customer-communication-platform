@@ -190,6 +190,8 @@ export class BroadcastsController {
     return this.broadcasts.listRecipients(session.workspaceId, id, {
       cursor: query.cursor,
       status: query.status,
+      outcome: query.outcome,
+      errorCode: query.errorCode,
       take: query.take,
     });
   }

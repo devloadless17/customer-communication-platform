@@ -441,6 +441,10 @@ export async function getConversationWithRefs(
           answeredAt: true,
           endedAt: true,
           durationSeconds: true,
+          recordingKey: true,
+          transcriptKey: true,
+          transcriptLanguage: true,
+          errorTitle: true,
         },
       },
       // database-added-1: only COUNT the bounded `notes` relation here. The
@@ -492,6 +496,10 @@ export async function getConversationWithRefs(
     answeredAt: c.answeredAt?.toISOString() ?? null,
     endedAt: c.endedAt?.toISOString() ?? null,
     durationSeconds: c.durationSeconds,
+    hasRecording: c.recordingKey !== null,
+    hasTranscript: c.transcriptKey !== null,
+    transcriptLanguage: c.transcriptLanguage,
+    errorTitle: c.errorTitle,
   }));
 
   return {

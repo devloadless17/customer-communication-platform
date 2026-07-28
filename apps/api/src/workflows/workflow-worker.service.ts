@@ -90,6 +90,10 @@ import {
   stopInboundMediaSweeper,
 } from "@/lib/sweepers/inbound-media";
 import {
+  startCallRecordingSweeper,
+  stopCallRecordingSweeper,
+} from "@/lib/sweepers/call-recordings";
+import {
   startStaleCallsSweeper,
   stopStaleCallsSweeper,
 } from "@/lib/sweepers/stale-calls";
@@ -163,6 +167,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(WorkflowWorkerService.name);
   private started = false;
   private mediaSweeperStarted = false;
+  private callRecordingSweeperStarted = false;
   private staleCallsSweeperStarted = false;
   private ticketSlaSweeperStarted = false;
   private waitingSweeperStarted = false;
@@ -228,6 +233,13 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       this.logger.log("Inbound media sweeper started");
     } catch (err) {
       this.logger.error("Failed to start inbound-media sweeper", err);
+    }
+    try {
+      startCallRecordingSweeper();
+      this.callRecordingSweeperStarted = true;
+      this.logger.log("Call-recording sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start call-recording sweeper", err);
     }
     try {
       // Backstop that terminalizes Call rows stuck `ringing`/`in_progress`
@@ -699,6 +711,11 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       if (this.mediaSweeperStarted) stopInboundMediaSweeper();
     } catch (err) {
       this.logger.warn(`stopInboundMediaSweeper threw: ${err instanceof Error ? err.message : err}`);
+    }
+    try {
+      if (this.callRecordingSweeperStarted) stopCallRecordingSweeper();
+    } catch (err) {
+      this.logger.warn(`stopCallRecordingSweeper threw: ${err instanceof Error ? err.message : err}`);
     }
     try {
       if (this.started) await stopWorkflowWorker();

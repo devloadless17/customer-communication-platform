@@ -28,6 +28,33 @@ interface MetaChannelConfig {
   messagingAccountId?: string;
   appId?: string;
   verifyToken?: string;
+  /**
+   * OUR per-number call-recording policy (Meta stores no such setting —
+   * recording is a per-call opt-in on connect/accept, so the standing choice
+   * lives here). Applied by CallsService to every placed/answered call on
+   * this number. `purpose` + `announcementLanguage` are required by the
+   * provider whenever recording is enabled.
+   */
+  callRecording?: {
+    enabled?: boolean;
+    purpose?: string;
+    announcementLanguage?: string;
+  };
+  /** Same policy shape for transcription — an independent provider feature
+   *  with its own webhook/artifact/pricing; see callRecording above. */
+  callTranscription?: {
+    enabled?: boolean;
+    purpose?: string;
+    announcementLanguage?: string;
+  };
+  /**
+   * OUR written consent notice, auto-sent into the chat around
+   * recorded/transcribed calls (before dialing on outbound, at answer on
+   * inbound). Exists because the provider's SPOKEN announcement has no Arabic
+   * voice — this message is ours and can be fully Arabic, and it leaves
+   * durable in-thread proof of notice the voice line can't.
+   */
+  callConsentMessage?: string;
 }
 /** Shape of `ChannelConnection.secrets` — envelope-encrypted ciphertext per field. */
 interface MetaChannelSecrets {
@@ -333,9 +360,16 @@ export async function getMetaSendConfig(
  */
 export async function getBusinessNumberCountry(
   workspaceId: string,
+  accountId?: string | null,
 ): Promise<string | null> {
+  // Per-account when the caller knows which number is acting (a thread's
+  // bound connection, the settings page's picker); the workspace default
+  // otherwise. Eligibility is per NUMBER — two numbers in one workspace can
+  // sit in different countries.
   const conn = await db.channelConnection.findFirst({
-    where: { workspaceId, channel: "whatsapp", isDefault: true },
+    where: accountId
+      ? { id: accountId, workspaceId, channel: "whatsapp" }
+      : { workspaceId, channel: "whatsapp", isDefault: true },
     select: { config: true },
   });
   const config = (conn?.config ?? {}) as MetaChannelConfig;

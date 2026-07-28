@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { Info, Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { apiFetch } from "@/lib/api/client-fetch";
 import { Button } from "@/components/ui/button";
+import { LocalTime } from "@/components/local-time";
 
 /**
  * Meta's own aggregate figures for the campaign's template, shown BESIDE the
@@ -27,12 +28,32 @@ export interface MetaAnalytics {
   delivered: number;
   read: number | null;
   clicked: number | null;
+  /** Per-button engagement: which button, quick-reply vs URL, unique vs total. */
+  clickedButtons: Array<{
+    type: string;
+    buttonContent: string | null;
+    count: number;
+  }> | null;
   costAmountSpent: number | null;
   costPerDelivered: number | null;
   currency: string | null;
   days: number;
   costWithheld: boolean;
+  /** When these figures were last pulled from Meta. */
+  fetchedAt: string | null;
 }
+
+/** Meta's aggregate moves on a scale of hours; fresher than this and an
+ *  auto-fetch would just spend Graph budget re-reading the same numbers. */
+const AUTO_FETCH_STALE_MS = 6 * 60 * 60_000;
+
+/** Human label for Meta's click-entry types. Unknown types pass through raw
+ *  rather than being dropped — a new Meta type must stay visible. */
+const CLICK_TYPE_LABELS: Record<string, string> = {
+  url_button: "clicks",
+  unique_url_button: "unique clicks",
+  quick_reply_button: "taps",
+};
 
 export function MetaAnalyticsPanel({
   broadcastId,
@@ -46,13 +67,46 @@ export function MetaAnalyticsPanel({
   const [pending, startTransition] = useTransition();
   const [dismissedHint, setDismissedHint] = useState(false);
 
+  // Self-updating: pull from Meta once on open when nothing is stored or the
+  // stored figures are stale — the operator shouldn't have to know a Fetch
+  // button exists to see their campaign's cost and clicks. ONE attempt per
+  // mount, silent on failure (the manual button still surfaces errors), so a
+  // broken account can't turn every report-open into a toast storm — and the
+  // 6h staleness gate keeps repeated opens from spending Graph budget.
+  const autoFetchedRef = useRef(false);
+  useEffect(() => {
+    if (autoFetchedRef.current) return;
+    const stale =
+      !analytics?.fetchedAt ||
+      Date.now() - Date.parse(analytics.fetchedAt) > AUTO_FETCH_STALE_MS;
+    if (!stale) return;
+    autoFetchedRef.current = true;
+    void (async () => {
+      try {
+        const res = await apiFetch(`/api/broadcasts/${broadcastId}/analytics/refresh`, {
+          method: "POST",
+        });
+        if (!res.ok) return;
+        const body = (await res.json()) as { rows: number };
+        if (body.rows > 0) onRefreshed?.();
+      } catch {
+        // Silent — the panel renders whatever is stored, and the manual
+        // button remains the loud path.
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [broadcastId]);
+
   function refresh() {
     startTransition(async () => {
       const res = await apiFetch(`/api/broadcasts/${broadcastId}/analytics/refresh`, {
         method: "POST",
       });
       if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        const body = (await res.json().catch(() => ({}))) as {
+          error?: string;
+          detail?: string;
+        };
         toast.error(
           body.error === "template_insights_not_enabled"
             ? "Turn on template analytics in Settings → WhatsApp first."
@@ -60,7 +114,12 @@ export function MetaAnalyticsPanel({
               ? "This campaign's template isn't synced from Meta yet."
               : body.error === "broadcast_has_no_template"
                 ? "Only template campaigns have Meta analytics."
-                : "Couldn't fetch from Meta.",
+                : // Meta's own sentence when we have it — "Couldn't fetch"
+                  // with no reason is a dead end the operator can't act on
+                  // (and can't even report usefully).
+                  body.detail
+                  ? `Meta refused the fetch: ${body.detail}`
+                  : "Couldn't fetch from Meta.",
         );
         return;
       }
@@ -91,6 +150,20 @@ export function MetaAnalyticsPanel({
           <p className="mt-0.5 text-xs text-muted-foreground">
             Meta&apos;s own figures for this template. Shown separately from the
             funnel above — they measure different things and won&apos;t match exactly.
+          </p>
+          {/* The freshness contract, stated instead of implied: these numbers
+              are a slow-moving aggregate that the server re-captures on its
+              own — not a live feed, and not something the operator must
+              babysit with the button. */}
+          <p className="mt-0.5 text-2xs text-muted-foreground/80">
+            {analytics?.fetchedAt ? (
+              <>
+                Updated <LocalTime iso={analytics.fetchedAt} format="listTime" /> · re-captured
+                automatically while Meta still reports this campaign
+              </>
+            ) : (
+              "Fetches automatically when you open this report"
+            )}
           </p>
         </div>
         <Button type="button" variant="outline" size="sm" onClick={refresh} disabled={pending}>
@@ -136,11 +209,68 @@ export function MetaAnalyticsPanel({
               }
             />
             <Stat label="Cost / delivered" value={money(analytics.costPerDelivered)} />
+            {/* Derived from Meta's own totals, never mixed with the funnel's:
+                the rates people quote when they compare campaigns. */}
+            <Stat
+              label="Read rate"
+              value={
+                analytics.read !== null && analytics.delivered > 0
+                  ? `${Math.round((analytics.read / analytics.delivered) * 100)}%`
+                  : null
+              }
+              nullReason="Needs read data"
+            />
+            <Stat
+              label="Click rate"
+              value={
+                analytics.clicked !== null && analytics.delivered > 0
+                  ? `${Math.round((analytics.clicked / analytics.delivered) * 100)}%`
+                  : null
+              }
+              nullReason="Needs click data"
+            />
+            <Stat
+              label="Cost / link click"
+              value={
+                analytics.costAmountSpent !== null &&
+                analytics.clicked !== null &&
+                analytics.clicked > 0
+                  ? money(analytics.costAmountSpent / analytics.clicked)
+                  : null
+              }
+              nullReason="Needs cost and click data"
+            />
             <Stat
               label="Days covered"
               value={`${analytics.days} day${analytics.days === 1 ? "" : "s"}`}
             />
           </dl>
+
+          {analytics.clickedButtons && analytics.clickedButtons.length > 0 && (
+            <div className="mt-4">
+              <h4 className="text-2xs font-medium text-muted-foreground">
+                Button engagement
+              </h4>
+              <ul className="mt-1.5 space-y-1">
+                {analytics.clickedButtons.map((b, i) => (
+                  <li
+                    key={`${b.type}-${b.buttonContent ?? i}`}
+                    className="flex items-center justify-between gap-3 rounded-md border border-border bg-muted/20 px-2.5 py-1.5 text-xs"
+                  >
+                    <span className="min-w-0 truncate">
+                      {b.buttonContent ?? "Button"}
+                    </span>
+                    <span className="shrink-0 tabular-nums font-medium">
+                      {b.count.toLocaleString()}{" "}
+                      <span className="font-normal text-muted-foreground">
+                        {CLICK_TYPE_LABELS[b.type] ?? b.type.replaceAll("_", " ")}
+                      </span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {!dismissedHint && (
             <button

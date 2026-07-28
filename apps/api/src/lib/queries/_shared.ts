@@ -256,6 +256,8 @@ export function mapContact(c: PrismaContact): Contact {
     // revoked contact doesn't show an enabled button the backend would reject.
     callPermissionRevokedUntil:
       c.callPermissionRevokedUntil?.toISOString() ?? null,
+    // Provider-level block — drives the reply-box lock + Block/Unblock menu.
+    blockedAt: c.blockedAt?.toISOString() ?? null,
     // Consecutive unanswered outbound calls. Surfaced so the agent can see the
     // approaching cliff — WhatsApp nudges the customer at 2 and revokes calling
     // permission outright at 4.
@@ -341,6 +343,9 @@ type PrismaContactListItem = Omit<
   // Same reasoning: the per-user marketing cap is a broadcast-audience concern,
   // never rendered in the inbox list row.
   | "marketingCapReachedAt"
+  // Blocked state gates the reply box, which reads the FULL per-conversation
+  // contact load — the list row never renders it.
+  | "blockedAt"
 >;
 export function mapContactListItem(c: PrismaContactListItem): Contact {
   const display = contactDisplayIdentity(c);

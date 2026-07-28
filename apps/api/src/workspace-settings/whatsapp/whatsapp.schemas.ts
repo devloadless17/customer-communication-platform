@@ -72,6 +72,13 @@ export type UpdateTemplateBindingsInput = z.infer<typeof UpdateTemplateBindingsS
  * published in the profile reference, so we display what Meta returns and leave
  * changing it to WhatsApp Manager rather than guessing an enum.
  */
+/** Body-click tracking toggle: `enabled` is the operator's mental model
+ *  ("track clicks?"), inverted to Meta's opt-OUT flag in the service. */
+export const SetLinkTrackingSchema = z.object({
+  enabled: z.boolean(),
+});
+export type SetLinkTrackingInput = z.infer<typeof SetLinkTrackingSchema>;
+
 export const UpdateBusinessProfileSchema = z
   .object({
     // WhatsApp's own limits for `about` and `description` aren't stated in the

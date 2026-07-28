@@ -27,7 +27,9 @@ import { SessionGuard } from "../../auth/session.guard";
 import type { ApiSession } from "../../auth/session.guard";
 import { zBody } from "../../common/zod-validation.pipe";
 import {
+  SetLinkTrackingSchema,
   UpdateTemplateBindingsSchema,
+  type SetLinkTrackingInput,
   type UpdateTemplateBindingsInput,
 } from "./whatsapp.schemas";
 import { WhatsappService } from "./whatsapp.service";
@@ -294,6 +296,23 @@ export class WhatsappTemplatesController {
     @Query("days") daysRaw?: string,
   ) {
     return this.whatsapp.refreshTemplateAnalytics(session.workspaceId, id, daysRaw);
+  }
+
+  /**
+   * Toggle button-click tracking on this template. `enabled: false` sets
+   * Meta's `cta_url_link_tracking_opted_out` — clicks stop being recorded and
+   * the insights panels explain the gap instead of showing a broken-looking
+   * empty series. Reversible, unlike the WABA-level insights switch.
+   */
+  @Post(":id/link-tracking")
+  @HttpCode(200)
+  @RequireCapability("templates:manage")
+  async setLinkTracking(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Body(zBody(SetLinkTrackingSchema)) body: SetLinkTrackingInput,
+  ) {
+    return this.whatsapp.setTemplateLinkTracking(session.workspaceId, id, body.enabled);
   }
 
   /**

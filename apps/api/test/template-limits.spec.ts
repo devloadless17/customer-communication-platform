@@ -1052,6 +1052,39 @@ describe("marketing send errors", () => {
   });
 });
 
+describe("account-level error codes (error-codes reference)", () => {
+  it("classifies the integrity / enforcement family", () => {
+    // 368 + 131031: WABA restricted/disabled/locked — run-fatal, and the
+    // health panel's restriction banner is the companion explanation.
+    expect(classifyMetaStatusError(368)).toBe("account_restricted");
+    expect(classifyMetaStatusError(131031)).toBe("account_restricted");
+    // 130497: business category can't message this recipient's country.
+    expect(classifyMetaStatusError(130497)).toBe("country_not_allowed");
+  });
+
+  it("classifies 130403 as OUR block — the WhatsApp-Manager drift signal", () => {
+    // Meta's guidance is "do not retry; unblock the user" — and ingest
+    // mirrors this code onto Contact.blockedAt as the out-of-band backstop.
+    expect(classifyMetaStatusError(130403)).toBe("contact_blocked");
+  });
+
+  it("classifies account configuration failures", () => {
+    expect(classifyMetaStatusError(131042)).toBe("billing_issue");
+    expect(classifyMetaStatusError(131045)).toBe("number_not_registered");
+    expect(classifyMetaStatusError(133010)).toBe("number_not_registered");
+    expect(classifyMetaStatusError(131063)).toBe("marketing_disabled");
+    // Token expired/invalidated — code 0 is the doc's "unable to authenticate".
+    expect(classifyMetaStatusError(0)).toBe("auth_expired");
+  });
+
+  it("folds the try-again-later cousins into rate_limited", () => {
+    // 131057 maintenance mode + 131064 classification-violation limit both
+    // mean "wait, then it works" — the retry machinery's family.
+    expect(classifyMetaStatusError(131057)).toBe("rate_limited");
+    expect(classifyMetaStatusError(131064)).toBe("rate_limited");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Meta's published examples, byte-for-byte.
 // ---------------------------------------------------------------------------
@@ -2233,6 +2266,16 @@ describe("normalizeMessagingTier across every spelling Meta uses", () => {
     expect(normalizeMessagingTier("UNLIMITED")).toBe("TIER_UNLIMITED");
   });
 
+  it("maps the legacy -1 sentinel to UNLIMITED (business-capability-update doc)", () => {
+    // `max_daily_conversation_per_phone: -1` documents unlimited messaging.
+    // Normalizing it to null read as "unknown" and conservatively capped the
+    // one portfolio that has no cap at all.
+    expect(normalizeMessagingTier(-1)).toBe("TIER_UNLIMITED");
+    // Every other non-positive stays unknown — never invent an allowance.
+    expect(normalizeMessagingTier(0)).toBeNull();
+    expect(normalizeMessagingTier(-2)).toBeNull();
+  });
+
   it("returns null for a THROUGHPUT level, which shares the `current_limit` field", () => {
     // Since the portfolio move, `current_limit` carries either the messaging
     // limit or the number's throughput level. Mapping a throughput string onto a
@@ -2329,6 +2372,10 @@ describe("failure buckets tell the operator the right thing to do", () => {
       "call_permission_required",
       "recipient_unavailable",
       "outside_24h_window",
+      // WE blocked them (130403) — unblocking, not list-cleaning, is the fix.
+      "contact_blocked",
+      // Meta's per-category country policy (130497) — the contact is fine.
+      "country_not_allowed",
     ] as const) {
       expect(failureBucket(code)).toBe("suppress");
     }
@@ -2340,8 +2387,22 @@ describe("failure buckets tell the operator the right thing to do", () => {
       "unsupported_message",
       "duplicate_button_title",
       "message_unavailable",
+      // The WABA's marketing-disabled flag (131063) — fix the config/template.
+      "marketing_disabled",
     ] as const) {
       expect(failureBucket(code)).toBe("content");
+    }
+  });
+
+  it("marks fix-then-retry account states as retryable, like a dead credential", () => {
+    // Restriction lapses / billing repaired / number registered → the same
+    // audience sends fine. Same verdict as auth_expired for the same reason.
+    for (const code of [
+      "account_restricted",
+      "billing_issue",
+      "number_not_registered",
+    ] as const) {
+      expect(failureBucket(code)).toBe("retryable");
     }
   });
 

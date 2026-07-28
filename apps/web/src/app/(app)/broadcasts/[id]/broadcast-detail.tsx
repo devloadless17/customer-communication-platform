@@ -57,6 +57,10 @@ export interface BroadcastDetailDto {
   templateId: string | null;
   templateName: string | null;
   templateLanguage: string | null;
+  /** The template's message text from the catalog (variables are the true
+   *  snapshot; the body is looked up so the card can show the message as the
+   *  customer saw it). Null for freeform campaigns or a deleted template. */
+  templateBody: string | null;
   audienceMode: string;
   variables: unknown;
   totalCount: number;
@@ -91,17 +95,40 @@ export interface BroadcastRecipientDto {
   externalId: string | null;
   errorMessage: string | null;
   sentAt: string | null;
+  /** The engagement trail — read/replied/clicked per person, from webhooks. */
+  deliveryState: string;
+  deliveredAt: string | null;
+  readAt: string | null;
+  repliedAt: string | null;
+  clickedAt: string | null;
+  clickedOptionId: string | null;
+  errorCode: string | null;
 }
 
 const POLL_INTERVAL_MS = 2000;
 
-type RecipientStatusFilter = "all" | "failed" | "sent" | "queued";
+/**
+ * The drill-down vocabulary — the SAME outcome buckets the report's funnel,
+ * the CSV export and /v1 use, served by one where-clause on the server. This
+ * is what turns "Read 4,120" from a scoreboard into a list of actual people.
+ */
+type RecipientOutcomeFilter =
+  | "all"
+  | "delivered"
+  | "read"
+  | "replied"
+  | "clicked"
+  | "never_received"
+  | "pending";
 
-const RECIPIENT_STATUS_TABS: { value: RecipientStatusFilter; label: string }[] = [
+const RECIPIENT_OUTCOME_TABS: { value: RecipientOutcomeFilter; label: string }[] = [
   { value: "all", label: "All" },
-  { value: "failed", label: "Failed" },
-  { value: "sent", label: "Sent" },
-  { value: "queued", label: "Queued" },
+  { value: "delivered", label: "Delivered" },
+  { value: "read", label: "Read" },
+  { value: "replied", label: "Replied" },
+  { value: "clicked", label: "Clicked" },
+  { value: "never_received", label: "Never received" },
+  { value: "pending", label: "Pending" },
 ];
 
 export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
@@ -112,11 +139,14 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
   const [canceling, setCanceling] = useState(false);
 
   // "Load more" recipients beyond the inline 500-row cap on the detail get().
-  // Status tabs filter the paged fetch server-side so an operator can isolate
-  // failures on a mass-failure broadcast (where they're what matters). These
-  // extra pages are appended below the inline `data.recipients`; the tabs reset
-  // the paging cursor and re-fetch from the chosen status.
-  const [statusFilter, setStatusFilter] = useState<RecipientStatusFilter>("all");
+  // Outcome tabs filter the paged fetch server-side so an operator can pull
+  // exactly "who replied" on a 100k-recipient campaign without the browser
+  // ever holding the audience. These pages are appended below the inline
+  // `data.recipients`; the tabs reset the paging cursor and re-fetch.
+  const [statusFilter, setStatusFilter] = useState<RecipientOutcomeFilter>("all");
+  // Set by the failure table's deep links ("who hit THIS error") — composes
+  // with the outcome filter server-side.
+  const [errorCodeFilter, setErrorCodeFilter] = useState<string | null>(null);
   const [extraRecipients, setExtraRecipients] = useState<BroadcastRecipientDto[]>([]);
   const [moreCursor, setMoreCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -177,13 +207,14 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
   }
 
   // Fetch one page of recipients from /recipients (cursor-paged, optionally
-  // status-filtered) and APPEND to extraRecipients. `cursor === null` starts a
-  // fresh page (a just-selected status tab); otherwise it continues after the
-  // given id. The server orders failed → sent → queued, matching the inline
-  // get(), so a status-less ("all") page picks up right after the inline 500.
+  // outcome-filtered) and APPEND to extraRecipients. `cursor === null` starts a
+  // fresh page (a just-selected tab); otherwise it continues after the given
+  // id. The server orders failed → sent → queued in `all` mode, matching the
+  // inline get(), so an unfiltered page picks up right after the inline 500.
   async function fetchRecipientPage(
     cursor: string | null,
-    filter: RecipientStatusFilter,
+    filter: RecipientOutcomeFilter,
+    errorCode: string | null,
     append: boolean,
   ) {
     setLoadingMore(true);
@@ -191,7 +222,8 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
     try {
       const params = new URLSearchParams();
       if (cursor) params.set("cursor", cursor);
-      if (filter !== "all") params.set("status", filter);
+      if (filter !== "all") params.set("outcome", filter);
+      if (errorCode) params.set("errorCode", errorCode);
       const res = await apiFetch(
         `/api/broadcasts/${data.id}/recipients?${params.toString()}`,
       );
@@ -213,50 +245,52 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
     }
   }
 
-  // Status tab switch. `all` shows the inline first-500 (no fetch needed unless
-  // the operator loads more); a specific status does a fresh server-filtered
-  // fetch that REPLACES the appended set.
-  function selectStatus(next: RecipientStatusFilter) {
-    if (next === statusFilter) return;
+  // Tab switch. `all` (with no error-code narrowing) shows the inline
+  // first-500; anything else does a fresh server-filtered fetch that REPLACES
+  // the appended set — always server-side, so a 100k campaign and a 20-person
+  // one drill down through the same code path.
+  function selectFilter(next: RecipientOutcomeFilter, errorCode: string | null = null) {
+    if (next === statusFilter && errorCode === errorCodeFilter) return;
     setStatusFilter(next);
+    setErrorCodeFilter(errorCode);
     setExtraRecipients([]);
     setMoreCursor(null);
-    if (next !== "all") void fetchRecipientPage(null, next, false);
+    if (next !== "all" || errorCode) void fetchRecipientPage(null, next, errorCode, false);
   }
 
-  // "Load more". In `all` mode the first page continues after the last inline
-  // recipient (seed the cursor from it); subsequent pages use the server's
-  // nextCursor. Filtered modes always page off the current cursor.
+  const unfiltered = statusFilter === "all" && !errorCodeFilter;
+
+  // "Load more". In unfiltered mode the first page continues after the last
+  // inline recipient (seed the cursor from it); subsequent pages use the
+  // server's nextCursor. Filtered modes always page off the current cursor.
   function loadMore() {
     const seedCursor =
-      statusFilter === "all" && moreCursor === null && extraRecipients.length === 0
+      unfiltered && moreCursor === null && extraRecipients.length === 0
         ? (data.recipients.at(-1)?.id ?? null)
         : moreCursor;
-    void fetchRecipientPage(seedCursor, statusFilter, true);
+    void fetchRecipientPage(seedCursor, statusFilter, errorCodeFilter, true);
   }
 
-  // Whether more rows can be paged. In `all` mode we always allow the first
+  // Whether more rows can be paged. Unfiltered: always allow the first
   // "Load more" (the inline set was truncated); after that, the server cursor
   // decides. In a filtered mode, the cursor decides from the first fetch.
-  const canLoadMore =
-    statusFilter === "all"
-      ? data.recipientsTruncated &&
-        (moreCursor !== null || extraRecipients.length === 0)
-      : moreCursor !== null;
+  const canLoadMore = unfiltered
+    ? data.recipientsTruncated &&
+      (moreCursor !== null || extraRecipients.length === 0)
+    : moreCursor !== null;
 
-  // Recipients to render: inline-500 + appended in `all` mode; only the
-  // server-filtered page in a specific-status mode. While a broadcast runs,
+  // Recipients to render: inline-500 + appended in unfiltered mode; only the
+  // server-filtered page in a drill-down mode. While a broadcast runs,
   // the status-grouped inline top-500 re-shuffles on each debounced refresh,
   // so a previously appended "Load more" row can flip status and re-enter the
   // inline set — dedupe by id (prefer the fresher inline row) to avoid
   // duplicate React keys and doubled rows.
-  const visibleRecipients =
-    statusFilter === "all"
-      ? (() => {
-          const inlineIds = new Set(data.recipients.map((r) => r.id));
-          return [...data.recipients, ...extraRecipients.filter((r) => !inlineIds.has(r.id))];
-        })()
-      : extraRecipients;
+  const visibleRecipients = unfiltered
+    ? (() => {
+        const inlineIds = new Set(data.recipients.map((r) => r.id));
+        return [...data.recipients, ...extraRecipients.filter((r) => !inlineIds.has(r.id))];
+      })()
+    : extraRecipients;
 
   // Shared refresher so both the socket listeners and the poll go through
   // the same code path. Inside a ref so the socket effect can call it
@@ -301,9 +335,34 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
     void reportRef.current();
     const live =
       data.status === "queued" || data.status === "running" || data.status === "materializing";
-    if (!live) return;
-    const t = window.setInterval(() => void reportRef.current(), 8_000);
-    return () => window.clearInterval(t);
+    if (live) {
+      const t = window.setInterval(() => void reportRef.current(), 8_000);
+      return () => window.clearInterval(t);
+    }
+    // The send finishing is not the campaign finishing: delivered/read/replied
+    // keep arriving from status webhooks for DAYS afterwards, and a frozen
+    // report reads as "nobody engaged" when the truth is "you're looking at a
+    // snapshot". Keep a gentle poll while the tab is actually visible, bounded
+    // to the engagement tail (7 days past completion) — after that the numbers
+    // genuinely stop moving and polling would be waste.
+    const completedAt = data.completedAt ? Date.parse(data.completedAt) : null;
+    const inTail =
+      completedAt === null || Date.now() - completedAt < 7 * 86_400_000;
+    if (!inTail) return;
+    const tick = () => {
+      if (document.visibilityState === "visible") void reportRef.current();
+    };
+    const t = window.setInterval(tick, 30_000);
+    // Coming back to the tab after a while shows fresh numbers immediately
+    // instead of waiting out the interval.
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void reportRef.current();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data.id, data.status]);
 
@@ -615,6 +674,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
         <section className="rounded-xl border border-border bg-card p-4">
           <BroadcastReport
             report={report}
+            hasTemplate={!isFreeform}
             // Without these the Meta panel fetched successfully and then went on
             // showing "Nothing fetched yet" until a manual page reload — the
             // button appeared broken while working perfectly. A completed
@@ -627,19 +687,23 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
             }}
             onFilter={(filter) => {
               // Deep-link a funnel stage / failure bucket into the recipient
-              // table below. Today the table filters by send-side status; the
-              // richer outcome buckets land with the filter model in a later
-              // phase, so map what we can and always scroll the user to the
-              // list rather than silently doing nothing.
+              // table below — the server speaks the same outcome vocabulary,
+              // so every number in the report is one click from the actual
+              // people behind it.
               const value = filter.split("=")[1] ?? "all";
               if (filter.startsWith("outcome=")) {
-                if (value === "failed" || value === "never_received") setStatusFilter("failed");
-                else if (value === "all") setStatusFilter("all");
+                const known = RECIPIENT_OUTCOME_TABS.some((t) => t.value === value);
+                // `accepted`/`undelivered` have no tab of their own — map to
+                // the closest truthful superset rather than doing nothing.
+                const mapped: RecipientOutcomeFilter = known
+                  ? (value as RecipientOutcomeFilter)
+                  : value === "undelivered" || value === "failed"
+                    ? "never_received"
+                    : "all";
+                selectFilter(mapped);
               } else if (filter.startsWith("errorCode=")) {
-                // Per-error-code buckets are all failures — map to the failed
-                // tab (a truthful superset) so the click actually narrows the
-                // table instead of only scrolling.
-                setStatusFilter("failed");
+                // "Who hit THIS error" — server-filtered by normalized code.
+                selectFilter("all", value);
               }
               document.getElementById("broadcast-recipients")?.scrollIntoView({
                 behavior: "smooth",
@@ -672,7 +736,25 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
               )}
             </p>
           ) : (
-            (variables.header || variables.body.length > 0) && (
+            <>
+              {/* The message as the customer saw it: the catalog body with
+                  this campaign's variable values substituted in. Without this
+                  a zero-variable template rendered a completely EMPTY card —
+                  a snapshot section with nothing in it reads as data loss. */}
+              {data.templateBody ? (
+                <p className="mb-3 whitespace-pre-wrap break-words rounded-lg border border-border bg-muted/20 p-3 text-sm">
+                  {substituteTemplateBody(data.templateBody, variables.body)}
+                </p>
+              ) : (
+                variables.body.length === 0 &&
+                !variables.header && (
+                  <p className="mb-3 text-xs text-muted-foreground">
+                    This template has no variables — the approved template text
+                    was sent to every recipient exactly as-is.
+                  </p>
+                )
+              )}
+              {(variables.header || variables.body.length > 0) && (
               <dl className="mb-3 flex flex-wrap gap-x-6 gap-y-2 text-xs">
                 {variables.header !== undefined && (
                   <div className="flex flex-col">
@@ -691,7 +773,8 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
                   </div>
                 ))}
               </dl>
-            )
+              )}
+            </>
           )}
         </div>
       </section>
@@ -708,18 +791,20 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
                 : null}
             </div>
           </div>
-          {/* Status tabs only matter once the inline set was truncated — under
-              500 recipients the full set is already on screen. */}
-          {data.recipientsTruncated && (
-            <div className="inline-flex w-fit rounded-lg border border-border bg-background p-0.5 text-xs">
-              {RECIPIENT_STATUS_TABS.map((tab) => (
+          {/* Outcome tabs — the funnel's numbers as PEOPLE. Always shown (a
+              20-recipient campaign still wants "who replied"); every tab is a
+              server-side filter, so a 100k campaign drills down through the
+              same bounded pages as a small one. */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <div className="inline-flex w-fit flex-wrap rounded-lg border border-border bg-background p-0.5 text-xs">
+              {RECIPIENT_OUTCOME_TABS.map((tab) => (
                 <button
                   key={tab.value}
                   type="button"
-                  onClick={() => selectStatus(tab.value)}
+                  onClick={() => selectFilter(tab.value)}
                   className={cn(
                     "rounded-md px-2.5 py-1 font-medium transition-colors",
-                    statusFilter === tab.value
+                    statusFilter === tab.value && !errorCodeFilter
                       ? "bg-primary/10 text-primary"
                       : "text-muted-foreground hover:text-foreground",
                   )}
@@ -728,7 +813,18 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
                 </button>
               ))}
             </div>
-          )}
+            {errorCodeFilter && (
+              <button
+                type="button"
+                onClick={() => selectFilter("all")}
+                className="inline-flex items-center gap-1 rounded-full border border-warning-border bg-warning-bg px-2 py-0.5 text-2xs font-medium text-warning-fg"
+                title="Clear this error filter"
+              >
+                Error: {errorCodeFilter}
+                <span aria-hidden>×</span>
+              </button>
+            )}
+          </div>
         </header>
         <div className="max-h-120 overflow-auto">
           <table className="w-full min-w-140 text-sm">
@@ -736,7 +832,8 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
               <tr className="border-b border-border text-2xs uppercase tracking-wide text-muted-foreground">
                 <th className="px-4 py-2.5 text-left font-medium">Contact</th>
                 <th className="px-4 py-2.5 text-left font-medium">Status</th>
-                <th className="px-4 py-2.5 text-left font-medium">When</th>
+                <th className="px-4 py-2.5 text-left font-medium">Engagement</th>
+                <th className="px-4 py-2.5 text-left font-medium">Sent</th>
                 <th className="px-4 py-2.5 text-right font-medium">Action</th>
               </tr>
             </thead>
@@ -754,6 +851,9 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
                   </td>
                   <td className="px-4 py-2.5">
                     <RecipientStatusPill recipient={r} />
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <RecipientEngagement recipient={r} />
                   </td>
                   <td className="px-4 py-2.5 text-xs text-muted-foreground">
                     {r.sentAt ? <LocalTime iso={r.sentAt} format="listTime" /> : "—"}
@@ -774,10 +874,15 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
               {visibleRecipients.length === 0 && !loadingMore && (
                 <tr>
                   <td
-                    colSpan={4}
+                    colSpan={5}
                     className="px-4 py-8 text-center text-xs text-muted-foreground"
                   >
-                    No {statusFilter === "all" ? "" : `${statusFilter} `}recipients.
+                    {statusFilter === "all"
+                      ? "No recipients."
+                      : `No recipients in “${
+                          RECIPIENT_OUTCOME_TABS.find((t) => t.value === statusFilter)?.label ??
+                          statusFilter
+                        }” yet.`}
                   </td>
                 </tr>
               )}
@@ -837,6 +942,43 @@ function Stat({
   );
 }
 
+/**
+ * The per-person engagement trail: how far this recipient got, with WHEN at
+ * each step. This is what the funnel's aggregate numbers are made of — an
+ * operator drilling into "Read 4,120" sees each person's read time here.
+ * Renders the FURTHEST milestone first (replied ⊃ read ⊃ delivered); a plain
+ * dash for a recipient with no engagement signal yet, which is honest for a
+ * just-sent or failed row.
+ */
+function RecipientEngagement({ recipient: r }: { recipient: BroadcastRecipientDto }) {
+  const steps: Array<{ label: string; iso: string; tone: string }> = [];
+  if (r.repliedAt) steps.push({ label: "Replied", iso: r.repliedAt, tone: "text-primary" });
+  if (r.clickedAt)
+    steps.push({
+      label: r.clickedOptionId ? `Clicked “${r.clickedOptionId}”` : "Clicked",
+      iso: r.clickedAt,
+      tone: "text-primary",
+    });
+  if (r.readAt) steps.push({ label: "Read", iso: r.readAt, tone: "text-success-fg" });
+  else if (r.deliveredAt)
+    steps.push({ label: "Delivered", iso: r.deliveredAt, tone: "text-muted-foreground" });
+  if (steps.length === 0) {
+    return <span className="text-xs text-muted-foreground">—</span>;
+  }
+  return (
+    <div className="flex flex-col gap-0.5">
+      {steps.map((s) => (
+        <span key={s.label} className={cn("inline-flex items-baseline gap-1.5 text-xs", s.tone)}>
+          <span className="font-medium">{s.label}</span>
+          <span className="text-2xs text-muted-foreground">
+            <LocalTime iso={s.iso} format="listTime" />
+          </span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function RecipientStatusPill({
   recipient,
 }: {
@@ -879,6 +1021,22 @@ function RecipientStatusPill({
       Queued
     </span>
   );
+}
+
+/**
+ * Compose the message the customer saw: replace the template's placeholder
+ * tokens with this campaign's variable values, IN ORDER. Token-order (not
+ * token-name) substitution handles positional `{{1}}` and named `{{code}}`
+ * bodies with the same code path — the stored values array is ordered either
+ * way. A token past the values array stays visible as-is, which is honest
+ * (it's what an unfilled variable would have looked like).
+ */
+function substituteTemplateBody(body: string, values: string[]): string {
+  let i = 0;
+  return body.replace(/\{\{\s*[^{}]+\s*\}\}/g, (token) => {
+    const v = values[i++];
+    return v !== undefined && v !== "" ? v : token;
+  });
 }
 
 function parseVariables(v: unknown): { body: string[]; header?: string } {

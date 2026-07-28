@@ -1,10 +1,17 @@
-import { BadRequestException, ConflictException } from "@nestjs/common";
+import {
+  BadGatewayException,
+  BadRequestException,
+  ConflictException,
+} from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { getProviderBinding } from "@/lib/providers";
 import { invalidateProviderConfig } from "@/lib/providers/config";
-import type { ProviderTemplateAnalyticsRow } from "@ccp/shared/providers/types";
+import type {
+  ProviderTemplateAnalyticsRow,
+  TemplateButtonClicks,
+} from "@ccp/shared/providers/types";
 
 /**
  * Meta's own template analytics — the aggregate half of campaign reporting.
@@ -165,7 +172,16 @@ export async function refreshTemplateAnalytics(
       if (/insight/i.test(msg)) {
         throw new ConflictException({ error: "template_insights_not_enabled" });
       }
-      throw err;
+      // Any other Graph refusal: keep it structured and carry Meta's OWN
+      // sentence as `detail`. Left raw this surfaced as a bare 500 and the UI
+      // could only say "Couldn't fetch from Meta" — an operator staring at
+      // that toast has nothing to act on, and neither did we when they
+      // reported it. (Unsupported-region WABAs, expired tokens and permission
+      // gaps all land here with distinct, actionable messages.)
+      throw new BadGatewayException({
+        error: "meta_analytics_fetch_failed",
+        detail: metaErrorSentence(msg),
+      });
     }
     for (const row of rows) {
       if (row.costAmountSpent !== null) sawCost = true;
@@ -179,17 +195,22 @@ export async function refreshTemplateAnalytics(
 /**
  * Upsert one template-day, MERGING rather than replacing the volatile fields.
  *
- * THE RULE: a captured non-null `read` / `clicked` / cost is never overwritten
- * with a later null. Meta reports read and click only for the last ~7 days, so
- * re-fetching a three-week-old campaign returns nulls for metrics we captured
- * correctly at the time. A naive upsert would zero out good history on every
- * refresh — and the damage is silent and permanent, because the source can no
- * longer produce those numbers.
+ * THE RULE: a captured `read` / `clicked` / cost is never overwritten with a
+ * later null OR ZERO. Meta reports read and click only for the last ~7 days —
+ * and its analytics doc is explicit that after that window the counts "reset
+ * to zero", not merely go absent. So a refresh of a three-week-old campaign
+ * (the report's Fetch button reaches back up to 90 days) legitimately returns
+ * 0s for metrics we captured correctly at the time. COALESCE alone survives
+ * the null case but not the zero case, which is why read/clicked merge with
+ * GREATEST: within the live window a fixed day's count only grows, and after
+ * the reset the stored high-water mark wins. The damage a plain overwrite does
+ * is silent and permanent, because the source can no longer produce those
+ * numbers.
  *
- * Written as raw SQL because this is exactly what `COALESCE(EXCLUDED.x, t.x)`
- * on an `ON CONFLICT` is for; expressing "keep the old value when the new one
- * is null" through Prisma's upsert would mean a read, a merge in JS and a
- * write — three statements and a race between them.
+ * Written as raw SQL because this is exactly what `ON CONFLICT ... DO UPDATE`
+ * merge expressions are for; expressing it through Prisma's upsert would mean
+ * a read, a merge in JS and a write — three statements and a race between
+ * them. (Postgres GREATEST ignores nulls, so it doubles as the null guard.)
  */
 async function upsertRollup(
   workspaceId: string,
@@ -203,12 +224,13 @@ async function upsertRollup(
   await db.$executeRaw`
     INSERT INTO "TemplateAnalyticsDaily" (
       "id", "workspaceId", "templateExternalId", "date",
-      "sent", "delivered", "read", "clicked",
+      "sent", "delivered", "read", "clicked", "clickedButtons",
       "costAmountSpent", "costPerDelivered", "costPerUrlClick", "currency", "fetchedAt"
     ) VALUES (
       ${`tad_${workspaceId.slice(-8)}_${row.templateExternalId}_${day.toISOString().slice(0, 10)}`},
       ${workspaceId}, ${row.templateExternalId}, ${day},
       ${row.sent}, ${row.delivered}, ${row.read}, ${row.clicked},
+      CAST(${row.clickedButtons === null ? null : JSON.stringify(row.clickedButtons)} AS jsonb),
       ${row.costAmountSpent}, ${row.costPerDelivered}, ${row.costPerUrlClick},
       ${row.currency}, NOW()
     )
@@ -222,9 +244,15 @@ async function upsertRollup(
       -- water mark and still tracks growth.
       "sent" = GREATEST(EXCLUDED."sent", "TemplateAnalyticsDaily"."sent"),
       "delivered" = GREATEST(EXCLUDED."delivered", "TemplateAnalyticsDaily"."delivered"),
-      -- Volatile metrics: keep what we captured if Meta has stopped reporting.
-      "read" = COALESCE(EXCLUDED."read", "TemplateAnalyticsDaily"."read"),
-      "clicked" = COALESCE(EXCLUDED."clicked", "TemplateAnalyticsDaily"."clicked"),
+      -- Read/click: same monotone rule, for a harsher reason — after the 7-day
+      -- window Meta RESETS these to zero, so a plain COALESCE would let a late
+      -- refresh erase captured history with 0s. GREATEST ignores nulls, so it
+      -- covers both the null case and the reset case.
+      "read" = GREATEST(EXCLUDED."read", "TemplateAnalyticsDaily"."read"),
+      "clicked" = GREATEST(EXCLUDED."clicked", "TemplateAnalyticsDaily"."clicked"),
+      -- The breakdown can't GREATEST; the parser maps a post-reset (all-zero)
+      -- breakdown to null instead, so COALESCE keeps the captured one.
+      "clickedButtons" = COALESCE(EXCLUDED."clickedButtons", "TemplateAnalyticsDaily"."clickedButtons"),
       "costAmountSpent" = COALESCE(EXCLUDED."costAmountSpent", "TemplateAnalyticsDaily"."costAmountSpent"),
       "costPerDelivered" = COALESCE(EXCLUDED."costPerDelivered", "TemplateAnalyticsDaily"."costPerDelivered"),
       "costPerUrlClick" = COALESCE(EXCLUDED."costPerUrlClick", "TemplateAnalyticsDaily"."costPerUrlClick"),
@@ -240,6 +268,7 @@ export interface TemplateAnalyticsDay {
   delivered: number;
   read: number | null;
   clicked: number | null;
+  clickedButtons: TemplateButtonClicks[] | null;
   costAmountSpent: number | null;
   currency: string | null;
 }
@@ -250,12 +279,20 @@ export interface TemplateAnalyticsSummary {
   delivered: number;
   read: number | null;
   clicked: number | null;
+  /** Per-button click totals over the window, summed by (type, label). Null
+   *  when no day carried a breakdown. Note `unique_url_button` counts are
+   *  unique PER DAY at Meta, so a multi-day sum can count one person twice. */
+  clickedButtons: TemplateButtonClicks[] | null;
   costAmountSpent: number | null;
   costPerDelivered: number | null;
   currency: string | null;
   /** Days actually covered by stored data — so "0 sent" and "never fetched"
    *  can be told apart in the UI. */
   days: number;
+  /** When any of this window's rows was last captured from Meta — the
+   *  freshness stamp the UI shows so "live-ish aggregate" is never mistaken
+   *  for a realtime feed. Null when nothing is stored. */
+  fetchedAt: string | null;
 }
 
 /**
@@ -278,9 +315,11 @@ export async function readTemplateAnalytics(
       delivered: true,
       read: true,
       clicked: true,
+      clickedButtons: true,
       costAmountSpent: true,
       costPerDelivered: true,
       currency: true,
+      fetchedAt: true,
     },
   });
 
@@ -290,6 +329,7 @@ export async function readTemplateAnalytics(
     delivered: r.delivered,
     read: r.read,
     clicked: r.clicked,
+    clickedButtons: buttonClicksOf(r.clickedButtons),
     costAmountSpent: decimalToNumber(r.costAmountSpent),
     currency: r.currency,
   }));
@@ -314,6 +354,18 @@ export async function readTemplateAnalytics(
   const delivered = rows.reduce((a, r) => a + r.delivered, 0);
   const cost = sumNullable((r) => decimalToNumber(r.costAmountSpent));
 
+  // Aggregate the per-button breakdown by (type, label) over the days that
+  // carried one. Same null discipline as the scalars: no day reported → null.
+  const byButton = new Map<string, TemplateButtonClicks>();
+  for (const day of days) {
+    for (const b of day.clickedButtons ?? []) {
+      const key = `${b.type} ${b.buttonContent ?? ""}`;
+      const prev = byButton.get(key);
+      if (prev) prev.count += b.count;
+      else byButton.set(key, { ...b });
+    }
+  }
+
   return {
     days,
     summary: {
@@ -321,18 +373,63 @@ export async function readTemplateAnalytics(
       delivered,
       read: sumNullable((r) => r.read),
       clicked: sumNullable((r) => r.clicked),
+      clickedButtons: byButton.size ? [...byButton.values()] : null,
       costAmountSpent: cost,
       // Derived from the totals rather than averaging per-day rates, which
       // would weight a 10-message day the same as a 10,000-message one.
       costPerDelivered: cost !== null && delivered > 0 ? cost / delivered : null,
       currency: rows.find((r) => r.currency)?.currency ?? null,
       days: rows.length,
+      fetchedAt:
+        rows.length > 0
+          ? new Date(Math.max(...rows.map((r) => r.fetchedAt.getTime()))).toISOString()
+          : null,
     },
   };
 }
 
 function dayOf(d: Date): Date {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+/**
+ * Pull the human sentence out of a Graph error. Provider errors read
+ * `meta fetchTemplateAnalytics failed: 400 {"error":{"message":"...",...}}` —
+ * the embedded message is the part an operator can act on; the wrapper is
+ * noise. Falls back to the raw text (bounded) when the body isn't Graph JSON.
+ */
+function metaErrorSentence(raw: string): string {
+  const jsonStart = raw.indexOf("{");
+  if (jsonStart !== -1) {
+    try {
+      const parsed = JSON.parse(raw.slice(jsonStart)) as {
+        error?: { message?: unknown; error_user_msg?: unknown };
+      };
+      const msg = parsed.error?.error_user_msg ?? parsed.error?.message;
+      if (typeof msg === "string" && msg.length > 0) return msg.slice(0, 300);
+    } catch {
+      // fall through to the raw text
+    }
+  }
+  return raw.slice(0, 300);
+}
+
+/** Narrow the stored JSON back to the typed breakdown; malformed → null,
+ *  never a throw — one bad row must not take the whole report down. */
+function buttonClicksOf(v: Prisma.JsonValue | null): TemplateButtonClicks[] | null {
+  if (!Array.isArray(v)) return null;
+  const out: TemplateButtonClicks[] = [];
+  for (const raw of v) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const e = raw as Record<string, unknown>;
+    if (typeof e.type !== "string" || typeof e.count !== "number") continue;
+    out.push({
+      type: e.type,
+      buttonContent: typeof e.buttonContent === "string" ? e.buttonContent : null,
+      count: e.count,
+    });
+  }
+  return out.length ? out : null;
 }
 
 function decimalToNumber(v: Prisma.Decimal | null): number | null {

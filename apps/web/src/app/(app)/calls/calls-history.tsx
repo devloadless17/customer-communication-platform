@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
+  AudioLines,
+  FileText,
   Loader2,
   MessageSquare,
   Phone,
@@ -17,6 +19,10 @@ import { Button } from "@/components/ui/button";
 import { Pagination } from "@/components/ui/pagination";
 import { LocalTime } from "@/components/local-time";
 import { apiFetch } from "@/lib/api/client-fetch";
+import {
+  RecordingPlayer,
+  TranscriptPanel,
+} from "@/features/calls/call-artifacts";
 import { toast } from "@/lib/toast";
 import { useCallApi } from "@/features/calls/call-provider";
 
@@ -34,6 +40,18 @@ interface CallRow {
   ringingAt: string;
   durationSeconds: number | null;
   connected: boolean;
+  /** Opaque payload from the call button that produced an inbound call. */
+  ctaPayload: string | null;
+  /** Opaque payload from the wa.me/call deep link that produced it. */
+  deeplinkPayload: string | null;
+  /** True once the call's opted-in recording is stored and streamable. */
+  hasRecording: boolean;
+  /** True once the call's opted-in transcript document is stored. */
+  hasTranscript: boolean;
+  /** Auto-detected spoken language of the transcript (ISO 639, e.g. "ar"). */
+  transcriptLanguage: string | null;
+  /** Why a FAILED call failed, from the provider's terminate webhook. */
+  errorTitle: string | null;
 }
 
 const PAGE = 25;
@@ -137,8 +155,9 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
         <h1 className="text-2xl font-semibold">Calls</h1>
         <p className="mt-1 max-w-xl text-sm text-muted-foreground">
           Your team&apos;s WhatsApp call history — who called, when, and how it
-          ended. Call audio isn&apos;t recorded: WhatsApp calls are end-to-end
-          encrypted and peer-to-peer, so nothing passes through the server.
+          ended. Calls made with recording turned on keep their audio and
+          transcript here for a limited time (see Settings → WhatsApp →
+          Calling); other calls store no audio.
         </p>
       </header>
 
@@ -334,12 +353,16 @@ function CallRowItem({
 }) {
   const { Icon, label, tone, actor } = describe(row);
   const name = row.contactName?.trim() || row.contactPhone || "Unknown contact";
+  // Recording player / transcript panel, revealed on demand — nothing is
+  // fetched until the agent asks for it.
+  const [showPlayer, setShowPlayer] = useState(false);
+  const [showTranscript, setShowTranscript] = useState(false);
 
   return (
     <li
       data-call-row=""
       className={cn(
-        "flex items-center gap-3 px-4 py-3 transition-colors hover:bg-accent/40",
+        "flex flex-wrap items-center gap-3 px-4 py-3 transition-colors hover:bg-accent/40",
         !first && "border-t border-border",
       )}
     >
@@ -375,6 +398,26 @@ function CallRowItem({
               <span className="tabular-nums">{formatDuration(row.durationSeconds)}</span>
             </>
           )}
+          {row.status === "failed" && row.errorTitle && (
+            <>
+              <span className="opacity-50">·</span>
+              <span className="min-w-0 truncate">{row.errorTitle}</span>
+            </>
+          )}
+          {/* Origin attribution: which call button / deep link produced this
+              inbound call. The payload is the campaign's own opaque tag, so
+              show it verbatim in the tooltip and keep the label generic. */}
+          {(row.ctaPayload ?? row.deeplinkPayload) && (
+            <>
+              <span className="opacity-50">·</span>
+              <span
+                className="rounded bg-muted px-1 py-px text-2xs"
+                title={row.ctaPayload ?? row.deeplinkPayload ?? undefined}
+              >
+                {row.ctaPayload ? "via call button" : "via call link"}
+              </span>
+            </>
+          )}
         </div>
       </div>
 
@@ -385,6 +428,32 @@ function CallRowItem({
       />
 
       <div className="flex shrink-0 items-center gap-1">
+        {row.hasRecording && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className={cn("size-8", showPlayer && "text-primary")}
+            title="Play recording"
+            aria-label="Play recording"
+            aria-pressed={showPlayer}
+            onClick={() => setShowPlayer((v) => !v)}
+          >
+            <AudioLines className="size-4" />
+          </Button>
+        )}
+        {row.hasTranscript && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className={cn("size-8", showTranscript && "text-primary")}
+            title={`Transcript${row.transcriptLanguage ? ` (${row.transcriptLanguage.toUpperCase()})` : ""}`}
+            aria-label="Show transcript"
+            aria-pressed={showTranscript}
+            onClick={() => setShowTranscript((v) => !v)}
+          >
+            <FileText className="size-4" />
+          </Button>
+        )}
         <Button asChild variant="ghost" size="icon" title="Open chat" className="size-8">
           <Link href={`/inbox?c=${row.conversationId}`} aria-label="Open chat">
             <MessageSquare className="size-4" />
@@ -408,6 +477,18 @@ function CallRowItem({
           </Button>
         )}
       </div>
+
+      {showPlayer && (
+        <div className="basis-full pl-12">
+          <RecordingPlayer callId={row.id} />
+        </div>
+      )}
+
+      {showTranscript && (
+        <div className="basis-full pl-12">
+          <TranscriptPanel callId={row.id} />
+        </div>
+      )}
     </li>
   );
 }

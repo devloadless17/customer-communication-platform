@@ -115,6 +115,9 @@ export class SendTemplateValidationError extends Error {
     // was approved with (count, media kind, body values, or a button value).
     | "carousel_cards_required"
     | "contact_has_no_phone"
+    // The workspace blocked this contact (Block Users API) — the provider
+    // rejects every send to them, so refuse up front with the reason.
+    | "contact_blocked"
     | "provider_not_configured"
     | "provider_no_template_support";
   detail?: string;
@@ -150,6 +153,13 @@ export async function sendTemplateInternal(
     throw new SendTemplateValidationError(
       "conversation_not_found",
       "conversation not found",
+    );
+  }
+  if (conversation.contact.blockedAt) {
+    throw new SendTemplateValidationError(
+      "contact_blocked",
+      "contact_blocked",
+      "This contact is blocked. Unblock them to send messages.",
     );
   }
   if (!template) {

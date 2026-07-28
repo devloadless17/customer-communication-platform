@@ -56,6 +56,12 @@ export type MetaErrorCode =
   | "unsupported_message"  // 131009 — content type not supported on this account
   | "duplicate_button_title" // 131009 + "Duplicate button title" — interactive buttons reuse a title
   | "call_permission_required" // WA 138006 — customer hasn't granted calling permission
+  | "account_restricted"   // WA 368/131031 — WABA restricted/disabled/locked by policy enforcement
+  | "contact_blocked"      // WA 130403 — WE blocked this person (Block Users API); unblock to resume
+  | "country_not_allowed"  // WA 130497 — business category can't message this recipient's country
+  | "billing_issue"        // WA 131042 — payment method / credit line problem on the WABA
+  | "number_not_registered" // WA 131045/133010 — number not registered with Cloud API
+  | "marketing_disabled"   // WA 131063 — marketing templates disabled on Cloud API (WhatsApp Manager flag)
   | "provider_rejected";   // catch-all for anything else MetaSendError-shaped
 
 /**
@@ -82,6 +88,12 @@ export const ALL_META_ERROR_CODES = [
   "unsupported_message",
   "duplicate_button_title",
   "call_permission_required",
+  "account_restricted",
+  "contact_blocked",
+  "country_not_allowed",
+  "billing_issue",
+  "number_not_registered",
+  "marketing_disabled",
   "provider_rejected",
 ] as const satisfies ReadonlyArray<MetaErrorCode>;
 
@@ -251,7 +263,12 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
   // WhatsApp 4/80007/130429/131048/131056; social 613 ("Calls to this API
   // exceeded the rate limit") + 80006. All normalize to `rate_limited` so the
   // retry machinery engages: send-worker retry, broadcast 429 streak backoff +
-  // cross-lane pause, forward-loop break.
+  // cross-lane pause, forward-loop break. Two try-again-later cousins ride the
+  // same family (error-codes reference): 131057 (account briefly in
+  // maintenance mode, e.g. a throughput upgrade) and 131064 (messaging limited
+  // over template-classification violations — lifts automatically after the
+  // enforcement period). Each keeps its own message so an agent isn't sent
+  // hunting for a rate problem that doesn't exist.
   if (
     numericCode === 4 ||
     numericCode === 80007 ||
@@ -259,19 +276,100 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
     numericCode === 130429 ||
     numericCode === 131048 ||
     numericCode === 131056 ||
+    numericCode === 131057 ||
+    numericCode === 131064 ||
     numericCode === 613
   ) {
     return {
       code: "rate_limited",
-      message: "Meta is rate-limiting this account — slow down or wait.",
+      // 131056 is the (business number, recipient) PAIR limit — the account is
+      // fine; THIS person was messaged too fast (1 msg/6s sustained, ~45-msg
+      // burst). The family message ("slow down the account") would send an
+      // agent hunting for an account problem that doesn't exist.
+      message:
+        numericCode === 131056
+          ? "WhatsApp limits how quickly you can message the same person — wait a few seconds and try again."
+          : numericCode === 131057
+            ? "The WhatsApp Business Account is briefly in maintenance (often a throughput upgrade) — try again shortly."
+            : numericCode === 131064
+              ? "Meta has limited this account's messaging over template-classification violations — the limit lifts automatically after the enforcement period."
+              : "Meta is rate-limiting this account — slow down or wait.",
       detail,
       httpStatus,
     };
   }
-  if (numericCode === 190) {
+  // Code 0 = "unable to authenticate the app user" — the token is expired or
+  // invalidated (error-codes reference), same operator action as 190.
+  if (numericCode === 190 || numericCode === 0) {
     return {
       code: "auth_expired",
       message: "The Meta access token expired — reconnect the channel in Settings.",
+      detail,
+      httpStatus,
+    };
+  }
+  // ── Account-level enforcement / configuration — run-fatal family ─────────
+  // 368 + 131031: the WABA is restricted, disabled, or locked by policy
+  // enforcement (integrity errors). Fails every send identically; the health
+  // panel's restriction banner (account_update webhooks) explains why.
+  if (numericCode === 368 || numericCode === 131031) {
+    return {
+      code: "account_restricted",
+      message:
+        "Meta has restricted or locked this WhatsApp Business Account — check Business Support Home for the violation and any appeal.",
+      detail,
+      httpStatus,
+    };
+  }
+  // 130403: WE blocked this recipient (Block Users API). Never retry —
+  // unblock from the conversation menu to resume.
+  if (numericCode === 130403) {
+    return {
+      code: "contact_blocked",
+      message: "You've blocked this contact — unblock them to resume messaging.",
+      detail,
+      httpStatus,
+    };
+  }
+  // 130497: the WABA's business category may not message this recipient's
+  // country (Business Messaging Policy). Nothing wrong with the contact.
+  if (numericCode === 130497) {
+    return {
+      code: "country_not_allowed",
+      message:
+        "Meta doesn't allow your business category to message people in this recipient's country.",
+      detail,
+      httpStatus,
+    };
+  }
+  // 131042: payment method / credit line problem on the WABA.
+  if (numericCode === 131042) {
+    return {
+      code: "billing_issue",
+      message:
+        "There's a problem with this account's WhatsApp billing (payment method / credit line) — fix it in Meta Business Suite, then retry.",
+      detail,
+      httpStatus,
+    };
+  }
+  // 131045 (send failed: registration error) + 133010 (number not registered).
+  if (numericCode === 131045 || numericCode === 133010) {
+    return {
+      code: "number_not_registered",
+      message:
+        "This WhatsApp number isn't registered with the Cloud API — register it in Settings → WhatsApp, then retry.",
+      detail,
+      httpStatus,
+    };
+  }
+  // 131063: the WABA has `disable_marketing_messages_on_cloud_api` set, so
+  // MARKETING templates are refused on Cloud API (a WhatsApp Manager setting;
+  // utility/auth templates still send).
+  if (numericCode === 131063) {
+    return {
+      code: "marketing_disabled",
+      message:
+        "Marketing templates are disabled for this account's Cloud API configuration — re-enable them in WhatsApp Manager, or use a utility template.",
       detail,
       httpStatus,
     };
@@ -401,10 +499,34 @@ export function classifyMetaStatusError(code: number | null | undefined): MetaEr
     case 130429:
     case 131048:
     case 131056:
+    // Try-again-later cousins: maintenance mode + classification-violation
+    // messaging limit (see the sync ladder's rate-limit family).
+    case 131057:
+    case 131064:
     case 613:
       return "rate_limited";
     case 190:
+    case 0:
       return "auth_expired";
+    // Account-level enforcement / configuration (error-codes reference) —
+    // mirrors the sync ladder's run-fatal family.
+    case 368:
+    case 131031:
+      return "account_restricted";
+    // WE blocked this recipient (Block Users API). Also the drift signal that
+    // the number was blocked out-of-band (WhatsApp Manager) — ingest reconciles
+    // Contact.blockedAt off this classification.
+    case 130403:
+      return "contact_blocked";
+    case 130497:
+      return "country_not_allowed";
+    case 131042:
+      return "billing_issue";
+    case 131045:
+    case 133010:
+      return "number_not_registered";
+    case 131063:
+      return "marketing_disabled";
     case 132001:
     case 132007:
     case 132015:
@@ -453,6 +575,12 @@ export function failureBucket(code: MetaErrorCode | string | null): FailureBucke
     case "rate_limited":
     case "template_unavailable":
     case "auth_expired":
+    // Fix-then-retry classes: once the operator repairs the account (billing,
+    // registration, or the restriction lapses/appeal succeeds), re-sending the
+    // same audience is expected to work.
+    case "account_restricted":
+    case "billing_issue":
+    case "number_not_registered":
       return "retryable";
     // The ONLY bucket that says "delete this contact" — reserved for a number
     // that genuinely isn't reachable.
@@ -474,6 +602,12 @@ export function failureBucket(code: MetaErrorCode | string | null): FailureBucke
     case "marketing_opt_out":
     case "portfolio_paced_drop":
     case "call_permission_required":
+    //   contact_blocked        WE blocked them — a standing workspace choice.
+    //                          Unblocking, not list-cleaning, is the fix.
+    //   country_not_allowed    Meta's per-category country policy. The contact
+    //                          is fine; the BUSINESS may not message there.
+    case "contact_blocked":
+    case "country_not_allowed":
       return "suppress";
     // OUR content, not their number. Every recipient fails identically until
     // the template or the message changes, so pointing the operator at their
@@ -481,6 +615,9 @@ export function failureBucket(code: MetaErrorCode | string | null): FailureBucke
     case "unsupported_message":
     case "duplicate_button_title":
     case "message_unavailable":
+    // A WhatsApp Manager configuration refusing MARKETING templates — every
+    // recipient fails identically until the flag or the template changes.
+    case "marketing_disabled":
       return "content";
     case "duplicate_person":
       // Deliberately suppressed, never retryable: the person DID receive this
@@ -537,4 +674,25 @@ function extractMetaError(body: string): { code: number | null; subcode: number 
 export function isProvablyNotSent(normalized: NormalizedSendError | null): boolean {
   if (!normalized) return false; // transport error / timeout → ambiguous
   return normalized.httpStatus < 500 || normalized.code === "rate_limited";
+}
+
+/**
+ * WhatsApp 131056 — the (business number, recipient) PAIR rate limit: 1 msg
+ * per 6s sustained to the same person, with a ~45-message burst allowance that
+ * borrows from future quota (a drained burst can need minutes to repay).
+ *
+ * It shares the `rate_limited` family (retry machinery must engage) but its
+ * SCOPE is one recipient, not the number — so callers that react to
+ * `rate_limited` with number-wide measures (the broadcast 429 streak, the
+ * cross-lane pause, the whole-run park) must carve this code out and handle
+ * the single recipient instead. These helpers are the one place that decision
+ * can be read from a thrown error / error body.
+ */
+export function isPairRateLimitBody(body: string | null | undefined): boolean {
+  if (!body) return false;
+  return extractMetaError(body).code === 131056;
+}
+
+export function isPairRateLimitError(err: unknown): boolean {
+  return err instanceof MetaSendError && isPairRateLimitBody(err.body);
 }

@@ -18,9 +18,11 @@ import {
   X,
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { LocalTime } from "@/components/local-time";
 import { TemplatePreview } from "@/features/templates/components/template-preview";
@@ -1115,6 +1117,15 @@ function DetailDrawer({
                     <div className="mt-3">
                       <TemplateInsights templateId={template.id} />
                     </div>
+                    {/* Keyed by template: the drawer body doesn't remount when
+                        the selection changes, and this component seeds local
+                        state from props — unkeyed, template B would show
+                        template A's toggle position. */}
+                    <LinkTrackingToggle
+                      key={template.id}
+                      template={template}
+                      canManage={canManage}
+                    />
                   </section>
                 )}
 
@@ -1319,6 +1330,83 @@ function DetailDrawer({
         </>
       )}
     </AnimatePresence>
+  );
+}
+
+/**
+ * Per-template button-click tracking control (Meta's
+ * `cta_url_link_tracking_opted_out`). Lives inside the Performance section
+ * because its whole effect IS the click analytics above it: with tracking off,
+ * the click series stops — and this row is what tells the operator that an
+ * empty series is a choice, not a broken chart.
+ */
+function LinkTrackingToggle({
+  template,
+  canManage,
+}: {
+  template: TemplateDto;
+  canManage: boolean;
+}) {
+  // Seeded from the synced row; null means Meta hasn't reported the flag,
+  // which renders as "on" (Meta's default at creation) but is only asserted
+  // once a toggle or resync confirms it.
+  const [optedOut, setOptedOut] = useState(template.linkTrackingOptedOut === true);
+  const [saving, setSaving] = useState(false);
+
+  async function toggle(nextEnabled: boolean) {
+    if (saving) return;
+    setSaving(true);
+    try {
+      const res = await apiFetch(
+        `/api/workspace/whatsapp/templates/${template.id}/link-tracking`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ enabled: nextEnabled }),
+        },
+      );
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as {
+          error?: string;
+          detail?: string;
+        };
+        toast.error(
+          body.detail
+            ? `Meta refused the change: ${body.detail}`
+            : "Couldn't update link tracking.",
+        );
+        return;
+      }
+      setOptedOut(!nextEnabled);
+      toast.success(
+        nextEnabled
+          ? "Button-click tracking is on for this template."
+          : "Button-click tracking is off — future sends won't record clicks.",
+      );
+    } catch {
+      toast.error("Network error — link tracking unchanged.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="mt-3 flex items-start justify-between gap-3 rounded-lg border border-border bg-muted/20 px-3 py-2.5">
+      <div className="min-w-0 text-xs leading-relaxed">
+        <div className="font-medium">Button-click tracking</div>
+        <p className="mt-0.5 text-muted-foreground">
+          {optedOut
+            ? "Off — Meta records no clicks for this template, so the click figures above stay empty on purpose."
+            : "On — Meta records URL and quick-reply button clicks for the figures above."}
+        </p>
+      </div>
+      <Switch
+        checked={!optedOut}
+        onCheckedChange={(v) => void toggle(v)}
+        disabled={!canManage || saving}
+        aria-label="Button-click tracking"
+      />
+    </div>
   );
 }
 

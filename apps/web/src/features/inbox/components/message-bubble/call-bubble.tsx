@@ -1,6 +1,9 @@
 "use client";
 
+import { useState } from "react";
 import {
+  AudioLines,
+  FileText,
   Phone,
   PhoneCall,
   PhoneIncoming,
@@ -10,6 +13,10 @@ import {
 } from "lucide-react";
 
 import type { CallSnapshot } from "@ccp/shared/types";
+import {
+  RecordingPlayer,
+  TranscriptPanel,
+} from "@/features/calls/call-artifacts";
 
 /**
  * Inline call entry in the thread timeline. Same visual idiom as the
@@ -112,11 +119,21 @@ export function CallBubble({
   // connected, the agent who picked up. An unanswered inbound has no agent.
   const actor = isInbound ? (connected ? answeredByName : null) : initiatedByName;
 
+  // Call artifacts, revealed on demand right in the thread — agents shouldn't
+  // have to leave the conversation to hear a call or read its (Arabic-RTL)
+  // transcript. Optional fields: live-frame bubbles predate the artifacts,
+  // which appear on the next thread hydrate ~1min after the call ends.
+  const [openPanel, setOpenPanel] = useState<"recording" | "transcript" | null>(
+    null,
+  );
+  const togglePanel = (panel: "recording" | "transcript") =>
+    setOpenPanel((prev) => (prev === panel ? null : panel));
+
   return (
-    <div className="flex items-center justify-center py-1.5">
+    <div className="flex flex-col items-center py-1.5">
       <div
         className={
-          "inline-flex max-w-64 items-center gap-1.5 rounded-full border px-3 py-1 text-2xs " +
+          "inline-flex max-w-72 items-center gap-1.5 rounded-full border px-3 py-1 text-2xs " +
           tones[tone]
         }
       >
@@ -131,7 +148,53 @@ export function CallBubble({
         {call.durationSeconds !== null && call.durationSeconds > 0 && (
           <span className="shrink-0 whitespace-nowrap opacity-70">· {formatDuration(call.durationSeconds)}</span>
         )}
+        {/* WHY it failed, from the provider's terminate webhook (e.g. "Media
+            receive timeout") — turns a generic failure into something the
+            agent can act on or report. */}
+        {call.status === "failed" && call.errorTitle && (
+          <span className="min-w-0 truncate opacity-70">· {call.errorTitle}</span>
+        )}
+        {call.hasRecording && (
+          <button
+            type="button"
+            title="Play recording"
+            aria-label="Play recording"
+            aria-pressed={openPanel === "recording"}
+            onClick={() => togglePanel("recording")}
+            className={
+              "shrink-0 rounded-full p-0.5 transition-colors hover:bg-foreground/10 " +
+              (openPanel === "recording" ? "text-primary" : "")
+            }
+          >
+            <AudioLines className="size-3.5" />
+          </button>
+        )}
+        {call.hasTranscript && (
+          <button
+            type="button"
+            title={`Transcript${call.transcriptLanguage ? ` (${call.transcriptLanguage.toUpperCase()})` : ""}`}
+            aria-label="Show transcript"
+            aria-pressed={openPanel === "transcript"}
+            onClick={() => togglePanel("transcript")}
+            className={
+              "shrink-0 rounded-full p-0.5 transition-colors hover:bg-foreground/10 " +
+              (openPanel === "transcript" ? "text-primary" : "")
+            }
+          >
+            <FileText className="size-3.5" />
+          </button>
+        )}
       </div>
+      {openPanel === "recording" && (
+        <div className="mt-1.5 w-full max-w-md">
+          <RecordingPlayer callId={call.id} />
+        </div>
+      )}
+      {openPanel === "transcript" && (
+        <div className="mt-1.5 w-full max-w-md">
+          <TranscriptPanel callId={call.id} />
+        </div>
+      )}
     </div>
   );
 }

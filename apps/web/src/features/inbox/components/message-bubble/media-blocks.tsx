@@ -46,7 +46,17 @@ export function MediaBlock({
     case "video":
       return <VideoBlock media={media} isOut={isOut} />;
     case "audio":
-      return <AudioBlock media={media} isOut={isOut} />;
+      return (
+        <AudioBlock
+          media={media}
+          isOut={isOut}
+          // A voicemail arrives as a normal inbound audio message whose id is
+          // the originating call's WACID (voicemail webhook contract) — the
+          // only wire-level marker there is. Label it so the agent knows this
+          // is a missed-call message, not a mid-chat voice note.
+          voicemail={!isOut && message.externalId.startsWith("wacid.")}
+        />
+      );
     case "document":
       return <DocumentBlock media={media} isOut={isOut} />;
     case "sticker":
@@ -413,7 +423,16 @@ function voiceWaveformBars(seed: string): number[] {
   return bars;
 }
 
-function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }) {
+function AudioBlock({
+  media,
+  isOut,
+  voicemail = false,
+}: {
+  media: MediaAttachment;
+  isOut: boolean;
+  /** Inbound audio whose id is a call WACID — a voicemail, not a voice note. */
+  voicemail?: boolean;
+}) {
   const [errored, setErrored] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [current, setCurrent] = useState(0);
@@ -562,11 +581,13 @@ function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }
         aria-label={
           playing
             ? "Pause"
-            : isVoice
-              ? "Play voice message"
-              : "Play audio"
+            : voicemail
+              ? "Play voicemail"
+              : isVoice
+                ? "Play voice message"
+                : "Play audio"
         }
-        title={isVoice ? "Voice message" : "Audio file"}
+        title={voicemail ? "Voicemail" : isVoice ? "Voice message" : "Audio file"}
         className={cn(
           "flex size-9 shrink-0 items-center justify-center rounded-full transition-colors",
           isOut
@@ -643,6 +664,19 @@ function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }
             style={{ width: `${fraction * 100}%` }}
           />
         </div>
+      )}
+      {/* Voicemail tag: same compact-pill idiom as the speed control (text-3xs,
+          leading-none), so the size-9 play button still drives the fixed row
+          height useChatScroll depends on. */}
+      {voicemail && (
+        <span
+          className={cn(
+            "shrink-0 rounded-full px-1.5 py-0.5 text-3xs font-medium leading-none",
+            isOut ? "bg-white/15 text-current" : "bg-muted text-muted-foreground",
+          )}
+        >
+          Voicemail
+        </span>
       )}
       {timeLabel != null && (
         <span className="shrink-0 text-3xs tabular-nums opacity-70">{timeLabel}</span>

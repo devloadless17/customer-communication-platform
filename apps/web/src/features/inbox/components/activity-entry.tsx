@@ -4,6 +4,7 @@ import { memo } from "react";
 import Link from "next/link";
 import {
   ArrowRightLeft,
+  Ban,
   Bot,
   CircleDot,
   Flag,
@@ -12,6 +13,7 @@ import {
   Tag,
   Ticket as TicketIcon,
   Trash2,
+  Undo2,
   UserPlus,
   UserMinus,
 } from "lucide-react";
@@ -119,6 +121,26 @@ function describe(e: ConversationActivityEvent): {
         text: (
           <>
             {who} resumed AI Autopilot
+          </>
+        ),
+      };
+    // Provider-level block (WhatsApp Block Users API). The pill is what
+    // explains the locked composer to a teammate opening the thread later.
+    case "contact_blocked":
+      return {
+        icon: Ban,
+        text: (
+          <>
+            {who} blocked this contact
+          </>
+        ),
+      };
+    case "contact_unblocked":
+      return {
+        icon: Undo2,
+        text: (
+          <>
+            {who} unblocked this contact
           </>
         ),
       };

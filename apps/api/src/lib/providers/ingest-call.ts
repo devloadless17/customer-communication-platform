@@ -9,6 +9,10 @@ import type { Contact, Conversation } from "@prisma/client";
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 import { publishInTx } from "@/lib/events/outbox";
+import {
+  downloadCallRecording,
+  downloadCallTranscript,
+} from "@/lib/media/call-recording-download";
 import { resolveCustomerId } from "@/lib/identity/identity-service";
 import { toContactWire } from "@/lib/queries/_shared";
 import {
@@ -74,7 +78,9 @@ function phaseToStatus(phase: NormalizedCallEvent["phase"]): CallStatus | null {
       return CallStatus.failed;
     case "permission_granted":
     case "permission_revoked":
-      // Handled separately — no Call row write.
+    case "recording_available":
+    case "transcript_available":
+      // Handled separately — no lifecycle-status write.
       return null;
   }
 }
@@ -87,6 +93,18 @@ export async function ingestCallEvent(
   // Permission events take a side-path: they mutate Contact, not Call.
   if (evt.phase === "permission_granted" || evt.phase === "permission_revoked") {
     await handlePermissionEvent(workspaceId, channel, evt);
+    return;
+  }
+
+  // Recording/transcript artifacts take a side-path too: they reference an
+  // EXISTING call by id and stamp its artifact columns — no lifecycle
+  // transition, no Contact/Conversation work.
+  if (evt.phase === "recording_available") {
+    await handleRecordingAvailable(workspaceId, channel, evt);
+    return;
+  }
+  if (evt.phase === "transcript_available") {
+    await handleTranscriptAvailable(workspaceId, channel, evt);
     return;
   }
 
@@ -490,6 +508,21 @@ export async function ingestCallEvent(
                   : {}),
                 endedAt: evt.timestamp,
                 durationSeconds: terminalDurationSeconds,
+                // Origin attribution (call button / deep link). The terminate
+                // webhook echoes the same values the connect carried, so a
+                // re-stamp is idempotent; stamping here also covers the
+                // terminal-on-first-webhook case where connect never arrived.
+                ...(evt.ctaPayload ? { ctaPayload: evt.ctaPayload } : {}),
+                ...(evt.deeplinkPayload
+                  ? { deeplinkPayload: evt.deeplinkPayload }
+                  : {}),
+                // WHY a failed call failed (terminate errors[]; 138019-138023).
+                ...(evt.phase === "failed" && evt.errorCode !== undefined
+                  ? { errorCode: evt.errorCode }
+                  : {}),
+                ...(evt.phase === "failed" && evt.errorTitle
+                  ? { errorTitle: evt.errorTitle }
+                  : {}),
                 rawPayload: evt.rawPayload as Prisma.InputJsonValue,
               },
             });
@@ -508,6 +541,10 @@ export async function ingestCallEvent(
                 ...(canWriteStatus ? { status: effectiveStatus } : {}),
                 ...(!existing.answeredAt && evt.connectedAt
                   ? { answeredAt: evt.connectedAt }
+                  : {}),
+                ...(evt.ctaPayload ? { ctaPayload: evt.ctaPayload } : {}),
+                ...(evt.deeplinkPayload
+                  ? { deeplinkPayload: evt.deeplinkPayload }
                   : {}),
                 rawPayload: evt.rawPayload as Prisma.InputJsonValue,
               },
@@ -535,6 +572,16 @@ export async function ingestCallEvent(
             ...(isTerminalPhase
               ? { endedAt: evt.timestamp, durationSeconds: terminalDurationSeconds }
               : {}),
+            ...(evt.ctaPayload ? { ctaPayload: evt.ctaPayload } : {}),
+            ...(evt.deeplinkPayload
+              ? { deeplinkPayload: evt.deeplinkPayload }
+              : {}),
+            ...(evt.phase === "failed" && evt.errorCode !== undefined
+              ? { errorCode: evt.errorCode }
+              : {}),
+            ...(evt.phase === "failed" && evt.errorTitle
+              ? { errorTitle: evt.errorTitle }
+              : {}),
             rawPayload: evt.rawPayload as Prisma.InputJsonValue,
           },
           select: { id: true, status: true },
@@ -544,6 +591,44 @@ export async function ingestCallEvent(
         // transition (a concurrent duplicate insert P2002-rolls-back wholesale,
         // publishes included, so the winner is still exactly one).
         terminalTransitionWon = isTerminalPhase;
+      }
+
+      // Customer-service window. The calling-PRICING doc settled both rules
+      // the earlier service-messages wording left open:
+      //   - a user-initiated call opens/refreshes the window "regardless of
+      //     if you accept the call or not" — so ANY inbound call bumps, at
+      //     its arrival instant (a missed/declined call still opened it);
+      //   - "when a WhatsApp user accepts your call" — a CONNECTED outbound
+      //     call bumps too, at the pickup instant (the ACCEPTED status
+      //     webhook carries it as `connectedAt`).
+      // Monotonic (only ever advances), so redelivered / out-of-order
+      // webhooks are no-ops, and an inbound call's answeredAt superseding its
+      // own ring-time bump is harmless. The contact-drift sweeper recomputes
+      // the same value (GREATEST over inbound messages + inbound calls'
+      // ringingAt + connected calls' answeredAt), so these bumps survive
+      // reconciliation. answerCall (calls.service.ts) remains the primary
+      // bump for a normally-answered inbound call; this covers every
+      // webhook-driven path.
+      const rowDirection =
+        existing?.direction ??
+        (evt.direction === "in" ? CallDirection.in : CallDirection.out);
+      const windowAnchor =
+        rowDirection === CallDirection.in
+          ? answeredAt ??
+            // The arrival itself opens the window. `incoming` is the ring
+            // webhook; a terminal-on-first-webhook insert (we never saw the
+            // ring) anchors at its own timestamp — within the ring duration
+            // of the true instant, and monotonicity absorbs the slack.
+            (evt.phase === "incoming" || isFirstInsert ? evt.timestamp : null)
+          : answeredAt;
+      if (windowAnchor) {
+        await tx.contact.updateMany({
+          where: {
+            id: contact.id,
+            OR: [{ lastInboundAt: null }, { lastInboundAt: { lt: windowAnchor } }],
+          },
+          data: { lastInboundAt: windowAnchor },
+        });
       }
 
       // Reopen the closed thread HERE (tx2), atomically with its event. The
@@ -787,6 +872,107 @@ export async function ingestCallEvent(
  * far future (Meta requires a fresh permission request from the customer
  * to re-enable); granted clears it AND resets the unanswered counter.
  */
+/**
+ * `recording_available`: stamp the media id on the call row, then fetch the
+ * bytes to R2 in the background. The webhook must 200 fast (Meta redelivers on
+ * anything else), so only the row stamp is synchronous — the download is
+ * detached, with the call-recordings sweeper as the retry backstop. The
+ * provider deletes the file 7 days after this webhook.
+ */
+async function handleRecordingAvailable(
+  workspaceId: string,
+  channel: Channel,
+  evt: NormalizedCallEvent,
+): Promise<void> {
+  const media = evt.recordingMedia;
+  if (!media?.mediaId) {
+    console.warn(
+      `[ingest-call] recording_available without a media id for call=${evt.externalCallId} — dropping`,
+    );
+    return;
+  }
+  const call = await db.call.findUnique({
+    where: {
+      workspaceId_channel_externalCallId: {
+        workspaceId,
+        channel,
+        externalCallId: evt.externalCallId,
+      },
+    },
+    select: { id: true, recordingKey: true },
+  });
+  if (!call) {
+    // Recording always postdates the call's own webhooks, so a missing row
+    // means the call was never ingested — nothing to attach to. Fail-soft.
+    console.warn(
+      `[ingest-call] recording_available for unknown call=${evt.externalCallId} team=${workspaceId} — dropping`,
+    );
+    return;
+  }
+  if (call.recordingKey) return; // redelivery after a completed download — no-op
+
+  await db.call.update({
+    where: { id: call.id },
+    data: {
+      recordingMediaId: media.mediaId,
+      ...(media.mimeType ? { recordingMimeType: media.mimeType } : {}),
+    },
+  });
+  // Detached — sweeper retries on transient failure.
+  void downloadCallRecording(call.id, media.sha256).catch((err) => {
+    console.warn(
+      `[ingest-call] inline recording download failed for call=${call.id}: ${
+        err instanceof Error ? err.message : err
+      } — sweeper will retry`,
+    );
+  });
+}
+
+/** `transcript_available`: same stamp-then-detached-download lifecycle as
+ *  handleRecordingAvailable, for the JSON transcript document. */
+async function handleTranscriptAvailable(
+  workspaceId: string,
+  channel: Channel,
+  evt: NormalizedCallEvent,
+): Promise<void> {
+  const media = evt.transcriptMedia;
+  if (!media?.mediaId) {
+    console.warn(
+      `[ingest-call] transcript_available without a media id for call=${evt.externalCallId} — dropping`,
+    );
+    return;
+  }
+  const call = await db.call.findUnique({
+    where: {
+      workspaceId_channel_externalCallId: {
+        workspaceId,
+        channel,
+        externalCallId: evt.externalCallId,
+      },
+    },
+    select: { id: true, transcriptKey: true },
+  });
+  if (!call) {
+    console.warn(
+      `[ingest-call] transcript_available for unknown call=${evt.externalCallId} team=${workspaceId} — dropping`,
+    );
+    return;
+  }
+  if (call.transcriptKey) return; // redelivery after a completed download
+
+  await db.call.update({
+    where: { id: call.id },
+    data: { transcriptMediaId: media.mediaId },
+  });
+  void downloadCallTranscript(call.id, media.sha256).catch((err) => {
+    console.warn(
+      `[ingest-call] inline transcript download failed for call=${call.id}: ${
+        err instanceof Error ? err.message : err
+      } — sweeper will retry`,
+    );
+  });
+}
+
 async function handlePermissionEvent(
   workspaceId: string,
   channel: Channel,

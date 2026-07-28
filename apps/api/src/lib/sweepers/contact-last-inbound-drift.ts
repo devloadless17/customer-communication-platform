@@ -5,11 +5,14 @@ import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
  * Reconciler for the `Contact.lastInboundAt` denormalization.
  *
  * The denorm is maintained by the inbound ingest path at
- * [providers/ingest.ts](../providers/ingest.ts). A crash between the
- * Message insert and the Contact bump leaves the denorm stale — rare in
- * practice (the writes are colocated and the path is short), but stale
- * denorm = sidebar sort order silently disagrees with the actual last
- * inbound time, with no operator signal until someone notices.
+ * [providers/ingest.ts](../providers/ingest.ts), and — since connected
+ * user-initiated calls also open the 24h customer-service window — by the
+ * call paths ([providers/ingest-call.ts](../providers/ingest-call.ts) and
+ * calls.service.ts `answerCall`). A crash between the Message/Call write and
+ * the Contact bump leaves the denorm stale — rare in practice (the writes are
+ * colocated and the paths are short), but stale denorm = sidebar sort order
+ * and the reply-box window gate silently disagree with the actual last
+ * inbound interaction, with no operator signal until someone notices.
  *
  * Cadence: 24h. Cheap enough to run forever — the UPDATE is a single
  * set-based statement, planner walks the contact table once. At pilot
@@ -75,7 +78,9 @@ export function stopContactDriftSweeper(): void {
   }
 }
 
-async function sweepOnce(): Promise<void> {
+// Exported for the call-csw-window regression spec (same pattern as
+// template-catalog-refresh's sweepOnce) — production entry is the interval.
+export async function sweepOnce(): Promise<void> {
   // bjadded-1: page PER-TEAM rather than one cross-tenant full-table UPDATE.
   // The old single statement joined the ENTIRE Contact table against the ENTIRE
   // Message table's per-contact MAX(timestamp) — at scale (many teams × millions
@@ -84,11 +89,19 @@ async function sweepOnce(): Promise<void> {
   // Message.workspaceId / Contact.workspaceId) bounds the footprint and lets unrelated
   // tenants' writes proceed between iterations.
   //
-  // Per team: join Contact against the per-contact MAX(timestamp) of inbound
-  // messages, update only where the denorm disagrees. `IS DISTINCT FROM` treats
-  // NULL as comparable so both drift directions (stale value vs missing value)
-  // are caught symmetrically. Message has no contactId — it joins through
-  // Conversation.
+  // Per team: join Contact against the per-contact GREATEST of (a) the MAX
+  // timestamp of inbound messages, (b) the MAX ringingAt of ALL inbound calls
+  // (the calling-pricing doc opens the window "regardless of if you accept
+  // the call or not"), and (c) the MAX answeredAt of connected calls of
+  // EITHER direction ("when a WhatsApp user accepts your call"). All write
+  // paths (providers/ingest.ts, providers/ingest-call.ts + calls.service.ts
+  // answerCall) bump the same denorm. Recomputing from a NARROWER set than
+  // the write paths would REVERT their bumps as "drift" within 24h.
+  // Postgres GREATEST ignores NULLs (null only when all args are null), so a
+  // contact with only one signal keeps it. Update only where the denorm
+  // disagrees; `IS DISTINCT FROM` treats NULL as comparable so both drift
+  // directions (stale value vs missing value) are caught symmetrically.
+  // Neither Message nor Call has a contactId — both join through Conversation.
   const teams = await db.workspace.findMany({ select: { id: true } });
   let totalDrifted = 0;
   for (const { id: workspaceId } of teams) {
@@ -102,7 +115,7 @@ async function sweepOnce(): Promise<void> {
         FROM (
           SELECT
             c2.id as contact_id,
-            actual.max_ts as last_inbound
+            GREATEST(msg.max_ts, calls.max_ts) as last_inbound
           FROM "Contact" c2
           LEFT JOIN (
             SELECT co."contactId" AS contact_id, MAX(m."timestamp") AS max_ts
@@ -110,7 +123,23 @@ async function sweepOnce(): Promise<void> {
             JOIN "Conversation" co ON co.id = m."conversationId"
             WHERE m.direction = 'in' AND m."workspaceId" = ${workspaceId}
             GROUP BY co."contactId"
-          ) actual ON actual.contact_id = c2.id
+          ) msg ON msg.contact_id = c2.id
+          LEFT JOIN (
+            -- Calling-pricing doc: ANY inbound call opens the window at its
+            -- arrival ("regardless of if you accept the call or not"), and a
+            -- CONNECTED call of EITHER direction opens it at pickup ("when a
+            -- WhatsApp user accepts your call"). GREATEST returns null only
+            -- when all args are null, so either signal alone survives.
+            SELECT co."contactId" AS contact_id,
+              GREATEST(
+                MAX(cl."ringingAt") FILTER (WHERE cl.direction = 'in'),
+                MAX(cl."answeredAt") FILTER (WHERE cl."answeredAt" IS NOT NULL)
+              ) AS max_ts
+            FROM "Call" cl
+            JOIN "Conversation" co ON co.id = cl."conversationId"
+            WHERE cl."workspaceId" = ${workspaceId}
+            GROUP BY co."contactId"
+          ) calls ON calls.contact_id = c2.id
           WHERE c2."workspaceId" = ${workspaceId}
         ) sub
         WHERE c.id = sub.contact_id

@@ -72,12 +72,20 @@ export async function sendStructuredInternal(
           identityChannel: true,
           externalContactId: true,
           lastInboundAt: true,
+          blockedAt: true,
         },
       },
     },
   });
   if (!conversation) {
     throw new SendTextValidationError("conversation_not_found", "conversation not found");
+  }
+  if (conversation.contact.blockedAt) {
+    throw new SendTextValidationError(
+      "contact_blocked",
+      "contact_blocked",
+      "This contact is blocked. Unblock them to send messages.",
+    );
   }
 
   let dest;

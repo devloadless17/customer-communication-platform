@@ -166,6 +166,17 @@ export interface NormalizedStatusUpdate {
    * cost reporting counts billable conversations by category.
    */
   pricing?: { billable?: boolean; category?: string; model?: string };
+  /**
+   * The provider's CANONICAL id for the recipient this message was actually
+   * delivered to (WhatsApp `statuses[].recipient_id` — the wa_id). Normally
+   * equals the address we dialed, but Meta normalizes some regions' digits
+   * (Brazil's mobile "9", Mexico's legacy "1"), so a CSV-imported number can
+   * differ from the wa_id the customer's REPLY will arrive from. Ingest uses a
+   * mismatch here to re-key/link the contact BEFORE that reply, so it lands in
+   * the same thread instead of forking a duplicate contact. Digits-only;
+   * WhatsApp sets it, other channels omit it.
+   */
+  recipientId?: string;
   timestamp: Date;
   rawPayload: Record<string, unknown>;
 }
@@ -264,7 +275,11 @@ export interface NormalizedCallEvent {
     | "rejected"      // explicitly declined (providers that distinguish it)
     | "failed"        // signaling/media error
     | "permission_granted"
-    | "permission_revoked";
+    | "permission_revoked"
+    | "recording_available"  // post-call: the provider finished processing the
+                             // opted-in recording; carries `recordingMedia`.
+    | "transcript_available"; // post-call: the finished transcript document;
+                              // carries `transcriptMedia`.
   /**
    * Set on `permission_granted` when the customer granted PERMANENTLY rather
    * than for a bounded window. A permanent grant never expires, so ingest must
@@ -279,6 +294,28 @@ export interface NormalizedCallEvent {
    * a fresh permission read) is the only way to know the grant is still live.
    */
   permissionExpiresAt?: Date;
+  /**
+   * Set on `recording_available`: the finished recording's media asset. The
+   * provider deletes the file 7 DAYS after this webhook, so ingest must
+   * download to our own storage promptly — the id (not the short-lived `url`)
+   * is what a retry re-fetches through the Media API.
+   */
+  recordingMedia?: {
+    mediaId: string;
+    mimeType: string | null;
+    /** Base64 SHA-256 of the file, for post-download integrity checks. */
+    sha256: string | null;
+  };
+  /**
+   * Set on `transcript_available`: the finished transcript JSON document.
+   * Same 7-day provider retention + media-id re-fetch semantics as
+   * `recordingMedia`.
+   */
+  transcriptMedia?: {
+    mediaId: string;
+    mimeType: string | null;
+    sha256: string | null;
+  };
   /**
    * The id of the permission-request message this reply answers, when the
    * customer responded to one. Absent when they granted proactively from the
@@ -423,7 +460,98 @@ export interface CallSettings {
     timezoneId: string;
     windows: CallHoursWindow[];
   };
+  /**
+   * Restrict WHERE the call icon shows: only customers whose phone numbers are
+   * registered in these ISO-3166 alpha-2 countries see it (Meta matches on the
+   * number's country code, not physical location). Empty array = no
+   * restriction, shown everywhere. Only meaningful while the icon is visible.
+   */
+  callIconCountries?: string[];
+  /**
+   * Voicemail for missed/rejected user-initiated calls. When enabled, the
+   * provider answers, plays the announcement, records, and delivers the
+   * recording as an inbound audio message (its id is the call's WACID).
+   */
+  voicemail?: CallVoicemailSettings;
 }
+
+/**
+ * Voicemail configuration (WhatsApp call settings `voicemail` object).
+ *
+ * Provider rules worth knowing at the seam: calling must be enabled on the
+ * number or the setting is ignored; the announcement must be audio/ogg (OPUS)
+ * under 60s, uploaded with `use_case=call_voicemail_announcement` (exempt from
+ * the 30-day media TTL); and a TIMEOUT trigger without `timeoutSeconds` is
+ * silently disabled by the provider — so callers should always pair them.
+ */
+export interface CallVoicemailSettings {
+  enabled: boolean;
+  /** What starts collection: we rejected the call, or we let it ring out. */
+  triggers?: Array<"REJECT" | "TIMEOUT">;
+  /** Media id of the announcement (uploaded with the voicemail use-case). */
+  announcementMediaId?: string;
+  /** Seconds of ringing before voicemail kicks in (TIMEOUT trigger, 0–30). */
+  timeoutSeconds?: number;
+}
+
+/**
+ * Per-call recording opt-in (WhatsApp call-recording doc). When enabled, the
+ * provider speaks a legally required consent announcement to BOTH parties
+ * before any audio is recorded — its fixed phrase comes from
+ * `announcementLanguage`, followed by our `purpose` text verbatim.
+ *
+ * The announcement voice is the PROVIDER's TTS in a fixed set of locales
+ * (see RECORDING_ANNOUNCEMENT_LANGUAGES) — notably WITHOUT Arabic as of
+ * 2026-07. An unsupported locale is rejected outright, not fallen back from.
+ */
+export interface CallRecordingOptions {
+  enabled: boolean;
+  /** Spoken to both parties after the fixed phrase. Max 250 chars. */
+  purpose?: string;
+  /** Provider locale for the announcement voice, e.g. "en", "fr", "es". */
+  announcementLanguage?: string;
+}
+
+/**
+ * Per-call transcription opt-in — the SAME request shape as recording (the
+ * provider's `transcription` object mirrors `recording` field-for-field), but
+ * a fully independent feature: separate pricing, separate webhook, separate
+ * artifact (a JSON transcript document, not audio).
+ *
+ * The TRANSCRIPT language is auto-detected from the call audio (Arabic is
+ * supported) — `announcementLanguage` only picks the consent announcement's
+ * voice. When recording AND transcription are both enabled on one call, the
+ * provider plays a single combined announcement using the RECORDING object's
+ * language + purpose and ignores this object's copies.
+ */
+export type CallTranscriptionOptions = CallRecordingOptions;
+
+/**
+ * The provider's supported `announcement_language` locales (call-recording
+ * doc, 2026-07). This list is the ONLY authority the settings UI and the
+ * schema validate against — a value outside it fails the whole call request.
+ * Conspicuously absent: Arabic. Re-check the doc's table before extending.
+ */
+export const RECORDING_ANNOUNCEMENT_LANGUAGES: ReadonlyArray<{
+  code: string;
+  label: string;
+}> = [
+  { code: "en", label: "English" },
+  { code: "en_US", label: "English (US)" },
+  { code: "en_GB", label: "English (UK)" },
+  { code: "en_IN", label: "English (India)" },
+  { code: "nl", label: "Dutch" },
+  { code: "fr", label: "French" },
+  { code: "de", label: "German" },
+  { code: "hi", label: "Hindi" },
+  { code: "it", label: "Italian" },
+  { code: "kn", label: "Kannada" },
+  { code: "pt", label: "Portuguese (Brazil)" },
+  { code: "es", label: "Spanish (Latin America)" },
+  { code: "es_ES", label: "Spanish (Spain)" },
+  { code: "te", label: "Telugu" },
+  { code: "vi", label: "Vietnamese" },
+];
 
 /**
  * A restriction the provider has placed on this number's calling, with the
@@ -442,6 +570,27 @@ export interface CallSettingsState {
   callIconVisible: boolean;
   callbackPermissionEnabled: boolean;
   hours: { timezoneId: string; windows: CallHoursWindow[] } | null;
+  /** Countries whose customers see the call icon; empty = everywhere. */
+  callIconCountries: string[];
+  /**
+   * True when SIP signaling is enabled on the number — which DISABLES the
+   * Graph calling endpoints this platform uses. Surfaced so the readiness
+   * checklist can name the real cause instead of "calls randomly fail".
+   */
+  sipEnabled: boolean;
+  /**
+   * SRTP key exchange: "DTLS" (default, what browser WebRTC requires) or
+   * "SDES" (breaks browser media negotiation). Null when the provider omits
+   * the field (treat as DTLS).
+   */
+  srtpKeyExchangeProtocol: string | null;
+  /** Voicemail config, or null when the provider reports none. */
+  voicemail: {
+    enabled: boolean;
+    triggers: string[];
+    announcementMediaId: string | null;
+    timeoutSeconds: number | null;
+  } | null;
   restrictions: CallRestriction[];
   /** Unparsed provider response, for ops diagnosis. */
   raw: unknown;
@@ -645,6 +794,12 @@ export interface NormalizedOutboundEcho extends NormalizedContactIdentity {
   body: string;
   /** Set when the echoed message carries an attachment that needs downloading. */
   media?: NormalizedMediaRef;
+  /**
+   * History backfill only — the delivery state the message had already earned
+   * (`history_context.status`, mapped to our ladder). Absent on live echoes;
+   * ingest defaults to "sent".
+   */
+  status?: MessageStatus;
   timestamp: Date;
   rawPayload: Record<string, unknown>;
 }
@@ -671,17 +826,27 @@ export interface NormalizedContactSync {
 }
 
 /**
- * The customer edited or unsent (deleted) one of the messages in the thread.
- * WhatsApp delivers a revoke/edit; Messenger/Instagram deliver an unsend
- * (`message.is_deleted`). Ingest finds the target Message by `targetExternalId`
- * (its mid/wamid) and either tombstones it (`action: "delete"` → sets
- * `deletedAt`, body preserved) or updates its body (`action: "edit"` → sets
- * `editedAt` + new body), then fans out `message.updated` to the thread.
- * Inbound-only (the customer's action on their own message).
+ * A message in the thread was edited or unsent (deleted) by whoever sent it.
+ * Customer side: WhatsApp delivers a revoke/edit; Messenger/Instagram an
+ * unsend (`message.is_deleted`). OWNER side (Coexistence): the Business App
+ * user revokes/edits their own sent message, delivered as an
+ * `smb_message_echoes` entry of `type:"revoke"|"edit"`. Ingest finds the
+ * target Message by `targetExternalId` (its mid/wamid) and either tombstones
+ * it (`action: "delete"` → sets `deletedAt`, body preserved) or updates its
+ * body (`action: "edit"` → sets `editedAt` + new body), then fans out
+ * `message.updated` to the thread.
  */
 export interface NormalizedMessageCorrection {
   kind: "message_correction";
   action: "edit" | "delete";
+  /**
+   * Which direction of row this correction may touch — a security pin, not a
+   * hint. A customer correction ("in", the default) must never rewrite a row
+   * WE sent; an owner-echo correction ("out") must never tombstone a
+   * CUSTOMER's message. Ingest drops a correction whose target's direction
+   * doesn't match.
+   */
+  expectedDirection?: "in" | "out";
   /** Provider id (mid/wamid) of the message being edited/deleted — the match key. */
   targetExternalId: string;
   /** New body text — set only for `action: "edit"`. */
@@ -794,6 +959,24 @@ export interface NormalizedChannelHealth {
   /** Meta's own expiry for the restriction, when it sent one. */
   utilityRestrictedUntil?: Date | null;
   /**
+   * Policy/spam MESSAGING enforcement (`account_update` → ACCOUNT_RESTRICTION /
+   * DISABLED_UPDATE — the policy-enforcement guide's escalation ladder: 1/3-day
+   * blocks on business-initiated template sends, 5/7/30-day blocks on ALL
+   * messages, then an indefinite lock or disable). Each direction arrives as
+   * its own `restriction_info` entry and gates a different surface —
+   * business-initiated covers broadcasts/templates/proactive sends,
+   * customer-initiated covers even replies inside the service window — so each
+   * is carried as its own (type, until) pair. The TYPE is the presence marker:
+   * an indefinite lock/ban has no expiry, so a null `until` beside a set type
+   * means "until Meta reverses it". `WABA_BAN_*` types mirror
+   * `ban_info.waba_ban_state`; a REINSTATE clears both pairs. `null` clears,
+   * `undefined` leaves untouched. WABA-scoped, like the fields above.
+   */
+  bizMessagingRestrictionType?: string | null;
+  bizMessagingRestrictedUntil?: Date | null;
+  customerMessagingRestrictionType?: string | null;
+  customerMessagingRestrictedUntil?: Date | null;
+  /**
    * An account-level alert we have no dedicated field for: an `account_update`
    * event outside the parsed set (the class where "app removed from WABA"
    * lands — the one that makes an integration go permanently dark) or an
@@ -801,12 +984,31 @@ export interface NormalizedChannelHealth {
    * so the trace is queryable, not just a warn log at info severity.
    */
   accountAlert?: {
-    source: "account_update" | "account_alerts";
-    /** The provider's event/alert discriminator, when it sent one. */
+    source:
+      | "account_update"
+      | "account_alerts"
+      | "account_review_update"
+      | "security"
+      // Standalone `value.errors[]` on the messages field — Meta's channel for
+      // system/app-level problems, incl. 131035 (No-Storage numbers: an
+      // inbound message permanently dropped past the 1-hour webhook window).
+      | "webhook_errors";
+    /** The provider's event/alert discriminator, when it sent one — for
+     *  `account_alerts` this is `alert_info.alert_type` (OBA_APPROVED,
+     *  INCREASED_CAPABILITIES_ELIGIBILITY_*, PROFILE_PICTURE_LOST, …). */
     event: string | null;
-    /** Compact raw detail for the operator/support — never parsed. */
+    /** Compact raw detail for the operator/support — never parsed. For
+     *  `account_alerts` this is the human `alert_description` prefixed with
+     *  severity/status; undocumented variants fall back to the JSON blob. */
     detail: string | null;
   };
+  /**
+   * Strongest attribution hint: the provider's own id for the subject phone
+   * number (`account_alerts` sends it as `entity_id` when
+   * `entity_type: "PHONE_NUMBER"`). Matches `ChannelConnection.externalAccountId`
+   * exactly — no digit normalization, no single-number-WABA inference needed.
+   */
+  phoneNumberId?: string;
   rawPayload: Record<string, unknown>;
 }
 
@@ -824,7 +1026,8 @@ export interface NormalizedNumberNameUpdate {
   displayPhoneNumber?: string;
   /** The WABA the update arrived under (webhook `entry[].id`). */
   wabaId?: string;
-  /** Meta's decision, raw: "APPROVED" | "REJECTED". */
+  /** Meta's decision, raw: APPROVED | REJECTED | PENDING | DEFERRED
+   *  (phone-number-name-update reference). */
   decision: string;
   /** The name that was reviewed. */
   requestedVerifiedName?: string;
@@ -952,9 +1155,23 @@ export interface SendInteractiveArgs {
    * `voice_call` renders a button that starts a WhatsApp call to us when
    * tapped — a way to invite a customer to call rather than waiting for
    * permission to call them. It carries no `options`.
+   *
+   * `location_request` renders WhatsApp's "send location" button
+   * (`interactive.type: "location_request_message"`) — the customer taps it,
+   * picks a location, and the reply arrives as an ordinary inbound `location`
+   * message carrying `context` back to this message. No `options` either.
+   *
+   * `cta_url` renders one URL-opening button (`interactive.type: "cta_url"`)
+   * so a long/ugly tracking link never appears raw in the body. Configured
+   * via `ctaUrl` below; no `options`.
+   *
+   * `carousel` renders 2-10 horizontally-scrollable media cards
+   * (`interactive.type: "carousel"`), each with an image/video header and
+   * either one URL button or uniform quick-reply buttons. Configured via
+   * `carouselCards` below; no `options`.
    */
-  kind: "buttons" | "list" | "voice_call";
-  /** Ignored for `voice_call`. */
+  kind: "buttons" | "list" | "voice_call" | "location_request" | "cta_url" | "carousel";
+  /** Ignored for `voice_call` / `location_request` / `cta_url` / `carousel`. */
   options: InteractiveOption[];
   /**
    * `voice_call` only. Every field is optional; the provider's defaults are
@@ -973,11 +1190,49 @@ export interface SendInteractiveArgs {
      */
     payload?: string;
   };
+  /**
+   * `cta_url` only — the single URL button (cta-url-messages doc). Meta caps
+   * `displayText` at 20 chars, header/footer text at 60; the provider
+   * truncates defensively. Media headers (image/video/document links) are a
+   * documented extension deliberately not modeled yet — add them here when a
+   * composer/upload surface exists to feed them.
+   */
+  ctaUrl?: {
+    /** Button label, max 20 chars. Required. */
+    displayText: string;
+    /** Opened in the customer's browser on tap. http(s) only. Required. */
+    url: string;
+    /** Optional text header, max 60 chars. */
+    headerText?: string;
+    /** Optional footer line, max 60 chars. */
+    footerText?: string;
+  };
+  /**
+   * `carousel` only — 2-10 media cards (interactive-carousel doc). Every card
+   * needs an image/video header LINK (Meta fetches it); card body ≤160 chars
+   * with ≤2 line breaks; and EITHER one `ctaUrl` button OR `quickReplies` —
+   * the variant and button count must be UNIFORM across cards (Meta rejects a
+   * mixed carousel). Validation lives in the request schemas; the provider
+   * builds the wire verbatim.
+   */
+  carouselCards?: Array<{
+    headerMedia: { kind: "image" | "video"; link: string };
+    body?: string;
+    ctaUrl?: { displayText: string; url: string };
+    quickReplies?: Array<{ id: string; title: string }>;
+  }>;
   /** List only — label on the CTA button that opens the row sheet.
    *  Defaults to "Choose" if omitted. Ignored for buttons. */
   listCtaLabel?: string;
   /** List only — header rendered above the rows. Defaults to "Options". */
   listSectionTitle?: string;
+  /** Buttons + list — optional TEXT header above the body (≤60 chars). Both
+   *  wires accept one (reply-buttons doc: text/media; list doc: text-only) —
+   *  we model TEXT only; media headers are the same deferred extension as
+   *  `ctaUrl`'s. Ignored by the other kinds. */
+  headerText?: string;
+  /** Buttons + list — optional footer line under the body (≤60 chars). */
+  footerText?: string;
   /** Quoted-reply context, same semantics as SendTextArgs. */
   replyToExternalId?: string;
   /** Meta social only — see SendTextArgs.useHumanAgentTag. */
@@ -1050,6 +1305,14 @@ export interface UploadMediaArgs {
   mimeType: string;
   /** Filename hint sent to the provider — required for documents. */
   filename: string;
+  /**
+   * Special-purpose upload class (e.g. `call_voicemail_announcement`, which
+   * exempts the media from the standard 30-day TTL but makes it unusable as a
+   * regular message attachment). Omit for ordinary messaging media.
+   */
+  useCase?: string;
+  /** Human label for the asset, shown in the provider's console. */
+  description?: string;
 }
 
 export interface UploadMediaResult {
@@ -1261,6 +1524,12 @@ export interface ProviderTemplate {
    * recreated by a resync keeps its type-check identity.
    */
   libraryTemplateName?: string;
+  /**
+   * True when button-click tracking is disabled on this template. ABSENT when
+   * the provider didn't report it — the sync must then leave the stored value
+   * alone rather than assuming "enabled".
+   */
+  linkTrackingOptedOut?: boolean;
   /**
    * `null` when Meta returned a category we don't map.
    *
@@ -1884,6 +2153,27 @@ export interface ProviderCapabilities {
    */
   sendLocation?: boolean;
   /**
+   * Location REQUEST messages (`interactive.type:"location_request_message"`
+   * — WhatsApp renders a "send location" button; the reply arrives as a
+   * normal inbound location pin). Gates the composer/`/v1` `location_request`
+   * interactive kind. WhatsApp only today. Optional — absent = false.
+   */
+  locationRequest?: boolean;
+  /**
+   * CTA URL button messages (`interactive.type:"cta_url"` — one button that
+   * opens a URL, keeping the raw link out of the body). Gates the
+   * composer/`/v1` `cta_url` interactive kind. WhatsApp only today.
+   * Optional — absent = false.
+   */
+  ctaUrlButton?: boolean;
+  /**
+   * Interactive media carousels (`interactive.type:"carousel"` — 2-10
+   * scrollable media cards with URL or quick-reply buttons). Gates the `/v1`
+   * `carousel` interactive kind. WhatsApp only today. Optional — absent =
+   * false.
+   */
+  interactiveCarousel?: boolean;
+  /**
    * Outbound contact share (`type:"contacts"` vCard). Gates the composer's
    * "Send contact" affordance. Optional — absent = false.
    */
@@ -1893,6 +2183,15 @@ export interface ProviderCapabilities {
    * affordance. Optional — absent = false.
    */
   sendReaction?: boolean;
+  /**
+   * The channel supports blocking a user at the PROVIDER level (WhatsApp's
+   * Block Users API today): a blocked person can't message the business or
+   * see it online, and outbound sends to them are rejected. Gates the inbox
+   * "Block contact" action + the `/v1` block endpoints. Optional — absent =
+   * false (blocking on other channels would be a local-only mute, which is a
+   * different, weaker promise we deliberately don't fake).
+   */
+  blockUsers?: boolean;
   /**
    * Voice calling. True if the provider implements placeCall / acceptCall /
    * etc. Gates the inbox "Call" button at the channel level — a future
@@ -1925,6 +2224,16 @@ export interface ProviderCapabilities {
   contactShareChips?: boolean;
 }
 
+/** Subject + desired state for the per-template link-tracking toggle. */
+export interface SetTemplateLinkTrackingArgs {
+  /** Provider template id. */
+  externalId: string;
+  /** True = stop tracking button clicks on this template. */
+  optedOut: boolean;
+  /** The template's CURRENT category, passed through verbatim. */
+  category: string;
+}
+
 /** Window + subject for a template-analytics read. */
 export interface TemplateAnalyticsArgs {
   /** Provider template ids. Meta caps a single request at 10. */
@@ -1932,6 +2241,21 @@ export interface TemplateAnalyticsArgs {
   /** Inclusive UTC day bounds. Meta's lookback is 90 days. */
   start: Date;
   end: Date;
+}
+
+/**
+ * One button's click count inside a template-day.
+ *
+ * Meta's `clicked` metric is an ARRAY of these, one per (button, count type):
+ * `url_button` (total URL clicks), `unique_url_button` (distinct accounts),
+ * `quick_reply_button` (quick-reply presses).
+ */
+export interface TemplateButtonClicks {
+  /** Normalized lowercase Meta type, e.g. `unique_url_button`. */
+  type: string;
+  /** The button's visible label; null if Meta omitted it. */
+  buttonContent: string | null;
+  count: number;
 }
 
 /**
@@ -1949,7 +2273,12 @@ export interface ProviderTemplateAnalyticsRow {
   sent: number;
   delivered: number;
   read: number | null;
+  /** Headline "link clicks": unique URL-button clicks when reported, total URL
+   *  clicks otherwise. Quick-reply presses are deliberately excluded — they
+   *  arrive as inbound replies and are counted by the recipient funnel. */
   clicked: number | null;
+  /** Full per-button breakdown, or null when Meta reported no click data. */
+  clickedButtons: TemplateButtonClicks[] | null;
   costAmountSpent: number | null;
   costPerDelivered: number | null;
   costPerUrlClick: number | null;
@@ -2037,6 +2366,33 @@ export interface ProviderQrCode {
   qrImageUrl?: string;
 }
 
+/**
+ * One user's outcome from a provider block/unblock call. The provider APIs are
+ * per-user even inside one request (WhatsApp returns `added_users` /
+ * `removed_users` alongside `failed_users` in the SAME response), so the
+ * result is a per-user ledger, never a boolean.
+ */
+export interface BlockUserOutcome {
+  /** The address as we sent it (WhatsApp: the `input` echo). */
+  input: string;
+  /** Provider-side user id when reported (WhatsApp `wa_id`; may differ from
+   *  the phone number, and may be absent on failures for invalid numbers). */
+  externalUserId: string | null;
+  /** Provider error for this user, when it failed. Null = succeeded. */
+  error: {
+    /** Provider's numeric code (WhatsApp: 131047 re-engagement required,
+     *  139101 blocklist full, 131021 self-block, 130429 rate limit). */
+    code: number | null;
+    message: string | null;
+    details: string | null;
+  } | null;
+}
+
+export interface BlockUsersResult {
+  succeeded: BlockUserOutcome[];
+  failed: BlockUserOutcome[];
+}
+
 export interface MessagingProvider<SendConfig = unknown> {
   name: Channel;
   /** Feature flags channel-agnostic code branches on. */
@@ -2086,6 +2442,17 @@ export interface MessagingProvider<SendConfig = unknown> {
   sendContacts?(args: SendContactsArgs, config: SendConfig): Promise<SendTextResult>;
   /** Outbound emoji reaction to a customer message. Empty emoji un-reacts. */
   sendReaction?(args: SendReactionArgs, config: SendConfig): Promise<SendTextResult>;
+  /**
+   * Block users at the provider (WhatsApp `POST /{phone-id}/block_users`).
+   * Per-user outcomes — a mixed response is NOT an exception. Throws only when
+   * the whole request failed with no per-user ledger (auth/network). Provider
+   * constraints (WhatsApp): only users who messaged in the last 24h, ≤1,000
+   * per request, 64,000-entry blocklist. Optional — gated by
+   * `capabilities.blockUsers`.
+   */
+  blockUsers?(users: string[], config: SendConfig): Promise<BlockUsersResult>;
+  /** Unblock users (WhatsApp `DELETE /{phone-id}/block_users`). Same contract. */
+  unblockUsers?(users: string[], config: SendConfig): Promise<BlockUsersResult>;
   /** Outbound media — caller uploads first, then sends with the returned id. */
   uploadMedia?(args: UploadMediaArgs, config: SendConfig): Promise<UploadMediaResult>;
   sendMedia?(args: SendMediaArgs, config: SendConfig): Promise<SendTextResult>;
@@ -2196,6 +2563,15 @@ export interface MessagingProvider<SendConfig = unknown> {
    * change a side effect of opening a chart.
    */
   enableTemplateInsights?(config: SendConfig): Promise<void>;
+  /**
+   * Toggle button-click tracking on one template (reversible, unlike
+   * enableTemplateInsights). `category` must be the template's CURRENT
+   * category — a different value sends the template back to review.
+   */
+  setTemplateLinkTracking?(
+    args: SetTemplateLinkTrackingArgs,
+    config: SendConfig,
+  ): Promise<void>;
   /**
    * Provider-side aggregate performance per template per day — the only source
    * of currency COST and of unique URL-button clicks, neither of which the
@@ -2332,6 +2708,10 @@ export interface MessagingProvider<SendConfig = unknown> {
       recipient?: string;
       sdpOffer: string;
       correlationId?: string;
+      /** Opt this call into recording (consent announcement plays first). */
+      recording?: CallRecordingOptions;
+      /** Opt this call into transcription (independent of recording). */
+      transcription?: CallTranscriptionOptions;
     },
     config: SendConfig,
   ): Promise<{ externalCallId: string }>;
@@ -2354,10 +2734,21 @@ export interface MessagingProvider<SendConfig = unknown> {
   /**
    * Accept an incoming call, once the WebRTC connection from `preAcceptCall`
    * is established. Carries the same SDP answer. After the 200, media may
-   * flow DTLS+SRTP browser ↔ provider.
+   * flow DTLS+SRTP browser ↔ provider. `correlationId` rides
+   * `biz_opaque_callback_data` (accept is the only inbound action that
+   * supports it) and is echoed on the terminate webhook.
    */
   acceptCall?(
-    args: { externalCallId: string; sdpAnswer: string },
+    args: {
+      externalCallId: string;
+      sdpAnswer: string;
+      correlationId?: string;
+      /** Opt this inbound call into recording — accept is the only inbound
+       *  action that carries the `recording` object. */
+      recording?: CallRecordingOptions;
+      /** Opt this inbound call into transcription (rides accept too). */
+      transcription?: CallTranscriptionOptions;
+    },
     config: SendConfig,
   ): Promise<void>;
 

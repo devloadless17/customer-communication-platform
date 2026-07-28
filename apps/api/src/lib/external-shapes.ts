@@ -374,6 +374,10 @@ export interface ExternalTemplate {
    */
   qualityScore: string | null;
   qualityScoreAt: string | null;
+  /** True = button-click tracking disabled (`cta_url_link_tracking_opted_out`)
+   *  — an empty `clicked` series on this template is a setting, not a gap.
+   *  Null = not reported by Meta yet. */
+  linkTrackingOptedOut: boolean | null;
   archivedAt: string | null;
   lastUsedAt: string | null;
   syncedAt: string;
@@ -396,6 +400,7 @@ export function externalTemplate(t: {
   components: unknown;
   qualityScore: string | null;
   qualityScoreAt: Date | null;
+  linkTrackingOptedOut: boolean | null;
   archivedAt: Date | null;
   lastUsedAt: Date | null;
   syncedAt: Date;
@@ -420,6 +425,7 @@ export function externalTemplate(t: {
     components: t.components,
     qualityScore: t.qualityScore,
     qualityScoreAt: t.qualityScoreAt?.toISOString() ?? null,
+    linkTrackingOptedOut: t.linkTrackingOptedOut,
     archivedAt: t.archivedAt?.toISOString() ?? null,
     lastUsedAt: t.lastUsedAt?.toISOString() ?? null,
     syncedAt: t.syncedAt.toISOString(),

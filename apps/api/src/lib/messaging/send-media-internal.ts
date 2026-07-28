@@ -63,11 +63,15 @@ export async function sendMediaInternal(
           identityChannel: true,
           externalContactId: true,
           lastInboundAt: true,
+          blockedAt: true,
         },
       },
     },
   });
   if (!conversation) throw new Error("conversation_not_found");
+  // Provider-level block: Meta rejects every send to a blocked contact —
+  // refuse up front (same code the sibling internals throw).
+  if (conversation.contact.blockedAt) throw new Error("contact_blocked");
 
   let channel;
   try {

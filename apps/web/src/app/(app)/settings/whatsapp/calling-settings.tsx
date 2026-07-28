@@ -11,6 +11,8 @@ import {
   X,
 } from "lucide-react";
 
+import { RECORDING_ANNOUNCEMENT_LANGUAGES } from "@ccp/shared/providers/types";
+
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
@@ -50,11 +52,20 @@ interface CallHoursWindow {
   closeTime: string;
 }
 
+type VoicemailTrigger = "REJECT" | "TIMEOUT";
+
 interface CallSettingsState {
   enabled: boolean;
   callIconVisible: boolean;
   callbackPermissionEnabled: boolean;
   hours: { timezoneId: string; windows: CallHoursWindow[] } | null;
+  callIconCountries: string[];
+  voicemail: {
+    enabled: boolean;
+    triggers: string[];
+    announcementMediaId: string | null;
+    timeoutSeconds: number | null;
+  } | null;
   restrictions: Array<{
     type: string;
     reason: string;
@@ -69,10 +80,19 @@ interface ReadinessCheck {
   detail: string | null;
 }
 
+interface RecordingPolicy {
+  enabled: boolean;
+  purpose?: string;
+  announcementLanguage?: string;
+}
+
 interface Readiness {
   ready: boolean;
   checks: ReadinessCheck[];
   settings: CallSettingsState | null;
+  recordingPolicy: RecordingPolicy | null;
+  transcriptionPolicy: RecordingPolicy | null;
+  consentMessage: string | null;
 }
 
 /** "HHMM" → "HH:MM" for an <input type="time">, and back. */
@@ -82,9 +102,14 @@ const fromTimeInput = (value: string) => value.replace(":", "");
 export function CallingSettings({
   displayNumber,
   canManage,
+  accountId,
 }: {
   displayNumber: string | null;
   canManage: boolean;
+  /** The connection being configured. Calling settings live on the phone
+   *  number, so a multi-number workspace must say WHICH number — omitted
+   *  keeps the single-account default resolution. */
+  accountId?: string | null;
 }) {
   const [readiness, setReadiness] = useState<Readiness | null>(null);
   const [loading, setLoading] = useState(true);
@@ -94,11 +119,38 @@ export function CallingSettings({
   const [hoursMode, setHoursMode] = useState<"always" | "custom">("always");
   const [timezoneId, setTimezoneId] = useState("UTC");
   const [windows, setWindows] = useState<CallHoursWindow[]>([]);
+  // Draft call-icon country restriction, edited as free text ("US, BR") and
+  // parsed on Save — same draft-then-commit shape as the hours editor.
+  const [iconCountries, setIconCountries] = useState("");
+  // Draft voicemail config. Committed by its own Save: enabling needs an
+  // uploaded announcement first, so it can't be an instant toggle-patch.
+  const [vmEnabled, setVmEnabled] = useState(false);
+  const [vmTriggers, setVmTriggers] = useState<VoicemailTrigger[]>(["TIMEOUT"]);
+  const [vmTimeout, setVmTimeout] = useState(20);
+  const [vmMediaId, setVmMediaId] = useState<string | null>(null);
+  const [vmUploading, setVmUploading] = useState(false);
+  // Draft recording/transcription policies — draft-then-Save like
+  // hours/voicemail, because enabling makes every future call open with a
+  // consent announcement.
+  const [recEnabled, setRecEnabled] = useState(false);
+  const [recPurpose, setRecPurpose] = useState("");
+  const [recLanguage, setRecLanguage] = useState("en");
+  const [trEnabled, setTrEnabled] = useState(false);
+  const [trPurpose, setTrPurpose] = useState("");
+  const [trLanguage, setTrLanguage] = useState("en");
+  // The written consent notice — ours end-to-end, so fully Arabic-capable.
+  const [consentMessage, setConsentMessage] = useState("");
+
+  // Same account-qualification the sibling panels use: explicit account when
+  // the picker chose one, the legacy no-param request otherwise.
+  const accountQuery = accountId
+    ? `?accountId=${encodeURIComponent(accountId)}`
+    : "";
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await apiFetch("/api/calls/admin/readiness");
+      const res = await apiFetch(`/api/calls/admin/readiness${accountQuery}`);
       if (!res.ok) {
         // A team that hasn't connected WhatsApp yet lands here; the connection
         // card above already tells them what to do, so stay quiet.
@@ -115,12 +167,30 @@ export function CallingSettings({
           "UTC",
       );
       setWindows(hours?.windows ?? []);
+      setIconCountries((data.settings?.callIconCountries ?? []).join(", "));
+      const vm = data.settings?.voicemail ?? null;
+      setVmEnabled(vm?.enabled ?? false);
+      const knownTriggers = (vm?.triggers ?? []).filter(
+        (t): t is VoicemailTrigger => t === "REJECT" || t === "TIMEOUT",
+      );
+      setVmTriggers(knownTriggers.length ? knownTriggers : ["TIMEOUT"]);
+      setVmTimeout(vm?.timeoutSeconds ?? 20);
+      setVmMediaId(vm?.announcementMediaId ?? null);
+      const rec = data.recordingPolicy;
+      setRecEnabled(rec?.enabled ?? false);
+      setRecPurpose(rec?.purpose ?? "");
+      setRecLanguage(rec?.announcementLanguage ?? "en");
+      const tr = data.transcriptionPolicy;
+      setTrEnabled(tr?.enabled ?? false);
+      setTrPurpose(tr?.purpose ?? "");
+      setTrLanguage(tr?.announcementLanguage ?? "en");
+      setConsentMessage(data.consentMessage ?? "");
     } catch {
       setReadiness(null);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [accountQuery]);
 
   useEffect(() => {
     void load();
@@ -129,7 +199,7 @@ export function CallingSettings({
   async function patch(body: Record<string, unknown>) {
     setSaving(true);
     try {
-      const res = await apiFetch("/api/calls/admin/settings", {
+      const res = await apiFetch(`/api/calls/admin/settings${accountQuery}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
@@ -146,6 +216,135 @@ export function CallingSettings({
       // who doesn't know that will think the save didn't work.
       toast.message?.(
         "WhatsApp can take up to 7 days to show this change to every customer.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function saveIconCountries() {
+    const codes = iconCountries
+      .split(/[,\s]+/)
+      .map((c) => c.trim().toUpperCase())
+      .filter(Boolean);
+    const invalid = codes.filter((c) => !/^[A-Z]{2}$/.test(c));
+    if (invalid.length) {
+      toast.error(
+        `Use two-letter country codes (like US or BR) — not: ${invalid.join(", ")}`,
+      );
+      return;
+    }
+    // An empty list is a real value: it CLEARS the restriction.
+    void patch({ callIconCountries: codes });
+  }
+
+  async function uploadAnnouncement(file: File) {
+    setVmUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      // No content-type header: the browser must set the multipart boundary.
+      const res = await apiFetch(
+        `/api/calls/admin/voicemail-announcement${accountQuery}`,
+        { method: "POST", body: fd },
+      );
+      if (!res.ok) {
+        const err = (await res.json().catch(() => ({}))) as { detail?: string };
+        toast.error(
+          err.detail ??
+            "Couldn't upload the announcement. It must be an OGG (OPUS) audio file under 60 seconds.",
+        );
+        return;
+      }
+      const { mediaId } = (await res.json()) as { mediaId: string };
+      setVmMediaId(mediaId);
+      toast.success("Announcement uploaded — save voicemail to apply it.");
+    } finally {
+      setVmUploading(false);
+    }
+  }
+
+  function saveVoicemail() {
+    if (!vmEnabled) {
+      void patch({ voicemail: { enabled: false } });
+      return;
+    }
+    if (!vmTriggers.length) {
+      toast.error("Pick at least one trigger for voicemail.");
+      return;
+    }
+    if (!vmMediaId) {
+      toast.error("Upload an announcement recording first.");
+      return;
+    }
+    void patch({
+      voicemail: {
+        enabled: true,
+        triggers: vmTriggers,
+        announcementMediaId: vmMediaId,
+        ...(vmTriggers.includes("TIMEOUT")
+          ? { timeoutSeconds: vmTimeout }
+          : {}),
+      },
+    });
+  }
+
+  async function saveArtifactPolicy(
+    path: "recording-policy" | "transcription-policy",
+    draft: { enabled: boolean; purpose: string; language: string },
+    onMessage: string,
+    offMessage: string,
+  ) {
+    if (draft.enabled && !draft.purpose.trim()) {
+      toast.error("Write the purpose — it's spoken to both parties.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await apiFetch(`/api/calls/admin/${path}${accountQuery}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(
+          draft.enabled
+            ? {
+                enabled: true,
+                purpose: draft.purpose.trim(),
+                announcementLanguage: draft.language,
+              }
+            : { enabled: false },
+        ),
+      });
+      if (!res.ok) {
+        const err = (await res.json().catch(() => ({}))) as { detail?: string };
+        toast.error(err.detail ?? "Couldn't save the policy.");
+        return;
+      }
+      toast.success(draft.enabled ? onMessage : offMessage);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveConsentMessage() {
+    setSaving(true);
+    try {
+      const res = await apiFetch(
+        `/api/calls/admin/consent-message${accountQuery}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ message: consentMessage.trim() || null }),
+        },
+      );
+      if (!res.ok) {
+        const err = (await res.json().catch(() => ({}))) as { detail?: string };
+        toast.error(err.detail ?? "Couldn't save the consent message.");
+        return;
+      }
+      toast.success(
+        consentMessage.trim()
+          ? "Consent message saved — it will be sent around recorded calls."
+          : "Consent message cleared.",
       );
     } finally {
       setSaving(false);
@@ -191,6 +390,37 @@ export function CallingSettings({
             disabled={saving || !settings.enabled}
             onChange={(callIconVisible) => void patch({ callIconVisible })}
           />
+          {settings.callIconVisible && (
+            <div className="flex flex-col gap-1.5">
+              <p className="text-sm font-medium">
+                Only show the call button in certain countries
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Two-letter country codes, comma-separated (like “US, BR”).
+                WhatsApp matches on the customer’s phone number country, not
+                where they are right now. Leave empty to show it everywhere.
+              </p>
+              <div className="flex items-center gap-2">
+                <Input
+                  value={iconCountries}
+                  onChange={(e) => setIconCountries(e.target.value)}
+                  placeholder="Everywhere"
+                  disabled={saving || !settings.enabled}
+                  className="max-w-xs"
+                  aria-label="Call button countries"
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={saving || !settings.enabled}
+                  onClick={saveIconCountries}
+                >
+                  Save
+                </Button>
+              </div>
+            </div>
+          )}
           <ToggleRow
             label="Allow callbacks automatically"
             hint="When a customer calls you, they automatically allow you to call them back. Worth leaving on — it's permission you get without having to ask for it."
@@ -220,6 +450,113 @@ export function CallingSettings({
               }
             />
           </div>
+
+          <div className="border-t pt-4">
+            <VoicemailEditor
+              enabled={vmEnabled}
+              triggers={vmTriggers}
+              timeoutSeconds={vmTimeout}
+              hasAnnouncement={vmMediaId !== null}
+              uploading={vmUploading}
+              disabled={saving || !settings.enabled}
+              hoursRestricted={hoursMode === "custom"}
+              onEnabledChange={setVmEnabled}
+              onTriggersChange={setVmTriggers}
+              onTimeoutChange={setVmTimeout}
+              onUpload={(file) => void uploadAnnouncement(file)}
+              onSave={saveVoicemail}
+            />
+          </div>
+
+          <div className="border-t pt-4">
+            <ArtifactPolicyEditor
+              title="Record calls"
+              description="Every placed and answered call on this number is recorded. WhatsApp first speaks a legally required consent announcement to BOTH parties — recording starts only after it finishes, and a customer can hang up to decline. The finished audio appears on the Calls page about a minute after the call ends."
+              warning="WhatsApp's announcement voice does not support Arabic yet — for Arabic-speaking customers the closest options are English or French. The purpose text below is spoken as-is by that same voice; if you write it in Arabic, place a test call first to hear how it renders. For a fully-Arabic consent experience, send an Arabic message telling the customer the call will be recorded before you dial."
+              purposeLabel="Recording purpose"
+              saveLabel="Save recording"
+              enabled={recEnabled}
+              purpose={recPurpose}
+              language={recLanguage}
+              disabled={saving || !settings.enabled}
+              onEnabledChange={setRecEnabled}
+              onPurposeChange={setRecPurpose}
+              onLanguageChange={setRecLanguage}
+              onSave={() =>
+                void saveArtifactPolicy(
+                  "recording-policy",
+                  { enabled: recEnabled, purpose: recPurpose, language: recLanguage },
+                  "Call recording is on — every new call starts with the consent announcement.",
+                  "Call recording turned off.",
+                )
+              }
+            />
+          </div>
+
+          <div className="border-t pt-4">
+            <ArtifactPolicyEditor
+              title="Transcribe calls"
+              description="Every placed and answered call on this number is transcribed into text — WhatsApp auto-detects the spoken language, and Arabic is fully supported, so Arabic calls produce Arabic transcripts. The same consent announcement rule applies (one combined announcement when recording is also on, using the recording settings). Transcripts appear on the Calls page about a minute after the call ends."
+              warning="Only the short spoken announcement lacks Arabic — the transcript itself will be in Arabic automatically. If recording is also enabled, WhatsApp uses the RECORDING purpose and language for the combined announcement and ignores these."
+              purposeLabel="Transcription purpose"
+              saveLabel="Save transcription"
+              enabled={trEnabled}
+              purpose={trPurpose}
+              language={trLanguage}
+              disabled={saving || !settings.enabled}
+              onEnabledChange={setTrEnabled}
+              onPurposeChange={setTrPurpose}
+              onLanguageChange={setTrLanguage}
+              onSave={() =>
+                void saveArtifactPolicy(
+                  "transcription-policy",
+                  { enabled: trEnabled, purpose: trPurpose, language: trLanguage },
+                  "Call transcription is on — Arabic calls will produce Arabic transcripts.",
+                  "Call transcription turned off.",
+                )
+              }
+            />
+          </div>
+
+          {(recEnabled || trEnabled) && (
+            <div className="border-t pt-4">
+              <div className="flex flex-col gap-1.5">
+                <p className="text-sm font-medium">
+                  Written consent message — Arabic ready
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Sent automatically into the chat around recorded or
+                  transcribed calls: before dialing on outbound, and the moment
+                  an agent answers on inbound. Unlike WhatsApp&apos;s spoken
+                  announcement, this message is yours — write it in Arabic and
+                  your customers get clear written notice in their own
+                  language, kept in the conversation as proof.
+                </p>
+                <textarea
+                  value={consentMessage}
+                  maxLength={1000}
+                  rows={3}
+                  dir="auto"
+                  onChange={(e) => setConsentMessage(e.target.value)}
+                  placeholder="سيتم تسجيل هذه المكالمة لأغراض الجودة وتحسين الخدمة."
+                  disabled={saving}
+                  className="max-w-md rounded-md border bg-transparent px-3 py-2 text-sm shadow-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  aria-label="Written consent message"
+                />
+                <div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={saving}
+                    onClick={() => void saveConsentMessage()}
+                  >
+                    Save message
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -289,6 +626,254 @@ function ToggleRow({
         onCheckedChange={onChange}
         aria-label={label}
       />
+    </div>
+  );
+}
+
+/**
+ * Shared editor for the two per-number call-artifact policies (recording and
+ * transcription): identical provider request shape, identical consent rules,
+ * different copy. Draft-then-Save — enabling changes what every future call
+ * opens with.
+ */
+function ArtifactPolicyEditor({
+  title,
+  description,
+  warning,
+  purposeLabel,
+  saveLabel,
+  enabled,
+  purpose,
+  language,
+  disabled,
+  onEnabledChange,
+  onPurposeChange,
+  onLanguageChange,
+  onSave,
+}: {
+  title: string;
+  description: string;
+  warning: string;
+  purposeLabel: string;
+  saveLabel: string;
+  enabled: boolean;
+  purpose: string;
+  language: string;
+  disabled?: boolean;
+  onEnabledChange: (next: boolean) => void;
+  onPurposeChange: (next: string) => void;
+  onLanguageChange: (next: string) => void;
+  onSave: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">{title}</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">{description}</p>
+        </div>
+        <Switch
+          checked={enabled}
+          disabled={disabled}
+          onCheckedChange={onEnabledChange}
+          aria-label={title}
+        />
+      </div>
+      {enabled && (
+        <>
+          <p className="flex items-start gap-1.5 text-xs text-amber-600 dark:text-amber-500">
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+            {warning}
+          </p>
+          <div className="flex flex-col gap-1.5">
+            <p className="text-sm font-medium">Announcement language</p>
+            <Select
+              value={language}
+              onChange={(e) => onLanguageChange(e.target.value)}
+              disabled={disabled}
+              className="max-w-xs"
+              aria-label={`${title} announcement language`}
+            >
+              {RECORDING_ANNOUNCEMENT_LANGUAGES.map((l) => (
+                <option key={l.code} value={l.code}>
+                  {l.label}
+                </option>
+              ))}
+            </Select>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <p className="text-sm font-medium">{purposeLabel}</p>
+            <p className="text-xs text-muted-foreground">
+              Spoken to both parties right after the announcement phrase, e.g.
+              “quality assurance”. Up to 250 characters — write it in the
+              announcement language above.
+            </p>
+            <Input
+              value={purpose}
+              maxLength={250}
+              onChange={(e) => onPurposeChange(e.target.value)}
+              placeholder="quality assurance"
+              disabled={disabled}
+              className="max-w-md"
+              aria-label={purposeLabel}
+            />
+          </div>
+        </>
+      )}
+      <div>
+        <Button type="button" size="sm" disabled={disabled} onClick={onSave}>
+          {saveLabel}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Voicemail configuration. Draft-then-Save like the hours editor — enabling
+ * needs an uploaded announcement first, so it can't be an instant
+ * toggle-patch. The announcement upload happens immediately (it's just a
+ * staging upload with no customer-visible effect until Save pins it).
+ */
+function VoicemailEditor({
+  enabled,
+  triggers,
+  timeoutSeconds,
+  hasAnnouncement,
+  uploading,
+  disabled,
+  hoursRestricted,
+  onEnabledChange,
+  onTriggersChange,
+  onTimeoutChange,
+  onUpload,
+  onSave,
+}: {
+  enabled: boolean;
+  triggers: VoicemailTrigger[];
+  timeoutSeconds: number;
+  hasAnnouncement: boolean;
+  uploading: boolean;
+  disabled?: boolean;
+  hoursRestricted: boolean;
+  onEnabledChange: (next: boolean) => void;
+  onTriggersChange: (next: VoicemailTrigger[]) => void;
+  onTimeoutChange: (next: number) => void;
+  onUpload: (file: File) => void;
+  onSave: () => void;
+}) {
+  function setTrigger(trigger: VoicemailTrigger, on: boolean) {
+    const rest = triggers.filter((t) => t !== trigger);
+    onTriggersChange(on ? [...rest, trigger] : rest);
+  }
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">Voicemail</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            When a customer’s call goes unanswered, WhatsApp answers, plays
+            your announcement, records their message, and delivers it to the
+            inbox as a voice note.
+          </p>
+        </div>
+        <Switch
+          checked={enabled}
+          disabled={disabled}
+          onCheckedChange={onEnabledChange}
+          aria-label="Voicemail"
+        />
+      </div>
+      {enabled && (
+        <>
+          {hoursRestricted && (
+            <p className="flex items-start gap-1.5 text-xs text-amber-600 dark:text-amber-500">
+              <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+              You also have call hours set. Customers can’t place calls outside
+              those hours, so after-hours calls never reach voicemail — WhatsApp
+              recommends 24/7 availability when voicemail is on.
+            </p>
+          )}
+          <div className="flex flex-col gap-2">
+            <p className="text-sm font-medium">Record a voicemail when…</p>
+            <label className="flex items-center gap-2 text-sm">
+              <Switch
+                checked={triggers.includes("TIMEOUT")}
+                disabled={disabled}
+                onCheckedChange={(on) => setTrigger("TIMEOUT", on)}
+                aria-label="Record when nobody answers in time"
+              />
+              <span className="flex items-center gap-2">
+                Nobody answers within
+                <Input
+                  type="number"
+                  min={0}
+                  max={30}
+                  value={timeoutSeconds}
+                  disabled={disabled || !triggers.includes("TIMEOUT")}
+                  onChange={(e) =>
+                    onTimeoutChange(
+                      Math.max(0, Math.min(30, Number(e.target.value) || 0)),
+                    )
+                  }
+                  className="w-16"
+                  aria-label="Seconds of ringing before voicemail"
+                />
+                seconds
+              </span>
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <Switch
+                checked={triggers.includes("REJECT")}
+                disabled={disabled}
+                onCheckedChange={(on) => setTrigger("REJECT", on)}
+                aria-label="Record when an agent declines the call"
+              />
+              An agent declines the call
+            </label>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <p className="text-sm font-medium">Announcement</p>
+            <p className="text-xs text-muted-foreground">
+              An OGG (OPUS) audio file under 60 seconds, played to the caller
+              before recording starts. This is YOUR recording — record it in
+              Arabic for Arabic-speaking customers.
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                type="file"
+                accept="audio/ogg,.ogg,.opus"
+                disabled={disabled || uploading}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  // Reset so re-picking the same file re-fires onChange.
+                  e.target.value = "";
+                  if (file) onUpload(file);
+                }}
+                className="text-xs file:mr-2 file:rounded-md file:border file:bg-transparent file:px-2 file:py-1 file:text-xs"
+                aria-label="Upload voicemail announcement"
+              />
+              {uploading ? (
+                <Loader2 className="size-4 animate-spin text-muted-foreground" />
+              ) : hasAnnouncement ? (
+                <span className="flex items-center gap-1 text-xs text-emerald-600">
+                  <Check className="size-3.5" /> Uploaded
+                </span>
+              ) : null}
+            </div>
+          </div>
+        </>
+      )}
+      <div>
+        <Button
+          type="button"
+          size="sm"
+          disabled={disabled || uploading}
+          onClick={onSave}
+        >
+          Save voicemail
+        </Button>
+      </div>
     </div>
   );
 }

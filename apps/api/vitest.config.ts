@@ -13,6 +13,14 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["src/**/*.spec.ts", "test/**/*.spec.ts"],
+    // Much of test/ is integration-style against the SHARED dev database, and
+    // a full run executes ~50 files in parallel — under that contention a
+    // plain `create` in a beforeAll has been observed to exceed the 5s/10s
+    // defaults (three different specs flaked this way on 2026-07-27 before
+    // this was centralized). Generous ceilings: the assertions are the tests,
+    // not the wall clock, and a genuine hang still fails — just later.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
   },
   resolve: {
     alias: {

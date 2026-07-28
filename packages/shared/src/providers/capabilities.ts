@@ -23,6 +23,10 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     freeFormWindowMs: DAY_MS,
     humanAgentWindowMs: null,
     messageTextMaxChars: 4096,
+    // Per-kind outbound media size caps live in `media-caps.ts`
+    // (MEDIA_SIZE_CAPS_BY_CHANNEL) — the single table shared by the server
+    // gate (mediaPolicyForChannel) and the composer's client guard. Audio
+    // 16 MB re-verified against Meta's audio-messages doc 2026-07-27.
     templates: true,
     readReceipts: true,
     typingIndicators: true,
@@ -31,6 +35,14 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     sendLocation: true,
     sendContacts: true,
     sendReaction: true,
+    // …and asking FOR a location (interactive "location_request_message"),
+    // and the single URL-opening button (interactive "cta_url").
+    locationRequest: true,
+    ctaUrlButton: true,
+    interactiveCarousel: true,
+    // Provider-level user blocking (Block Users API on the business number).
+    // WhatsApp-only: Messenger/Instagram expose no equivalent messaging API.
+    blockUsers: true,
     calling: true,
   },
   // Facebook Messenger: 24h free-form window + a 7-day Human Agent extension for

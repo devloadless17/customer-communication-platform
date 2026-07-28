@@ -1,6 +1,12 @@
 import { readLimitedBody } from "@/lib/http/safe-fetch";
 import type { MetaSendConfig } from "@/lib/providers/config";
-import { MetaSendError, normalizeMetaSendError, isProvablyNotSent } from "./meta-send-error";
+import {
+  MetaSendError,
+  normalizeMetaSendError,
+  isProvablyNotSent,
+  isPairRateLimitBody,
+  isPairRateLimitError,
+} from "./meta-send-error";
 import { metaWireEnabled, wireOut } from "./meta-wire";
 
 // Meta error responses are tiny in practice (JSON envelope, a few KB).
@@ -20,8 +26,10 @@ async function safeMetaText(res: Response): Promise<string> {
 import type {
   CallHoursWindow,
   CallPermissionState,
+  CallRecordingOptions,
   CallSettings,
   CallSettingsState,
+  CallTranscriptionOptions,
   CreateTemplateArgs,
   CreateTemplateResult,
   DeleteTemplateArgs,
@@ -51,6 +59,8 @@ import type {
   SendTemplateArgs,
   SendTextArgs,
   SendTextResult,
+  BlockUsersResult,
+  BlockUserOutcome,
   TemplateCategory,
   TemplateComponent,
   TemplateStatus,
@@ -64,6 +74,8 @@ import type {
   TemplateLibraryFilters,
   TemplateParamType,
   ProviderTemplateAnalyticsRow,
+  SetTemplateLinkTrackingArgs,
+  TemplateButtonClicks,
   ProviderTemplateComparison,
   TemplateVariableSet,
   TemplateAnalyticsArgs,
@@ -304,6 +316,26 @@ interface MetaChangeValue {
   decision?: string;
   requested_verified_name?: string;
   rejection_reason?: string | null;
+  // `security` webhook (security reference doc): who asked to turn off
+  // two-step verification. Reset requests only.
+  requester?: string;
+  // `account_alerts` webhook fields (account-alerts reference doc): the alert
+  // envelope. `entity_type` says WHAT the alert is about — "PHONE_NUMBER"
+  // makes `entity_id` the number's own id (= our externalAccountId, the
+  // strongest attribution key); "BUSINESS" scopes it to the portfolio.
+  entity_type?: string;
+  entity_id?: string;
+  alert_info?: {
+    /** CRITICAL (rejection/denial) | WARNING (action may be needed) | INFORMATIONAL. */
+    alert_severity?: string;
+    /** ACTIVE | NONE. */
+    alert_status?: string;
+    /** OBA_APPROVED, OBA_REJECTED, PROFILE_PICTURE_LOST,
+     *  INCREASED_CAPABILITIES_ELIGIBILITY_{DEFERRED,FAILED,NEED_MORE_INFO}, … */
+    alert_type?: string;
+    /** The human sentence — what the operator should actually read. */
+    alert_description?: string;
+  };
   // `account_update` webhook fields — account-level enforcement. `event` above
   // discriminates: ACCOUNT_VIOLATION is an early quality warning,
   // ACCOUNT_RESTRICTION is an active pause with an expiry.
@@ -314,9 +346,16 @@ interface MetaChangeValue {
     expiration?: number;
   }>;
   violation_info?: { violation_type?: string };
+  // `account_update` → DISABLED_UPDATE: the account-lock / disable leg of the
+  // policy-enforcement ladder. `waba_ban_state` is SCHEDULE_FOR_DISABLE |
+  // DISABLE | REINSTATE; `waba_ban_date` is Meta's display date, kept verbatim
+  // in the alert detail (never parsed — its format is not contractual).
+  ban_info?: { waba_ban_state?: string; waba_ban_date?: string };
   // `user_preferences` webhook: Meta reports a WhatsApp user's marketing
-  // messaging preference. `value` is "stop" | "resume"; `category` is
-  // "marketing". This is the ONLY signal allowed to CLEAR an opt-out.
+  // messaging preference. `value` is "stop" | "resume"; `category` has been
+  // observed as both "marketing" and "marketing_messages" (the reference doc
+  // renamed it) — the parser prefix-matches. This is the ONLY signal allowed
+  // to CLEAR an opt-out.
   user_preferences?: Array<{
     wa_id?: string;
     detail?: string;
@@ -345,12 +384,15 @@ interface MetaChangeValue {
   message_echoes?: MetaMessage[];
   history?: MetaHistoryEntry[];
   state_sync?: MetaStateSyncEntry[];
-  // Value-level errors, used by two unrelated signals:
+  // Value-level errors, used by three unrelated signals:
   //   - the history-declined code 2593109 ("History sync is turned off by the
   //     business from the WhatsApp Business App"), which can surface here or
   //     per history entry — we check both;
   //   - the calling error on a FAILED call terminate, sitting alongside
-  //     `calls[]`, which is the only place Meta says WHY a call failed.
+  //     `calls[]`, which is the only place Meta says WHY a call failed;
+  //   - standalone system/app/account-level errors (no messages/calls/statuses
+  //     beside it) — traced in parseWebhook so they don't vanish as a bare
+  //     `{ingested: 0}`.
   errors?: MetaStatus["errors"];
 }
 
@@ -416,6 +458,10 @@ interface MetaCall {
   status?: string;
   /** SDP payload for setup. */
   session?: { sdp_type?: string; sdp?: string };
+  /** Second documented home for the connect ANSWER on business-initiated
+   *  calls (business-initiated-calls doc, Part 3) — the sample carries the
+   *  SDP in BOTH `session` and here. Read as a fallback only. */
+  connection?: { webrtc?: { sdp?: string } };
   /**
    * Terminal-only timing, documented as present "only when the call was picked
    * up by the other party":
@@ -435,6 +481,28 @@ interface MetaCall {
   cta_payload?: string;
   /** Opaque attribution string from a `wa.me/call/...?biz_payload=` deep link. */
   deeplink_payload?: string;
+  /** `call_recording_available` payload: the finished recording's media asset.
+   *  The `url` is a 5-minute signed link; the durable handle is `audio.id`
+   *  (re-fetchable via the Media API for 7 days). */
+  call_recording?: {
+    type?: string;
+    audio?: {
+      id?: string;
+      sha256?: string;
+      mime_type?: string;
+      url?: string;
+    };
+  };
+  /** `call_transcription_available` payload — same media semantics as
+   *  call_recording, but the asset is a JSON transcript document. */
+  call_transcript?: {
+    document?: {
+      id?: string;
+      sha256?: string;
+      mime_type?: string;
+      url?: string;
+    };
+  };
 }
 
 /**
@@ -472,11 +540,29 @@ interface MetaStatus {
     billable?: boolean;
     pricing_model?: string;
     category?: string;
+    /**
+     * "regular" | "free_customer_service" | "free_entry_point". Meta is
+     * deprecating `billable` in a future Graph version in favour of
+     * type+category — the parser derives billable from this when the boolean
+     * is absent, so campaign billing counts survive the deprecation.
+     */
+    type?: string;
   };
+  /**
+   * Omitted entirely on v24.0+ (except free-entry-point windows). Typed for
+   * wire completeness; deliberately never consumed — the 24h customer-service
+   * window is tracked from our own lastInboundAt, not Meta's
+   * expiration_timestamp, so the v24 omission costs nothing.
+   */
   conversation?: {
     id?: string;
     origin?: { type?: string };
   };
+  /** "group" when the message was sent to a group; recipient_id is then the
+   *  GROUP id (which can be purely numeric — never treat it as a phone). */
+  recipient_type?: string;
+  /** The participant's phone number on group statuses. */
+  recipient_participant_id?: string;
   /** Present on `status: "failed"` — the actual delivery-rejection reason. */
   errors?: Array<{
     code?: number;
@@ -490,7 +576,24 @@ interface MetaStatus {
 interface MetaCallingSettings {
   status?: string;
   call_icon_visibility?: string;
+  /** Country scoping for the call icon (restrict_to_user_countries). */
+  call_icons?: {
+    restrict_to_user_countries?: string[];
+  };
   callback_permission_status?: string;
+  /** Voicemail for missed/rejected inbound calls (call-settings doc). The
+   *  announcement id is numeric in Meta's samples but near the 2^53 boundary —
+   *  never coerce through Number; carry it as-is and stringify for state. */
+  voicemail?: {
+    status?: string;
+    triggers?: string[];
+    audio?: {
+      default?: {
+        announcement_media_id?: number | string;
+        timeout_seconds?: number;
+      };
+    };
+  };
   call_hours?: {
     status?: string;
     timezone_id?: string;
@@ -498,6 +601,15 @@ interface MetaCallingSettings {
       day_of_week?: string;
       open_time?: string;
       close_time?: string;
+    }>;
+    /** Per-date overrides (up to 20). We don't author these, but a call_hours
+     *  POST REPLACES the whole object — "if holiday_schedule is not passed…
+     *  the existing holiday_schedule will be deleted" — so writes must carry
+     *  the stored entries forward or silently wipe them. */
+    holiday_schedule?: Array<{
+      date?: string;
+      start_time?: string;
+      end_time?: string;
     }>;
   };
   /** Present while Meta has paused calling on this number. */
@@ -509,6 +621,16 @@ interface MetaCallingSettings {
       expiration?: number;
     }>;
   };
+  /** SIP signaling config. We never enable it — ENABLED means the Graph
+   *  calling endpoints this platform uses stop working on the number, so
+   *  the read-back exists purely to DIAGNOSE that state. */
+  sip?: {
+    status?: string;
+    servers?: Array<{ app_id?: string | number; hostname?: string }>;
+  };
+  /** DTLS (default) | SDES. Browser RTCPeerConnection only speaks DTLS-SRTP,
+   *  so SDES set out-of-band silently breaks our media negotiation. */
+  srtp_key_exchange_protocol?: string;
 }
 
 interface MetaContact {
@@ -535,6 +657,10 @@ interface MetaMediaPayload {
   voice?: boolean;
   // not all media types include a duration but some do
   duration?: number;
+  // stickers only. Deliberately not captured: an animated sticker is an
+  // animated WebP and the browser animates it natively in <img> — the bytes
+  // carry the behavior, so no renderer flag is needed.
+  animated?: boolean;
 }
 
 interface MetaContextRef {
@@ -542,6 +668,21 @@ interface MetaContextRef {
   id?: string;
   // The wa_id of the original sender (kept for debugging only).
   from?: string;
+  // FORWARDED message: `context` carries one of these booleans and NO `id`
+  // (so it never false-threads as a reply — `replyToExternalId` reads `id`
+  // only). `frequently_forwarded` = forwarded more than 5 times. Deliberately
+  // not surfaced in the inbox today; recoverable from rawPayload if a
+  // "Forwarded" chip is ever wanted.
+  forwarded?: boolean;
+  frequently_forwarded?: boolean;
+  // Catalog "Message business" button: the customer asked about a product
+  // from the business's WhatsApp catalog (set up in Commerce Manager, outside
+  // this platform). `context.id` is then a SYNTHETIC product-inquiry wamid
+  // matching no real message — reply resolution misses and drops the quote
+  // link, which is the correct fail-soft. Not surfaced today (no catalog
+  // model here); if catalog commerce ever lands, this is the field to render
+  // as a product chip so "Is this still available?" has its referent.
+  referred_product?: { catalog_id?: string; product_retailer_id?: string };
 }
 
 interface MetaInteractivePayload {
@@ -558,8 +699,15 @@ interface MetaInteractivePayload {
     | (string & {});
   button_reply?: { id?: string; title?: string };
   list_reply?: { id?: string; title?: string; description?: string };
-  /** WhatsApp Flows submission payload (JSON string). Retained via rawPayload. */
-  nfm_reply?: { response_json?: string; name?: string };
+  /**
+   * A Native Flow Message submission — a WhatsApp Flow, or an address-message
+   * form (interactive `address_message`, India). `response_json` is the field
+   * data (retained via rawPayload); `body` is the HUMAN-READABLE summary the
+   * customer sees in their own chat (for an address form: the address itself),
+   * which is what the inbox bubble should show. `name` discriminates the form
+   * kind (`address_message`, a Flow's name, …).
+   */
+  nfm_reply?: { response_json?: string; name?: string; body?: string };
   /**
    * The customer's answer to a call-permission request — this is how WhatsApp
    * delivers permission grants and revocations. It is NOT a calling webhook,
@@ -583,10 +731,21 @@ interface MetaLocationPayload {
   longitude?: number;
   name?: string;
   address?: string;
+  // "Usually only included for business locations" (a shared POI's website).
+  // Deliberately not lifted into the structured pin — the bubble's map link
+  // comes from lat/lon; recoverable from rawPayload if ever wanted.
+  url?: string;
 }
 
 interface MetaContactsPayload {
-  name?: { formatted_name?: string };
+  name?: {
+    formatted_name?: string;
+    prefix?: string;
+    first_name?: string;
+    middle_name?: string;
+    last_name?: string;
+    suffix?: string;
+  };
   phones?: Array<{ phone?: string; wa_id?: string; type?: string }>;
   emails?: Array<{ email?: string; type?: string }>;
   addresses?: Array<{
@@ -602,6 +761,23 @@ interface MetaContactsPayload {
   urls?: Array<{ url?: string; type?: string }>;
 }
 
+/**
+ * Display name for a shared contact card. `formatted_name` when present (the
+ * WhatsApp client normally builds it), else composed from the name parts — the
+ * contacts webhook doc warns ANY property may be omitted, and a card with only
+ * `first_name`/`last_name` must not render nameless.
+ */
+function contactCardName(c: MetaContactsPayload): string {
+  const formatted = c.name?.formatted_name?.trim();
+  if (formatted) return formatted;
+  const n = c.name;
+  if (!n) return "";
+  return [n.prefix, n.first_name, n.middle_name, n.last_name, n.suffix]
+    .map((x) => x?.trim())
+    .filter((x): x is string => !!x && x.length > 0)
+    .join(" ");
+}
+
 interface MetaMessage {
   from?: string;
   // NOTE: BSUID / @username do NOT live here. Meta stamps them on `contacts[]`
@@ -612,6 +788,10 @@ interface MetaMessage {
   // number. Absent on ordinary inbound `messages[]` (where `from` is already
   // the customer).
   to?: string;
+  // History-backfill rows only (history webhook reference): the message's most
+  // recent delivery state at sync time — SENT | DELIVERED | READ | PLAYED |
+  // PENDING | ERROR (uppercase, unlike live status webhooks).
+  history_context?: { status?: string };
   id?: string;
   timestamp?: string;
   type?: string;
@@ -684,6 +864,10 @@ interface MetaMessage {
   // `type:"system"` — a customer changed their WhatsApp number. `system.wa_id`
   // is the NEW number; `messages[].from` is the OLD one.
   system?: { body?: string; wa_id?: string; type?: string };
+  // `type:"unsupported"` only: names WHAT the customer sent that the Cloud API
+  // can't represent (poll_creation, pin, group_invite, edit, gif, …) — the one
+  // piece of renderable context besides `errors[]`.
+  unsupported?: { type?: string };
 }
 
 const META_MEDIA_TYPES: MediaKind[] = ["image", "video", "audio", "document", "sticker"];
@@ -715,8 +899,8 @@ function placeholderForUnhandledType(m: MetaMessage): string | null {
     }
     case "contacts": {
       const names = (m.contacts ?? [])
-        .map((c) => c.name?.formatted_name?.trim())
-        .filter((n): n is string => Boolean(n));
+        .map((c) => contactCardName(c))
+        .filter((n) => n.length > 0);
       if (names.length > 0) return `👤 Contact card: ${names.join(", ")}`;
       return "👤 Contact card shared";
     }
@@ -727,14 +911,37 @@ function placeholderForUnhandledType(m: MetaMessage): string | null {
       return note ? `🛒 Order shared — ${note}` : "🛒 Order shared";
     }
     case "unsupported": {
-      // Meta strips the content for unsupported types; the errors array is the
-      // only context. Common cause: a template/interactive message received by
-      // a WhatsApp Business (Cloud API) number from another business — the
-      // phone renders it, but the inbound webhook can't. Surface Meta's reason
-      // when present so it's not a context-free "Unsupported message".
+      // Meta strips the content for unsupported types; the errors array and
+      // the `unsupported.type` sub-object are the only context. Causes: a
+      // message kind the Cloud API can't represent (poll, pin, group invite,
+      // an edit while Meta's edit delivery is down, …) — named in
+      // `unsupported.type`; or 131060 "currently unavailable" (typically the
+      // first CTWA message to a Coexistence number). Surface both the KIND
+      // and Meta's reason so it's not a context-free "Unsupported message".
       const err = m.errors?.[0];
       const reason = err?.error_data?.details?.trim() || err?.title?.trim();
-      return reason ? `⚠️ Unsupported message — ${reason}` : "⚠️ Unsupported message";
+      const kind = m.unsupported?.type?.trim();
+      const label = kind
+        ? `⚠️ Unsupported message (${kind.replace(/_/g, " ")})`
+        : "⚠️ Unsupported message";
+      return reason ? `${label} — ${reason}` : label;
+    }
+    case "system": {
+      // A system NOTICE about the account. `user_changed_number` is
+      // intercepted upstream (contact migration), so what reaches here is any
+      // OTHER system subtype — notably the opt-in identity-change signal
+      // ("the person behind this account may have changed"). That one matters
+      // operationally: once it fires, Meta BLOCKS every outbound to this
+      // person until the business acknowledges, so this bubble is the only
+      // in-inbox explanation for sends suddenly failing. `system.body` is
+      // Meta's own human-readable sentence — surface it verbatim instead of
+      // a context-free "Unsupported message (system)".
+      const body = m.system?.body?.trim();
+      if (body) return `ℹ️ ${body}`;
+      const sub = m.system?.type?.trim();
+      return sub
+        ? `ℹ️ WhatsApp system notice (${sub.replace(/_/g, " ")})`
+        : "ℹ️ WhatsApp system notice";
     }
     default:
       // Unknown future type Meta might add — surface SOMETHING so it's
@@ -779,7 +986,7 @@ function structuredForMessage(m: MetaMessage): MessageStructured | undefined {
           .filter((x): x is string => !!x && x.length > 0)
           .join(" · ");
         return {
-          name: c.name?.formatted_name?.trim() ?? "",
+          name: contactCardName(c),
           phones: (c.phones ?? [])
             .map((p) => p.phone?.trim() ?? "")
             .filter((p) => p.length > 0),
@@ -935,6 +1142,31 @@ function tsFromMeta(timestamp: string | undefined): Date {
 /** History-declined sentinel: the owner turned off sharing in the Business App. */
 const HISTORY_DECLINED_CODE = 2593109;
 
+/**
+ * Map a history row's `history_context.status` (UPPERCASE, per the history
+ * webhook reference) onto our MessageStatus ladder, so a backfilled echo
+ * shows the ticks it had earned instead of defaulting to a lone "sent".
+ * PLAYED collapses to read (same rule as the live `played` status); PENDING
+ * stays "sent" (it left the device); ERROR → failed. Unknown → null, caller
+ * keeps its default.
+ */
+function mapHistoryStatus(s: string | undefined): MessageStatus | null {
+  switch (s?.trim().toUpperCase()) {
+    case "SENT":
+    case "PENDING":
+      return "sent";
+    case "DELIVERED":
+      return "delivered";
+    case "READ":
+    case "PLAYED":
+      return "read";
+    case "ERROR":
+      return "failed";
+    default:
+      return null;
+  }
+}
+
 function mapMetaStatus(s: string | undefined): MessageStatus | null {
   switch (s) {
     case "sent":
@@ -965,7 +1197,13 @@ function rewriteSdpForBrowser(sdp: string): string {
   // server. `a=setup:passive` in Meta's answer is what tells the browser to be
   // the client. (Meta's real answers already pin a concrete role, so this only
   // fires on the malformed case this rewrite exists for.)
-  return sdp.replace(/^a=setup:actpass$/gm, "a=setup:passive");
+  //
+  // `\r?` matters: RFC 8866 SDP lines end \r\n, and JS `$` under /m matches
+  // before \n only — without tolerating the \r, this safety net silently
+  // no-ops on exactly the spec-compliant malformed answer it exists for.
+  return sdp.replace(/^a=setup:actpass\r?$/gm, (line) =>
+    line.endsWith("\r") ? "a=setup:passive\r" : "a=setup:passive",
+  );
 }
 
 /**
@@ -1013,19 +1251,25 @@ function mapMetaCallPhase(
           return hasConnectedSignal ? "completed" : "missed";
       }
     case "call_created":
-      // SIP-mode only. We deliberately never enable SIP (it would disable the
-      // Graph calling endpoints this whole module is built on, along with
-      // Meta-side call recording), so reaching here means someone flipped SIP
-      // on out-of-band. Log it rather than blackholing the call.
+      // SIP-mode only (sent when the number has SIP enabled WITH
+      // `webhook_delivery: ENABLED` — informational, no SDP). We deliberately
+      // never enable SIP: it disables the Graph calling endpoints this whole
+      // module is built on. Reaching here means someone flipped SIP on
+      // out-of-band — log it rather than blackholing the call; the readiness
+      // checklist names the same state from the settings read.
       console.warn(
         "[meta] calls webhook: received SIP-only `call_created` — SIP appears " +
           "to be enabled on this number, which disables the Graph calling API",
       );
       return null;
+    case "call_recording_available":
+      // Post-call artifact for a call we opted into recording. The media id
+      // expires provider-side after 7 days — ingest downloads to R2 promptly.
+      return "recording_available";
+    case "call_transcription_available":
+      // Post-call transcript document (same 7-day media retention).
+      return "transcript_available";
     default:
-      // Includes `call_recording_available` / `call_transcription_available`
-      // when those features are enabled on the Meta side but not yet consumed
-      // here. Visible, not lost.
       console.warn(
         `[meta] calls webhook: unhandled call event ${JSON.stringify(event)} — dropping row`,
       );
@@ -1192,6 +1436,14 @@ function parseMetaCall(
       type,
       sdp: type === "answer" ? rewriteSdpForBrowser(c.session.sdp) : c.session.sdp,
     };
+  } else if (c.connection?.webrtc?.sdp && phase === "connecting") {
+    // Fallback: the business-initiated connect sample carries the answer in
+    // `connection.webrtc.sdp` alongside `session` — if a payload ever arrives
+    // with only that shape, losing it strands the outbound call in silence.
+    // `phase === "connecting"` pins this to the outbound connect, where the
+    // SDP is by definition the provider's ANSWER (actpass → passive rewrite
+    // applied like the session path).
+    sdp = { type: "answer", sdp: rewriteSdpForBrowser(c.connection.webrtc.sdp) };
   }
 
   return {
@@ -1210,7 +1462,12 @@ function parseMetaCall(
           ...(typeof firstError.code === "number"
             ? { errorCode: firstError.code }
             : {}),
-          ...(firstError.title ? { errorTitle: firstError.title } : {}),
+          // Calling terminate errors carry the label in `message` (docs'
+          // 138019-138023 payloads), message-status errors in `title` — read
+          // both or a calling failure persists a bare code with no label.
+          ...(firstError.title ?? firstError.message
+            ? { errorTitle: firstError.title ?? firstError.message }
+            : {}),
           ...(firstError.error_data?.details ?? firstError.message
             ? {
                 errorDetail:
@@ -1224,6 +1481,28 @@ function parseMetaCall(
     ...(c.deeplink_payload ? { deeplinkPayload: c.deeplink_payload } : {}),
     ...(c.biz_opaque_callback_data
       ? { correlationId: c.biz_opaque_callback_data }
+      : {}),
+    // The finished recording's durable handle. The webhook also carries a
+    // 5-minute signed `url`, deliberately NOT forwarded: by the time a retry
+    // needs it it's dead, and the media id re-fetches through the Media API
+    // for the full 7-day retention window.
+    ...(phase === "recording_available" && c.call_recording?.audio?.id
+      ? {
+          recordingMedia: {
+            mediaId: c.call_recording.audio.id,
+            mimeType: c.call_recording.audio.mime_type ?? null,
+            sha256: c.call_recording.audio.sha256 ?? null,
+          },
+        }
+      : {}),
+    ...(phase === "transcript_available" && c.call_transcript?.document?.id
+      ? {
+          transcriptMedia: {
+            mediaId: c.call_transcript.document.id,
+            mimeType: c.call_transcript.document.mime_type ?? null,
+            sha256: c.call_transcript.document.sha256 ?? null,
+          },
+        }
       : {}),
     timestamp: ts,
     rawPayload,
@@ -1370,8 +1649,12 @@ function normalizeTemplateLanguage(language: string): string {
  * Meta sends this field for TWO different moments and they must not be merged:
  *
  *   - ADVANCE NOTICE — carries `correct_category`, the category the template
- *     WILL be moved to (typically on the 1st of next month). Nothing has changed
- *     yet, so this maps to `pendingCategory`.
+ *     WILL be moved to (~24h later per the template-category-update reference;
+ *     `category_update_timestamp` names the scheduled instant). Nothing has
+ *     changed yet, so this maps to `pendingCategory`. NOTE the trap: this shape
+ *     ALSO carries `new_category`, but there it means the CURRENT category —
+ *     which is why this parser treats `new_category` as always-safe current
+ *     truth rather than discriminating on its presence.
  *   - ACTION TAKEN — carries `new_category` (plus `previous_category`). The move
  *     has happened, so this maps to `category`.
  *
@@ -1471,8 +1754,8 @@ function logUnhandledAccountUpdate(
 
 /**
  * Parse a number-health webhook (`phone_number_quality_update`,
- * `business_capability_update`, `account_update`, or `account_alerts`) into a
- * NormalizedChannelHealth
+ * `business_capability_update`, `account_update`, `account_alerts`, or
+ * `account_review_update`) into a NormalizedChannelHealth
  * carrying whichever of tier/quality/throughput the payload actually contains.
  * Ingest merges the partial onto the WhatsApp ChannelConnection. Returns null
  * when nothing usable is present (e.g. a generic account_alerts envelope), so a
@@ -1517,61 +1800,146 @@ function parseChannelHealthUpdate(
           rawPayload,
         };
       }
-      const utility = (value.restriction_info ?? []).find((r) =>
-        r.restriction_type?.includes("UTILITY"),
-      );
+      // One webhook can list SEVERAL restrictions — a 5/7/30-day spam block
+      // arrives as BIZ_INITIATED + CUSTOMER_INITIATED + ADD_PHONE entries in
+      // one `restriction_info` (policy-enforcement guide) — so every entry is
+      // routed into its slot on ONE health update. First-match-wins here would
+      // silently drop the other half of a full messaging block.
+      const info = value.restriction_info ?? [];
+      const expiry = (r: (typeof info)[number]) =>
+        r.expiration ? new Date(r.expiration * 1000) : null;
+      const health: NormalizedChannelHealth = { kind: "channel_health", rawPayload };
+      let matched = false;
+      const utility = info.find((r) => r.restriction_type?.includes("UTILITY"));
       if (utility) {
         // RATE_LIMITED_UTILITY_TEMPLATE_MESSAGING: utility sends over the
         // rolling-24h cap are REJECTED — the composer must warn before an
         // operator fires a utility campaign into it.
         // RESTRICTED_UTILITY_TEMPLATES: utility templates recategorized,
         // new utility creation + category reviews disabled.
-        return {
-          kind: "channel_health",
-          utilityRestrictionType: utility.restriction_type ?? null,
-          utilityRestrictedUntil: utility.expiration
-            ? new Date(utility.expiration * 1000)
-            : null,
-          rawPayload,
-        };
+        matched = true;
+        health.utilityRestrictionType = utility.restriction_type ?? null;
+        health.utilityRestrictedUntil = expiry(utility);
       }
-      const calling = (value.restriction_info ?? []).find((r) =>
+      const callingRestrictions = info.filter((r) =>
         r.restriction_type?.includes("CALLING"),
       );
+      // Meta can pause each direction independently and may list both in one
+      // webhook. Prefer the BUSINESS_INITIATED entry: its window is what gates
+      // OUR outbound calls, while RESTRICTED_USER_INITIATED_CALLING (and the
+      // low-pickup _CALL_BUTTON_HIDDEN variant) only pause inbound + the call
+      // icon — see the placeCall gate, which lets outbound proceed for those.
+      const calling =
+        callingRestrictions.find((r) =>
+          r.restriction_type?.includes("BUSINESS_INITIATED"),
+        ) ?? callingRestrictions[0];
       if (calling) {
+        matched = true;
+        health.callingRestrictedUntil = expiry(calling);
+        health.callingRestrictionType = calling.restriction_type ?? null;
+        health.callingRestrictionReason = calling.reason ?? null;
+      }
+      // Policy/spam MESSAGING enforcement (the escalation ladder in the
+      // policy-enforcement guide). Matched by substring, not exact name, so a
+      // future variant Meta adds still lands in the right slot — and matched
+      // AFTER utility/calling, whose types also end in ...MESSAGING/...CALLING.
+      const customerMessaging = info.find((r) => {
+        const t = r.restriction_type ?? "";
+        return t.includes("MESSAGING") && !t.includes("UTILITY") && t.includes("CUSTOMER");
+      });
+      if (customerMessaging) {
+        matched = true;
+        health.customerMessagingRestrictionType =
+          customerMessaging.restriction_type ?? null;
+        health.customerMessagingRestrictedUntil = expiry(customerMessaging);
+      }
+      const bizMessaging = info.find((r) => {
+        const t = r.restriction_type ?? "";
+        return (
+          t.includes("MESSAGING") &&
+          !t.includes("UTILITY") &&
+          !t.includes("CALLING") &&
+          !t.includes("CUSTOMER")
+        );
+      });
+      if (bizMessaging) {
+        matched = true;
+        health.bizMessagingRestrictionType = bizMessaging.restriction_type ?? null;
+        health.bizMessagingRestrictedUntil = expiry(bizMessaging);
+      }
+      // Entries outside every slot (RESTRICTED_ADD_PHONE_NUMBER_ACTION rides
+      // along with every spam block; genuinely new types land here too) go to
+      // the last-alert slot: the restriction types are not enumerated anywhere
+      // we can read, so the stored trace is how a new one becomes known
+      // instead of being invisible. When NOTHING matched, that alert is the
+      // whole update — same posture as before, never silence.
+      const unmatched = info.filter(
+        (r) =>
+          // Every CALLING entry is accounted for — the non-preferred direction
+          // is deliberately ignored (see the preference note above), which is
+          // not the same as unrecognised.
+          !callingRestrictions.includes(r) &&
+          ![utility, customerMessaging, bizMessaging].includes(r),
+      );
+      if (unmatched.length > 0 || !matched) {
+        logUnhandledAccountUpdate(value, rawPayload);
+        health.accountAlert = {
+          source: "account_update",
+          event: value.event ?? null,
+          detail: JSON.stringify(
+            matched ? { ...value, restriction_info: unmatched } : value,
+          ).slice(0, 500),
+        };
+      }
+      return health;
+    }
+    // The account-lock / disable leg of the enforcement ladder. `ban_info`
+    // carries the state: SCHEDULE_FOR_DISABLE (still sending, on notice),
+    // DISABLE (nothing sends until an appeal succeeds), REINSTATE (appeal
+    // reversed the ban — clear the stored block). Modeled on the messaging
+    // pair because that is what a ban IS — both directions blocked with no
+    // expiry — which keeps the banner/composer surfaces on one code path.
+    if (value.event === "DISABLED_UPDATE") {
+      const state = (value.ban_info?.waba_ban_state ?? "").toUpperCase();
+      const alert = {
+        source: "account_update" as const,
+        event: `DISABLED_UPDATE:${state || "UNKNOWN"}`,
+        detail: JSON.stringify(value).slice(0, 500),
+      };
+      if (state === "REINSTATE") {
         return {
           kind: "channel_health",
-          callingRestrictedUntil: calling.expiration
-            ? new Date(calling.expiration * 1000)
-            : null,
-          callingRestrictionType: calling.restriction_type ?? null,
-          callingRestrictionReason: calling.reason ?? null,
+          bizMessagingRestrictionType: null,
+          bizMessagingRestrictedUntil: null,
+          customerMessagingRestrictionType: null,
+          customerMessagingRestrictedUntil: null,
+          accountAlert: alert,
           rawPayload,
         };
       }
-      // A restriction on something OTHER than calling — leave calling state
-      // untouched rather than implying it was cleared. Logged AND persisted as
-      // the connection's last-alert slot: the restriction types are not
-      // enumerated anywhere we can read, so the stored trace is how a new one
-      // becomes known instead of being invisible.
-      logUnhandledAccountUpdate(value, rawPayload);
-      return {
-        kind: "channel_health",
-        accountAlert: {
-          source: "account_update",
-          event: value.event ?? null,
-          detail: JSON.stringify(value).slice(0, 500),
-        },
-        rawPayload,
-      };
+      if (state === "DISABLE" || state === "SCHEDULE_FOR_DISABLE") {
+        return {
+          kind: "channel_health",
+          bizMessagingRestrictionType: `WABA_BAN_${state}`,
+          bizMessagingRestrictedUntil: null,
+          customerMessagingRestrictionType: `WABA_BAN_${state}`,
+          customerMessagingRestrictedUntil: null,
+          accountAlert: alert,
+          rawPayload,
+        };
+      }
+      // An unknown ban state falls through to the generic trace below.
     }
     if (value.event === "ACCOUNT_VIOLATION") {
       const type = value.violation_info?.violation_type;
       if (!type) return null;
       // A CALLING violation is the early warning before calling is paused, and
       // has its own field because the actionable response is different (narrow
-      // call hours, hide the call button).
-      if (type.includes("CALLING")) {
+      // call hours, hide the call button). Matched on CALLS too: the low
+      // pickup-rate warning arrives as USER_INITIATED_CALLS_LOW_PICKUP_RATE
+      // (call-settings doc) — "CALLING" alone misfiles it as a policy
+      // violation.
+      if (type.includes("CALLING") || type.includes("CALLS")) {
         return {
           kind: "channel_health",
           callingQualityWarning: type,
@@ -1619,7 +1987,19 @@ function parseChannelHealthUpdate(
   if (value.max_daily_conversations_per_business != null) {
     messagingTier = String(value.max_daily_conversations_per_business);
   } else if (field === "phone_number_quality_update") {
-    if (value.current_limit) messagingTier = value.current_limit;
+    // `current_limit` is OVERLOADED by `event` (phone-number-quality-update
+    // reference): on THROUGHPUT_UPGRADE it describes the number's THROUGHPUT
+    // ("TIER_UNLIMITED — higher throughput", the doc's own example), NOT the
+    // messaging limit. Reading it as a tier there set the portfolio's 24h cap
+    // to UNLIMITED off a throughput event — ungating campaigns in the
+    // dangerous direction. Skip the tier read for that event (the health
+    // poll owns throughput); every other/absent event keeps the legacy
+    // limit reading until Meta removes the field (Feb 2026).
+    const isThroughputEvent =
+      value.event?.trim().toUpperCase() === "THROUGHPUT_UPGRADE";
+    if (value.current_limit && !isThroughputEvent) {
+      messagingTier = value.current_limit;
+    }
   } else if (field === "business_capability_update") {
     if (value.max_daily_conversation_per_phone != null) {
       messagingTier = String(value.max_daily_conversation_per_phone);
@@ -1638,14 +2018,85 @@ function parseChannelHealthUpdate(
     // `account_alerts` with no tier rider: the alert BODY is the payload.
     // Persist it as the last-alert slot instead of dropping it — this envelope
     // exists to explain enforcement, and it left no trace before.
+    //
+    // Documented shape (account-alerts reference, 2026-07): the discriminator
+    // is `alert_info.alert_type` and the operator-readable sentence is
+    // `alert_info.alert_description` — surface those instead of a JSON blob.
+    // Undocumented variants keep the blob fallback so nothing regresses to
+    // silence. `entity_type: "PHONE_NUMBER"` makes `entity_id` the number's
+    // own id — the strongest attribution hint ingest can get.
+    // Two-step-verification PIN events (security reference doc). Per-number
+    // (the flat display_phone_number attributes it); `requester` names the
+    // Business Suite user on reset REQUESTS only. An unexpected reset request
+    // or a completed turn-off is the account-takeover tell, so the sentence
+    // says what to do, not just what happened.
+    if (field === "security") {
+      const event = value.event?.trim().toUpperCase() || "UNKNOWN";
+      const requester = value.requester?.trim();
+      const sentence =
+        event === "PIN_CHANGED"
+          ? "Two-step verification PIN was changed or enabled via WhatsApp Manager."
+          : event === "PIN_RESET_REQUEST"
+            ? `Two-step verification reset was REQUESTED via WhatsApp Manager${requester ? ` by Business Suite user ${requester}` : ""} — if nobody on your team did this, secure your Meta Business account now.`
+            : event === "PIN_REQUEST_SUCCESS"
+              ? "Two-step verification was TURNED OFF via the reset email — re-enable a PIN to keep the number protected."
+              : `Security event: ${event}.`;
+      return {
+        kind: "channel_health",
+        accountAlert: {
+          source: "security",
+          event,
+          detail: sentence,
+        },
+        rawPayload,
+      };
+    }
+    // WABA policy review verdict (account-review-update reference doc).
+    // Everything except APPROVED means "this WABA cannot be used with the
+    // APIs" — the operator explanation for every send suddenly failing.
+    if (field === "account_review_update") {
+      const decision = value.decision?.trim().toUpperCase() || "UNKNOWN";
+      const sentence =
+        decision === "APPROVED"
+          ? "WhatsApp Business Account review: approved — the account is ready for use."
+          : decision === "REJECTED"
+            ? "WhatsApp Business Account review: REJECTED — the account doesn't meet Meta's policy requirements and cannot be used with the API until resolved."
+            : decision === "PENDING"
+              ? "WhatsApp Business Account review: pending — the account can't be used with the API until Meta's review completes."
+              : decision === "DEFERRED"
+                ? "WhatsApp Business Account review: deferred — Meta needs more information before the account can be used with the API."
+                : `WhatsApp Business Account review: ${decision}.`;
+      return {
+        kind: "channel_health",
+        accountAlert: {
+          source: "account_review_update",
+          event: decision,
+          detail: sentence,
+        },
+        rawPayload,
+      };
+    }
     if (field === "account_alerts") {
+      const info = value.alert_info;
+      const description = info?.alert_description?.trim();
+      const severity = info?.alert_severity?.trim();
+      const status = info?.alert_status?.trim();
+      const prefix =
+        severity || status
+          ? `[${[severity, status].filter(Boolean).join("/")}] `
+          : "";
       return {
         kind: "channel_health",
         accountAlert: {
           source: "account_alerts",
-          event: value.event ?? null,
-          detail: JSON.stringify(value).slice(0, 500),
+          event: info?.alert_type?.trim() || value.event || null,
+          detail: description
+            ? `${prefix}${description}`.slice(0, 500)
+            : JSON.stringify(value).slice(0, 500),
         },
+        ...(value.entity_type === "PHONE_NUMBER" && value.entity_id
+          ? { phoneNumberId: value.entity_id }
+          : {}),
         rawPayload,
       };
     }
@@ -1671,6 +2122,208 @@ function parseChannelHealthUpdate(
  * that produced it. Older WhatsApp clients drop it, so never treat its absence
  * as an error.
  */
+/**
+ * `interactive.type: "location_request_message"` — body text + WhatsApp's own
+ * "send location" button (location-request-messages doc). The action name is
+ * the fixed literal `send_location`; there is nothing else to configure. Body
+ * cap (1024) is enforced by the schemas upstream, same as buttons/list.
+ */
+async function sendLocationRequest(
+  args: SendInteractiveArgs,
+  config: MetaSendConfig,
+): Promise<SendTextResult> {
+  const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
+  const res = await metaFetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${config.accessToken}`,
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      ...messagingAccountField(config),
+      recipient_type: "individual",
+      to: args.to,
+      type: "interactive",
+      interactive: {
+        type: "location_request_message",
+        body: { text: args.bodyText },
+        action: { name: "send_location" },
+      },
+      ...(args.replyToExternalId
+        ? { context: { message_id: args.replyToExternalId } }
+        : {}),
+    }),
+  });
+  if (!res.ok) {
+    const text = await safeMetaText(res);
+    throw new MetaSendError(
+      `meta sendLocationRequest failed: ${res.status} ${text}`,
+      res.status,
+      text,
+    );
+  }
+  const json = (await res.json()) as { messages?: Array<{ id?: string }> };
+  const externalId = json.messages?.[0]?.id;
+  if (!externalId) {
+    throw new Error(
+      `meta sendLocationRequest missing message id: ${JSON.stringify(json)}`,
+    );
+  }
+  return { externalId, timestamp: new Date() };
+}
+
+/**
+ * `interactive.type: "carousel"` — 2-10 horizontally-scrollable media cards
+ * (interactive-carousel doc). Doc quirks reproduced deliberately:
+ *   - every card carries `type: "cta_url"` — Meta's OWN examples set that
+ *     literal even on quick-reply cards, so we copy their wire exactly;
+ *   - a card's action is EITHER `{name:"cta_url", parameters}` (URL button)
+ *     or `{buttons:[{type:"quick_reply", quick_reply:{id,title}}]}` — the
+ *     schemas guarantee the variant is uniform across cards before we get
+ *     here (Meta rejects mixed carousels).
+ * Caps truncated defensively: button labels 20, card body 160. Card media is
+ * link-only per the doc ("publicly available media asset URL").
+ */
+async function sendInteractiveCarousel(
+  args: SendInteractiveArgs,
+  config: MetaSendConfig,
+): Promise<SendTextResult> {
+  const cards = args.carouselCards;
+  if (!cards || cards.length < 2) {
+    throw new MetaSendError("sendInteractiveCarousel: 2-10 carouselCards required", 400, "");
+  }
+  const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
+  const res = await metaFetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${config.accessToken}`,
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      ...messagingAccountField(config),
+      recipient_type: "individual",
+      to: args.to,
+      type: "interactive",
+      interactive: {
+        type: "carousel",
+        body: { text: args.bodyText },
+        action: {
+          cards: cards.map((card, i) => ({
+            card_index: i,
+            type: "cta_url",
+            header: {
+              type: card.headerMedia.kind,
+              [card.headerMedia.kind]: { link: card.headerMedia.link },
+            },
+            ...(card.body ? { body: { text: card.body.slice(0, 160) } } : {}),
+            action: card.ctaUrl
+              ? {
+                  name: "cta_url",
+                  parameters: {
+                    display_text: card.ctaUrl.displayText.slice(0, 20),
+                    url: card.ctaUrl.url,
+                  },
+                }
+              : {
+                  buttons: (card.quickReplies ?? []).map((qr) => ({
+                    type: "quick_reply",
+                    quick_reply: { id: qr.id.slice(0, 256), title: qr.title.slice(0, 20) },
+                  })),
+                },
+          })),
+        },
+      },
+      ...(args.replyToExternalId
+        ? { context: { message_id: args.replyToExternalId } }
+        : {}),
+    }),
+  });
+  if (!res.ok) {
+    const text = await safeMetaText(res);
+    throw new MetaSendError(
+      `meta sendInteractiveCarousel failed: ${res.status} ${text}`,
+      res.status,
+      text,
+    );
+  }
+  const json = (await res.json()) as { messages?: Array<{ id?: string }> };
+  const externalId = json.messages?.[0]?.id;
+  if (!externalId) {
+    throw new Error(
+      `meta sendInteractiveCarousel missing message id: ${JSON.stringify(json)}`,
+    );
+  }
+  return { externalId, timestamp: new Date() };
+}
+
+/**
+ * `interactive.type: "cta_url"` — body + one URL-opening button, so a long
+ * tracking link never appears raw in the message (cta-url-messages doc).
+ * Optional text header (≤60) and footer (≤60); `display_text` caps at 20.
+ * All three truncated defensively, same posture as the buttons/list caps.
+ * Media headers are deliberately not modeled yet — see SendInteractiveArgs.
+ */
+async function sendCtaUrlButton(
+  args: SendInteractiveArgs,
+  config: MetaSendConfig,
+): Promise<SendTextResult> {
+  const cta = args.ctaUrl;
+  if (!cta?.displayText || !cta.url) {
+    throw new MetaSendError("sendCtaUrlButton: ctaUrl.displayText + url are required", 400, "");
+  }
+  const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
+  const res = await metaFetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${config.accessToken}`,
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      ...messagingAccountField(config),
+      recipient_type: "individual",
+      to: args.to,
+      type: "interactive",
+      interactive: {
+        type: "cta_url",
+        ...(cta.headerText
+          ? { header: { type: "text", text: cta.headerText.slice(0, 60) } }
+          : {}),
+        body: { text: args.bodyText },
+        action: {
+          name: "cta_url",
+          parameters: {
+            display_text: cta.displayText.slice(0, 20),
+            url: cta.url,
+          },
+        },
+        ...(cta.footerText
+          ? { footer: { text: cta.footerText.slice(0, 60) } }
+          : {}),
+      },
+      ...(args.replyToExternalId
+        ? { context: { message_id: args.replyToExternalId } }
+        : {}),
+    }),
+  });
+  if (!res.ok) {
+    const text = await safeMetaText(res);
+    throw new MetaSendError(
+      `meta sendCtaUrlButton failed: ${res.status} ${text}`,
+      res.status,
+      text,
+    );
+  }
+  const json = (await res.json()) as { messages?: Array<{ id?: string }> };
+  const externalId = json.messages?.[0]?.id;
+  if (!externalId) {
+    throw new Error(`meta sendCtaUrlButton missing message id: ${JSON.stringify(json)}`);
+  }
+  return { externalId, timestamp: new Date() };
+}
+
 async function sendVoiceCallButton(
   args: SendInteractiveArgs,
   config: MetaSendConfig,
@@ -1733,6 +2386,109 @@ async function sendVoiceCallButton(
     );
   }
   return { externalId, timestamp: new Date() };
+}
+
+/** Wire shape of `POST|DELETE /{phone-id}/block_users` (Block Users API). */
+interface MetaBlockUsersResponse {
+  block_users?: {
+    added_users?: Array<{ input?: string; wa_id?: string }>;
+    removed_users?: Array<{ input?: string; wa_id?: string }>;
+    failed_users?: Array<{
+      input?: string;
+      wa_id?: string;
+      errors?: Array<{
+        message?: string;
+        code?: number;
+        error_data?: { details?: string };
+      }>;
+    }>;
+  };
+  error?: { message?: string; code?: number };
+}
+
+/**
+ * Block Users API response → per-user ledger. Exported for tests.
+ *
+ * The load-bearing rule: a MIXED response carries `failed_users` AND a
+ * top-level OAuth-style `error` (#139100) in the SAME body — so the top-level
+ * error must never be read as "the whole call failed" when the `block_users`
+ * ledger is present. Successes arrive as `added_users` (block) or
+ * `removed_users` (unblock); both map to `succeeded`.
+ */
+export function parseBlockUsersResponse(
+  json: MetaBlockUsersResponse,
+): BlockUsersResult {
+  const toOutcome = (
+    u: { input?: string; wa_id?: string },
+    error: BlockUserOutcome["error"],
+  ): BlockUserOutcome => ({
+    input: u.input ?? "",
+    externalUserId: u.wa_id ?? null,
+    error,
+  });
+  const succeeded = [
+    ...(json.block_users?.added_users ?? []),
+    ...(json.block_users?.removed_users ?? []),
+  ].map((u) => toOutcome(u, null));
+  const failed = (json.block_users?.failed_users ?? []).map((u) => {
+    const err = u.errors?.[0];
+    return toOutcome(u, {
+      code: typeof err?.code === "number" ? err.code : null,
+      message: err?.message ?? null,
+      details: err?.error_data?.details ?? null,
+    });
+  });
+  return { succeeded, failed };
+}
+
+/**
+ * One block/unblock request against the business number's blocklist. The two
+ * directions share everything except the HTTP method (POST blocks, DELETE
+ * unblocks). Blocking is idempotent — re-blocking a blocked user succeeds — so
+ * the transient-5xx retry is safe to keep on.
+ */
+async function blockUsersCall(
+  method: "POST" | "DELETE",
+  users: string[],
+  config: MetaSendConfig,
+): Promise<BlockUsersResult> {
+  // Meta caps one request at 1,000 users. Callers today send one; a future
+  // bulk path must page, not truncate silently.
+  if (users.length > 1000) {
+    throw new Error(`meta block_users: ${users.length} users exceeds Meta's 1,000/request cap`);
+  }
+  const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/block_users`;
+  const res = await metaFetch(url, {
+    method,
+    retry: true,
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${config.accessToken}`,
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      block_users: users.map((user) => ({ user })),
+    }),
+  });
+  const text = await safeMetaText(res);
+  let json: MetaBlockUsersResponse | null = null;
+  try {
+    json = JSON.parse(text) as MetaBlockUsersResponse;
+  } catch {
+    // Non-JSON body — fall through to the status check below.
+  }
+  // Per-user ledger present → authoritative, even on a non-2xx status (a
+  // mixed partial-failure response carries HTTP error + the ledger together).
+  if (json?.block_users) return parseBlockUsersResponse(json);
+  if (!res.ok || !json) {
+    throw new Error(`meta block_users ${method} failed: ${res.status} ${text.slice(0, 500)}`);
+  }
+  // 2xx with no ledger — treat every requested user as succeeded (docs always
+  // show the ledger, but an empty-object success must not read as failure).
+  return {
+    succeeded: users.map((input) => ({ input, externalUserId: null, error: null })),
+    failed: [],
+  };
 }
 
 export const metaProvider: MessagingProvider<MetaSendConfig> = {
@@ -1814,6 +2570,24 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             const waId = pref.wa_id;
             const val = pref.value?.toLowerCase();
             if (!waId || (val !== "stop" && val !== "resume")) continue;
+            // Category gate, consent-safe in both directions. Meta has already
+            // renamed this once (docs said "marketing", the reference now says
+            // "marketing_messages"), so a prefix match accepts both spellings
+            // — never-tighten. But an ABSENT match must skip: this event
+            // clears opt-outs on "resume", and clearing a MARKETING opt-out
+            // off some future non-marketing category would be a consent
+            // violation. Absent category (older payloads) passes.
+            const category = pref.category?.trim().toLowerCase();
+            if (category && !category.startsWith("marketing")) {
+              console.warn(
+                JSON.stringify({
+                  event: "meta.user_preferences.unknown_category",
+                  severity: "info",
+                  category,
+                }),
+              );
+              continue;
+            }
             events.push({
               kind: "marketing_preference",
               contactPhone: waId.replace(/\D/g, ""),
@@ -1840,11 +2614,19 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         // an early quality warning, or an active ~7-day pause on calling during
         // which every call and permission request fails. Storing it is what
         // turns "calling randomly stopped working" into a dated explanation.
+        // `account_review_update` rides the same channel: its decision gates
+        // whether the WHOLE WABA may use the API at all (REJECTED / PENDING /
+        // DEFERRED = no sends), and the last-alert slot is WABA-scoped in
+        // persistWhatsappHealth, so the verdict lands on every number under it.
         if (
           change.field === "phone_number_quality_update" ||
           change.field === "business_capability_update" ||
           change.field === "account_update" ||
-          change.field === "account_alerts"
+          change.field === "account_alerts" ||
+          change.field === "account_review_update" ||
+          // Two-step-verification PIN events — per-number security signals
+          // the operator must see (an unexpected reset is the takeover tell).
+          change.field === "security"
         ) {
           const evt = parseChannelHealthUpdate(
             change.field,
@@ -1920,6 +2702,37 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             const externalId = m.id;
             const contactPhone = digitsOnly(m.to);
             if (!externalId || !contactPhone) continue;
+            // Owner-side corrections (smb-message-echoes doc): the Business
+            // App user revoked/edited a previously-sent message. These are
+            // CORRECTIONS to the ORIGINAL row (by its wamid), not new sends —
+            // running them through the content walker minted a phantom
+            // "unsupported" echo bubble while the agent's copy silently
+            // diverged from what the customer actually sees. Same machinery
+            // as customer-side revokes, pinned to OUTBOUND rows only.
+            if (m.type === "edit" && m.edit?.original_message_id) {
+              const newBody = editBody(m.edit.message);
+              events.push({
+                kind: "message_correction",
+                action: "edit",
+                targetExternalId: m.edit.original_message_id,
+                expectedDirection: "out",
+                ...(newBody ? { newBody } : {}),
+                timestamp: tsFromMeta(m.timestamp),
+                rawPayload: payload as Record<string, unknown>,
+              } satisfies NormalizedMessageCorrection);
+              continue;
+            }
+            if (m.type === "revoke" && m.revoke?.original_message_id) {
+              events.push({
+                kind: "message_correction",
+                action: "delete",
+                targetExternalId: m.revoke.original_message_id,
+                expectedDirection: "out",
+                timestamp: tsFromMeta(m.timestamp),
+                rawPayload: payload as Record<string, unknown>,
+              } satisfies NormalizedMessageCorrection);
+              continue;
+            }
             const content = extractMetaMessageContent(m);
             if (!content) continue;
             events.push({
@@ -2013,12 +2826,14 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
                   threadPhone ?? (isBusinessSent ? digitsOnly(m.to) : fromDigits);
                 if (!contactPhone) continue;
                 if (isBusinessSent) {
+                  const historyStatus = mapHistoryStatus(m.history_context?.status);
                   events.push({
                     kind: "echo",
                     externalId,
                     contactPhone,
                     body: content.body,
                     ...(content.media ? { media: content.media } : {}),
+                    ...(historyStatus ? { status: historyStatus } : {}),
                     timestamp: ts,
                     rawPayload: payload as Record<string, unknown>,
                   } satisfies NormalizedOutboundEcho);
@@ -2035,6 +2850,52 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
                   } satisfies NormalizedInboundMessage);
                 }
               }
+            }
+          }
+          // The ≤14-day MEDIA FOLLOW-UPS (history reference, second example):
+          // Meta re-sends a media message's real contents as `field:"history"`
+          // with a plain `value.messages` array — NOT under `value.history`.
+          // This branch used to walk `value.history` only, so every follow-up
+          // was dropped and the "📎 Media" placeholder never had a chance to
+          // resolve (the placeholder's own comment believed these dedupe
+          // against it; they never arrived). Same direction rule as above:
+          // the business number is the sender for echoes.
+          for (const m of Array.isArray(value.messages) ? value.messages : []) {
+            const externalId = m.id;
+            if (!externalId) continue;
+            const content = extractMetaMessageContent(m);
+            if (!content) continue;
+            const ts = tsFromMeta(m.timestamp);
+            const fromDigits = digitsOnly(m.from);
+            const toDigits = digitsOnly(m.to);
+            const isBusinessSent = businessNumber
+              ? fromDigits === businessNumber
+              : toDigits !== undefined; // `to` is only present on echo shapes
+            const contactPhone = isBusinessSent ? toDigits : fromDigits;
+            if (!contactPhone) continue;
+            if (isBusinessSent) {
+              const historyStatus = mapHistoryStatus(m.history_context?.status);
+              events.push({
+                kind: "echo",
+                externalId,
+                contactPhone,
+                body: content.body,
+                ...(content.media ? { media: content.media } : {}),
+                ...(historyStatus ? { status: historyStatus } : {}),
+                timestamp: ts,
+                rawPayload: payload as Record<string, unknown>,
+              } satisfies NormalizedOutboundEcho);
+            } else {
+              events.push({
+                kind: "message",
+                externalId,
+                contactPhone,
+                contactName: null,
+                body: content.body,
+                ...(content.media ? { media: content.media } : {}),
+                timestamp: ts,
+                rawPayload: payload as Record<string, unknown>,
+              } satisfies NormalizedInboundMessage);
             }
           }
           continue;
@@ -2067,6 +2928,14 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         // other type since `value.messages` / `value.calls` / `value.statuses`
         // are independently present.
         if (change.field !== "messages" && change.field !== "calls") {
+          // `account_settings_update` is a KNOWN field we deliberately don't
+          // consume: it announces phone-number settings changes (calling
+          // status, icon, SIP), but our settings surfaces always read live
+          // from Graph, so there is no cached copy to refresh. Dropped
+          // quietly — a tenant subscribing it would otherwise emit one
+          // unhandled-field warn per settings save, drowning the signal the
+          // warn below exists for (genuinely NEW fields).
+          if (change.field === "account_settings_update") continue;
           // Everything above is handled; anything else Meta subscribed us to
           // (account/phone-number quality alerts, flows, etc.) is dropped — but
           // logged so a NEW field type Meta starts sending surfaces in ops
@@ -2094,6 +2963,56 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
               note: "MM-API click webhook received — a tenant WABA appears to be onboarded to MM API; this platform sends via Cloud API only",
             }),
           );
+        }
+
+        // `value.errors[]` is Meta's third error surface (besides per-message
+        // `messages[].errors` on `type:"unsupported"` and per-status
+        // `statuses[].errors`): system-, app- and account-level errors. When it
+        // rides alongside `calls[]` it is the call-failure reason and
+        // parseMetaCall consumes it below; standalone it announces an
+        // account/app problem (rate limit, restriction) that yields NO events —
+        // without this trace the controller 200s `{ingested: 0}` and the only
+        // signal Meta will ever send about the problem vanishes silently.
+        if (
+          Array.isArray(value.errors) &&
+          value.errors.length > 0 &&
+          !(Array.isArray(value.calls) && value.calls.length > 0)
+        ) {
+          for (const e of value.errors) {
+            console.warn(
+              JSON.stringify({
+                event: "meta.webhook.value_error",
+                code: e.code,
+                title: e.title,
+                detail: e.error_data?.details ?? e.message,
+              }),
+            );
+          }
+          // Also PERSIST the batch's first error as the number's last-alert:
+          // a warn log is invisible to the tenant, and this surface includes
+          // real data loss — 131035 (No-Storage numbers: an inbound message
+          // Meta dropped because our webhook was unreachable past the 1-hour
+          // retention; the customer's message is gone and this is the ONLY
+          // signal), rate limits, account problems. Number-attributed via the
+          // metadata hint below. 131035 gets an operator sentence; other
+          // codes carry Meta's own title/detail.
+          const first = value.errors[0]!;
+          events.push({
+            kind: "channel_health",
+            phoneNumberId: value.metadata?.phone_number_id,
+            displayPhoneNumber: value.metadata?.display_phone_number,
+            accountAlert: {
+              source: "webhook_errors",
+              event: first.code != null ? String(first.code) : null,
+              detail:
+                first.code === 131035
+                  ? "An incoming message was permanently dropped: this number has No-Storage " +
+                    "retention and the webhook could not be delivered within its 1-hour limit. " +
+                    "The customer's message cannot be recovered — check webhook uptime."
+                  : `${first.title ?? "webhook error"}: ${first.error_data?.details ?? first.message ?? ""}`.slice(0, 400),
+            },
+            rawPayload: payload as Record<string, unknown>,
+          });
         }
 
         // `contacts[]` — not `messages[]` — is where Meta puts the customer's
@@ -2242,7 +3161,12 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
               continue;
             }
             if (inner?.type === "button_reply" && inner.button_reply) {
-              const { id: optId, title } = inner.button_reply;
+              // Both fields round-trip from our own outbound message, so both
+              // should always be present — but a tap must never be droppable on
+              // one going missing (we 200; a drop is permanent). Same fallback
+              // as the template quick-reply branch below.
+              const optId = inner.button_reply.id?.trim() || inner.button_reply.title?.trim();
+              const title = inner.button_reply.title?.trim() || inner.button_reply.id?.trim();
               if (!optId || !title) continue;
               events.push({
                 kind: "message",
@@ -2258,7 +3182,12 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
               continue;
             }
             if (inner?.type === "list_reply" && inner.list_reply) {
-              const { id: optId, title } = inner.list_reply;
+              // Same missing-field fallback as button_reply above. The row
+              // `description` is deliberately not captured: it echoes what WE
+              // configured on the outbound list (visible just above in-thread),
+              // and WhatsApp's own reply bubble shows only the title.
+              const optId = inner.list_reply.id?.trim() || inner.list_reply.title?.trim();
+              const title = inner.list_reply.title?.trim() || inner.list_reply.id?.trim();
               if (!optId || !title) continue;
               events.push({
                 kind: "message",
@@ -2273,19 +3202,30 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
               } satisfies NormalizedInboundMessage);
               continue;
             }
-            // Any other interactive subtype — today most importantly WhatsApp
-            // Flows (`nfm_reply`, a submitted form). Persist a placeholder row
-            // rather than dropping it: we 200 the webhook, so Meta never
-            // redelivers, and a bare `continue` loses the customer's submission
-            // completely — no message row, no unread bump, no 24h-window reset,
-            // not even the raw payload to recover from later. Same contract as
-            // placeholderForUnhandledType for location/contacts/order.
+            // Any other interactive subtype — today most importantly an NFM
+            // submission (`nfm_reply`: a WhatsApp Flow, or an address-message
+            // form). Persist a row rather than dropping it: we 200 the
+            // webhook, so Meta never redelivers, and a bare `continue` loses
+            // the customer's submission completely — no message row, no unread
+            // bump, no 24h-window reset, not even the raw payload to recover
+            // from later. Same contract as placeholderForUnhandledType for
+            // location/contacts/order.
+            //
+            // `nfm_reply.body` is the human-readable summary the CUSTOMER sees
+            // in their own chat (for an address form: the actual address), so
+            // when Meta sends it, the agent reads the real content instead of
+            // a "📝 Form response" placeholder. The structured field data
+            // (`response_json`) stays recoverable in rawPayload.
+            const nfmBody =
+              inner?.type === "nfm_reply" ? inner.nfm_reply?.body?.trim() : undefined;
             events.push({
               kind: "message",
               externalId,
               ...identity,
               contactName,
-              body: inner?.type === "nfm_reply" ? "📝 Form response" : "💬 Interactive reply",
+              body:
+                nfmBody ||
+                (inner?.type === "nfm_reply" ? "📝 Form response" : "💬 Interactive reply"),
               timestamp: ts,
               rawPayload: payload as Record<string, unknown>,
               ...(replyToExternalId ? { replyToExternalId } : {}),
@@ -2300,8 +3240,12 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           // placeholder — losing the payload the ask_question step routes on.
           // Emit a structured button_reply, parity with interactive replies.
           if (m.type === "button") {
-            const payloadId = m.button?.payload;
-            const title = m.button?.text ?? "";
+            // Meta defaults `payload` to the label text when the template author
+            // set no id, so it should always be present — but a tap must never
+            // be droppable on that guarantee (we 200; a drop is permanent).
+            // Mirror Meta's own fallback in both directions.
+            const payloadId = m.button?.payload?.trim() || m.button?.text?.trim();
+            const title = m.button?.text?.trim() || m.button?.payload?.trim() || "";
             if (!payloadId) continue;
             events.push({
               kind: "message",
@@ -2319,10 +3263,12 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
           // Inbound emoji reactions (m.type === "reaction", payload
           // `m.reaction = { message_id, emoji }`). The customer reacted to one
-          // of our messages; `message_id` is that message's wamid and `emoji`
-          // is the reaction (empty string ⇒ reaction REMOVED). Ingest resolves
-          // the target by wamid and patches its `reaction` column. We never
-          // create a Message row for the reaction itself.
+          // of our messages; `message_id` is that message's wamid. A REMOVAL
+          // arrives as another reaction webhook with `emoji` OMITTED entirely
+          // (per the reaction webhook reference) — we also tolerate an empty
+          // string; both normalize to emoji:null. Ingest resolves the target by
+          // wamid and patches its `reaction` column. We never create a Message
+          // row for the reaction itself.
           if (m.type === "reaction") {
             const targetExternalId = m.reaction?.message_id;
             if (!targetExternalId) continue;
@@ -2468,13 +3414,32 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             ...(s.pricing
               ? {
                   pricing: {
+                    // `billable` is deprecated in a future Graph version; when
+                    // absent, derive it from `type` ("regular" bills, the two
+                    // free_* values don't) so campaign billing counts keep
+                    // working after Meta drops the boolean.
                     ...(typeof s.pricing.billable === "boolean"
                       ? { billable: s.pricing.billable }
-                      : {}),
+                      : s.pricing.type
+                        ? { billable: s.pricing.type === "regular" }
+                        : {}),
                     ...(s.pricing.category ? { category: s.pricing.category } : {}),
                     ...(s.pricing.pricing_model ? { model: s.pricing.pricing_model } : {}),
                   },
                 }
+              : {}),
+            // The wa_id Meta actually delivered to. When it differs from the
+            // number we dialed (Brazil/Mexico digit normalization), ingest
+            // re-keys/links the contact so the reply threads correctly — see
+            // NormalizedStatusUpdate.recipientId. Digits-gated: a malformed
+            // value must not masquerade as a phone identity. Group statuses are
+            // excluded outright — there `recipient_id` is the GROUP id, which
+            // can be purely numeric and would otherwise pass the digits gate
+            // and re-key a contact onto a group id.
+            ...(s.recipient_type !== "group" &&
+            s.recipient_id &&
+            /^\d{8,15}$/.test(s.recipient_id.trim())
+              ? { recipientId: s.recipient_id.trim() }
               : {}),
             timestamp: ts,
             rawPayload: payload as Record<string, unknown>,
@@ -2559,6 +3524,22 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     if (args.kind === "voice_call") {
       return sendVoiceCallButton(args, config);
     }
+    // A location request has no options either: WhatsApp renders its own
+    // "send location" button (location-request-messages doc), and the reply
+    // comes back as a normal inbound `location` message with `context`.
+    if (args.kind === "location_request") {
+      return sendLocationRequest(args, config);
+    }
+    // One URL-opening button (cta-url-messages doc) — configured via
+    // `args.ctaUrl`, no authored options.
+    if (args.kind === "cta_url") {
+      return sendCtaUrlButton(args, config);
+    }
+    // 2-10 scrollable media cards (interactive-carousel doc) — configured via
+    // `args.carouselCards`, no authored options.
+    if (args.kind === "carousel") {
+      return sendInteractiveCarousel(args, config);
+    }
 
     // Pre-flight option-count check. Meta rejects with a cryptic 132xxx
     // error for "wrong option count"; failing fast with a clear message
@@ -2583,7 +3564,13 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       args.kind === "buttons"
         ? {
             type: "button" as const,
+            // Optional text header/footer (reply-buttons doc: header may be
+            // text/image/video/document — TEXT modeled today; footer ≤60).
+            ...(args.headerText
+              ? { header: { type: "text" as const, text: args.headerText.slice(0, 60) } }
+              : {}),
             body: { text: args.bodyText },
+            ...(args.footerText ? { footer: { text: args.footerText.slice(0, 60) } } : {}),
             action: {
               buttons: args.options.map((o) => ({
                 type: "reply" as const,
@@ -2601,17 +3588,30 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           }
         : {
             type: "list" as const,
+            // Optional text header/footer (≤60 each — the list wire supports
+            // TEXT headers only, interactive-list-messages doc).
+            ...(args.headerText
+              ? { header: { type: "text" as const, text: args.headerText.slice(0, 60) } }
+              : {}),
             body: { text: args.bodyText },
+            ...(args.footerText
+              ? { footer: { text: args.footerText.slice(0, 60) } }
+              : {}),
             action: {
               button: (args.listCtaLabel ?? "Choose").slice(0, 20),
               sections: [
                 {
                   title: (args.listSectionTitle ?? "Options").slice(0, 24),
                   rows: args.options.map((o) => ({
-                    // Meta caps a list-row id at 256 chars (same as buttons) —
-                    // NOT 200. Truncating at 200 silently corrupted a >200-char
-                    // id, so the `list_reply.id` didn't match on reply and
-                    // workflow routing (ask_question) fell through.
+                    // Id caps: Meta's docs split them — BUTTON reply ids cap at
+                    // 256, LIST row ids at 200 (interactive-list-messages doc,
+                    // 2026-07). We deliberately do NOT truncate to either
+                    // number here: truncating at 200 once silently corrupted a
+                    // >200-char id, so `list_reply.id` didn't match on reply
+                    // and ask_question routing fell through. The 256 slice is
+                    // a hard backstop only; the request schemas hold NEW list
+                    // ids to 200 at authoring time, where a violation can be
+                    // rejected instead of corrupted.
                     id: o.id.slice(0, 256),
                     // List rows: title cap 24, description cap 72.
                     title: o.title.slice(0, 24),
@@ -2766,6 +3766,14 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       throw new Error(`meta sendContacts response missing message id: ${JSON.stringify(json)}`);
     }
     return { externalId, timestamp: new Date() };
+  },
+
+  async blockUsers(users: string[], config: MetaSendConfig): Promise<BlockUsersResult> {
+    return blockUsersCall("POST", users, config);
+  },
+
+  async unblockUsers(users: string[], config: MetaSendConfig): Promise<BlockUsersResult> {
+    return blockUsersCall("DELETE", users, config);
   },
 
   async sendReaction(args: SendReactionArgs, config: MetaSendConfig): Promise<SendTextResult> {
@@ -2959,6 +3967,11 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // Meta requires the type field — using the mime type works. The wire
     // format of the file part is what Meta dispatches the right validators on.
     fd.append("type", args.mimeType);
+    // Special-purpose uploads (voicemail announcements) carry a use_case that
+    // both exempts them from the 30-day media TTL and locks them out of
+    // ordinary message sends.
+    if (args.useCase) fd.append("use_case", args.useCase);
+    if (args.description) fd.append("description", args.description);
     // Hand the Uint8Array straight to Blob. Node 20+'s undici-backed Blob
     // accepts Uint8Array as a BlobPart at runtime — the prior `new
     // ArrayBuffer(len) + .set(bytes)` dance doubled peak RAM (one copy of
@@ -3102,7 +4115,12 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         // Without it, a library template created in WhatsApp Manager (or a row
         // recreated by a resync) lost the marker and its type checks silently
         // vanished.
-        "library_template_name",
+        "library_template_name," +
+        // Whether button-click tracking is disabled on this template — the
+        // Analytics doc's per-template opt-out. Read it so the insights UI can
+        // say "clicks are off for this template" instead of rendering a null
+        // that looks like a broken feature.
+        "cta_url_link_tracking_opted_out",
     );
     url.searchParams.set("limit", "200");
 
@@ -3599,12 +4617,52 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
   },
 
   /**
+   * Toggle button-click tracking on ONE template.
+   *
+   * `POST /{template-id}?cta_url_link_tracking_opted_out=<bool>&category=<cur>`
+   *
+   * `category` is REQUIRED by Meta and must be the template's CURRENT category
+   * — sending a different one flips the template back to PENDING review, so
+   * the caller resolves it from the stored row and this method never invents
+   * it. Reversible (unlike WABA insights enablement).
+   */
+  async setTemplateLinkTracking(
+    args: SetTemplateLinkTrackingArgs,
+    config: MetaSendConfig,
+  ): Promise<void> {
+    const url = new URL(
+      `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(args.externalId)}`,
+    );
+    url.searchParams.set("cta_url_link_tracking_opted_out", String(args.optedOut));
+    url.searchParams.set("category", args.category.toLowerCase());
+    // No retry: a POST replayed on an ambiguous timeout could race a concurrent
+    // category edit; the caller re-syncs state instead.
+    const res = await metaFetch(url, {
+      method: "POST",
+      headers: { authorization: `Bearer ${config.accessToken}` },
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(
+        `meta setTemplateLinkTracking failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+  },
+
+  /**
    * Read Meta's own per-template daily analytics.
    *
-   * Wire shape (nested field expansion on the WABA node):
-   *   /{WABA}?fields=template_analytics.start(..).end(..).granularity(DAILY)
-   *           .metric_types([SENT,DELIVERED,READ,CLICKED,COST])
-   *           .template_ids([..])
+   * Wire shape (the edge form from Meta's own doc example):
+   *   GET /{WABA}/template_analytics?start=&end=&granularity=daily
+   *       &metric_types=sent,delivered,read,clicked,cost&template_ids=[..]
+   *
+   * The edge form is used instead of the `?fields=template_analytics.<...>`
+   * field expansion because its response carries a TOP-LEVEL `paging` object —
+   * 10 templates over 90 days is up to 900 data points, and whatever falls
+   * past page one of an unfollowed cursor silently vanishes, which reads as
+   * "this template sent nothing on those days" forever.
    *
    * Two Meta constraints the caller must respect and this method enforces:
    * at most 10 template ids per request, and a 90-day lookback. Timestamps are
@@ -3621,34 +4679,61 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
     const startSec = Math.floor(args.start.getTime() / 1000);
     const endSec = Math.floor(args.end.getTime() / 1000);
-    const field =
-      `template_analytics.start(${startSec}).end(${endSec}).granularity(DAILY)` +
-      `.metric_types(["SENT","DELIVERED","READ","CLICKED","COST"])` +
-      `.template_ids([${ids.map((id: string) => JSON.stringify(id)).join(",")}])`;
-
-    const url = new URL(
-      `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(config.wabaId)}`,
+    const first = new URL(
+      `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(config.wabaId)}/template_analytics`,
     );
-    url.searchParams.set("fields", field);
+    first.searchParams.set("start", String(startSec));
+    first.searchParams.set("end", String(endSec));
+    first.searchParams.set("granularity", "daily");
+    first.searchParams.set("metric_types", "sent,delivered,read,clicked,cost");
+    first.searchParams.set(
+      "template_ids",
+      `[${ids.map((id: string) => JSON.stringify(id)).join(",")}]`,
+    );
 
-    // Idempotent read — the transient-blip retry is safe here.
-    const res = await metaFetch(url, {
-      method: "GET",
-      retry: true,
-      headers: { authorization: `Bearer ${config.accessToken}` },
-    });
-    if (!res.ok) {
-      const text = await safeMetaText(res);
-      throw new MetaSendError(
-        `meta fetchTemplateAnalytics failed: ${res.status} ${text}`,
-        res.status,
-        text,
-      );
+    const rows: ProviderTemplateAnalyticsRow[] = [];
+    let url: URL | null = first;
+    // Hard page ceiling: 900 points at Meta's smallest observed page size fits
+    // comfortably; a malformed `next` loop must not fetch forever.
+    for (let page = 0; url && page < 50; page++) {
+      // Idempotent read — the transient-blip retry is safe here.
+      const res = await metaFetch(url, {
+        method: "GET",
+        retry: true,
+        headers: { authorization: `Bearer ${config.accessToken}` },
+      });
+      if (!res.ok) {
+        const text = await safeMetaText(res);
+        // Some WABAs (older Graph versions, partial rollouts) reject the edge
+        // path itself with an "unknown path / nonexistent field" 400. That is
+        // a shape disagreement, not a data refusal — fall back to the field-
+        // expansion form (`?fields=template_analytics.<...>`) once, on the
+        // first page only, rather than failing a fetch the account can serve.
+        if (page === 0 && res.status === 400 && /unknown path|nonexisting field|nonexistent field/i.test(text)) {
+          return fetchTemplateAnalyticsViaFieldExpansion(
+            { ids, startSec, endSec },
+            config,
+          );
+        }
+        throw new MetaSendError(
+          `meta fetchTemplateAnalytics failed: ${res.status} ${text}`,
+          res.status,
+          text,
+        );
+      }
+      const json = (await res.json()) as {
+        data?: unknown;
+        paging?: { next?: unknown };
+      };
+      // The edge response is `{ data, paging }` — the parser's wrapped shape.
+      rows.push(...parseTemplateAnalytics({ template_analytics: json }));
+
+      const next = typeof json.paging?.next === "string" ? json.paging.next : null;
+      // Follow only cursors that stay on Graph — a response-supplied URL never
+      // gets to point this token anywhere else.
+      url = next && next.startsWith(`${GRAPH_BASE}/`) ? new URL(next) : null;
     }
-    const json = (await res.json()) as {
-      template_analytics?: { data?: unknown } | Array<{ data_points?: unknown }>;
-    };
-    return parseTemplateAnalytics(json);
+    return rows;
   },
 
   /**
@@ -4258,6 +5343,8 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       recipient?: string;
       sdpOffer: string;
       correlationId?: string;
+      recording?: CallRecordingOptions;
+      transcription?: CallTranscriptionOptions;
     },
     config: MetaSendConfig,
   ): Promise<{ externalCallId: string }> {
@@ -4290,6 +5377,31 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         // returned call id. Meta caps it at 512 chars; our ids are far shorter.
         ...(args.correlationId
           ? { biz_opaque_callback_data: args.correlationId }
+          : {}),
+        // Per-call recording opt-in. Omitted entirely when off (the doc's own
+        // no-recording form) — `purpose` + `announcement_language` are both
+        // REQUIRED when ENABLED, and the consent announcement plays to both
+        // parties before recording starts.
+        ...(args.recording?.enabled
+          ? {
+              recording: {
+                status: "ENABLED",
+                purpose: args.recording.purpose,
+                announcement_language: args.recording.announcementLanguage,
+              },
+            }
+          : {}),
+        // Independent of recording (own webhook, own artifact). When BOTH are
+        // enabled the provider plays one combined announcement using the
+        // RECORDING object's language + purpose and ignores this object's.
+        ...(args.transcription?.enabled
+          ? {
+              transcription: {
+                status: "ENABLED",
+                purpose: args.transcription.purpose,
+                announcement_language: args.transcription.announcementLanguage,
+              },
+            }
           : {}),
       }),
     });
@@ -4351,7 +5463,13 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
   },
 
   async acceptCall(
-    args: { externalCallId: string; sdpAnswer: string },
+    args: {
+      externalCallId: string;
+      sdpAnswer: string;
+      correlationId?: string;
+      recording?: CallRecordingOptions;
+      transcription?: CallTranscriptionOptions;
+    },
     config: MetaSendConfig,
   ): Promise<void> {
     const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/calls`;
@@ -4368,6 +5486,33 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         call_id: args.externalCallId,
         action: "accept",
         session: { sdp_type: "answer", sdp: args.sdpAnswer },
+        // Accept is the only inbound action documented to carry this; the
+        // terminate webhook echoes it back. Same rule as placeCall: an opaque
+        // cuid only — Meta hands the string to every app subscribed to the
+        // WABA's calls field, so it must never carry PII.
+        ...(args.correlationId
+          ? { biz_opaque_callback_data: args.correlationId }
+          : {}),
+        // Recording rides ACCEPT for inbound calls (not pre_accept). Omitted
+        // when off; purpose + announcement_language required when on.
+        ...(args.recording?.enabled
+          ? {
+              recording: {
+                status: "ENABLED",
+                purpose: args.recording.purpose,
+                announcement_language: args.recording.announcementLanguage,
+              },
+            }
+          : {}),
+        ...(args.transcription?.enabled
+          ? {
+              transcription: {
+                status: "ENABLED",
+                purpose: args.transcription.purpose,
+                announcement_language: args.transcription.announcementLanguage,
+              },
+            }
+          : {}),
       }),
     });
     if (!res.ok) {
@@ -4534,6 +5679,32 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         ? "ENABLED"
         : "DISABLED";
     }
+    if (settings.callIconCountries !== undefined) {
+      // Empty array is meaningful — Meta's documented way to CLEAR the
+      // restriction ("no restriction: []"), so pass it through, don't skip it.
+      calling.call_icons = {
+        restrict_to_user_countries: settings.callIconCountries,
+      };
+    }
+    if (settings.voicemail !== undefined) {
+      calling.voicemail = settings.voicemail.enabled
+        ? {
+            status: "ENABLED",
+            triggers: settings.voicemail.triggers ?? [],
+            audio: {
+              default: {
+                // Kept as the string the media upload returned — the ids sit
+                // near the 2^53 boundary, so a Number round-trip could
+                // silently corrupt one.
+                announcement_media_id: settings.voicemail.announcementMediaId,
+                ...(settings.voicemail.timeoutSeconds !== undefined
+                  ? { timeout_seconds: settings.voicemail.timeoutSeconds }
+                  : {}),
+              },
+            },
+          }
+        : { status: "DISABLED" };
+    }
     if (settings.hours !== undefined) {
       // No windows ⇒ reachable around the clock, which Meta expresses as call
       // hours DISABLED ("if call hours are disabled, your business is
@@ -4541,17 +5712,46 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       // 24/7 as a 0000-2359 window: times are minute-granular, so that leaves
       // calls refused for the last minute of every day, and no widening closes
       // the gap.
-      calling.call_hours = settings.hours.windows.length
-        ? {
-            status: "ENABLED",
-            timezone_id: settings.hours.timezoneId,
-            weekly_operating_hours: settings.hours.windows.map((w) => ({
-              day_of_week: w.dayOfWeek,
-              open_time: w.openTime,
-              close_time: w.closeTime,
-            })),
+      if (settings.hours.windows.length) {
+        const callHours: Record<string, unknown> = {
+          status: "ENABLED",
+          timezone_id: settings.hours.timezoneId,
+          weekly_operating_hours: settings.hours.windows.map((w) => ({
+            day_of_week: w.dayOfWeek,
+            open_time: w.openTime,
+            close_time: w.closeTime,
+          })),
+        };
+        // A call_hours POST is a REPLACE, not a merge — Meta deletes any
+        // stored holiday_schedule the request doesn't carry. We don't author
+        // holidays, so read the current ones and echo them back verbatim, or
+        // an hours edit here silently wipes a schedule the admin configured
+        // in WhatsApp Manager. A failed read aborts the write (loud) rather
+        // than proceeding to a silent wipe. Past dates are dropped from the
+        // echo: they're inert, and Meta rejects "a past date" on POST — one
+        // stale entry would otherwise brick every future hours update.
+        const current = await metaProvider.getCallSettings!(config);
+        const holidays = (current.raw as { calling?: MetaCallingSettings } | null)
+          ?.calling?.call_hours?.holiday_schedule;
+        if (holidays?.length) {
+          // "Today" in the business's own call-hours timezone, not UTC — a
+          // zone behind UTC would otherwise lose the final hours of an
+          // in-progress holiday override.
+          let today: string;
+          try {
+            today = new Intl.DateTimeFormat("en-CA", {
+              timeZone: settings.hours.timezoneId,
+            }).format(new Date());
+          } catch {
+            today = new Date().toISOString().slice(0, 10);
           }
-        : { status: "DISABLED" };
+          const upcoming = holidays.filter((h) => !h.date || h.date >= today);
+          if (upcoming.length) callHours.holiday_schedule = upcoming;
+        }
+        calling.call_hours = callHours;
+      } else {
+        calling.call_hours = { status: "DISABLED" };
+      }
     }
     // Idempotent settings write — Meta returns success even when the value is
     // already set, so the transient-blip retry is safe.
@@ -4602,8 +5802,13 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const hours = calling?.call_hours;
     return {
       enabled: calling?.status === "ENABLED",
-      // Absent ⇒ Meta's default, which is to show the icon.
-      callIconVisible: calling?.call_icon_visibility !== "DISABLE_ALL",
+      // Absent ⇒ Meta's default, which is to show the icon. HIDE_IN_CHAT is a
+      // third value the consumer-client FAQ reveals (icon hidden in the chat
+      // bar) — read it as hidden too, or a number configured that way in
+      // WhatsApp Manager renders as "visible" in our settings UI.
+      callIconVisible:
+        calling?.call_icon_visibility !== "DISABLE_ALL" &&
+        calling?.call_icon_visibility !== "HIDE_IN_CHAT",
       callbackPermissionEnabled:
         calling?.callback_permission_status === "ENABLED",
       // Call hours DISABLED means "open 24/7", which we model as no windows.
@@ -4624,6 +5829,26 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
               ),
             }
           : null,
+      callIconCountries:
+        calling?.call_icons?.restrict_to_user_countries?.filter(
+          (c): c is string => typeof c === "string",
+        ) ?? [],
+      sipEnabled: calling?.sip?.status === "ENABLED",
+      srtpKeyExchangeProtocol: calling?.srtp_key_exchange_protocol ?? null,
+      voicemail: calling?.voicemail
+        ? {
+            enabled: calling.voicemail.status === "ENABLED",
+            triggers: (calling.voicemail.triggers ?? []).filter(
+              (t): t is string => typeof t === "string",
+            ),
+            announcementMediaId:
+              calling.voicemail.audio?.default?.announcement_media_id != null
+                ? String(calling.voicemail.audio.default.announcement_media_id)
+                : null,
+            timeoutSeconds:
+              calling.voicemail.audio?.default?.timeout_seconds ?? null,
+          }
+        : null,
       // A restricted number rejects every call attempt. Without surfacing this,
       // a paused tenant sees only a string of unexplained failures.
       restrictions: (calling?.restrictions?.restrictions_list ?? []).flatMap(
@@ -4647,7 +5872,13 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 // Send-error classification moved to `meta-send-error.ts` (shared with the
 // social providers). Re-exported here so every existing `@/lib/providers/meta`
 // import keeps working. Imported at the top for meta.ts's own `throw`s.
-export { MetaSendError, normalizeMetaSendError, isProvablyNotSent };
+export {
+  MetaSendError,
+  normalizeMetaSendError,
+  isProvablyNotSent,
+  isPairRateLimitBody,
+  isPairRateLimitError,
+};
 export type { MetaErrorCode, NormalizedSendError } from "./meta-send-error";
 
 /**
@@ -4890,6 +6121,9 @@ interface MetaTemplateRow {
   /** Present ONLY on templates created from the Template Library — the marker
    *  the doc keys send-time parameter TYPE checks on. */
   library_template_name?: string;
+  /** True when button-click tracking was disabled on this template (the
+   *  Analytics doc's per-template link-tracking opt-out). Absent on old rows. */
+  cta_url_link_tracking_opted_out?: boolean;
 }
 
 /**
@@ -5091,6 +6325,11 @@ function normalizeMetaTemplate(row: MetaTemplateRow): ProviderTemplate | null {
       ? { messageSendTtlSeconds: row.message_send_ttl_seconds }
       : {}),
     ...(row.library_template_name ? { libraryTemplateName: row.library_template_name } : {}),
+    // Only when Meta actually reported it — absent must leave the stored value
+    // alone (same never-prune discipline as every other field here).
+    ...(typeof row.cta_url_link_tracking_opted_out === "boolean"
+      ? { linkTrackingOptedOut: row.cta_url_link_tracking_opted_out }
+      : {}),
     ...(row.id ? { externalId: row.id } : {}),
   };
 }
@@ -5280,6 +6519,42 @@ export function parseTemplateComparison(json: unknown): ProviderTemplateComparis
 }
 
 /**
+ * Fallback wire shape for template analytics: the nested field expansion on
+ * the WABA node. Used only when the `/template_analytics` edge 400s with an
+ * unknown-path error (older Graph versions / partial rollouts). No pagination
+ * here — the field form buries its cursor — which is exactly why the edge
+ * form is primary.
+ */
+async function fetchTemplateAnalyticsViaFieldExpansion(
+  args: { ids: string[]; startSec: number; endSec: number },
+  config: MetaSendConfig,
+): Promise<ProviderTemplateAnalyticsRow[]> {
+  const field =
+    `template_analytics.start(${args.startSec}).end(${args.endSec}).granularity(DAILY)` +
+    `.metric_types(["SENT","DELIVERED","READ","CLICKED","COST"])` +
+    `.template_ids([${args.ids.map((id) => JSON.stringify(id)).join(",")}])`;
+  const url = new URL(
+    `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(config.wabaId!)}`,
+  );
+  url.searchParams.set("fields", field);
+  const res = await metaFetch(url, {
+    method: "GET",
+    retry: true,
+    headers: { authorization: `Bearer ${config.accessToken}` },
+  });
+  if (!res.ok) {
+    const text = await safeMetaText(res);
+    throw new MetaSendError(
+      `meta fetchTemplateAnalytics failed: ${res.status} ${text}`,
+      res.status,
+      text,
+    );
+  }
+  const json = (await res.json()) as { template_analytics?: unknown };
+  return parseTemplateAnalytics(json);
+}
+
+/**
  * Parse Meta's `template_analytics` response into flat template-day rows.
  *
  * The shape is awkward and has moved: the payload is sometimes
@@ -5289,9 +6564,10 @@ export function parseTemplateComparison(json: unknown): ProviderTemplateComparis
  * indistinguishable from "this template genuinely sent nothing".
  *
  * NULL DISCIPLINE is the load-bearing part. Meta returns READ and CLICKED only
- * for the last ~7 days, and omits COST entirely for Solution-Partner-billed
- * WABAs. An absent metric becomes `null` — never 0 — so the storage layer can
- * COALESCE-merge and never overwrite a captured number with a later blank.
+ * for the last ~7 days (then RESETS them to zero), and omits COST entirely for
+ * Solution-Partner-billed WABAs. An absent metric becomes `null` — never 0 —
+ * so the storage layer's merge (GREATEST for counts, COALESCE for the rest)
+ * never overwrites a captured number with a later blank or reset.
  */
 export function parseTemplateAnalytics(json: {
   template_analytics?: unknown;
@@ -5319,17 +6595,55 @@ export function parseTemplateAnalytics(json: {
       let perUrlClick: number | null = null;
       let currency: string | null = null;
       // `cost` is an ARRAY of typed entries, and it is absent (not zero) when
-      // Meta withholds pricing.
+      // Meta withholds pricing. The type tag's CASE has been seen both ways —
+      // Meta's own doc example says `amount_spent`, older captures said
+      // `AMOUNT_SPENT` — so match case-insensitively; picking one silently
+      // nulls every cost figure when the other arrives.
       if (Array.isArray(cost)) {
         for (const entry of cost) {
           const e = entry as Record<string, unknown>;
-          const type = str(e.type);
+          const type = str(e.type)?.toUpperCase() ?? null;
           const value = num(e.value);
           currency = str(e.currency) ?? currency;
           if (type === "AMOUNT_SPENT") amountSpent = value;
           else if (type === "COST_PER_DELIVERED") perDelivered = value;
           else if (type === "COST_PER_URL_BUTTON_CLICK") perUrlClick = value;
         }
+      }
+
+      // `clicked` is an ARRAY of per-button entries
+      // (`{ type, button_content, count }`), NOT a scalar — treating it as one
+      // parses every buttoned template's clicks to null. The scalar we store is
+      // "link clicks": unique URL-button clicks when Meta reports them, total
+      // URL clicks otherwise. Quick-reply presses stay out of the scalar (they
+      // arrive as inbound replies and the funnel already counts them) but are
+      // kept in the breakdown.
+      const clickedRaw = pt.clicked;
+      let clicked: number | null = null;
+      let clickedButtons: TemplateButtonClicks[] | null = null;
+      if (Array.isArray(clickedRaw)) {
+        const entries: TemplateButtonClicks[] = [];
+        for (const entry of clickedRaw) {
+          const e = entry as Record<string, unknown>;
+          const type = str(e.type)?.toLowerCase();
+          const count = num(e.count);
+          if (!type || count === null) continue;
+          entries.push({ type, buttonContent: str(e.button_content), count });
+        }
+        const sumOf = (t: string): number | null => {
+          const hits = entries.filter((e) => e.type === t);
+          return hits.length ? hits.reduce((a, e) => a + e.count, 0) : null;
+        };
+        clicked = sumOf("unique_url_button") ?? sumOf("url_button");
+        // An all-zero breakdown is ambiguous: a fresh campaign nobody clicked,
+        // or the post-7-day reset (Meta zeroes clicks, it doesn't omit them).
+        // Store null so the COALESCE merge can't erase a captured breakdown;
+        // the scalar's GREATEST merge preserves a genuine zero either way.
+        const anyCount = entries.some((e) => e.count > 0);
+        clickedButtons = anyCount ? entries : null;
+      } else {
+        // Tolerate a plain number — the shape this parser originally assumed.
+        clicked = num(clickedRaw);
       }
 
       out.push({
@@ -5340,7 +6654,8 @@ export function parseTemplateAnalytics(json: {
         delivered: num(pt.delivered) ?? 0,
         // Absent = not reported (outside the 7-day window), NOT zero.
         read: num(pt.read),
-        clicked: num(pt.clicked),
+        clicked,
+        clickedButtons,
         costAmountSpent: amountSpent,
         costPerDelivered: perDelivered,
         costPerUrlClick: perUrlClick,

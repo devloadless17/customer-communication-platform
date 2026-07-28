@@ -20,9 +20,22 @@ const WHATSAPP_CAPS: Record<MediaKind, number> = {
   image: 5 * MB,
   video: 16 * MB,
   audio: 16 * MB,
+  // The ANIMATED sticker ceiling. WhatsApp's sticker cap is split by kind —
+  // animated 500 KB, static 100 KB (sticker-messages doc) — and this table is
+  // one number per media kind, so it carries the larger of the two as the
+  // coarse gate. The precise static-vs-animated check runs server-side after
+  // the bytes are read (isAnimatedWebp + WHATSAPP_STATIC_STICKER_MAX_BYTES),
+  // where the webp header can actually be sniffed.
   sticker: 500 * 1024,
   document: 100 * MB,
 };
+
+/**
+ * WhatsApp's STATIC sticker ceiling — 100 KB (sticker-messages doc). Enforced
+ * in the send path once the bytes are readable; see the `sticker` entry above
+ * for why the coarse per-kind table carries 500 KB instead.
+ */
+export const WHATSAPP_STATIC_STICKER_MAX_BYTES = 100 * 1024;
 
 export const MEDIA_SIZE_CAPS_BY_CHANNEL: Partial<Record<Channel, Record<MediaKind, number>>> = {
   whatsapp: WHATSAPP_CAPS,

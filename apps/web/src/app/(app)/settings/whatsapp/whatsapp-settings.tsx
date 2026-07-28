@@ -394,8 +394,10 @@ export function WhatsappSettings({
           Renders nothing until WhatsApp is connected. */}
       {current.connected && (
         <CallingSettings
+          key={`calling-${activeSettingsAccountId ?? "default"}`}
           displayNumber={current.displayNumber}
           canManage={canManage}
+          accountId={activeSettingsAccountId ?? undefined}
         />
       )}
 

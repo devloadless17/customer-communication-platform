@@ -11,6 +11,7 @@ import { useCallApi } from "@/features/calls/call-provider";
 import { useChannelAccounts } from "@/features/inbox/contexts/channel-accounts-context";
 import { ContactStagePicker } from "@/features/contacts/components/contact-stage-picker";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
+import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
 import { formatPhone, initials } from "@ccp/shared/utils";
 import type { Channel, ContactStage, ConversationStatus, User } from "@ccp/shared/types";
 
@@ -126,6 +127,7 @@ function ThreadHeaderImpl({
   contactId,
   contactName,
   contactAvatarUrl,
+  contactBlockedAt,
   phone,
   status,
   assignedUserId,
@@ -158,6 +160,8 @@ function ThreadHeaderImpl({
   contactId: string;
   contactName: string;
   contactAvatarUrl: string | null;
+  /** Provider-level block state — drives the menu's Block/Unblock label. */
+  contactBlockedAt?: string | null;
   phone: string | null;
   status: ConversationStatus;
   /** AI Autopilot state for the header toggle (per-conversation). */
@@ -228,6 +232,9 @@ function ThreadHeaderImpl({
   // talking to, without opening settings. Null unless the channel actually has
   // more than one account.
   const inboundAccount = useChannelAccounts().accountFor(channel, channelConnectionId);
+  // Provider-level blocking is a CHANNEL capability (WhatsApp Block Users API
+  // today) — derived from the same map the composer reads, never hardcoded.
+  const canBlockContact = !!channel && !!CHANNEL_CAPABILITIES[channel]?.blockUsers;
   return (
     <header className="@container flex h-15 shrink-0 items-center gap-2 border-b border-border px-3 md:gap-3 md:px-4">
       {onMobileBack && (
@@ -365,10 +372,14 @@ function ThreadHeaderImpl({
             a team that had it enabled could no longer turn this one off. The
             `Conversation.aiEnabled` column and the /v1 endpoint stay for any
             org still driving an external flow through the API. */}
-        {canDeleteConversations && (
+        {(canDeleteConversations || canBlockContact) && (
           <ConversationMenu
             conversationId={conversationId}
+            contactId={contactId}
             contactName={contactName}
+            contactBlockedAt={contactBlockedAt}
+            canBlock={canBlockContact}
+            canDelete={canDeleteConversations}
           />
         )}
         {/* Contact details — below lg the desktop right rail is hidden, so this

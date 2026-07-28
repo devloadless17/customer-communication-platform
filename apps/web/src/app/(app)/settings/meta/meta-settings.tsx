@@ -53,7 +53,7 @@ export function MetaSettings({
     });
   }
 
-  async function save(): Promise<{ resynced: string[] } | null> {
+  async function save(): Promise<{ resynced: string[]; warnings: string[] } | null> {
     setError(null);
     const res = await apiFetch("/api/workspace/meta", {
       method: "POST",
@@ -64,6 +64,7 @@ export function MetaSettings({
       error?: string;
       detail?: string;
       resynced?: string[];
+      warnings?: string[];
     };
     if (!res.ok) {
       setError(
@@ -73,7 +74,7 @@ export function MetaSettings({
       );
       return null;
     }
-    return { resynced: data.resynced ?? [] };
+    return { resynced: data.resynced ?? [], warnings: data.warnings ?? [] };
   }
 
   return (
@@ -139,6 +140,13 @@ export function MetaSettings({
                 toast.success(
                   labels ? `Meta App saved · refreshed ${labels}` : "Meta App saved",
                 );
+                // debug_token advisories (missing permission, expiring token).
+                // Saved anyway — the credential is shared across channels and
+                // may be fine for the ones this workspace uses — but the admin
+                // should read these NOW, not discover them as sync failures.
+                for (const w of out.warnings) {
+                  toast.warning(w, { duration: 12_000 });
+                }
                 softRefresh();
               }
             });
@@ -166,6 +174,38 @@ export function MetaSettings({
             required
             secret
           />
+          {/* The #1 setup trap: creating a system user and granting the token
+              permissions but NEVER assigning the assets in Business settings.
+              Meta then rejects every management call with error code 200 —
+              weeks later, in template sync, far from this form. Spell out the
+              full recipe at the one place the token gets pasted. */}
+          <details className="rounded-md border border-dashed border-border bg-muted/20 p-3 [&_summary::-webkit-details-marker]:hidden">
+            <summary className="cursor-pointer text-xs font-medium">
+              How to generate this token (avoids the &ldquo;error 200&rdquo; trap)
+            </summary>
+            <ol className="mt-2 list-decimal space-y-1 pl-4 text-2xs text-muted-foreground">
+              <li>
+                Business Settings → <strong>System users</strong> → Add — create a
+                system user (Admin, or Employee if you prefer least-privilege).
+              </li>
+              <li>
+                Select it → <strong>Assign assets</strong> — assign <em>both</em>:
+                your <strong>app</strong> (Manage app) <em>and</em> your{" "}
+                <strong>WhatsApp account</strong> (Manage WhatsApp Business
+                accounts, full control). Skipping the WhatsApp account is the
+                usual cause of Meta&apos;s &ldquo;(#200) permissions&rdquo;
+                errors on template sync.
+              </li>
+              <li>
+                <strong>Generate token</strong> — expiry <em>Never</em>, with
+                permissions <code>whatsapp_business_messaging</code>,{" "}
+                <code>whatsapp_business_management</code> and{" "}
+                <code>business_management</code> (the last one lets us resolve
+                your portfolio&apos;s shared 24h budget and template limits).
+              </li>
+              <li>Paste it above — we verify what it can do when you save.</li>
+            </ol>
+          </details>
           <LabeledInput
             label="App ID (optional)"
             value={form.appId}

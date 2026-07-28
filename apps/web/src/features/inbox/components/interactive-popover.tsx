@@ -39,6 +39,12 @@ interface Props {
   initialBody: string;
   /** Called on successful send. The parent clears its composer. */
   onSent: () => void;
+  /** Channel capability `locationRequest` — shows the "Request location" mode
+   *  (WhatsApp's interactive location_request_message). */
+  allowLocationRequest?: boolean;
+  /** Channel capability `ctaUrlButton` — shows the "Link button" mode
+   *  (WhatsApp's interactive cta_url: one URL-opening button). */
+  allowCtaUrl?: boolean;
 }
 
 export function InteractivePopover({
@@ -47,8 +53,16 @@ export function InteractivePopover({
   conversationId,
   initialBody,
   onSent,
+  allowLocationRequest = false,
+  allowCtaUrl = false,
 }: Props) {
   const [body, setBody] = useState("");
+  // "buttons" = agent-authored quick replies; "location_request" = WhatsApp's
+  // own "send location" button (reply arrives as a normal location pin);
+  // "cta_url" = one URL-opening button so the raw link stays out of the body.
+  const [mode, setMode] = useState<"buttons" | "location_request" | "cta_url">("buttons");
+  const [ctaLabel, setCtaLabel] = useState("");
+  const [ctaUrl, setCtaUrl] = useState("");
   const [options, setOptions] = useState<ButtonOption[]>([
     { id: "yes", title: "Yes" },
     { id: "no", title: "No" },
@@ -63,6 +77,9 @@ export function InteractivePopover({
   useEffect(() => {
     if (open) {
       setBody(initialBody);
+      setMode("buttons");
+      setCtaLabel("");
+      setCtaUrl("");
       setOptions([
         { id: "yes", title: "Yes" },
         { id: "no", title: "No" },
@@ -133,14 +150,20 @@ export function InteractivePopover({
       ? "Button titles must be unique — WhatsApp rejects duplicates."
       : null;
 
+  const locationMode = mode === "location_request";
+  const ctaMode = mode === "cta_url";
+  const ctaUrlValid = /^https?:\/\/\S+$/i.test(ctaUrl.trim());
   const canSend =
     body.trim().length > 0 &&
-    options.length >= 1 &&
-    titles.every((t) => t.length > 0) &&
-    ids.every((id) => id.length > 0) &&
-    idsUnique &&
-    titlesUnique &&
-    !busy;
+    !busy &&
+    (locationMode ||
+      (ctaMode
+        ? ctaLabel.trim().length > 0 && ctaUrlValid
+        : options.length >= 1 &&
+          titles.every((t) => t.length > 0) &&
+          ids.every((id) => id.length > 0) &&
+          idsUnique &&
+          titlesUnique));
 
   async function send() {
     if (!canSend) return;
@@ -162,8 +185,15 @@ export function InteractivePopover({
           conversationId,
           clientTempId,
           body: body.trim(),
-          kind: "buttons",
-          options: options.map((o) => ({ id: o.id.trim(), title: o.title.trim() })),
+          kind: locationMode ? "location_request" : ctaMode ? "cta_url" : "buttons",
+          // location_request / cta_url carry no options — WhatsApp renders the button.
+          options:
+            locationMode || ctaMode
+              ? []
+              : options.map((o) => ({ id: o.id.trim(), title: o.title.trim() })),
+          ...(ctaMode
+            ? { ctaUrl: { displayText: ctaLabel.trim(), url: ctaUrl.trim() } }
+            : {}),
         }),
       });
       if (!res.ok) {
@@ -204,7 +234,9 @@ export function InteractivePopover({
       ref={wrapperRef}
       role="dialog"
       aria-modal="true"
-      aria-label="Send buttons"
+      aria-label={
+        locationMode ? "Request location" : ctaMode ? "Send link button" : "Send buttons"
+      }
       tabIndex={-1}
       // left-0 (opens to the RIGHT): the trigger is a LEFT-side composer-toolbar
       // icon, so right-0 anchored the 320px panel to the button's right edge and
@@ -214,7 +246,13 @@ export function InteractivePopover({
     >
       <div className="mb-2 flex items-center gap-2">
         <MousePointerClick className="size-4 text-info-fg" />
-        <div className="text-sm font-semibold">Send with buttons</div>
+        <div className="text-sm font-semibold">
+          {locationMode
+            ? "Request location"
+            : ctaMode
+              ? "Send a link button"
+              : "Send with buttons"}
+        </div>
         <button
           type="button"
           onClick={onClose}
@@ -224,6 +262,39 @@ export function InteractivePopover({
           <X className="size-3.5" />
         </button>
       </div>
+
+      {(allowLocationRequest || allowCtaUrl) && (
+        <div
+          role="radiogroup"
+          aria-label="Interactive message kind"
+          className="mb-2 flex gap-1 rounded-lg bg-muted p-0.5"
+        >
+          {(
+            [
+              ["buttons", "Buttons"] as const,
+              ...(allowLocationRequest
+                ? [["location_request", "Location"] as const]
+                : []),
+              ...(allowCtaUrl ? [["cta_url", "Link button"] as const] : []),
+            ] as ReadonlyArray<readonly [string, string]>
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              role="radio"
+              aria-checked={mode === value}
+              onClick={() => setMode(value as typeof mode)}
+              className={`flex-1 rounded-md px-2 py-1 text-2xs font-medium transition-colors ${
+                mode === value
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
 
       <label className="mb-2 flex flex-col gap-1">
         <span className="text-xs font-medium text-muted-foreground">Question</span>
@@ -237,7 +308,44 @@ export function InteractivePopover({
         />
       </label>
 
-      <div className="mb-2 flex flex-col gap-1.5">
+      {locationMode && (
+        // No authored options in this mode — WhatsApp draws its own
+        // "Send location" button; the customer's pick lands in the thread as
+        // a normal location pin.
+        <p className="mb-2 rounded-md bg-muted/40 px-2 py-1.5 text-2xs text-muted-foreground">
+          WhatsApp shows a <strong>Send location</strong> button under your
+          message. The customer&apos;s location arrives as a map pin in this
+          conversation.
+        </p>
+      )}
+
+      {ctaMode && (
+        <div className="mb-2 flex flex-col gap-1.5">
+          <Input
+            value={ctaLabel}
+            onChange={(e) => setCtaLabel(e.target.value)}
+            placeholder="Button label (max 20)"
+            maxLength={20}
+            className="text-xs"
+            aria-label="Link button label"
+          />
+          <Input
+            value={ctaUrl}
+            onChange={(e) => setCtaUrl(e.target.value)}
+            placeholder="https://…"
+            type="url"
+            className="text-xs"
+            aria-label="Link button URL"
+          />
+          {ctaUrl.trim().length > 0 && !ctaUrlValid && (
+            <p className="text-2xs text-warning-fg">
+              The link must start with http:// or https://.
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className={locationMode || ctaMode ? "hidden" : "mb-2 flex flex-col gap-1.5"}>
         <div className="flex items-center justify-between">
           <span className="text-xs font-medium text-muted-foreground">
             Buttons (1–3)
@@ -287,7 +395,7 @@ export function InteractivePopover({
         </div>
       )}
 
-      {!error && validationHint && (
+      {!error && !locationMode && validationHint && (
         <div className="mb-2 rounded border border-warning-border bg-warning-bg px-2 py-1 text-2xs text-warning-fg">
           {validationHint}
         </div>

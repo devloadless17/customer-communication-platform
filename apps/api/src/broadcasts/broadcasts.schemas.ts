@@ -330,14 +330,38 @@ export const BroadcastListQuerySchema = z.object({
 export type BroadcastListQuery = z.infer<typeof BroadcastListQuerySchema>;
 
 /**
+ * The outcome vocabulary shared by the recipient LIST, the CSV export and the
+ * /v1 recipients pull — one enum so a funnel deep-link, a filtered export and
+ * an API integration can never disagree about what a bucket means.
+ * `never_received` is the union operators actually ask for (rejected at send
+ * OR accepted-then-undeliverable).
+ */
+export const RecipientOutcomeEnum = z.enum([
+  "all",
+  "never_received",
+  "delivered",
+  "read",
+  "replied",
+  "clicked",
+  "failed",
+  "undelivered",
+  "pending",
+]);
+
+/**
  * Recipient-page query for `GET :id/recipients`. `status` is validated against
  * the BroadcastRecipientStatus enum so a bad value (e.g. `?status=bogus`) is
  * rejected with a clean 400 here rather than being cast straight to the Prisma
  * enum and surfacing as a 500 from the DB. Omit `status` = no filter.
+ * `outcome`/`errorCode` are the report's drill-down vocabulary — "who exactly
+ * read / replied / clicked" — resolved by the same `recipientOutcomeWhere` the
+ * export uses.
  */
 export const BroadcastRecipientsQuerySchema = z.object({
   cursor: z.string().optional(),
   status: z.enum(["queued", "sent", "failed"]).optional(),
+  outcome: RecipientOutcomeEnum.optional(),
+  errorCode: z.string().max(64).optional(),
   take: z.coerce.number().int().min(1).max(500).optional(),
 });
 export type BroadcastRecipientsQuery = z.infer<
@@ -362,19 +386,7 @@ export type RetryBroadcastInput = z.infer<typeof RetryBroadcastSchema>;
  * arithmetic across two buckets.
  */
 export const BroadcastExportQuerySchema = z.object({
-  outcome: z
-    .enum([
-      "all",
-      "never_received",
-      "delivered",
-      "read",
-      "replied",
-      "clicked",
-      "failed",
-      "undelivered",
-      "pending",
-    ])
-    .optional(),
+  outcome: RecipientOutcomeEnum.optional(),
   errorCode: z.string().max(64).optional(),
 });
 export type BroadcastExportQuery = z.infer<typeof BroadcastExportQuerySchema>;

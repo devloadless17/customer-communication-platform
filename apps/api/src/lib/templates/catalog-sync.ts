@@ -245,6 +245,9 @@ async function reconcileWaba(
           // on it. Without persisting it here, a library template created in
           // WhatsApp Manager (or a row recreated by resync) lost the checks.
           libraryTemplateName: t.libraryTemplateName ?? null,
+          // Null = Meta didn't report it (older Graph) — distinguishable from
+          // an explicit false so the UI doesn't claim "tracking on" on faith.
+          linkTrackingOptedOut: t.linkTrackingOptedOut ?? null,
           syncedAt: now,
         },
         update: {
@@ -274,6 +277,12 @@ async function reconcileWaba(
           // library-created, and a Graph version that omits the field must not
           // strip the type-check identity off every stored row.
           ...(t.libraryTemplateName ? { libraryTemplateName: t.libraryTemplateName } : {}),
+          // Same leave-alone rule as status/category: absent ≠ false. Written
+          // only when Meta reported the flag, so an omitting Graph version
+          // can't flip every stored opt-out back to "tracking on".
+          ...(typeof t.linkTrackingOptedOut === "boolean"
+            ? { linkTrackingOptedOut: t.linkTrackingOptedOut }
+            : {}),
           syncedAt: now,
         },
       });

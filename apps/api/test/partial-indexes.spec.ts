@@ -129,6 +129,20 @@ const REQUIRED_PARTIAL_INDEXES: { name: string; unique: boolean; protects: strin
     protects:
       "the `isPlatform = false` filter every customer-facing org read applies — the platform operator's anchor org must never render as a tenant",
   },
+  {
+    name: "BroadcastRecipient_replied_idx",
+    unique: false,
+    protects:
+      "the campaign report's 'who replied' drill-down — without it every page " +
+      "of the filtered recipient list heap-scans the whole 100k-row campaign",
+  },
+  {
+    name: "BroadcastRecipient_clicked_idx",
+    unique: false,
+    protects:
+      "the campaign report's 'who clicked' drill-down — same full-campaign " +
+      "re-scan per page as the replied leg if a baseline regen drops it",
+  },
 ];
 
 describe("hand-written partial indexes", () => {

@@ -3,13 +3,21 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   HttpCode,
   Param,
   Patch,
   Post,
   Query,
+  Res,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from "@nestjs/common";
+import { FileInterceptor } from "@nestjs/platform-express";
+import type { Response } from "express";
+
+import { streamBlob } from "../media/stream-blob";
 
 import type { Channel } from "@ccp/shared/types";
 import { LIVE_CHANNELS } from "@ccp/shared/providers/capabilities";
@@ -28,7 +36,9 @@ import {
   InitiateCallSchema,
   ListCallsQuerySchema,
   ListTeamCallsQuerySchema,
+  ConsentMessageSchema,
   MediaUpdateSchema,
+  RecordingPolicySchema,
   RejectCallSchema,
   UpdateCallSettingsSchema,
   RequestCallPermissionSchema,
@@ -37,7 +47,9 @@ import {
   type InitiateCallInput,
   type ListCallsQuery,
   type ListTeamCallsQuery,
+  type ConsentMessageInput,
   type MediaUpdateInput,
+  type RecordingPolicyInput,
   type RejectCallInput,
   type UpdateCallSettingsInput,
   type RequestCallPermissionInput,
@@ -162,8 +174,13 @@ export class CallsController {
   async enableCalling(
     @CurrentSession() session: ApiSession,
     @Query("channel") channel?: string,
+    @Query("accountId") accountId?: string,
   ) {
-    return this.calls.enableCallingForTeam(session, this.channelOf(channel));
+    return this.calls.enableCallingForTeam(
+      session,
+      this.channelOf(channel),
+      accountId ?? null,
+    );
   }
 
   /**
@@ -177,8 +194,13 @@ export class CallsController {
   async getSettings(
     @CurrentSession() session: ApiSession,
     @Query("channel") channel?: string,
+    @Query("accountId") accountId?: string,
   ) {
-    return this.calls.getPhoneNumberSettings(session, this.channelOf(channel));
+    return this.calls.getPhoneNumberSettings(
+      session,
+      this.channelOf(channel),
+      accountId ?? null,
+    );
   }
 
   /**
@@ -190,8 +212,13 @@ export class CallsController {
   async readiness(
     @CurrentSession() session: ApiSession,
     @Query("channel") channel?: string,
+    @Query("accountId") accountId?: string,
   ) {
-    return this.calls.getCallingReadiness(session, this.channelOf(channel));
+    return this.calls.getCallingReadiness(
+      session,
+      this.channelOf(channel),
+      accountId ?? null,
+    );
   }
 
   /**
@@ -206,12 +233,149 @@ export class CallsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(UpdateCallSettingsSchema)) body: UpdateCallSettingsInput,
     @Query("channel") channel?: string,
+    @Query("accountId") accountId?: string,
   ) {
     const { channel: _ignored, ...settings } = body;
     return this.calls.updateCallSettings(
       session,
       settings,
       this.channelOf(channel),
+      accountId ?? null,
+    );
+  }
+
+  /**
+   * Set the number's standing call-recording policy — stored on OUR
+   * connection config (Meta has no such setting; recording is a per-call
+   * opt-in this policy applies to every placed/answered call). ADMIN-only:
+   * it makes every future call on the number open with a legally required
+   * consent announcement.
+   */
+  @Patch("api/calls/admin/recording-policy")
+  @HttpCode(200)
+  @RequireRole("admin")
+  async updateRecordingPolicy(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(RecordingPolicySchema)) body: RecordingPolicyInput,
+    @Query("channel") channel?: string,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.calls.updateCallArtifactPolicy(
+      session,
+      "callRecording",
+      body,
+      this.channelOf(channel),
+      accountId ?? null,
+    );
+  }
+
+  /**
+   * The written consent notice auto-sent around recorded/transcribed calls —
+   * OUR message, fully Arabic-capable, unlike the provider's announcement
+   * voice. ADMIN-only, same reasoning as the policies themselves.
+   */
+  @Patch("api/calls/admin/consent-message")
+  @HttpCode(200)
+  @RequireRole("admin")
+  async updateConsentMessage(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(ConsentMessageSchema)) body: ConsentMessageInput,
+    @Query("channel") channel?: string,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.calls.updateCallConsentMessage(
+      session,
+      body.message,
+      this.channelOf(channel),
+      accountId ?? null,
+    );
+  }
+
+  /**
+   * Same shape for the transcription policy — an independent provider feature
+   * (own webhook, own artifact, own pricing). The transcript LANGUAGE is
+   * auto-detected from the call audio (Arabic supported); the announcement
+   * language here only picks the consent phrase's voice.
+   */
+  @Patch("api/calls/admin/transcription-policy")
+  @HttpCode(200)
+  @RequireRole("admin")
+  async updateTranscriptionPolicy(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(RecordingPolicySchema)) body: RecordingPolicyInput,
+    @Query("channel") channel?: string,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.calls.updateCallArtifactPolicy(
+      session,
+      "callTranscription",
+      body,
+      this.channelOf(channel),
+      accountId ?? null,
+    );
+  }
+
+  /**
+   * Stream a call's stored recording from R2. Capability + visibility gated
+   * in the service — a recording is the most sensitive call artifact there
+   * is, so the read boundary matches the call lists exactly.
+   */
+  @Get("api/calls/:callId/recording")
+  async streamRecording(
+    @CurrentSession() session: ApiSession,
+    @Param("callId") callId: string,
+    @Headers("range") range: string | undefined,
+    @Res() res: Response,
+  ) {
+    const ref = await this.calls.getRecordingRef(session, callId);
+    await streamBlob(res, ref.key, range, { downloadFilename: ref.filename });
+  }
+
+  /** The transcript JSON document — same gates as the recording stream. */
+  @Get("api/calls/:callId/transcript")
+  async streamTranscript(
+    @CurrentSession() session: ApiSession,
+    @Param("callId") callId: string,
+    @Headers("range") range: string | undefined,
+    @Res() res: Response,
+  ) {
+    const ref = await this.calls.getTranscriptRef(session, callId);
+    await streamBlob(res, ref.key, range);
+  }
+
+  /**
+   * Upload the voicemail announcement audio for a number. Meta requires
+   * audio/ogg (OPUS) under 60 seconds, uploaded with the voicemail use-case
+   * (which exempts it from the 30-day media TTL). Returns the media id the
+   * settings PATCH then pins as `voicemail.announcementMediaId`. ADMIN-only —
+   * it changes what every caller to the business hears.
+   */
+  @Post("api/calls/admin/voicemail-announcement")
+  @HttpCode(200)
+  @RequireRole("admin")
+  @UseInterceptors(
+    // Memory storage: a 60s OPUS announcement is well under 1MB; the cap is a
+    // slack guard, not a target.
+    FileInterceptor("file", { limits: { fileSize: 8 * 1024 * 1024 } }),
+  )
+  async uploadVoicemailAnnouncement(
+    @CurrentSession() session: ApiSession,
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Query("channel") channel?: string,
+    @Query("accountId") accountId?: string,
+  ) {
+    if (!file?.buffer?.length) {
+      throw new BadRequestException({ error: "file_required" });
+    }
+    return this.calls.uploadVoicemailAnnouncement(
+      session,
+      {
+        bytes: new Uint8Array(file.buffer),
+        mimeType: file.mimetype || "audio/ogg",
+        filename: file.originalname || "announcement.ogg",
+      },
+      this.channelOf(channel),
+      accountId ?? null,
     );
   }
 

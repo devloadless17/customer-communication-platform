@@ -50,6 +50,11 @@ const SOCIAL_INFLIGHT_GRACE_MS = 10 * 60 * 1000;
 // How long we keep re-attempting a parked row before the final text-only
 // downgrade. Comfortably inside Meta's ~30-day media retention; long enough to
 // ride out any realistic blob-storage / Meta-CDN outage window.
+// Caveat (local-storage doc): a number with Meta's No-Storage retention keeps
+// inbound media for only 1 HOUR — re-attempts past that just 404 until the
+// downgrade. Still correct (bounded, then text-only with caption preserved);
+// the alternative — downgrading everyone at 1h — would abandon media the
+// default 30-day retention could still recover.
 const RECOVERY_HORIZON_MS = 24 * 60 * 60 * 1000;
 // Minimum gap between re-download attempts for the SAME row. Hourly keeps a
 // sustained outage from re-fetching every 60s for 24h while still recovering

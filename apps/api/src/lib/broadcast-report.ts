@@ -18,6 +18,7 @@
 
 import { db } from "@/lib/db";
 import { readTemplateAnalytics } from "@/lib/analytics/template-analytics";
+import type { TemplateButtonClicks } from "@ccp/shared/providers/types";
 import { TtlCache } from "@/lib/providers/config-cache";
 import { failureBucket } from "@/lib/providers/meta-send-error";
 
@@ -130,11 +131,17 @@ export interface BroadcastReport {
     delivered: number;
     read: number | null;
     clicked: number | null;
+    /** Per-button click totals (which button, quick-reply vs URL, unique vs
+     *  total) — Meta is the only source, and only inside its 7-day window. */
+    clickedButtons: TemplateButtonClicks[] | null;
     costAmountSpent: number | null;
     costPerDelivered: number | null;
     currency: string | null;
     days: number;
     costWithheld: boolean;
+    /** When these figures were last pulled from Meta — the panel's freshness
+     *  stamp, so an aggregate snapshot is never mistaken for a live feed. */
+    fetchedAt: string | null;
   } | null;
   generatedAt: string;
 }
@@ -161,6 +168,12 @@ export const ERROR_LABELS: Record<string, string> = {
   message_unavailable: "Referenced message unavailable",
   unsupported_message: "Unsupported message content",
   duplicate_button_title: "Duplicate button title",
+  account_restricted: "Account restricted by Meta",
+  contact_blocked: "Blocked by your workspace",
+  country_not_allowed: "Country not allowed for your business",
+  billing_issue: "WhatsApp billing problem",
+  number_not_registered: "Number not registered with Cloud API",
+  marketing_disabled: "Marketing templates disabled on this account",
   provider_rejected: "Rejected by Meta",
 };
 
@@ -599,6 +612,7 @@ async function loadMetaAnalytics(
     delivered: summary.delivered,
     read: summary.read,
     clicked: summary.clicked,
+    clickedButtons: summary.clickedButtons,
     costAmountSpent: summary.costAmountSpent,
     costPerDelivered: summary.costPerDelivered,
     currency: summary.currency,
@@ -607,5 +621,6 @@ async function loadMetaAnalytics(
     // happens on Solution-Partner-billed WABAs. Distinguished so the UI can say
     // WHY the cost is blank instead of showing an unexplained dash.
     costWithheld: summary.costAmountSpent === null,
+    fetchedAt: summary.fetchedAt,
   };
 }

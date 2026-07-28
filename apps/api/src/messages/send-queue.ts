@@ -117,8 +117,14 @@ export function getMessageSendQueue(): Queue<MessageSendJobData> {
       // rejected) are NOT retried; the worker categorizes the error and
       // re-throws non-transient ones as `UnrecoverableError` so BullMQ skips
       // remaining attempts.
+      //
+      // `custom` hands retry SPACING to the worker's backoffStrategy
+      // (send-worker.service.ts): the same 1.5s-exponential as before for
+      // transient errors, but a full pair-limit token period (≥6s) when Meta
+      // answered 131056 — under the old flat schedule both retries landed
+      // inside the 6s refill window and were guaranteed wasted.
       attempts: 3,
-      backoff: { type: "exponential", delay: 1_500 },
+      backoff: { type: "custom" },
       // Successful sends are durable in DB + audit timeline; the job record
       // itself doesn't need to live forever. Keep a day of completed jobs
       // for ops debugging, a week of failures.

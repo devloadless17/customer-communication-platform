@@ -897,6 +897,11 @@ export function NewBroadcastForm({
      *  expired): sends of UTILITY templates over Meta's cap are rejected. */
     utilityRestrictionType?: string | null;
     utilityRestrictedUntil?: string | null;
+    /** ACTIVE policy/spam messaging enforcement on the WABA (server filters
+     *  expired): business-initiated sends — this whole surface — are rejected
+     *  by Meta for the duration. Null until = indefinite (lock/ban). */
+    bizMessagingRestrictionType?: string | null;
+    bizMessagingRestrictedUntil?: string | null;
   } | null>(null);
   useEffect(() => {
     // Only WhatsApp campaigns are tier-gated; don't burn a request per social
@@ -928,6 +933,37 @@ export function NewBroadcastForm({
     { level: "error" | "warn"; text: string } | null
   >(() => {
     if (messageKind !== "template" || !messagingHealth) return null;
+    // Policy/spam enforcement outranks the budget math below: while a
+    // messaging restriction is active, Meta rejects EVERY business-initiated
+    // send, so no amount of remaining budget makes this campaign deliverable.
+    // Advisory (the server doesn't hard-block — Meta is the enforcement
+    // authority and our copy of the restriction could be stale), but styled
+    // as the error it will become. SCHEDULE_FOR_DISABLE still sends until the
+    // ban date, so it warns instead of reading as an active block.
+    const bizRestriction = messagingHealth.bizMessagingRestrictionType;
+    if (bizRestriction === "WABA_BAN_SCHEDULE_FOR_DISABLE") {
+      return {
+        level: "warn",
+        text:
+          "Meta has scheduled this WhatsApp Business Account to be disabled. Sends " +
+          "still work until the ban date, but unless the decision is reversed the " +
+          "account stops sending entirely — appeal in Meta Business Support Home " +
+          "before investing in new campaigns.",
+      };
+    }
+    if (bizRestriction) {
+      const until = messagingHealth.bizMessagingRestrictedUntil
+        ? ` until ${new Date(messagingHealth.bizMessagingRestrictedUntil).toLocaleDateString()}`
+        : " with no end date (it stands until Meta reverses it)";
+      return {
+        level: "error",
+        text:
+          `Meta has blocked business-initiated messages on this WhatsApp Business ` +
+          `Account${until} — every send in this campaign would be rejected. This is ` +
+          `Meta's enforcement for policy or spam violations; check Meta Business ` +
+          `Support Home for the violation and any appeal before launching.`,
+      };
+    }
     const cap = messagingHealth.messagingDailyCap;
     const tier = messagingHealth.messagingTier ?? "current";
     // The 24h budget is BUSINESS-PORTFOLIO-scoped (shared by every number in

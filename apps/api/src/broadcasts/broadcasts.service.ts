@@ -881,6 +881,32 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
+    // ── Blocked-contact suppression ──────────────────────────────────────────
+    // Same single-choke-point placement as the marketing suppression above, but
+    // NOT gated on category: a provider-level block (Block Users API) stops ALL
+    // messaging, so utility/auth templates and freeform sends skip them too —
+    // Meta rejects every send to a blocked user anyway. Same inverted lookup
+    // (the blocklist is a small slice of the contact book; Meta caps it at
+    // 64,000 entries). The runner re-checks at fire time for the create→fire gap.
+    if (recipientRows.length > 0) {
+      const blockedContacts = await this.db.contact.findMany({
+        where: { workspaceId, blockedAt: { not: null } },
+        select: { id: true },
+      });
+      if (blockedContacts.length > 0) {
+        const blockedIds = new Set(blockedContacts.map((c) => c.id));
+        const before = recipientRows.length;
+        recipientRows = recipientRows.filter((r) => !blockedIds.has(r.contactId));
+        suppressedCount += before - recipientRows.length;
+      }
+      if (recipientRows.length === 0) {
+        throw new BadRequestException({
+          error: "all_recipients_blocked",
+          detail: "All selected contacts are blocked. Unblock them to message them again.",
+        });
+      }
+    }
+
     // Enforce the recipient ceiling HERE, before writing any rows. This is the
     // policy cap (BROADCAST_MAX_RECIPIENTS, default 100k) — bound a single team's
     // blast radius / Meta spend. Reaching it ALSO requires the number's messaging
@@ -1714,6 +1740,19 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       },
     });
 
+    // The template's message text, so the snapshot card can show the message
+    // as the customer saw it — a zero-variable campaign otherwise rendered a
+    // blank card. From the catalog row (we snapshot the VARIABLES, not the
+    // body), so the UI captions it as the catalog text rather than claiming
+    // it's frozen. Tolerates a deleted template: the card falls back to
+    // name + language.
+    const template = row.templateId
+      ? await this.db.messageTemplate.findFirst({
+          where: { id: row.templateId, workspaceId },
+          select: { bodyText: true },
+        })
+      : null;
+
     return {
       id: row.id,
       // Message identity — freeform / People (customer-mode) broadcasts have no
@@ -1731,6 +1770,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       templateId: row.templateId,
       templateName: row.templateName,
       templateLanguage: row.templateLanguage,
+      templateBody: template?.bodyText || null,
       audienceMode: row.audienceMode,
       audienceTagIds: row.audienceTagIds,
       audienceGroupId: row.audienceGroupId,
@@ -1758,6 +1798,16 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         externalId: r.externalId,
         errorMessage: r.errorMessage,
         sentAt: r.sentAt?.toISOString() ?? null,
+        // Same engagement trail as listRecipients() — the two shapes must stay
+        // identical or the table renders richer rows for paged results than
+        // for the inline first-500.
+        deliveryState: r.deliveryState,
+        deliveredAt: r.deliveredAt?.toISOString() ?? null,
+        readAt: r.readAt?.toISOString() ?? null,
+        repliedAt: r.repliedAt?.toISOString() ?? null,
+        clickedAt: r.clickedAt?.toISOString() ?? null,
+        clickedOptionId: r.clickedOptionId,
+        errorCode: r.errorCode,
       })),
     };
   }
@@ -1769,7 +1819,13 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
   async listRecipients(
     workspaceId: string,
     broadcastId: string,
-    opts: { cursor?: string; status?: string; take?: number },
+    opts: {
+      cursor?: string;
+      status?: string;
+      outcome?: string;
+      errorCode?: string;
+      take?: number;
+    },
   ) {
     const take = Math.min(Math.max(opts.take ?? 200, 1), 500);
     const broadcast = await this.db.broadcast.findFirst({
@@ -1780,19 +1836,27 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
 
     const where: Prisma.BroadcastRecipientWhereInput = {
       broadcastId,
+      // The report's drill-down vocabulary (who read / replied / clicked …) —
+      // the SAME clause the CSV export and /v1 use, so the table an operator
+      // clicks into can never disagree with the file they download.
+      ...recipientOutcomeWhere({ outcome: opts.outcome, errorCode: opts.errorCode }),
     };
     if (opts.status) {
       where.status = opts.status as Prisma.BroadcastRecipientWhereInput["status"];
     }
+    const filtered = !!(opts.outcome && opts.outcome !== "all") || !!opts.errorCode;
     const rows = await this.db.broadcastRecipient.findMany({
       where,
-      // Failed-first, matching the inline get() ordering rationale: the
-      // BroadcastRecipientStatus enum declares (queued, sent, failed) so
-      // `status: "desc"` yields failed → sent → queued — the actionable rows
-      // (failures the operator triages) come first as "Load more" pages. An
-      // explicit `status` filter narrows to one bucket anyway, so the ordering
-      // only matters for the unfiltered "all recipients" paging.
-      orderBy: [{ status: "desc" }, { id: "asc" }],
+      // Unfiltered mode: failed-first, matching the inline get() ordering
+      // rationale — the BroadcastRecipientStatus enum declares (queued, sent,
+      // failed) so `status: "desc"` yields failed → sent → queued and the
+      // actionable rows come first as "Load more" pages.
+      // Outcome-filtered mode: plain id order. The bucket is already
+      // homogeneous, and (broadcastId, deliveryState, id) / the repliedAt·
+      // clickedAt partial indexes serve `ORDER BY id` as a bounded range scan
+      // — a 100k-recipient campaign pages in index order instead of
+      // re-sorting the whole bucket per page.
+      orderBy: filtered ? { id: "asc" } : [{ status: "desc" }, { id: "asc" }],
       take: take + 1,
       ...(opts.cursor
         ? { cursor: { id: opts.cursor }, skip: 1 }
@@ -1812,6 +1876,16 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         externalId: r.externalId,
         errorMessage: r.errorMessage,
         sentAt: r.sentAt?.toISOString() ?? null,
+        // The engagement trail — what "read 4,120" is MADE OF. Per-recipient
+        // truth from status webhooks; the table renders these as the
+        // read/replied/clicked columns of the drill-down.
+        deliveryState: r.deliveryState,
+        deliveredAt: r.deliveredAt?.toISOString() ?? null,
+        readAt: r.readAt?.toISOString() ?? null,
+        repliedAt: r.repliedAt?.toISOString() ?? null,
+        clickedAt: r.clickedAt?.toISOString() ?? null,
+        clickedOptionId: r.clickedOptionId,
+        errorCode: r.errorCode,
       })),
       nextCursor: hasMore ? (page[page.length - 1]?.id ?? null) : null,
     };

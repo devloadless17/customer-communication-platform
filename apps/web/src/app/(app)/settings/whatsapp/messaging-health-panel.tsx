@@ -46,6 +46,13 @@ interface Health {
    *  sends rate-limited, or utility templates restricted/recategorized. */
   utilityRestrictionType: string | null;
   utilityRestrictedUntil: string | null;
+  /** ACTIVE policy/spam messaging enforcement (server filters expired; a set
+   *  type with a null `until` is an indefinite lock/ban). Business-initiated
+   *  blocks templates/broadcasts; customer-initiated blocks even replies. */
+  bizMessagingRestrictionType: string | null;
+  bizMessagingRestrictedUntil: string | null;
+  customerMessagingRestrictionType: string | null;
+  customerMessagingRestrictedUntil: string | null;
   messagingHealthUpdatedAt: string | null;
 }
 
@@ -54,6 +61,78 @@ const THROUGHPUT_LABEL: Record<string, string> = {
   STANDARD: "Standard · up to ~80 messages/second",
   HIGH: "High · up to ~1,000 messages/second",
 };
+
+/**
+ * Human phrasing for the policy-violation codes Meta enumerates in its
+ * "WhatsApp Business Platform Policy Violations" list. Meta says the list can
+ * change, so an unknown code falls back to the raw value — never hidden.
+ */
+const POLICY_VIOLATION_LABEL: Record<string, string> = {
+  ADULT: "adult products or services",
+  ALCOHOL: "sale of alcohol",
+  ANIMALS: "sale of animals or animal products",
+  BODY_PARTS_FLUIDS: "sale of human body parts or fluids",
+  DATING: "online dating services",
+  DIGITAL_SERVICES_PRODUCTS: "sale of digital content, subscriptions, or accounts",
+  DRUGS: "sale of illegal, prescription, or recreational drugs",
+  GAMBLING: "gambling or games of skill for money",
+  HEALTHCARE: "restricted healthcare products",
+  ILLEGAL_PRODUCTS: "illegal products or services",
+  MISLEADING: "misleading, deceptive, or exploitative offerings",
+  OVERTLY_SEXUALIZED_POSITIONING: "sexually suggestive positioning of products",
+  REAL_FAKE_CURRENCY: "sale of real, virtual, or fake currency",
+  SCAM: "activity that promotes or facilitates scams",
+  SUPPLEMENTS: "sale of unsafe ingestible supplements",
+  THIRD_PARTY_INFRINGEMENTS: "counterfeit goods or intellectual-property infringement",
+  TOBACCO: "sale of tobacco products or paraphernalia",
+  UNAUTHORIZED_MEDIA: "devices enabling unauthorized media streaming",
+  WEAPONS: "sale or use of weapons, ammunition, or explosives",
+};
+
+/** Copy per messaging-restriction shape. `WABA_BAN_*` types come from Meta's
+ *  DISABLED_UPDATE ban states; the RESTRICTED_* types from ACCOUNT_RESTRICTION. */
+function messagingRestrictionCopy(health: Health): {
+  title: string;
+  body: string;
+  until: string | null;
+} | null {
+  const biz = health.bizMessagingRestrictionType;
+  const customer = health.customerMessagingRestrictionType;
+  if (!biz && !customer) return null;
+  // Bans stamp both directions with the same WABA_BAN_* type.
+  if (biz?.startsWith("WABA_BAN_") || customer?.startsWith("WABA_BAN_")) {
+    const scheduled = (biz ?? customer) === "WABA_BAN_SCHEDULE_FOR_DISABLE";
+    return {
+      title: scheduled
+        ? "Meta has scheduled this WhatsApp Business Account to be disabled"
+        : "Meta has disabled this WhatsApp Business Account",
+      body: scheduled
+        ? "Messaging still works until the ban date, but the account will be disabled unless the decision is reversed. Appeal now in Meta Business Support Home."
+        : "No messages can be sent from any number under this account until an appeal succeeds. Request a review in Meta Business Support Home.",
+      until: null,
+    };
+  }
+  const until = health.bizMessagingRestrictedUntil ?? health.customerMessagingRestrictedUntil;
+  if (biz && customer) {
+    return {
+      title: "Meta has blocked ALL messaging on this WhatsApp Business Account",
+      body: "Every send — broadcasts, templates, and replies to customers — is rejected by Meta for the duration of this restriction. This is Meta's escalation for repeated policy or spam violations.",
+      until,
+    };
+  }
+  if (biz) {
+    return {
+      title: "Meta has blocked business-initiated messages on this WhatsApp Business Account",
+      body: "Template sends — broadcasts, campaigns, and proactive messages — are rejected by Meta for the duration of this restriction. Replies inside the 24-hour customer service window still work.",
+      until: health.bizMessagingRestrictedUntil,
+    };
+  }
+  return {
+    title: "Meta has blocked replies to customer conversations on this WhatsApp Business Account",
+    body: "Responses to customer-initiated conversations are rejected by Meta for the duration of this restriction.",
+    until: health.customerMessagingRestrictedUntil,
+  };
+}
 
 export function MessagingHealthPanel({
   canManage,
@@ -174,6 +253,35 @@ export function MessagingHealthPanel({
         )}
       </header>
 
+      {/* An ACTIVE messaging restriction outranks everything on this panel —
+          sends are being rejected right now. Shown even without a snapshot;
+          it arrives by webhook. */}
+      {(() => {
+        const restriction = messagingRestrictionCopy(health);
+        if (!restriction) return null;
+        return (
+          <div className="mt-4 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2.5">
+            <p className="text-xs font-medium text-destructive">{restriction.title}</p>
+            <p className="mt-1 text-2xs text-muted-foreground">
+              {restriction.body}{" "}
+              {restriction.until ? (
+                <>
+                  Lifts <LocalTime iso={restriction.until} format="localeString" />.{" "}
+                  Some spam restrictions cannot be appealed — if this one can, the
+                  option appears in Meta Business Support Home (Request Review).
+                </>
+              ) : (
+                <>
+                  No end date — it stands until Meta reverses it. Appeal in Meta
+                  Business Support Home (Request Review); decisions typically take
+                  24–48 hours.
+                </>
+              )}
+            </p>
+          </div>
+        );
+      })()}
+
       {/* A policy violation outranks every figure below it: Meta restricts an
           account that doesn't address one, and this is the only warning that
           comes first. Shown even without a snapshot — it arrives by webhook. */}
@@ -182,6 +290,9 @@ export function MessagingHealthPanel({
           <p className="text-xs font-medium text-destructive">
             WhatsApp reported a policy violation:{" "}
             <span className="font-mono">{health.policyViolationType}</span>
+            {POLICY_VIOLATION_LABEL[health.policyViolationType] && (
+              <> — {POLICY_VIOLATION_LABEL[health.policyViolationType]}</>
+            )}
           </p>
           <p className="mt-1 text-2xs text-muted-foreground">
             {health.policyViolationAt && (
@@ -189,9 +300,11 @@ export function MessagingHealthPanel({
                 Reported <LocalTime iso={health.policyViolationAt} format="localeString" />.{" "}
               </>
             )}
-            Meta restricts accounts that don&apos;t address a violation. Review the
-            WhatsApp Business Messaging Policy and your recent campaigns — Meta
-            Business Suite and email carry the details and any appeal.
+            Violations start as warnings, then escalate to messaging blocks of
+            increasing length (1&ndash;30 days, then an account lock). Review the
+            WhatsApp Business Messaging Policy and your recent campaigns — the
+            details, and the appeal (Request Review), are in Meta Business
+            Support Home.
           </p>
         </div>
       )}
