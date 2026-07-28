@@ -823,7 +823,17 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     // Resolved HERE, in the one place, rather than threading the field onto the
     // ~20 publish sites — missing one there silently reintroduces the bug,
     // which is how this whole class started (see deriveEventAccountId).
-    const messageId = raw.messageId;
+    // TWO SHAPES, and reading only one of them is what made this branch dead
+    // for the event that needed it most. `message.status_changed` and
+    // `message.flag_changed` carry a TOP-LEVEL `messageId`; `message.sent` and
+    // `message.received` carry the whole `Message` DTO instead, so their id is
+    // at `message.id` and there is no top-level field to read. With only the
+    // top-level lookup, `message.sent` — the single most-subscribed outbound
+    // event — always fell through to the conversation pointer, i.e. straight
+    // back into the bug this branch exists to prevent.
+    const nestedMessage = raw.message as { id?: unknown } | undefined;
+    const messageId =
+      typeof raw.messageId === "string" && raw.messageId ? raw.messageId : nestedMessage?.id;
     if (typeof messageId === "string" && messageId) {
       // workspaceId stays in the WHERE — the id arrives on an event payload.
       const msg = await this.db.message.findFirst({

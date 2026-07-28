@@ -73,6 +73,7 @@ let workspaceId = "";
 let defaultConn = "";
 let salesConn = "";
 let conversationId = "";
+let messageOnDefault = "";
 
 beforeAll(async () => {
   orgId = (await prisma.organization.create({ data: { name: `CP Org ${S}`, status: "active" } })).id;
@@ -130,6 +131,25 @@ beforeAll(async () => {
       select: { id: true },
     })
   ).id;
+
+  // A send that genuinely went out from the DEFAULT number, on a thread that
+  // has since been re-stamped to SALES. The two therefore disagree, which is
+  // what makes "prefer the message's own stamp" a distinguishable assertion
+  // rather than one the conversation fallback would satisfy by accident.
+  messageOnDefault = (
+    await prisma.message.create({
+      data: {
+        workspaceId,
+        conversationId,
+        externalId: `wamid.${S}.provenance`,
+        body: "sent from the default number",
+        direction: "out",
+        channel: "whatsapp",
+        channelConnectionId: defaultConn,
+      },
+      select: { id: true },
+    })
+  ).id;
 });
 
 afterAll(async () => {
@@ -155,6 +175,32 @@ describe("webhook channel provenance", () => {
     });
     expect(accountId).toBe(salesConn);
     expect(accountId).not.toBe(defaultConn);
+  });
+
+  it("prefers the MESSAGE's own account over the re-stamped thread — top-level messageId", async () => {
+    // The `message.status_changed` / `message.flag_changed` shape.
+    const accountId = await subscriber.resolveEventAccountId(workspaceId, {
+      conversationId,
+      messageId: messageOnDefault,
+    });
+    expect(accountId).toBe(defaultConn);
+    expect(accountId).not.toBe(salesConn);
+  });
+
+  it("prefers the MESSAGE's own account over the re-stamped thread — nested message.id", async () => {
+    // REGRESSION PIN. `message.sent` carries the whole Message DTO instead of a
+    // top-level `messageId`, so a resolver that reads only `raw.messageId` finds
+    // nothing here and silently falls through to the conversation pointer —
+    // reporting a send that went out from Main under Sales, to every partner
+    // subscribed to the most-subscribed event in the API. Caught by
+    // `tests/e2e/multi-account/03-reads-and-webhooks.spec.ts`, which is not in
+    // CI; pinned here because this spec is.
+    const accountId = await subscriber.resolveEventAccountId(workspaceId, {
+      conversationId,
+      message: { id: messageOnDefault, conversationId },
+    });
+    expect(accountId).toBe(defaultConn);
+    expect(accountId).not.toBe(salesConn);
   });
 
   it("does not resolve a conversation from another workspace", async () => {
