@@ -36,7 +36,7 @@ socket-room that references the dying entity.
 
 ## Predeploy ritual (run before every push to `production`)
 
-1. `pnpm run check` (typecheck ×3 + lint + 7 checkers) — must be 0 ERRORS
+1. `pnpm run check` (typecheck ×3 + lint + 8 checkers) — must be 0 ERRORS
 2. `pnpm test` (Vitest, api + web)
 3. `pnpm test:e2e:meta` (hermetic; needs Postgres + Redis)
 4. `pnpm test:e2e:multiaccount` — **never concurrently with 3** (both spawn the
@@ -50,9 +50,11 @@ socket-room that references the dying entity.
 
 ## Phase 0 — Baseline (2026-07-29, HEAD `44d538e0`)
 
-**Gate status after this session's fixes — all four green, re-run end to end:**
-`pnpm run check` 0 errors / 7 checkers · vitest **827/827** + web **18/18** ·
-meta e2e **170/170** · multi-account e2e **42/42**.
+**GATE — re-run end to end after every fix in this program (2026-07-29):**
+`pnpm run check` **0 errors / 8 checkers** · vitest api **839/839** + web
+**24/24** · meta e2e **170/170** · multi-account e2e **42/42**. The api suite
+was run twice consecutively after the last change to confirm the sweeper flake
+is gone.
 
 | Gate | Result |
 |---|---|
