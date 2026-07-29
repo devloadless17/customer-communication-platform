@@ -248,6 +248,42 @@ export class WorkspaceRootService {
     );
   }
 
+  /**
+   * AI assistant blobs — knowledge documents (`ai-knowledge/`) and generated
+   * voice drafts (`ai-voice-draft/`).
+   *
+   * These are the LAST prefixes with no reclaim path at all, and unlike the
+   * call and message blobs above the blob-orphan sweeper cannot be the
+   * backstop: both prefixes are in its `URL_ONLY_KEY_PREFIXES` exclusion list,
+   * because their keys live in `AiContextDocument.r2Key` /
+   * `AiReplySuggestion.audioR2Key` rather than in any `mediaKey` column the
+   * sweeper cross-checks — so a naive scan would classify every live one as an
+   * orphan and delete it.
+   *
+   * That exclusion is right for the live case and is exactly what strands them
+   * on delete: the cascade takes the rows, the sweeper is forbidden from
+   * touching the prefix, and the objects leak FOREVER. A churned tenant's
+   * uploaded knowledge base (10 MB × 50 docs is the documented cap) sits in the
+   * bucket permanently. Snapshot the keys here, the same way transfer artifacts
+   * are, since this is the only place that still can.
+   */
+  private async collectAiArtifactKeys(workspaceId: string): Promise<string[]> {
+    const [docs, drafts] = await Promise.all([
+      this.db.aiContextDocument.findMany({
+        where: { workspaceId, r2Key: { not: "" } },
+        select: { r2Key: true },
+      }),
+      this.db.aiReplySuggestion.findMany({
+        where: { workspaceId, audioR2Key: { not: null } },
+        select: { audioR2Key: true },
+      }),
+    ]);
+    return [
+      ...docs.map((d) => d.r2Key),
+      ...drafts.map((d) => d.audioR2Key),
+    ].filter((k): k is string => typeof k === "string" && k.length > 0);
+  }
+
   private async collectContactAvatarKeys(workspaceId: string): Promise<string[]> {
     const keys: string[] = [];
     const PAGE = 1_000;
@@ -273,11 +309,12 @@ export class WorkspaceRootService {
     // Blob keys feed post-delete cleanup; member ids feed the explicit
     // socket kick (the cascade clears their Session rows but already-
     // connected sockets stay live until kicked).
-    const [messageBlobKeys, contactAvatarKeys, transferKeys, callArtifactKeys, teamMembers] = await Promise.all([
+    const [messageBlobKeys, contactAvatarKeys, transferKeys, callArtifactKeys, aiArtifactKeys, teamMembers] = await Promise.all([
       this.collectMessageBlobKeys(workspaceId),
       this.collectContactAvatarKeys(workspaceId),
       this.collectTransferArtifactKeys(workspaceId),
       this.collectCallArtifactKeys(workspaceId),
+      this.collectAiArtifactKeys(workspaceId),
       this.db.user.findMany({ where: { workspaceMemberships: { some: { workspaceId } } }, select: { id: true, avatarUrl: true } }),
     ]);
     const blobKeys = messageBlobKeys
@@ -302,7 +339,12 @@ export class WorkspaceRootService {
       // reaper "owns the category". Nothing was left holding a handle.
       .concat(transferKeys)
       // Call recordings + transcripts — see collectCallArtifactKeys.
-      .concat(callArtifactKeys);
+      .concat(callArtifactKeys)
+      // AI knowledge docs + voice drafts. These are the only prefixes the
+      // blob-orphan sweeper is FORBIDDEN to reclaim (it excludes them, because
+      // their keys are not in any `mediaKey` column it cross-checks), so this
+      // is their one and only cleanup path — miss it and they leak forever.
+      .concat(aiArtifactKeys);
 
     try {
       // DB-2: pre-drain the Message table in bounded batches BEFORE the cascade.

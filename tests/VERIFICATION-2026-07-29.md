@@ -381,9 +381,24 @@ until re-confirmed at HEAD.
 
 **Open MED/LOW at last pass**
 - per-WABA template-insights enable still needs `?accountId=`.
-- `ai-knowledge/`, `ai-voice-draft/`, `tpl-hdr-` blobs orphaned by workspace
-  delete (prefix-excluded rather than cross-checked — the same class that was
-  permanently deleting call recordings).
+- ~~`ai-knowledge/`, `ai-voice-draft/` blobs orphaned by workspace delete~~ —
+  **CLOSED 2026-07-29.** Verified the whole class mechanically rather than
+  spot-fixing: enumerated every blob-key-shaped column in `schema.prisma` and
+  every `putObject` call site, then checked each prefix against the sweeper's
+  cross-check list (`Message.mediaKey`/`.mediaThumbnailKey`,
+  `TeamChannelMessage.mediaKey`, `Call.recordingKey`/`.transcriptKey`) and its
+  `URL_ONLY_KEY_PREFIXES` exclusion list. **Deletion safety is complete** — every
+  prefix is either cross-checked or excluded, so nothing live can be reclaimed.
+  But `ai-knowledge/` and `ai-voice-draft/` are the only two that are excluded
+  *and* had no collector in `destroy()`, which means they were the only blobs in
+  the system with **no reclaim path at all**: the cascade takes the rows, the
+  sweeper is forbidden to touch the prefix, and the objects leak forever.
+  `collectAiArtifactKeys` added; pinned by `workspace-destroy-ai-blobs.spec.ts`
+  (collects both, and does not reach into a sibling workspace),
+  NEGATIVE-TESTED. `tpl-hdr-` stays open by design — it has no column at all
+  (the URL is the only reference, held in workflow step config, Broadcast
+  variables and `Message.rawPayload`), so collecting it needs a different
+  approach than a column scan.
 - Hard-deleting a user re-homes nothing through the domain path (no version
   bump, no `TicketEvent`, no `conversation.assigned`).
 - `shiftDueDates` adds **wall-clock** pause time to a **business-hours**
