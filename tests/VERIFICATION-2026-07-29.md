@@ -325,7 +325,7 @@ a checklist, not on however many findings happened to surface.
 | 6 | broadcasts (+audience/templates/analytics) | 1 | | ☐ |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 | 8 | realtime layer | 1 | R (adversarial) + E (18 reducer + storm guard) | ✅ **2026-07-29** — all three reducer consumers verified table-driven; no defect |
-| 9 | auth / org / workspaces / members | 1 | | ☐ |
+| 9 | auth / org / workspaces / members | 1 | R (adversarial) + E | ✅ **2026-07-29** — one resolver with exactly the three §18 callers; all guards FOR UPDATE; no defect |
 | 10 | external `/v1` API | 1 | | ☐ |
 | 11 | contacts (+import/export/transfer) | 2 | R (adversarial) + E (19 e2e + 72-assertion smoke + 100k load) | ✅ **2026-07-29** — no defect; format abstraction made literally true |
 | 12 | customers / identity | 2 | R (adversarial, 7 doc rules + §58) + E | ✅ **2026-07-29** — all seven hold, incl. the both-directions ephemeral exclusion; no defect. Merge-audit gap carried forward (doc-declared) |
@@ -725,6 +725,34 @@ sweep before starting the suite.
 ---
 
 ## Domain session notes
+
+### #9 auth / org / workspaces / members — ✅ CLOSED (2026-07-29)
+
+Checklist from `docs/workspaces.md` + CLAUDE.md §18. No defect.
+
+| Invariant | Evidence |
+|---|---|
+| **§18: the active workspace is resolved in EXACTLY one place** | **R** `resolveActiveWorkspaceId` (`@ccp/shared/auth/active-workspace`) has exactly three callers, and they are precisely the three §18 names: the NestJS `SessionGuard`, the Socket.io handshake (`socket-auth.service.ts`), and the Next RSC session (`current-user.ts`). Three copies drifted once and the web silently rendered every switched session against the wrong workspace |
+| `workspaceId` comes from the session, never from client input | **R** guard-sourced, plus the tenancy gate inside `check:prisma-fields` |
+| A workspace can never be left with **zero admins** (removal *or* demotion) | **R** `error: "last_admin"` |
+| An organization can never be left with **zero workspaces** | **R** `error: "last_workspace"` |
+| Those guards must hold under CONCURRENCY | **R** `FOR UPDATE` row locks on the org (workspace-create cap), the workspace (member cap), and the removal path — with the comment stating it is *"load-bearing, not decorative: two people accepting…"* |
+| **Org-wide actions need ORG authority**, not the collapsed workspace role | **R** `resolveSession` flattens a superAdmin, an org owner/admin and a one-workspace admin all to `"admin"`, so deactivate/delete/password-reset gate on `canModifyUserAccount` (orgRole) and `@RequireOrgRole("owner")` — deliberately with NO superAdmin bypass |
+| Switching is a full page navigation, never a soft refresh | **R** — the active workspace is baked into RSC output |
+| Membership revoked moments ago must not stay switchable | **R** the session-cache is keyed `(userId, workspaceId)` and busted on membership change |
+
+**Edge themes:** ① **covered — every concurrency guard is `FOR UPDATE`** ·
+② N/A · ③ removal goes through the one `remove-member.ts` definition ·
+④ a switch drops sockets so they rejoin under the new scope · ⑤ N/A ·
+⑥ N/A · ⑦ N/A · ⑧ **the domain's core** · ⑨ **the domain's core** ·
+⑩ N/A.
+
+**CARRIED FORWARD (product decision, unchanged):** `orgRole` still has no write
+path — "org admin" is unreachable and there is no ownership succession, so a
+lost sole owner permanently loses org rename, workspace create/delete and all
+membership management. The predecessor recommended an owner-transfer + org-admin
+grant before real customers land; that is still the recommendation.
+
 
 ### #11 contacts (+import / export / transfer) — ✅ CLOSED (2026-07-29)
 
@@ -1142,7 +1170,7 @@ in five separate prior sessions. Checklist taken verbatim from
 | 6 | Attribution renders ONLY above one account per channel | **R** `showAccountFor(channel)` gates every `AccountLabel`; a single-account inbox stays byte-identical |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 | 8 | realtime layer | 1 | R (adversarial) + E (18 reducer + storm guard) | ✅ **2026-07-29** — all three reducer consumers verified table-driven; no defect |
-| 9 | `business_management` is required in practice | **R-only** — a Meta permission, not our code; both onboarding guides and the settings panel say so |
+| 9 | auth / org / workspaces / members | 1 | R (adversarial) + E | ✅ **2026-07-29** — one resolver with exactly the three §18 callers; all guards FOR UPDATE; no defect |
 
 Plus the multi-account lens applied across the delta: `Message.channelConnectionId`
 as immutable history (**E** `multi-account/03`), outbound-webhook attribution
@@ -1209,7 +1237,7 @@ CLAUDE.md §7/§12/§15/§18 + the module docblock.
 | 6 | Internal route gated on `teamActivity:view` | **R** `@RequireCapability("teamActivity:view")` under `SessionGuard`; the web redirect is UX only, the API is authoritative |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 | 8 | realtime layer | 1 | R (adversarial) + E (18 reducer + storm guard) | ✅ **2026-07-29** — all three reducer consumers verified table-driven; no defect |
-| 9 | One response shape shared by both routes | **R** both call `getWorkspaceReport` and return `WorkspaceReport`; the docblock names the 2026-07-28 calls-artifact regression a second mapper caused |
+| 9 | auth / org / workspaces / members | 1 | R (adversarial) + E | ✅ **2026-07-29** — one resolver with exactly the three §18 callers; all guards FOR UPDATE; no defect |
 | 10 | Multi-account lens: every panel scopable to one account | **N** `multi-account/08-reports.spec.ts` (4) |
 | 11 | contacts (+import/export/transfer) | 2 | R (adversarial) + E (19 e2e + 72-assertion smoke + 100k load) | ✅ **2026-07-29** — no defect; format abstraction made literally true |
 
@@ -1297,7 +1325,7 @@ unmapped.**
 | 6 | SSRF-safe egress | **R** `worker.ts:425` routes through `safeFetch` (DNS-pinned, private ranges + all IPv6 notations blocked) — verified in depth by the predecessor program; R-only because exercising it needs a live resolver |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 | 8 | realtime layer | 1 | R (adversarial) + E (18 reducer + storm guard) | ✅ **2026-07-29** — all three reducer consumers verified table-driven; no defect |
-| 9 | Chain-depth guard (`X-CCP-Depth`) | **E** `workflows.spec.ts:159,224` (at-cap and below-cap) + **R** `worker.ts:440` |
+| 9 | auth / org / workspaces / members | 1 | R (adversarial) + E | ✅ **2026-07-29** — one resolver with exactly the three §18 callers; all guards FOR UPDATE; no defect |
 | 10 | Retention cleanup batched | **R** `MAX_BATCHES` loop — the unbounded `deleteMany` the predecessor fixed is gone |
 | 11 | contacts (+import/export/transfer) | 2 | R (adversarial) + E (19 e2e + 72-assertion smoke + 100k load) | ✅ **2026-07-29** — no defect; format abstraction made literally true |
 | 12 | customers / identity | 2 | R (adversarial, 7 doc rules + §58) + E | ✅ **2026-07-29** — all seven hold, incl. the both-directions ephemeral exclusion; no defect. Merge-audit gap carried forward (doc-declared) |
