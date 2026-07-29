@@ -317,8 +317,8 @@ a checklist, not on however many findings happened to surface.
 
 | # | Domain | Tier | Method | Status |
 |---|---|---|---|---|
-| 1 | webhooks ingest | 1 | E (meta 170/170) + N (pressure harness) | ◐ burst behaviour VERIFIED: converges to exactly 500, no duplicates, no thread fragmentation, 56.4/s p95 892ms — inside the recorded band. Full checklist not yet walked |
-| 2 | outbound send + idempotency ledger | 1 | | ☐ |
+| 1 | webhooks ingest | 1 | R (adversarial) + E (meta 170) + N (pressure) | ✅ **2026-07-29** — both halves of the dedupe rule verified; fail-soft envelope named per reason |
+| 2 | outbound send + idempotency ledger | 1 | R (adversarial) + E | ✅ **2026-07-29** — Idempotency-Key required, one shared release-vs-retain rule; 2 tradeoffs carried |
 | 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
 | 4 | workflows (~22 step types) | 1 | | ☐ |
 | 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
@@ -725,6 +725,49 @@ sweep before starting the suite.
 ---
 
 ## Domain session notes
+
+### #1 webhooks ingest + #2 outbound send — ✅ CLOSED (2026-07-29)
+
+The two Tier-1 message-path domains, checked against CLAUDE.md §8/§18.
+
+**#1 ingest**
+
+| Invariant | Evidence |
+|---|---|
+| HMAC over the RAW body, timing-safe, length-guarded, dual team-owned candidates | **R** `timingSafeEqual` on raw bytes · **E** meta suite signed-ingest + rejection cases |
+| **Fail-soft envelope** — parse failure / unknown account / missing raw body → `200 {dropped}`; ONLY transient DB errors → `503` | **R** each drop reason is a named string (`unsupported_object`, `missing_raw_body`, `unknown_account`), and the 503s are gated on the transient classifier with a log line saying "asking Meta to retry" |
+| **Dedupe: never a bare create on inbound** | **R** BOTH halves of the §18 rule are present — a cheap `findUnique` pre-check on `workspaceId_channel_externalId`, AND the compound unique as the actual race guard, with a P2002 catch that returns **without side effects** because the transaction rolled back, so no outbox row was written either |
+| Message + conversation summary + `lastInboundAt` + the outbox row commit ATOMICALLY | **R** one `$transaction` with `publishInTx` — the comment records the bug it closed: a crash between commit and a fire-and-forget publish lost the realtime emit forever, because Meta's retry then hit the P2002 dedupe and returned silently |
+| One conversation per contact; closed threads reopen, never fragment | **R** `@@unique([workspaceId, contactId])` + the reopen CAS co-committed with the insert |
+| The account is stamped and re-stamped | **R** — verified in #14 |
+| Media is downloaded async; the row commits `mediaPending` | **R** |
+| Burst behaviour measured | **E** the `@pressure` harness — 61.9/s, p95 728 ms, converging with no duplicates and no thread fragmentation (Finding #1) |
+
+**#2 outbound send + idempotency ledger**
+
+| Invariant | Evidence |
+|---|---|
+| The billed `/v1` sends REQUIRE an `Idempotency-Key` | **R** `idempotency_key_required` at every send site, incl. the two call sends and contact import |
+| `OutboundSendAttempt` ledger keyed by BullMQ jobId survives a worker restart | **E** carried + the recovery path re-inserts from the recorded wamid rather than re-calling Meta |
+| ONE shared release-vs-retain rule | **R** `isProvablyNotSent` is a single exported function consumed by the worker, `messages.service` and the `/v1` sites — the predecessor's LOW was that the `rate_limited` carve-out existed in the worker but not the three `/v1` sites, so a rate-limit signalled ≥500 stranded a partner's key |
+| Ambiguity is refused rather than retried | **R** `refuseStaleOnAmbiguity` |
+| Every send names its ACCOUNT | **R** — verified in #14, enforced by checker 7 |
+| Broadcasts bypass the ledger and `commitOutboundSend` entirely | **R** — verified structurally in #7 |
+
+**Edge themes (both):** ① the P2002 race drops cleanly on ingest; the ledger
+claim is the CAS on send · ② **the core of both domains** · ③ ingest tolerates
+a vanished conversation · ④ N/A · ⑤ the 24 h window · ⑥ an empty batch is a
+no-op · ⑦ history chunks offload to BullMQ · ⑧ `/v1` scope-gated (checker 8) ·
+⑨ `workspaceId` in every ingest query · ⑩ the send worker's stable jobId
+survives a restart.
+
+**ACCEPTED, carried forward:** no per-conversation send ORDERING — two rapid
+sends can reach the customer out of order if the first hits a transient Meta
+failure and retries (local thread order stays correct); and the sync paths
+(media / template / interactive / forward) keep only the in-process idempotency
+map, so an api restart between Meta-accept and the HTTP response can let a human
+Retry re-send.
+
 
 ### #23 catalog + #30 api-keys — ✅ CLOSED (2026-07-29)
 
@@ -1189,8 +1232,8 @@ safe", plus the §58 composition warning. **All seven hold.** No defect found.
 
 | Rule | Invariant | Evidence |
 |---|---|---|
-| 1 | Auto-merge ONLY on deterministic strong keys | **R** `strongKeys` is exactly `phoneNumber`, plus `email` gated on `trustEmailAsStrongKey` (default OFF, one caller: the self-asserted contact-share chip) |
-| 2 | No fuzzy / name matching, ever | **R** `name` appears in identity-service only to SEED a new customer — it is never a predicate |
+| 1 | webhooks ingest | 1 | R (adversarial) + E (meta 170) + N (pressure) | ✅ **2026-07-29** — both halves of the dedupe rule verified; fail-soft envelope named per reason |
+| 2 | outbound send + idempotency ledger | 1 | R (adversarial) + E | ✅ **2026-07-29** — Idempotency-Key required, one shared release-vs-retain rule; 2 tradeoffs carried |
 | 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
 | 4 | Merge is non-destructive | **R** zero `contact.delete*` / `message.delete*` in `customers.service.ts`; the only delete is empty-customer cleanup, which the doc sanctions |
 | 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
@@ -1272,8 +1315,8 @@ in five separate prior sessions. Checklist taken verbatim from
 
 | # | Invariant (doc §6) | Evidence |
 |---|---|---|
-| 1 | `@@unique([workspaceId, channel, externalAccountId])` — re-connecting updates, never duplicates | **R** schema |
-| 2 | Dedup keys stay **workspace**-scoped, NOT per-account | **R** `Message @@unique([workspaceId, channel, externalId])`, `Call @@unique([workspaceId, channel, externalCallId])` — adding the account would make status webhooks miss |
+| 1 | webhooks ingest | 1 | R (adversarial) + E (meta 170) + N (pressure) | ✅ **2026-07-29** — both halves of the dedupe rule verified; fail-soft envelope named per reason |
+| 2 | outbound send + idempotency ledger | 1 | R (adversarial) + E | ✅ **2026-07-29** — Idempotency-Key required, one shared release-vs-retain rule; 2 tradeoffs carried |
 | 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
 | 4 | The account is re-stamped on every inbound; the widget binding is **sticky** | **R** `ingest.ts:2217-2223` (guarded so the common case writes nothing, and explicitly *"unlike webchat's sticky webchatWidgetId"*) + **E** `webhook-account-attribution.spec.ts`, `multi-account/01` |
 | 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
@@ -1339,8 +1382,8 @@ CLAUDE.md §7/§12/§15/§18 + the module docblock.
 
 | # | Invariant | Evidence |
 |---|---|---|
-| 1 | `workspaceId` in EVERY query | **R** all ten query functions verified individually |
-| 2 | `accountId` proved to belong to THIS workspace before it reaches nine raw predicates | **R** + **N** `reports-accounts.spec.ts` — an unknown id is REJECTED, not silently emptied |
+| 1 | webhooks ingest | 1 | R (adversarial) + E (meta 170) + N (pressure) | ✅ **2026-07-29** — both halves of the dedupe rule verified; fail-soft envelope named per reason |
+| 2 | outbound send + idempotency ledger | 1 | R (adversarial) + E | ✅ **2026-07-29** — Idempotency-Key required, one shared release-vs-retain rule; 2 tradeoffs carried |
 | 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
 | 4 | Range capped (`MAX_RANGE_DAYS = 366`) → `400 invalid_range` | **E** `reports-overview.spec.ts` |
 | 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
@@ -1427,8 +1470,8 @@ unmapped.**
 
 | # | Invariant | Evidence |
 |---|---|---|
-| 1 | Signed `X-CCP-Signature: t=…,v1=…`, HMAC-SHA256 over the RAW posted bytes | **N** `webhook-signing.spec.ts` (9) — incl. a receiver-side recomputation and a re-serialized-body case. NEGATIVE-TESTED ×2 |
-| 2 | Idempotent for the partner: stable `X-CCP-Delivery` id | **E** `outbox-redelivery-dedupe.spec.ts` + **R** `worker.ts:431` |
+| 1 | webhooks ingest | 1 | R (adversarial) + E (meta 170) + N (pressure) | ✅ **2026-07-29** — both halves of the dedupe rule verified; fail-soft envelope named per reason |
+| 2 | outbound send + idempotency ledger | 1 | R (adversarial) + E | ✅ **2026-07-29** — Idempotency-Key required, one shared release-vs-retain rule; 2 tradeoffs carried |
 | 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
 | 4 | Auto-disable after repeated failure | **R** `worker.ts` `consecutiveFailures` increment + reset-on-success |
 | 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
