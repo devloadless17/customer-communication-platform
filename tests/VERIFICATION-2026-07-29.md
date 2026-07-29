@@ -328,7 +328,7 @@ a checklist, not on however many findings happened to surface.
 | 11 | contacts (+import/export/transfer) | 2 | | ☐ |
 | 12 | customers / identity | 2 | | ☐ |
 | 13 | inbox-views | 2 | | ☐ |
-| 14 | channels / multi-account | 2 | | ☐ |
+| 14 | channels / multi-account | 2 | R (adversarial, 9 doc invariants) + E + N (7) | ✅ **2026-07-29** — doc §6 walked line by line; invariant 8 was FALSE and was a data-loss path (Finding #8) |
 | 15 | outbound-webhooks (delivery/retry) | 2 | R (adversarial, 13 invariants) + E + N (16 tests) | ✅ **2026-07-29** — full checklist walked, 0 unmapped. HIGH wrong-account FIXED; signing newly covered + negative-tested ×2; one false positive of my own caught and withdrawn |
 | 16 | calls (WhatsApp calling + artifacts) | 2 | | ☐ |
 | 17 | media / R2 / blob-storage | 2 | | ☐ |
@@ -723,6 +723,73 @@ sweep before starting the suite.
 ---
 
 ## Domain session notes
+
+### #14 channels / multi-account — ✅ CLOSED (2026-07-29)
+
+The domain the maintainer cares most about, and the one that has produced a HIGH
+in five separate prior sessions. Checklist taken verbatim from
+`docs/channel-accounts.md` §6 (nine stated invariants) plus CLAUDE.md §5/§7/§18.
+
+| # | Invariant (doc §6) | Evidence |
+|---|---|---|
+| 1 | `@@unique([workspaceId, channel, externalAccountId])` — re-connecting updates, never duplicates | **R** schema |
+| 2 | Dedup keys stay **workspace**-scoped, NOT per-account | **R** `Message @@unique([workspaceId, channel, externalId])`, `Call @@unique([workspaceId, channel, externalCallId])` — adding the account would make status webhooks miss |
+| 3 | Sends never guess an account | **R** `ProviderNotConfiguredError.accountUnresolved` + **E** `send-account-unresolved.spec.ts` + **CHECKER 7** enforces it mechanically across 46 call sites |
+| 4 | The account is re-stamped on every inbound; the widget binding is **sticky** | **R** `ingest.ts:2217-2223` (guarded so the common case writes nothing, and explicitly *"unlike webchat's sticky webchatWidgetId"*) + **E** `webhook-account-attribution.spec.ts`, `multi-account/01` |
+| 5 | No credentials in the member-readable directory | **R** `secrets` is never selected in `channel-accounts.service.ts` — zero occurrences |
+| 6 | Attribution renders ONLY above one account per channel | **R** `showAccountFor(channel)` gates every `AccountLabel`; a single-account inbox stays byte-identical |
+| 7 | The broadcast gate reads the **sending** account's portfolio, never the channel default's | **R** both `getSendConfig` and `getWhatsappHealth` are passed `broadcast.channelConnectionId` |
+| 8 | The account narrow is ANDed, and **must be part of `filterKey`** | **N** — **it was NOT.** Fixed + `filter-key.spec.ts` (6), negative-tested |
+| 9 | `business_management` is required in practice | **R-only** — a Meta permission, not our code; both onboarding guides and the settings panel say so |
+
+Plus the multi-account lens applied across the delta: `Message.channelConnectionId`
+as immutable history (**E** `multi-account/03`), outbound-webhook attribution
+(**FIXED**, Finding #2), calls/ingest account threading, and the whole
+`tests/e2e/multi-account/` suite at **42/42**.
+
+**Invariant 8 was the one that was false, and it was a data-loss path.** See the
+finding below. Worth noting *how* it was found: not by reading the inbox code,
+but by taking the doc's own list of invariants and checking each one. Invariants
+1–7 and 9 all held; a reviewer trusting the code's own comments would have moved
+on, because the comment three lines above the bug describes the exact hazard and
+sounds authoritative.
+
+**Edge themes:** ① N/A · ② covered (2 — dedup survives redelivery per account) ·
+③ disconnecting an account is `SetNull` + the >1-account confirm guard
+(`assert-channel-disconnect.ts`, `channel-disconnect-guard.spec.ts`) ·
+④ N/A · ⑤ N/A · ⑥ a workspace with zero accounts renders no chrome · ⑦ N/A ·
+⑧ the directory is member-readable by design, credentials are not (5) ·
+⑨ every account query is workspace-scoped · ⑩ N/A.
+
+### Finding #8 — HIGH: bulk delete could destroy chats the agent could not see
+
+`docs/channel-accounts.md` §6: *"the account narrow is ANDed, never merged, and
+must be part of `filterKey` or it silently does nothing."* It was not in
+`filterKey`.
+
+The key was built inline from `filter` alone. The account narrow is a SECOND,
+independent dimension living in the filter CONTEXT, so switching Sales → Support
+produced a byte-identical key and neither effect keyed on it fired:
+`setSelectedIds(new Set())` and `setHighlightedIndex(-1)`.
+
+The first is the dangerous half. `bulkDelete()` posts the retained ids to
+`/api/conversations/bulk`, which removes every message and note and says so in
+its own dialog (*"This can't be undone"*). Select chats on Sales → narrow to
+Support → Delete, and Sales threads the agent cannot see are destroyed while the
+UI shows Support rows.
+
+**The inline comment three lines above the bug already described this hazard**
+(*"a bulk-delete would target invisible chats"*) — it simply did not know a
+second dimension existed. That is the argument for extracting the rule to
+`lib/filter-key.ts` rather than patching in place: the next dimension gets added
+somewhere a test can see it, the same reason `inboxViewWhereClauses` and
+`channelAccountDisplayName` exist.
+
+Pinned by `apps/web/test/filter-key.spec.ts` (6), asserting DISTINCTNESS across
+dimensions rather than exact strings — including a collision case (stage `"a"` +
+account `"b"` must not alias stage `"a|b"` + no account, which naive
+concatenation would). NEGATIVE-TESTED: dropping the account segment fails 3 of 6.
+
 
 ### #21 reports / analytics — ✅ CLOSED (2026-07-29)
 
