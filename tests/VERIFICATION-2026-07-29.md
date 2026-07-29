@@ -329,7 +329,7 @@ a checklist, not on however many findings happened to surface.
 | 12 | customers / identity | 2 | | ☐ |
 | 13 | inbox-views | 2 | | ☐ |
 | 14 | channels / multi-account | 2 | | ☐ |
-| 15 | outbound-webhooks (delivery/retry) | 2 | R (account resolution) + N (2 pins) | ◐ HIGH wrong-account on `message.sent` FIXED (`3bb0f6fb`); the `conversationId` fallback claim verified across all 10 conversation-scoped events; delivery/retry/SSRF not re-walked |
+| 15 | outbound-webhooks (delivery/retry) | 2 | R (adversarial, 13 invariants) + E + N (16 tests) | ✅ **2026-07-29** — full checklist walked, 0 unmapped. HIGH wrong-account FIXED; signing newly covered + negative-tested ×2; one false positive of my own caught and withdrawn |
 | 16 | calls (WhatsApp calling + artifacts) | 2 | | ☐ |
 | 17 | media / R2 / blob-storage | 2 | | ☐ |
 | 18 | queues / workers | 2 | | ☐ |
@@ -724,4 +724,46 @@ sweep before starting the suite.
 
 ## Domain session notes
 
-_(appended as each domain closes)_
+### #15 outbound-webhooks — ✅ CLOSED (2026-07-29)
+
+Checklist generated from CLAUDE.md §12 + §18 + `docs/events.md`, then each line
+mapped to a green test or an explicit R-only reason. **13 invariants, 0
+unmapped.**
+
+| # | Invariant | Evidence |
+|---|---|---|
+| 1 | Signed `X-CCP-Signature: t=…,v1=…`, HMAC-SHA256 over the RAW posted bytes | **N** `webhook-signing.spec.ts` (9) — incl. a receiver-side recomputation and a re-serialized-body case. NEGATIVE-TESTED ×2 |
+| 2 | Idempotent for the partner: stable `X-CCP-Delivery` id | **E** `outbox-redelivery-dedupe.spec.ts` + **R** `worker.ts:431` |
+| 3 | Bounded retries — 7 attempts, exponential backoff from 30 s | **R** `queue.ts:110-111` (R-only: asserting BullMQ's own backoff schedule would test the library, not us) |
+| 4 | Auto-disable after repeated failure | **R** `worker.ts` `consecutiveFailures` increment + reset-on-success |
+| 5 | Stable, versioned payload | **N** `webhook-signing.spec.ts` pins `WEBHOOK_WIRE_VERSION = 1`, so a silent bump costs a deliberate test edit |
+| 6 | SSRF-safe egress | **R** `worker.ts:425` routes through `safeFetch` (DNS-pinned, private ranges + all IPv6 notations blocked) — verified in depth by the predecessor program; R-only because exercising it needs a live resolver |
+| 7 | §18: **never** subscribe to `broadcast.*` | **R** verified against the actual `busEventTypesToSubscribe()` list (15 events, zero `broadcast.*`) — against the registry, not a comment |
+| 8 | Tenancy: `OutboundWebhookDelivery` is a parent-scoped exception | **R** the one request-reachable read proves ownership of the workspace-scoped PARENT first, then queries by `webhookId`; the worker's bare-id read is a BullMQ job path, never request input |
+| 9 | Chain-depth guard (`X-CCP-Depth`) | **E** `workflows.spec.ts:159,224` (at-cap and below-cap) + **R** `worker.ts:440` |
+| 10 | Retention cleanup batched | **R** `MAX_BATCHES` loop — the unbounded `deleteMany` the predecessor fixed is gone |
+| 11 | Fires at tier `OUTBOUND_WEBHOOKS` (50), self-registers | **R** + **E** `fanout-storm-guard.spec.ts` |
+| 12 | Redelivery dedupe per (outbox row, webhook) | **E** `outbox-redelivery-dedupe.spec.ts` + `partial-indexes.spec.ts` pins the raw partial UNIQUE |
+| 13 | Names the account that ACTUALLY carried the event | **N** `webhook-channel-provenance.spec.ts` (7) + **E** `multi-account/03` — the HIGH fixed today |
+
+**A false positive I caught in my own audit, worth recording.** I reported that
+the three `*_event_key_uniq` partial UNIQUE indexes — the only thing preventing
+redelivery from double-firing workflows (billed Meta sends) and double-POSTing
+partners — were missing from `partial-indexes.spec.ts`. They are not. I had
+grepped the spec for the COLUMN name (`eventKey`) while the spec names them by
+INDEX name (`event_key_uniq`). Verified three ways before withdrawing it: the
+migration, `pg_indexes` on the live dev DB, and the spec's own list. The
+§18 tripwire is intact.
+
+**Edge themes:** ① N/A (delivery is queue-serialized per row) · ② covered (12) ·
+③ covered (`worker.ts:355` exits cleanly when the row is gone) · ④ N/A ·
+⑤ N/A · ⑥ N/A · ⑦ retention batching (10) · ⑧ management routes are
+`admin:settings` incl. reads, pinned by `v1-parity.spec.ts` · ⑨ covered (8) ·
+⑩ orphan-delivery sweeper re-enqueues preserving `chainDepth`.
+
+**ACCEPTED (documented, not defects):** the retry schedule is BullMQ's, so it is
+asserted by configuration rather than by waiting ~31 min in a test; `safeFetch`
+is R-only for the same reason its own hardening was — a genuine SSRF assertion
+needs a resolver, and the predecessor verified the implementation line by line.
+
+
