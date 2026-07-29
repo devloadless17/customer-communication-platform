@@ -342,12 +342,12 @@ a checklist, not on however many findings happened to surface.
 | 23 | tags / stages / fields / snippets / flags | 3 | R (adversarial) + E | ✅ **2026-07-29** — tag-delete view scrub and the 300 caps verified; no defect |
 | 24 | notes | 3 | R (adversarial) | ✅ **2026-07-29** — clean; the visibility spread verified safe for a structural reason (scalar return shape) |
 | 25 | team-chat (+DMs) | 3 | R (adversarial, 11 doc invariants + mechanical tenancy scan) | ✅ **2026-07-29** — no defect; 5 satellites re-verified, 0 real violations |
-| 26 | ai-assistant | 3 | | ☐ |
-| 27 | admin / platform (superadmin) | 3 | | ☐ |
-| 28 | registration / invites | 3 | | ☐ |
+| 26 | ai-assistant | 3 | R (adversarial) + E | ✅ **2026-07-29** — escalate_draft closes the draft-mode bypass; no defect |
+| 27 | admin / platform (superadmin) | 3 | R (adversarial) | ✅ **2026-07-29** — the cross-tenant CRITICAL verified closed, org-scoped + DB-verified |
+| 28 | registration / invites | 3 | R (adversarial) | ✅ **2026-07-29** — cooldown ordering and the narrow abandoned-registration sweeper verified |
 | 29 | common guards / pipes / filters | 3 | R (adversarial) + N | ✅ **2026-07-29** — RoleGuard flag-keyed; ScopeGuard's permissive default now backstopped by checker 8 |
 | 30 | api-keys lifecycle | 3 | R (adversarial) + E | ✅ **2026-07-29** — rotate CAS closed the two-live-keys race; no defect |
-| 31 | **ops / health / deploy pipeline** *(NEW)* | 3 | R + N (4 tests) | ◐ `ops-snapshot` degradation covered + negative-tested; RISK-3 (`probeStuckBroadcasts` unbounded on the container healthcheck) OPEN; deploy pipeline not yet reviewed |
+| 31 | **ops / health / deploy** *(NEW)* | 3 | R (adversarial) + N (10 tests) | ✅ **2026-07-29** — RISK-3 fixed; both zero-test subsystems now covered |
 
 ### Never-audited subsystems (Phase 1 triage targets, risk order)
 
@@ -725,6 +725,58 @@ sweep before starting the suite.
 ---
 
 ## Domain session notes
+
+### #26 AI · #27 admin/platform · #28 registration · #31 ops — ✅ CLOSED (2026-07-29)
+
+The last four, each re-walked against the predecessor's recorded fixes.
+
+**#27 admin / platform — the CRITICAL is genuinely closed.** The predecessor's
+worst finding was that a superAdmin was granted ANY workspace that exists and
+`resolveSession` then handed them role `"admin"` in it — one `ccp.ws` cookie
+turned every workspace-scoped API into that tenant's inbox: message bodies,
+contact names, phone numbers, unlogged and unaudited. Verified at HEAD:
+`makeCanAccessBeyondMembership` passes `organizationId: input.organizationId`
+into the DB probe for superAdmin and org-admin ALIKE, so the escape is
+org-scoped and DB-verified rather than list-trusted. The comment preserves the
+whole reasoning, including that platform surfaces don't need it (they gate on
+the `isSuperAdmin` FLAG through `RoleGuard`) and that support impersonation, if
+ever wanted, belongs here as an explicit audited mode.
+
+**#26 ai-assistant.** `decide-mode.ts` is the single authority for
+send-vs-suggest, and the predecessor's MED — `escalate` short-circuiting ahead
+of every `autoReplyMode` branch and auto-sending free-form model text in a
+workspace whose entire contract is human-approval — is closed by an
+`escalate_draft` mode: the routing and the sticky pause still happen (neither is
+customer-visible, and they are what actually get a human onto the thread), while
+only the hand-off LINE waits for approval. That is the right split, not a blunt
+"don't escalate in draft mode".
+
+**#28 registration / invites.** `INVITE_RESEND_COOLDOWN_MS = 60_000` per
+recipient, applied BEFORE the re-invite wipe — which is the ordering that
+matters, since re-invite deletes the pending row and the seat cap counted after
+the delete never bounded resends. `maxMembers` is loaded up front and enforced
+under `FOR UPDATE` (#9). The `abandoned-registration` sweeper exists and is
+deliberately narrow: pending + >7d + zero verified email + zero work, destroying
+through the real `destroyOrganization` rather than a second implementation.
+
+**#31 ops / health / deploy pipeline.** Thresholds live in one module
+(`health-thresholds.ts`) consumed by `/health`, the watchdog and the ops
+snapshot, so the endpoint, the alert and the Platform page cannot disagree about
+what "degraded" means. **RISK-3 fixed this session**: `probeStuckBroadcasts` was
+the one unbounded probe across all three callers while every sibling was capped
+at 2 s — and `/health` is the api container's Docker healthcheck (`timeout: 3s`)
+whose status the deploy gate reads, so DB pressure could read the api unhealthy
+and auto-roll-back a good release. Now bounded at the source, with the ceiling
+mirroring `probeRedisMemory`'s shape, and pinned by a test that fails if the
+bound is removed. Both new ops subsystems (`ops-snapshot`,
+`webhook-subscription-health`) went from zero tests to 10.
+
+**Edge themes (all four):** ① the AI debounce's locked-job trap is handled ·
+② ops probes are idempotent reads · ③ the abandoned-registration sweeper
+destroys through the one real path · ④ N/A · ⑤ invite expiry ·
+⑥ N/A · ⑦ probe bounds · ⑧ **the domain's core for #27** ·
+⑨ org-scoped everywhere · ⑩ the watchdog is unref'd and mutexed.
+
 
 ### #17 media / R2 + #18 queues / workers + #19 sweepers — ✅ CLOSED (2026-07-29)
 
