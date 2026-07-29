@@ -326,7 +326,7 @@ a checklist, not on however many findings happened to surface.
 | 9 | auth / org / workspaces / members | 1 | | ☐ |
 | 10 | external `/v1` API | 1 | | ☐ |
 | 11 | contacts (+import/export/transfer) | 2 | | ☐ |
-| 12 | customers / identity | 2 | | ☐ |
+| 12 | customers / identity | 2 | R (adversarial, 7 doc rules + §58) + E | ✅ **2026-07-29** — all seven hold, incl. the both-directions ephemeral exclusion; no defect. Merge-audit gap carried forward (doc-declared) |
 | 13 | inbox-views | 2 | R (adversarial, 6 doc invariants) + E (31) | ✅ **2026-07-29** — all six already covered; no defect, one stale comment fixed |
 | 14 | channels / multi-account | 2 | R (adversarial, 9 doc invariants) + E + N (7) | ✅ **2026-07-29** — doc §6 walked line by line; invariant 8 was FALSE and was a data-loss path (Finding #8) |
 | 15 | outbound-webhooks (delivery/retry) | 2 | R (adversarial, 13 invariants) + E + N (16 tests) | ✅ **2026-07-29** — full checklist walked, 0 unmapped. HIGH wrong-account FIXED; signing newly covered + negative-tested ×2; one false positive of my own caught and withdrawn |
@@ -724,6 +724,51 @@ sweep before starting the suite.
 
 ## Domain session notes
 
+### #12 customers / identity — ✅ CLOSED (2026-07-29)
+
+Checklist = the seven numbered rules in `docs/identity.md` "Rules that keep this
+safe", plus the §58 composition warning. **All seven hold.** No defect found.
+
+| Rule | Invariant | Evidence |
+|---|---|---|
+| 1 | Auto-merge ONLY on deterministic strong keys | **R** `strongKeys` is exactly `phoneNumber`, plus `email` gated on `trustEmailAsStrongKey` (default OFF, one caller: the self-asserted contact-share chip) |
+| 2 | No fuzzy / name matching, ever | **R** `name` appears in identity-service only to SEED a new customer — it is never a predicate |
+| 3 | Everything else is manual and reversible | **E** `v1-parity.spec.ts` — *"unlink must never delete the contact"* |
+| 4 | Merge is non-destructive | **R** zero `contact.delete*` / `message.delete*` in `customers.service.ts`; the only delete is empty-customer cleanup, which the doc sanctions |
+| 5 | Tenant-scoped — identity never crosses `workspaceId` | **R** `workspaceId` in the candidate `where` and on the created `Customer` |
+| 6 | ONE writer | **R** `resolveCustomerId` called only from ingest (×3), ingest-call and the drift sweeper — never a controller or provider |
+| 7 | A strong key needs a VERIFIED identity, **in both directions** | **R** `identityChannel: { notIn: [...EPHEMERAL_CONTACT_CHANNELS] }` excludes ephemeral contacts from the CANDIDATE SET, not merely from initiating |
+
+**Rule 7 is the subtle one and it is genuinely implemented.** Blocking only the
+outbound half would leave the attack reachable from the far side: a stranger
+types a known customer's number into the public pre-chat box, and *the real
+owner's* next inbound then resolves that number, finds the widget contact, and
+adopts ITS customer — folding a stranger's live thread into the real person's
+profile and channel switcher (exploitable when the widget row is older, since
+`orderBy: createdAt asc` means oldest wins). The exclusion sits in the candidate
+query, so both directions are closed. The value is still STORED so an agent can
+see it; it just never acts as a key.
+
+**§58 composition warning — VERIFIED HELD at every site.** `directoryContactWhere`
+is an `OR` node, so spreading it into a `where` that already has a top-level `OR`
+clobbers that disjunction and silently widens the result — the same class as the
+inbox-view spread and the `filterKey` omission (Finding #8). All sites are
+correct: `countAll` spreads it but has no sibling `OR`; the export runner uses an
+explicit `AND: [...]`; and the raw-SQL twin `DIRECTORY_CONTACT_SQL` is a
+parenthesised fragment ANDed in.
+
+**Edge themes:** ① the drift sweeper CASes on `customerId` · ② N/A ·
+③ `deletedAt: null` keeps tombstones out of the candidate set · ④ N/A ·
+⑤ N/A · ⑥ no strong key → a fresh customer, never a match-all · ⑦ the drift
+sweeper is batched · ⑧ merge/split is agent-driven and workspace-scoped ·
+⑨ covered (rule 5) · ⑩ the sweeper is mutexed and resumable.
+
+**CARRIED FORWARD (the doc declares it itself, not a new finding):** the
+merge/split **audit record** is still not persisted — merge and split only write
+log lines. `docs/identity.md` rule 3 flags it: *"Add it before relying on merge
+history."* Unchanged by this pass.
+
+
 ### #13 inbox-views — ✅ CLOSED (2026-07-29)
 
 Checklist taken from `docs/inbox-views.md` §1–§6. **The best-covered domain
@@ -935,7 +980,7 @@ unmapped.**
 | 9 | Chain-depth guard (`X-CCP-Depth`) | **E** `workflows.spec.ts:159,224` (at-cap and below-cap) + **R** `worker.ts:440` |
 | 10 | Retention cleanup batched | **R** `MAX_BATCHES` loop — the unbounded `deleteMany` the predecessor fixed is gone |
 | 11 | Fires at tier `OUTBOUND_WEBHOOKS` (50), self-registers | **R** + **E** `fanout-storm-guard.spec.ts` |
-| 12 | Redelivery dedupe per (outbox row, webhook) | **E** `outbox-redelivery-dedupe.spec.ts` + `partial-indexes.spec.ts` pins the raw partial UNIQUE |
+| 12 | customers / identity | 2 | R (adversarial, 7 doc rules + §58) + E | ✅ **2026-07-29** — all seven hold, incl. the both-directions ephemeral exclusion; no defect. Merge-audit gap carried forward (doc-declared) |
 | 13 | inbox-views | 2 | R (adversarial, 6 doc invariants) + E (31) | ✅ **2026-07-29** — all six already covered; no defect, one stale comment fixed |
 
 **A false positive I caught in my own audit, worth recording.** I reported that
