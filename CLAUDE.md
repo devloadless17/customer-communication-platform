@@ -1,6 +1,6 @@
 # Engineering Handbook — Omnichannel Shared Inbox
 
-This is the single source of truth for how this repository is designed and how future code must be written. Read it before making changes. Deep operational detail lives in [`docs/`](docs/) (linked throughout) so this file stays scannable.
+This is the single source of truth for how this repository is designed and how future code must be written. Read it before making changes. Deeper detail lives beside the code it describes (see §20) so this file stays scannable — there is no `docs/` tree, it was removed as stale.
 
 > **Prime directive.** Build a world-class, realtime, collaborative shared-inbox platform that is **simple, layered, predictable, and fast**. Every part must be clean, solid, and wired to the next through clear seams, so any one part can change or fail without breaking the rest. When in doubt, choose the simpler design.
 
@@ -54,11 +54,11 @@ Organization → Workspaces → Channels → Accounts
 - **Conversation** — one thread per contact per channel. Closed threads **reopen**, they never fragment.
 - **Message** — one inbound/outbound message on a conversation.
 - **Ticket** — the unit of *work* on a conversation, **many per thread over time**. See §2 note
-  below and [docs/ticketing.md](docs/ticketing.md).
+  below and [`apps/api/src/lib/tickets/mutations.ts`](apps/api/src/lib/tickets/mutations.ts).
 
-A conversation is the long-lived thread. A **ticket** is one piece of *work* on it, and there are many over time — the refund in March and the delivery question in June are two tickets on one unbroken thread, each with its own assignee, priority, SLA clock and outcome. Tickets are **raised deliberately** — by the agent who read the message (or a workflow's `create_ticket` step), with a subject, a priority and an assignee. There is **no auto-open** (the `Workspace.ticketAutoOpen` toggle was removed 2026-07-25): the inbox already tracks every thread, so auto-opening would make a ticket mean the same thing as a conversation and fill the board with work nobody raised. Ingest only ATTACHES an inbound to the thread's active ticket, or REOPENS one solved inside the per-workspace reopen window (`Workspace.ticketReopenWindowHours`). The inbox is untouched either way (the board is a parallel lens joined by `Message.ticketId`). See [docs/ticketing.md](docs/ticketing.md).
+A conversation is the long-lived thread. A **ticket** is one piece of *work* on it, and there are many over time — the refund in March and the delivery question in June are two tickets on one unbroken thread, each with its own assignee, priority, SLA clock and outcome. Tickets are **raised deliberately** — by the agent who read the message (or a workflow's `create_ticket` step), with a subject, a priority and an assignee. There is **no auto-open** (the `Workspace.ticketAutoOpen` toggle was removed 2026-07-25): the inbox already tracks every thread, so auto-opening would make a ticket mean the same thing as a conversation and fill the board with work nobody raised. Ingest only ATTACHES an inbound to the thread's active ticket, or REOPENS one solved inside the per-workspace reopen window (`Workspace.ticketReopenWindowHours`). The inbox is untouched either way (the board is a parallel lens joined by `Message.ticketId`). See [`apps/api/src/lib/tickets/mutations.ts`](apps/api/src/lib/tickets/mutations.ts).
 
-Collaboration primitives on a conversation: **assignment** (manual, or routed by admin-configured policies — see [docs/assignment.md](docs/assignment.md)), **status** (open/pending/closed), **stage** (pipeline), **tags**, **custom fields**, **internal notes**, and **saved views** (a named, reusable filter over the list — personal or shared with the workspace). Around them: **triggers → workflows → actions** (automation), **outbound webhooks** (notify external systems), **broadcasts** (bulk templated outbound), the external **`/v1` API** (n8n/Zapier/partners), and **calling** (WhatsApp Business Calling over WebRTC).
+Collaboration primitives on a conversation: **assignment** (manual, or routed by admin-configured policies — see [`apps/api/src/lib/assignment/README.md`](apps/api/src/lib/assignment/README.md)), **status** (open/pending/closed), **stage** (pipeline), **tags**, **custom fields**, **internal notes**, and **saved views** (a named, reusable filter over the list — personal or shared with the workspace). Around them: **triggers → workflows → actions** (automation), **outbound webhooks** (notify external systems), **broadcasts** (bulk templated outbound), the external **`/v1` API** (n8n/Zapier/partners), and **calling** (WhatsApp Business Calling over WebRTC).
 
 Everything in the app revolves around the conversation. The inbox is the heart of the product and must always be the highest-quality, most realtime surface.
 
@@ -107,7 +107,7 @@ This is what lets one layer change without breaking the rest. Swap a provider, m
 
 ## 5. Channels are pluggable
 
-Full recipe + per-channel constraint table: **[docs/adding-a-channel.md](docs/adding-a-channel.md)**.
+Full recipe + per-channel constraint table: **[`apps/api/src/lib/providers/README.md`](apps/api/src/lib/providers/README.md)**.
 
 - One discriminator: the `Channel` enum. **Live today**: `whatsapp`, `messenger`, `instagram`, `webchatwidget` (each has a registered provider + onboarding; `webchatwidget` is first-party, no vendor). **Designed-for / disabled**: `telegram`, `email`, `sms` — the enum value + capability/identity/label maps exist so the architecture is ready, but there's no provider/webhook/onboarding yet, so no row can carry them. `@ccp/shared/providers/capabilities` exposes `LIVE_CHANNELS` + `isChannelLive()`; shipping a designed-for channel = add its provider/webhook/onboarding **and** add it to `LIVE_CHANNELS`. **No `provider`/`vendor` column anywhere** — which vendor implements a channel is an impl detail, never stored. Meta Cloud serves WhatsApp/Messenger/Instagram; they are distinct *channels* because the channel is the medium, not the vendor.
 - `MessagingProvider<C>` interface (`packages/shared/src/providers/types.ts`): declarative `capabilities`, a pure `parseWebhook(payload) → NormalizedEvent[]`, `sendText`, and optional media/template/calling methods. The only impl today is the `metaProvider` object in `apps/api/src/lib/providers/meta.ts`.
@@ -121,25 +121,25 @@ Model each channel's rules (24h window, templates vs free-form, rate limit) as `
 
 ## 6. Customer identity
 
-Full design + current state: **[docs/identity.md](docs/identity.md)**.
+Full design + current state: **[`apps/api/src/lib/identity/identity-service.ts`](apps/api/src/lib/identity/identity-service.ts)**.
 
 The platform adopts a **unified customer identity**: a `Customer` (person) owns many channel-scoped `Contact` rows, so an agent sees one profile across all a person's channels. Threads stay **per-contact/per-channel** (we never merge message histories) — the customer is a profile-and-switcher layer over separate threads.
 
 Discipline that keeps this simple and safe:
 - **Auto-merge only on deterministic strong keys** (exact phone; exact email **only when self-asserted** via the contact-share chip — an agent-typed or CSV-imported email never auto-merges). **No fuzzy/name matching, ever.** A strong key requires a **vendor-verified** identity, so ephemeral-channel contacts are excluded from the strong-key *candidate set* in both directions — a value typed into the widget's public pre-chat box is stored but never acts as a key.
-- **Ephemeral contacts.** `EPHEMERAL_CONTACT_CHANNELS` (webchatwidget today) are chat sessions, not directory entries: a per-browser `vis_<uuid>` with no durable address. They're hidden from the contacts list / CSV / audience counts / search — but full-quality in the inbox, and workflows still fire. Directory membership is **derived** (has a phone or email), so a visitor who self-identifies is promoted automatically. See [docs/identity.md](docs/identity.md).
+- **Ephemeral contacts.** `EPHEMERAL_CONTACT_CHANNELS` (webchatwidget today) are chat sessions, not directory entries: a per-browser `vis_<uuid>` with no durable address. They're hidden from the contacts list / CSV / audience counts / search — but full-quality in the inbox, and workflows still fire. Directory membership is **derived** (has a phone or email), so a visitor who self-identifies is promoted automatically. See [`apps/api/src/lib/identity/identity-service.ts`](apps/api/src/lib/identity/identity-service.ts).
 - Everything else is **manual, reversible merge/split**. Merge never deletes a contact or its messages — it only re-points `Contact.customerId`. (A persisted audit record for merges is designed but **not yet built** — see gaps below.)
 - Identity resolution runs in **exactly one place** (`IdentityService.resolveCustomerId` in the domain layer, called from ingest + a drift sweeper), tenant-scoped.
 
-**Current state**: **shipped** (built alongside Messenger + Instagram). The `Customer` model + `Contact.customerId` exist; auto-merge on exact phone/email runs via `IdentityService` (inline at ingest + drift sweeper); manual reversible merge/split (`CustomersService.link`/`unlink`) + the "linked channels" switcher UI are live. Per-`Customer` **omnichannel broadcast targeting** is now built — a `targetMode:'customer'` broadcast reaches each person ONCE on their best live channel (`bestChannelForCustomer` + per-recipient runner routing; "People (best channel)" mode in the broadcast composer). **Not yet built**: lifting person-level fields onto `Customer` + a contacts-list page rollup by person (workflow actions still target channel-scoped `Contact`s outside the `customer` step target). Gaps tracked in [docs/identity.md](docs/identity.md).
+**Current state**: **shipped** (built alongside Messenger + Instagram). The `Customer` model + `Contact.customerId` exist; auto-merge on exact phone/email runs via `IdentityService` (inline at ingest + drift sweeper); manual reversible merge/split (`CustomersService.link`/`unlink`) + the "linked channels" switcher UI are live. Per-`Customer` **omnichannel broadcast targeting** is now built — a `targetMode:'customer'` broadcast reaches each person ONCE on their best live channel (`bestChannelForCustomer` + per-recipient runner routing; "People (best channel)" mode in the broadcast composer). **Not yet built**: lifting person-level fields onto `Customer` + a contacts-list page rollup by person (workflow actions still target channel-scoped `Contact`s outside the `customer` step target). Gaps tracked in [`apps/api/src/lib/identity/identity-service.ts`](apps/api/src/lib/identity/identity-service.ts).
 
 ---
 
 ## 7. Data model spine
 
-Real entities (`prisma/schema.prisma`; ERD in [docs/schema-erd.md](docs/schema-erd.md)):
+Real entities (`prisma/schema.prisma`; ERD in [`prisma/schema.prisma`](prisma/schema.prisma)):
 
-`Team → User → ChannelConnection`; `Contact → Conversation → Message`; plus `ContactStage`, `ContactFieldDefinition`, `Tag`, `InboxView` (saved inbox filters — shared or personal; the criteria are one validated JSON document turned into SQL in exactly one place, `lib/inbox-views/where.ts`), `AudienceGroup`, `Broadcast`/`BroadcastRecipient`, `WhatsappPortfolio` (the business portfolio a WhatsApp number belongs to — since 2025-10-07 the 24h messaging cap is PORTFOLIO-scoped, shared by every number in it), `TemplateAnalyticsDaily` (Meta's own per-template daily rollup — the only source of currency cost + unique link clicks), `InternalNote`, `Workflow`/`WorkflowRun`/`WorkflowContactState`, `TeamApiKey`, `OutboundWebhook`/`OutboundWebhookDelivery`, `OutboundEvent` (outbox), `ConversationEvent` (audit timeline), `ContactTransferJob` (contact import/export runs), `Ticket`/`TicketEvent`/`TicketSlaPolicy`/`TicketFieldDefinition`/`TicketNumberCounter` (the work items on a conversation — many per thread; see [docs/ticketing.md](docs/ticketing.md)), the team-chat models (a deliberately separate message graph — channels **and** 1:1 DMs share `TeamChannel` via a `kind` discriminator; see [docs/team-chat.md](docs/team-chat.md)), `Call`/`CallPermissionRequest`, `OutboundSendAttempt` (send-idempotency ledger).
+`Team → User → ChannelConnection`; `Contact → Conversation → Message`; plus `ContactStage`, `ContactFieldDefinition`, `Tag`, `InboxView` (saved inbox filters — shared or personal; the criteria are one validated JSON document turned into SQL in exactly one place, `lib/inbox-views/where.ts`), `AudienceGroup`, `Broadcast`/`BroadcastRecipient`, `WhatsappPortfolio` (the business portfolio a WhatsApp number belongs to — since 2025-10-07 the 24h messaging cap is PORTFOLIO-scoped, shared by every number in it), `TemplateAnalyticsDaily` (Meta's own per-template daily rollup — the only source of currency cost + unique link clicks), `InternalNote`, `Workflow`/`WorkflowRun`/`WorkflowContactState`, `TeamApiKey`, `OutboundWebhook`/`OutboundWebhookDelivery`, `OutboundEvent` (outbox), `ConversationEvent` (audit timeline), `ContactTransferJob` (contact import/export runs), `Ticket`/`TicketEvent`/`TicketSlaPolicy`/`TicketFieldDefinition`/`TicketNumberCounter` (the work items on a conversation — many per thread; see [`apps/api/src/lib/tickets/mutations.ts`](apps/api/src/lib/tickets/mutations.ts)), the team-chat models (a deliberately separate message graph — channels **and** 1:1 DMs share `TeamChannel` via a `kind` discriminator; see [`apps/api/src/team-chat/`](apps/api/src/team-chat/)), `Call`/`CallPermissionRequest`, `OutboundSendAttempt` (send-idempotency ledger).
 
 **Non-negotiable data invariants:**
 - **`workspaceId` on every table**, and in the `where` of every query — sourced from `req.session.workspaceId` (resolved server-side from the membership-validated `ccp.ws` cookie / `Session.activeWorkspaceId`) or `req.apiKey.workspaceId`, **never** from client input. There is no Prisma middleware / RLS; tenant isolation is manual and load-bearing. **Explicit exceptions** (each carries a `TENANCY EXCEPTION` note in the schema, and the checker's tenancy gate allowlists them): auth/root tables, seven parent-scoped children (`BroadcastRecipient`, `OutboundWebhookDelivery`, the five `TeamChannel*` satellites) that must ONLY be reached through a workspaceId-scoped query on their parent — never by a bare child id from request input — and `TicketEscalation`, the one deliberately cross-workspace row (the escalation bridge; reached only through a workspace-scoped query on one of its two tickets).
@@ -162,7 +162,7 @@ Meta → Caddy → NestJS webhook controller → HMAC verify (raw body)
   → Prisma upsert → publish DomainEvent
   → [realtime fanout] · [audit] · [analytics] · [workflow dispatch] · [outbound webhooks]
 ```
-Media is downloaded async (row commits `mediaPending`, then `message.media_ready` publishes once bytes land in R2). Fail-soft: Meta retries any non-2xx, so parse/ingest failures return `200 {dropped}`; only transient DB errors throw `503` for redelivery. Detail in [docs/events.md](docs/events.md).
+Media is downloaded async (row commits `mediaPending`, then `message.media_ready` publishes once bytes land in R2). Fail-soft: Meta retries any non-2xx, so parse/ingest failures return `200 {dropped}`; only transient DB errors throw `503` for redelivery. Detail in [`apps/api/src/lib/events/bus.ts`](apps/api/src/lib/events/bus.ts).
 
 **Outbound**:
 ```
@@ -176,7 +176,7 @@ A send is non-idempotent and bills the team, so `/v1` sends **require** an `Idem
 
 ## 9. Event model
 
-Full detail: **[docs/events.md](docs/events.md)**.
+Full detail: **[`apps/api/src/lib/events/bus.ts`](apps/api/src/lib/events/bus.ts)**.
 
 **Events are notifications, not business logic.** They announce a change that already committed. Rules:
 - Every event has **one owner** (the publisher) and **one purpose**. A subscriber reacts; it never owns the mutation.
@@ -191,7 +191,7 @@ The bus (`apps/api/src/lib/events/bus.ts`) is a **two-tier priority dispatch**: 
 
 ## 10. Realtime model
 
-Full detail: **[docs/realtime.md](docs/realtime.md)**. This is the app's highest-quality bar.
+Full detail: **[`apps/api/src/realtime/fanout-rules.ts`](apps/api/src/realtime/fanout-rules.ts)**. This is the app's highest-quality bar.
 
 - **Emit only after a successful state change. Frames are small, scoped, idempotent — never speculative, never duplicate, never unchanged.**
 - **Rooms** (`apps/api/src/realtime/rooms.ts`): `team:` / `conv:` / `chan:` / `user:`. Fanout scope is deliberate (`fanout-rules.ts`): team-wide frames only for what every agent needs; thread frames (`message:status`, typing, broadcast recipient frames) scoped to the conversation room to avoid team-room storms.
@@ -222,7 +222,7 @@ Protected against recursion, infinite loops, duplicate execution, and retry-indu
 - **Providers are adapters.** They translate a vendor wire shape ↔ `NormalizedEvent` and nothing else. Business logic never depends on a provider. Every external system (Meta, future Telegram/SMS/Email, n8n/Zapier/Make) is just another adapter or a webhook consumer.
 - **Inbound webhooks**: HMAC-verify the raw body on every POST (`X-Hub-Signature-256`), reject malformed signatures, dedupe, keep the raw payload, fail-soft on non-2xx.
 - **Outbound webhooks** (implemented): only meaningful business events; signed (`X-CCP-Signature`, HMAC-SHA256); idempotent (delivery id header); bounded retries (7 attempts, exp backoff) with auto-disable after repeated failure; a stable, versioned payload that carries enough context to avoid extra API calls. Managed under `apps/api/src/workspace-settings/outbound-webhooks/`.
-- **External `/v1` API** (`apps/api/src/external/v1/`): full parity with the internal UI actions is a **locked rule** — every capability the UI has, the API has, and every endpoint is documented in both [docs/organization-api.md](docs/organization-api.md) and the in-app `/docs/api` page. Bearer API keys + scopes, mandatory `Idempotency-Key` on sends, chain-depth guard. `/v1` writes publish the same domain events as internal routes.
+- **External `/v1` API** (`apps/api/src/external/v1/`): full parity with the internal UI actions is a **locked rule** — every capability the UI has, the API has, and every endpoint is documented on the in-app `/docs/api` page ([`apps/web/src/app/docs/api/page.tsx`](apps/web/src/app/docs/api/page.tsx)). `scripts/check-v1-docs.mjs` enforces BOTH halves mechanically: every route carries `@RequireScope` (`ScopeGuard` is permissive by default, so an undecorated route is reachable by any valid key) and appears on that page. Bearer API keys + scopes, mandatory `Idempotency-Key` on sends, chain-depth guard. `/v1` writes publish the same domain events as internal routes.
 
 ---
 
@@ -231,12 +231,12 @@ Protected against recursion, infinite loops, duplicate execution, and retry-indu
 **REST**: one folder per domain (`*.controller.ts` + `*.service.ts` + `*.module.ts` + `*.schemas.ts`); controllers thin over `lib/**`.
 - **Validation**: Zod everywhere via `zBody(schema)` / `zQuery(schema)` pipes (`apps/api/src/common/zod-validation.pipe.ts`). **There is no `zParam`** — params are read with `@Param` and checked inline. Reuse existing schemas; no class-validator.
 - **Guards**: `SessionGuard` (Better Auth cookie via Prisma, cached), `ApiKeyGuard` + `ScopeGuard` (`@RequireScope`), role/capability guards for RBAC.
-- **Rate limiting**: `@RateLimit({ perMinute })` interceptor, 300/min/user default (details + rationale in [docs/operations.md](docs/operations.md)).
+- **Rate limiting**: `@RateLimit({ perMinute })` interceptor, 300/min/user default (details + rationale in [`deploy/README.md`](deploy/README.md)).
 - **Errors**: structured `{ error: "<snake_case_key>", … }`; Zod adds `issues`; `PrismaExceptionFilter` maps leaked Prisma errors (P2025→404, P2002→409, …). PII/`.meta` logged server-side with the correlation id, never in the body.
 - **Correlation**: `X-Request-Id` via AsyncLocalStorage, minted at the edge and propagated through all fan-out fetches.
 - No hidden side effects: a GET never mutates; a mutation publishes exactly the events it should.
 
-**Queues**: async work only; bounded retries + dead-letter retention; idempotent enqueue (stable `jobId`); never a recursive or storming job. Workers run in-process (`RUN_WORKER_INLINE`, default on; prod refuses `0`). Graceful shutdown drains them cleanly — see [docs/operations.md](docs/operations.md).
+**Queues**: async work only; bounded retries + dead-letter retention; idempotent enqueue (stable `jobId`); never a recursive or storming job. Workers run in-process (`RUN_WORKER_INLINE`, default on; prod refuses `0`). Graceful shutdown drains them cleanly — see [`deploy/README.md`](deploy/README.md).
 
 ---
 
@@ -268,9 +268,9 @@ Avoid duplicated state, unnecessary global stores, unnecessary fetching, and unn
 
 ## 16. Scalability & security
 
-**Scale**: assume many orgs, users, conversations, messages, sockets, workflows, webhook deliveries. The current single-VPS, in-process design is correct for today; grow only at a **named cliff** (full list in [docs/operations.md](docs/operations.md)):
+**Scale**: assume many orgs, users, conversations, messages, sockets, workflows, webhook deliveries. The current single-VPS, in-process design is correct for today; grow only at a **named cliff** (full list in [`deploy/README.md`](deploy/README.md)):
 - second app instance → Redis Socket.io adapter + sticky sessions + move in-memory buckets/caches to Redis;
-- 10k+ recipient broadcasts → **already handled in-process**: lanes are derived from the number's Meta tier (Little's Law), a process-wide in-flight ceiling bounds total send work, and recipients are keyset-paged so a 100k audience never loads whole. See [docs/campaign-analytics.md](docs/campaign-analytics.md) §6b. A dedicated worker container is NOT the plan — revisit only if a measured campaign shows interactive latency suffering;
+- 10k+ recipient broadcasts → **already handled in-process**: lanes are derived from the number's Meta tier (Little's Law), a process-wide in-flight ceiling bounds total send work, and recipients are keyset-paged so a 100k audience never loads whole. See [`apps/api/src/lib/analytics/template-analytics.ts`](apps/api/src/lib/analytics/template-analytics.ts) §6b. A dedicated worker container is NOT the plan — revisit only if a measured campaign shows interactive latency suffering;
 - 50–200 tenants → add eviction to the grow-only caches.
 Don't pre-build any of it.
 
@@ -305,63 +305,55 @@ Each links to the reasoning:
 - **One conversation per contact** (`@@unique([workspaceId, contactId])`); reopen, don't fragment. — §7
 - **No persisted `provider`/`vendor`** — the `Channel` enum is the only discriminator. — §5
 - **Providers hold no business logic**; app code only sees `NormalizedEvent`. — §5, §12
-- **Event tier order** (realtime → audit → analytics → workflow → webhooks); **never subscribe audit/workflow to `broadcast.*`**. — [docs/events.md](docs/events.md)
-- **Automated assignment never overrides a human**: every automated caller passes `onlyIfUnassigned`, and every automated assignment writes through `assignConversation` so it is indistinguishable downstream from a manual one. — [docs/assignment.md](docs/assignment.md)
-- **A template sync is authoritative ONLY for the WABA it fetched**, and a template Meta *returned* is never pruned — an unmappable status/category leaves the stored value alone rather than dropping the row. Both failure modes are silent, permanent data loss (they take `variableBindings` with them). — [docs/whatsapp-templates.md](docs/whatsapp-templates.md)
-- **A carousel's card COUNT and each card's component signature are frozen at approval** — every card carries the same components, and a button's `index` is scoped to its CARD, not the message. `requiredCarouselCards` is the one authority both the UIs and the send guards read. — [docs/whatsapp-templates.md](docs/whatsapp-templates.md)
-- **`MessageTemplate.parameterFormat` is the single authority on positional vs named** — never re-derive it from a regex over the body, or a template containing literal `{{word}}` copy fails every recipient with Meta error 132000. — [docs/whatsapp-templates.md](docs/whatsapp-templates.md)
-- **Broadcasts never open tickets** (the runner bypasses `commitOutboundSend`); a customer's REPLY does. Same reasoning as the audit/workflow rule above. — [docs/ticketing.md](docs/ticketing.md)
-- **A saved view's filter never merges by spread** — `inboxViewWhereClauses` returns independent predicates that callers AND in, so an `Unassigned` view can't clobber an agent's visibility restriction. — [docs/inbox-views.md](docs/inbox-views.md)
+- **Event tier order** (realtime → audit → analytics → workflow → webhooks); **never subscribe audit/workflow to `broadcast.*`**. — [`apps/api/src/lib/events/bus.ts`](apps/api/src/lib/events/bus.ts)
+- **Automated assignment never overrides a human**: every automated caller passes `onlyIfUnassigned`, and every automated assignment writes through `assignConversation` so it is indistinguishable downstream from a manual one. — [`apps/api/src/lib/assignment/README.md`](apps/api/src/lib/assignment/README.md)
+- **A template sync is authoritative ONLY for the WABA it fetched**, and a template Meta *returned* is never pruned — an unmappable status/category leaves the stored value alone rather than dropping the row. Both failure modes are silent, permanent data loss (they take `variableBindings` with them). — [`apps/api/src/lib/templates/`](apps/api/src/lib/templates/)
+- **A carousel's card COUNT and each card's component signature are frozen at approval** — every card carries the same components, and a button's `index` is scoped to its CARD, not the message. `requiredCarouselCards` is the one authority both the UIs and the send guards read. — [`apps/api/src/lib/templates/`](apps/api/src/lib/templates/)
+- **`MessageTemplate.parameterFormat` is the single authority on positional vs named** — never re-derive it from a regex over the body, or a template containing literal `{{word}}` copy fails every recipient with Meta error 132000. — [`apps/api/src/lib/templates/`](apps/api/src/lib/templates/)
+- **Broadcasts never open tickets** (the runner bypasses `commitOutboundSend`); a customer's REPLY does. Same reasoning as the audit/workflow rule above. — [`apps/api/src/lib/tickets/mutations.ts`](apps/api/src/lib/tickets/mutations.ts)
+- **A saved view's filter never merges by spread** — `inboxViewWhereClauses` returns independent predicates that callers AND in, so an `Unassigned` view can't clobber an agent's visibility restriction. — [`apps/api/src/lib/inbox-views/where.ts`](apps/api/src/lib/inbox-views/where.ts)
 - **The ACTIVE WORKSPACE is resolved in exactly one place** — `resolveActiveWorkspaceId` (`@ccp/shared/auth/active-workspace`), called by the NestJS guard, the Socket.io handshake AND the Next.js RSC session. Order: membership-validated `ccp.ws` cookie → `Session.activeWorkspaceId` → first membership; the beyond-membership escape (org owner/admin, superAdmin) is always DB-verified and org-scoped. Three copies drifted once and the web silently rendered every switched session against the wrong workspace. Anything workspace-scoped that is cached (the session snapshot) is keyed by **(userId, workspaceId)**, and the per-user socket room is `user:<ws>:<uid>`. — §7
 - **Org-wide actions need ORG authority.** `resolveSession` collapses a superAdmin, an org owner/admin and a plain member who admins ONE workspace all to the effective role `"admin"` — so deactivate / delete / password-reset gate on `canModifyUserAccount` (orgRole), never on the workspace role. Removing someone from a workspace goes through `lib/workspaces/remove-member.ts`, the counterpart to `provisionWorkspace`: one definition of what that transition means. — §2
 - **Raw-SQL PARTIAL / expression indexes are invisible to the whole toolchain** — Prisma's DSL can't express a `WHERE`, an expression (`lower()`, `to_tsvector()`) or an operator class (`gin_trgm_ops`), so `migrate diff` and `check:prisma-fields` are both blind to them, and eight of them are UNIQUE constraints backstopping check-then-act races the app deliberately doesn't lock for. A `DROP COLUMN` silently destroys every index keyed on that column: the org→workspace rename took out six. They now live in **one hand-maintained section at the bottom of `prisma/migrations/0_init/migration.sql`** — regenerating that baseline from `schema.prisma` drops all 24 and `migrate diff` will still report "no difference", so the section must be carried by hand and verified by diffing `pg_indexes` between two real databases. `apps/api/test/partial-indexes.spec.ts` is the tripwire — keep it in lockstep with that section. — §7
-- **Realtime read-state convergence** (mark-read only when viewing; all recovery paths converge; local `conversation:read` drives the badge); **team-wide unread only**. — [docs/realtime.md](docs/realtime.md)
-- **Graceful shutdown**: `server.close()` before `app.close()`; keep the manual SIGTERM handler; `stop_grace_period ≥ ~100s` on api. — [docs/operations.md](docs/operations.md)
-- **Heap ≤ ~75% of the service's `mem_limit`** (api 2048/3g, web 1536/2g). — [docs/operations.md](docs/operations.md)
-- **`RUN_WORKER_INLINE` stays on in prod** (no external worker entrypoint exists). — [docs/operations.md](docs/operations.md)
+- **Realtime read-state convergence** (mark-read only when viewing; all recovery paths converge; local `conversation:read` drives the badge); **team-wide unread only**. — [`apps/api/src/realtime/fanout-rules.ts`](apps/api/src/realtime/fanout-rules.ts)
+- **Graceful shutdown**: `server.close()` before `app.close()`; keep the manual SIGTERM handler; `stop_grace_period ≥ ~100s` on api. — [`deploy/README.md`](deploy/README.md)
+- **Heap ≤ ~75% of the service's `mem_limit`** (api 2048/3g, web 1536/2g). — [`deploy/README.md`](deploy/README.md)
+- **`RUN_WORKER_INLINE` stays on in prod** (no external worker entrypoint exists). — [`deploy/README.md`](deploy/README.md)
 - **`/v1` API keeps full parity with the UI**, documented in both places. — §12
 
 ---
 
 ## 19. Deferred / not now (with triggers)
 
-- **Meta's WABA → WAAC + Messaging Account split** (phased H2 2026 → H1 2028) — Phase 1 needs **no code changes** for a single-integration app like this one; `wabaId` simply comes to mean "Messaging Account id". Per-phase triggers for `messaging_account_id`, WAAC ids and the `whatsapp_account` topic are tabulated in [docs/whatsapp-templates.md](docs/whatsapp-templates.md) §28. Don't pre-build any of it.
-- **More channels** (Telegram, TikTok, SMS, Email) — the interface is ready; build one when a pilot asks. Recipe: [docs/adding-a-channel.md](docs/adding-a-channel.md). *(Messenger + Instagram are **live**, not deferred.)*
+- **Meta's WABA → WAAC + Messaging Account split** (phased H2 2026 → H1 2028) — Phase 1 needs **no code changes** for a single-integration app like this one; `wabaId` simply comes to mean "Messaging Account id". Per-phase triggers for `messaging_account_id`, WAAC ids and the `whatsapp_account` topic are tabulated in [`apps/api/src/lib/templates/`](apps/api/src/lib/templates/) §28. Don't pre-build any of it.
+- **More channels** (Telegram, TikTok, SMS, Email) — the interface is ready; build one when a pilot asks. Recipe: [`apps/api/src/lib/providers/README.md`](apps/api/src/lib/providers/README.md). *(Messenger + Instagram are **live**, not deferred.)*
 - **Messenger calling · social opt-in/proactive messaging · capability-driven broadcasting · per-`Customer` omnichannel targeting** — designed, not yet built; each is a bounded add along an existing seam. See the Meta-parity roadmap.
-- **WhatsApp Embedded Signup** (no more manual credential paste) — needs Meta Tech-Provider review; after the product is worth onboarding into. [docs/onboarding-future.md](docs/onboarding-future.md).
+- **WhatsApp Embedded Signup** (no more manual credential paste) — needs Meta Tech-Provider review; after the product is worth onboarding into. [`apps/api/src/workspace-settings/whatsapp/`](apps/api/src/workspace-settings/whatsapp/).
 - **Unified `Customer` implementation** — ✅ shipped (§6). Remaining: merge/split audit record + person-level field lift + omnichannel targeting.
-- **Redis Socket.io adapter, standalone worker container, per-tenant media isolation, encryption-at-rest for message bodies, analytics dashboards, per-agent unread** — each has a named trigger in [docs/operations.md](docs/operations.md) / the security docs. Don't pre-build.
+- **Redis Socket.io adapter, standalone worker container, per-tenant media isolation, encryption-at-rest for message bodies, analytics dashboards, per-agent unread** — each has a named trigger in [`deploy/README.md`](deploy/README.md) / the security docs. Don't pre-build.
 
 ---
 
-## 20. Docs index
+## 20. Where the detail lives
 
-| Topic | File |
+`docs/` was **removed on purpose** — its contents had gone stale, and a stale
+doc is worse than none: it is read as authority. **This file is the source of
+truth.** Deeper detail lives next to the code it describes, which is the only
+place that cannot drift out of sync with it:
+
+| Topic | Authority |
 |---|---|
-| **Launch checklist**: env gates, deploy order, first-traffic checks | [docs/launch-checklist.md](docs/launch-checklist.md) |
-| Operations, deploy, heap, shutdown, queues, sweepers, Caddy | [docs/operations.md](docs/operations.md) |
-| Realtime: rooms, fanout scoping, reducers, read-state convergence | [docs/realtime.md](docs/realtime.md) |
-| Saved inbox views: the filter document, visibility boundary, counts cadence | [docs/inbox-views.md](docs/inbox-views.md) |
-| Event bus: tiers, taxonomy, subscribers, outbox | [docs/events.md](docs/events.md) |
-| Assignment routing: policies, rules, capacity, campaign splits, rebalance | [docs/assignment.md](docs/assignment.md) |
-| Customer identity: unified model, auto-merge rules, migration | [docs/identity.md](docs/identity.md) |
-| Org → Workspaces: tenancy, membership, the three settings areas | [docs/workspaces.md](docs/workspaces.md) |
-| Ticketing: the work item on a conversation, routing, SLA, reopen window | [docs/ticketing.md](docs/ticketing.md) |
-| Team chat: channels, 1:1 DMs, public/private visibility, invariants | [docs/team-chat.md](docs/team-chat.md) |
-| Website chat widget: embed modes, transport, media, identity | [docs/webchatwidget.md](docs/webchatwidget.md) |
-| Website chat widget: **developer** guide — file map, local run, tests, invariants, debugging | [docs/webchatwidget-dev-guide.md](docs/webchatwidget-dev-guide.md) |
-| Website chat widget: **customer-facing** install guide (also in-app at `/docs/webchat-install`) | [docs/webchat-install-guide.md](docs/webchat-install-guide.md) |
-| Adding a channel: recipe + per-channel constraints | [docs/adding-a-channel.md](docs/adding-a-channel.md) |
-| Channel accounts: several numbers/Pages per workspace, one Meta app, inbox attribution | [docs/channel-accounts.md](docs/channel-accounts.md) |
-| WhatsApp templates: WABA scoping, parameter format, categories, component rules | [docs/whatsapp-templates.md](docs/whatsapp-templates.md) |
-| WhatsApp Calling: wire shapes, permission, region, accept handshake, recording/transcription | [docs/whatsapp-calling.md](docs/whatsapp-calling.md) |
-| Campaign analytics: the two sources, the null rules, the send-rate bucket | [docs/campaign-analytics.md](docs/campaign-analytics.md) |
-| Contact import/export: CSV + Excel, streaming, at 100k | [docs/contact-import-export.md](docs/contact-import-export.md) |
-| Data model ERD | [docs/schema-erd.md](docs/schema-erd.md) |
-| External API reference | [docs/organization-api.md](docs/organization-api.md) |
-| Local setup & dev matrix | [docs/local-setup.md](docs/local-setup.md) |
-| WhatsApp onboarding (today) | [docs/customer-onboarding-whatsapp.md](docs/customer-onboarding-whatsapp.md) · [docs/whatsapp-coexistence.md](docs/whatsapp-coexistence.md) |
-| Meta manual onboarding: keys/IDs per channel + troubleshooting runbook | [docs/meta-manual-onboarding.md](docs/meta-manual-onboarding.md) |
-| Provider engine internals | [apps/api/src/lib/providers/README.md](apps/api/src/lib/providers/README.md) |
+| Provider engine, adding a channel, Meta onboarding | [apps/api/src/lib/providers/README.md](apps/api/src/lib/providers/README.md) |
 | Workflow engine internals | [apps/api/src/lib/workflows/README.md](apps/api/src/lib/workflows/README.md) |
-| Assignment engine internals | [apps/api/src/lib/assignment/README.md](apps/api/src/lib/assignment/README.md) |
+| Assignment routing internals | [apps/api/src/lib/assignment/README.md](apps/api/src/lib/assignment/README.md) |
+| The domain layer as a whole | [apps/api/src/lib/README.md](apps/api/src/lib/README.md) |
+| Event bus: tiers, subscribers, outbox | [apps/api/src/lib/events/bus.ts](apps/api/src/lib/events/bus.ts) |
+| Realtime rooms + fanout scoping | [apps/api/src/realtime/fanout-rules.ts](apps/api/src/realtime/fanout-rules.ts) |
+| Data model + every invariant comment | [prisma/schema.prisma](prisma/schema.prisma) |
+| External `/v1` API reference | the in-app `/docs/api` page — [apps/web/src/app/docs/api/page.tsx](apps/web/src/app/docs/api/page.tsx), kept honest by `scripts/check-v1-docs.mjs` |
+| Local setup & dev matrix | [ONBOARDING.md](ONBOARDING.md) |
+| Deploy, heap, shutdown, queues, Caddy | [deploy/README.md](deploy/README.md) |
+| What has been verified, how, and when | [tests/VERIFICATION-2026-07-29.md](tests/VERIFICATION-2026-07-29.md) |
+
+Everything else is a docblock on the module that owns the behaviour. When a
+rule matters, it is written where someone changing that code will see it.
