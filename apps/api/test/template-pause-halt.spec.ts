@@ -210,9 +210,40 @@ describe("re-approving the template releases them", () => {
     const n = await resumeBroadcastsForTemplate(workspaceId, templateId);
     expect(n).toBe(1);
 
-    expect((await read(ours)).status).toBe("queued");
-    expect((await read(credentials)).status).toBe("paused");
-    expect((await read(byHand)).status).toBe("paused");
+    // Assert on `pausedReason`, NOT on `status`.
+    //
+    // Resuming doesn't just flip a column — it re-fires the campaign, and with
+    // the worker inline the runner can legitimately re-park it before this line
+    // executes (this workspace has no WhatsApp credentials, so the runner parks
+    // it `not_connected` and logs "not connected at fire time"). Asserting
+    // `status === "queued"` was therefore a race against a background write the
+    // product is SUPPOSED to make: green alone in the file, red roughly 1 run in
+    // 2 in the full suite, where a sibling spec has already warmed the queue.
+    //
+    // Exactly two end states are legitimate, and both prove the resume ran:
+    //   - the runner hasn't picked it up yet  → status "queued"
+    //   - the runner picked it up and re-parked → pausedReason "not_connected"
+    // Anything else (still "paused" for reason "template") means it was never
+    // resumed, which is the real regression this guards.
+    //
+    // Note `pausedReason` is NOT cleared on resume, so a still-queued row keeps
+    // the stale "template" reason — which is why the check is a disjunction on
+    // these two fields rather than a single assertion on either one.
+    const resumed = await read(ours);
+    expect(
+      resumed.status === "queued" || resumed.pausedReason === "not_connected",
+      `expected resumed-or-refired, got status=${resumed.status} reason=${resumed.pausedReason}`,
+    ).toBe(true);
+
+    // The other two must be untouched — same status AND same reason. Checking
+    // the reason too is what proves they were skipped rather than resumed and
+    // coincidentally re-parked.
+    const cred = await read(credentials);
+    expect(cred.status).toBe("paused");
+    expect(cred.pausedReason).toBe("credentials");
+    const hand = await read(byHand);
+    expect(hand.status).toBe("paused");
+    expect(hand.pausedReason).toBeNull();
   });
 
   it("is a no-op when nothing was parked", async () => {
