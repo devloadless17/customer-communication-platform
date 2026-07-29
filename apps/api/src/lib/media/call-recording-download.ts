@@ -234,9 +234,6 @@ export async function storeInAppRecording(
     contentType = "audio/ogg";
     bytesForTranscription = ogg;
     await blobStorage.putObject({ key, bytes: ogg, contentType });
-    // Replace the interim raw object so the stored artifact is exactly one
-    // file (blob-orphan hygiene). Best-effort — a stray raw is harmless.
-    await blobStorage.delete(rawKey).catch(() => undefined);
   } catch (err) {
     console.warn(
       `[call-recording] in-app remux failed for call=${callId} (${
@@ -249,6 +246,21 @@ export async function storeInAppRecording(
     where: { id: call.id },
     data: { recordingKey: key, recordingMimeType: contentType },
   });
+
+  // ONLY NOW drop the interim raw — after the row points at the new key.
+  //
+  // ORDER IS LOAD-BEARING. This delete used to sit immediately after the OGG
+  // upload, i.e. BEFORE the pointer moved. A crash (or a DB blip) in that
+  // window left `recordingKey` naming an object that had just been deleted,
+  // while the OGG nobody pointed at became an orphan the blob sweeper reclaims
+  // 24h later — permanent loss of the recording, and unlike Meta's own
+  // recordings there is no upstream copy to re-fetch, because these bytes only
+  // ever existed in the agent's browser. Same class as the four blob-orphan
+  // incidents that file's header documents.
+  //
+  // Reversed, the worst case is a stray `.raw` the sweeper reclaims on its own
+  // — which is what "best-effort" should have meant all along.
+  if (key !== rawKey) await blobStorage.delete(rawKey).catch(() => undefined);
 
   if (opts.transcribe) {
     // Detached — the upload response must not wait on Whisper.

@@ -15,9 +15,10 @@
  *   pnpm --filter @ccp/api exec vitest run test/inapp-recording.spec.ts
  */
 import { existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 import { PrismaClient } from "@prisma/client";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { setSharedDb } from "@/lib/db";
 import { createTestPrismaClient } from "./_prisma";
@@ -134,4 +135,102 @@ describe("storeInAppRecording", () => {
     });
     expect(after?.transcriptKey).toBeNull();
   });
+});
+
+const hasFfmpeg = spawnSync("ffmpeg", ["-version"]).status === 0;
+
+describe.skipIf(!hasFfmpeg)("storeInAppRecording — remux SUCCESS ordering (real ffmpeg)", () => {
+  it("moves the row pointer to the OGG BEFORE deleting the interim raw", async () => {
+    // ORDER IS THE ASSERTION, not the end state — both orders look identical
+    // once the function returns. The delete used to run immediately after the
+    // OGG upload, i.e. before the pointer moved, so a crash or a DB blip in
+    // that window left `recordingKey` naming an object that had just been
+    // deleted while the OGG nobody pointed at became an orphan the blob sweeper
+    // reclaims 24h later. That is permanent loss: unlike Meta's own recordings
+    // there is no upstream copy, because these bytes only ever existed in the
+    // agent's browser. Fourth instance of the blob-orphan class.
+    //
+    // So spy on the delete and read the DB row AT THE MOMENT it fires.
+    const org = await prisma.organization.create({
+      data: { name: `IAR Ord ${S}`, status: "active" },
+    });
+    const ws = await prisma.workspace.create({
+      data: { name: `IAR Ord WS ${S}`, organizationId: org.id },
+    });
+    const contact = await prisma.contact.create({
+      data: {
+        workspaceId: ws.id,
+        name: "Order Probe",
+        phoneNumber: `1777${S.slice(-7)}`,
+        identityChannel: "whatsapp",
+      },
+    });
+    const conv = await prisma.conversation.create({
+      data: { workspaceId: ws.id, contactId: contact.id, channel: "whatsapp" },
+    });
+    const call = await prisma.call.create({
+      data: {
+        workspaceId: ws.id,
+        conversationId: conv.id,
+        externalCallId: `ord-${S}`,
+        channel: "whatsapp",
+        direction: "in",
+        status: "completed",
+        ringingAt: new Date(),
+        rawPayload: {},
+      },
+      select: { id: true },
+    });
+
+    // A real, decodable OGG/OPUS so ffmpeg genuinely remuxes and the success
+    // branch is the one under test.
+    const src = spawnSync(
+      "ffmpeg",
+      ["-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:a", "libopus", "-f", "ogg", "pipe:1"],
+      { maxBuffer: 32 * 1024 * 1024 },
+    );
+    expect(src.status, "could not synthesise test audio").toBe(0);
+
+    const rawKey = `call-recordings/${ws.id}/${call.id}.raw`;
+    let pointerWhenDeleted: string | null | undefined;
+    const deleteSpy = vi
+      .spyOn(blobStorage, "delete")
+      .mockImplementation(async (key: string) => {
+        if (key === rawKey) {
+          const row = await prisma.call.findUnique({
+            where: { id: call.id },
+            select: { recordingKey: true },
+          });
+          pointerWhenDeleted = row?.recordingKey;
+        }
+      });
+
+    try {
+      await storeInAppRecording(
+        call.id,
+        { bytes: new Uint8Array(src.stdout), mimeType: "audio/ogg" },
+        { final: true, transcribe: false },
+      );
+
+      const row = await prisma.call.findUnique({
+        where: { id: call.id },
+        select: { recordingKey: true, recordingMimeType: true },
+      });
+      expect(row?.recordingKey, "remux should have produced an .ogg").toBe(
+        `call-recordings/${ws.id}/${call.id}.ogg`,
+      );
+      expect(row?.recordingMimeType).toBe("audio/ogg");
+      storedKeys.push(row!.recordingKey!);
+
+      // THE POINT: when the raw was deleted, the row already named the OGG.
+      expect(
+        pointerWhenDeleted,
+        "the interim raw was deleted while the row still pointed at it — " +
+          "a crash in that window loses the recording permanently",
+      ).toBe(row?.recordingKey);
+    } finally {
+      deleteSpy.mockRestore();
+      await prisma.organization.delete({ where: { id: org.id } }).catch(() => undefined);
+    }
+  }, 60_000);
 });

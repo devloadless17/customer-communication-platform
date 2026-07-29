@@ -17,7 +17,6 @@
  */
 import { existsSync } from "node:fs";
 
-import type { PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/workflows/queue", async (importOriginal) => {

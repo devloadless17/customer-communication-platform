@@ -561,6 +561,34 @@ want it — can make the api read unhealthy and trip the deploy's auto-rollback 
 a release that is fine. Pre-existing (not from the delta) and consistent across
 all three sites, so it is a design gap, not a regression. Belongs to domain #31.
 
+### Finding #5 — in-app call recording deleted the interim raw BEFORE moving the row pointer
+
+`storeInAppRecording`'s final path uploaded the remuxed OGG, **deleted the
+interim `.raw`, and only then** updated `Call.recordingKey`. A crash or a DB
+blip in that window leaves the row naming an object that has just been deleted,
+while the OGG nobody points at becomes an orphan the blob sweeper reclaims 24 h
+later.
+
+That is **permanent, total loss**. Unlike Meta's own recordings there is no
+upstream copy to re-fetch — the whole point of the in-app mode is that the bytes
+only ever existed in the agent's browser. This is the **fifth** instance of the
+blob-orphan class the sweeper's own header documents (avatars, ai-knowledge +
+ai-voice-draft, contact transfer artifacts, call recordings/transcripts).
+
+**Fixed** by reversing the order: commit the pointer, then drop the raw (and
+only when it is genuinely a different key). Reversed, the worst case is a stray
+`.raw` the sweeper reclaims on its own — which is what the comment's
+"best-effort" should have meant all along.
+
+**Pinned by an ORDERING assertion, because both orders look identical once the
+function returns**: `inapp-recording.spec.ts` spies on `blobStorage.delete` and
+reads the `Call` row *at the moment the delete fires*, asserting it already
+names the OGG. Runs against real ffmpeg (`describe.skipIf(!hasFfmpeg)`, the
+repo's existing convention) with synthesised OPUS audio, so the remux-SUCCESS
+branch — the only branch that behaves differently — is genuinely exercised.
+NEGATIVE-TESTED: restoring the original order fails it with exactly the intended
+message.
+
 ### The two backfill migrations — VERIFIED against the real dev database
 
 Irreversible data writes, so checked by querying the result rather than reading
