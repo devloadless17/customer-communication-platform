@@ -37,6 +37,8 @@ import type {
   Tag,
 } from "@ccp/shared/types";
 import { useConversationCounts } from "@/features/inbox/hooks/use-conversation-counts";
+import { useInboxFilter } from "@/features/inbox/contexts/inbox-filter-context";
+import { conversationFilterKey } from "@/features/inbox/lib/filter-key";
 import { useInboxViews } from "@/features/inbox/contexts/inbox-views-context";
 import { ConversationListItem } from "./conversation-list-item";
 import { InboxSearchPanel, type SearchResultTarget } from "./inbox-search-panel";
@@ -117,6 +119,10 @@ function ConversationListImpl({
   // checks the first row. Esc / Clear exits.
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  // The account narrow. It is a SECOND filter dimension, independent of
+  // `filter` (which arrives as a prop), and it must take part in `filterKey`
+  // below — see the comment there for what happens when it doesn't.
+  const { accountId } = useInboxFilter();
   const [deleting, setDeleting] = useState(false);
   // Roving keyboard focus through the loaded rows (j/k or arrows; Enter opens).
   // -1 = no row highlighted (the default; the highlight is opt-in via a keypress
@@ -133,14 +139,12 @@ function ConversationListImpl({
   // Clear selection when the filter changes — otherwise checkboxes look
   // unchecked (the rows aren't in the new view) but selectedIds still
   // carries the prior ids, and a bulk-delete would target invisible chats.
-  // The reducer key is the filter's discriminated shape; stage filter id
-  // and preset id both feed the comparison.
-  const filterKey =
-    filter.kind === "preset"
-      ? `p:${filter.id}`
-      : filter.kind === "stage"
-        ? `s:${filter.stageId}`
-        : "calls";
+  //
+  // ONE AUTHORITY for what "the list I'm looking at" means, because this key
+  // was built inline from `filter` alone and the account narrow — a second,
+  // independent dimension living in the filter context — was not in it. See
+  // lib/filter-key.ts for what that omission cost.
+  const filterKey = conversationFilterKey(filter, accountId);
   useEffect(() => {
     setSelectedIds(new Set());
   }, [filterKey]);
