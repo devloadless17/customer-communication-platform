@@ -20,6 +20,23 @@ export class OpenAiUnavailableError extends Error {
   }
 }
 
+/**
+ * One `verbose_json` segment. The three probability fields are the quality
+ * signals a call transcript is filtered on — see `callSttModel()` for the
+ * measurements behind the thresholds.
+ */
+export interface TranscriptionSegment {
+  start: number;
+  end: number;
+  text: string;
+  /** P(this segment is NOT speech). ≈0.9 on silence, ≈0.01 on real speech. */
+  no_speech_prob: number;
+  /** Mean token log-probability — the model's confidence in what it heard. */
+  avg_logprob: number;
+  /** Text/compressed size. >2.4 means a repetition loop, a hallucination mode. */
+  compression_ratio: number;
+}
+
 export interface ChatUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
@@ -43,7 +60,11 @@ interface OpenAiClientLike {
   };
   audio: {
     transcriptions: {
-      create(params: Record<string, unknown>): Promise<{ text?: string; language?: string }>;
+      create(params: Record<string, unknown>): Promise<{
+        text?: string;
+        language?: string;
+        segments?: TranscriptionSegment[];
+      }>;
     };
     speech: {
       create(params: Record<string, unknown>): Promise<{ arrayBuffer(): Promise<ArrayBuffer> }>;
@@ -129,15 +150,31 @@ export async function transcribe(opts: {
   filename: string;
   mimeType: string;
   language?: string;
-}): Promise<{ text: string; language?: string }> {
+  /**
+   * Ask for `verbose_json` — per-segment timestamps AND the quality signals
+   * (`no_speech_prob`, `avg_logprob`, `compression_ratio`) that make it
+   * possible to tell a real transcription from a confident hallucination.
+   * Supported by `whisper-1` only; the gpt-4o transcribe models accept `json`
+   * alone and silently ignore the rest, so callers that need segments must
+   * pick a model that returns them (see `callSttModel`).
+   */
+  segments?: boolean;
+}): Promise<{ text: string; language?: string; segments?: TranscriptionSegment[] }> {
   const { client, toFile } = await getClient();
   const file = await toFile(Buffer.from(opts.bytes), opts.filename, { type: opts.mimeType });
   const res = await client.audio.transcriptions.create({
     model: opts.model,
     file,
     ...(opts.language ? { language: opts.language } : {}),
+    ...(opts.segments
+      ? { response_format: "verbose_json", timestamp_granularities: ["segment"] }
+      : {}),
   });
-  return { text: res.text ?? "", language: res.language };
+  return {
+    text: res.text ?? "",
+    language: res.language,
+    ...(res.segments ? { segments: res.segments } : {}),
+  };
 }
 
 /** Text-to-speech (TTS) -> mp3 bytes. */

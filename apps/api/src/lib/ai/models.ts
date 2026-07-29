@@ -40,6 +40,30 @@ export function sttModel(): string {
   return process.env.AI_STT_MODEL || "gpt-4o-transcribe";
 }
 
+/**
+ * STT for CALL RECORDINGS — deliberately NOT `sttModel()`.
+ *
+ * Call audio needs three things a voice note doesn't, and only `whisper-1`
+ * returns them (`gpt-4o-transcribe` supports `response_format: json` alone):
+ *
+ *   - `no_speech_prob` per segment — the ONLY defence against transcribing
+ *     silence. Measured 2026-07-29: `gpt-4o-transcribe` answered pure digital
+ *     silence with "人間失格" and faint noise with "Horecaonderneming",
+ *     confidently and with no signal to catch it. whisper-1 flagged the same
+ *     clips at no_speech_prob 0.94 / 0.89 against 0.009 for real speech.
+ *   - `avg_logprob` — confidence, which is what lets a channel whose language
+ *     was mis-detected be RETRIED pinned to the other channel's language
+ *     instead of being stored as gibberish.
+ *   - segment TIMESTAMPS — required to interleave the two channels into one
+ *     speaker-attributed conversation instead of two blocks.
+ *
+ * Arabic was the reason to prefer gpt-4o-transcribe; measured across three
+ * Lebanese sentences the two are equivalent, so nothing is given up.
+ */
+export function callSttModel(): string {
+  return process.env.AI_CALL_STT_MODEL || "whisper-1";
+}
+
 export function ttsModel(): string {
   return process.env.AI_TTS_MODEL || "gpt-4o-mini-tts";
 }

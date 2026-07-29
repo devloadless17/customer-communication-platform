@@ -118,10 +118,18 @@ export async function transcodeCallRecordingToOgg(
 
 /** One side of the stereo call master, ready for a speech model. */
 export interface CallChannelAudio {
-  /** Mono 16 kHz WAV — the shape speech models actually want. */
+  /** Mono 16 kHz WAV, loudness-normalised when it carries speech. */
   bytes: Uint8Array;
-  /** Mean level in dBFS (ffmpeg volumedetect). ≈ -91 is digital silence. */
+  /** Mean level in dBFS of the RAW channel. ≈ -91 is digital silence. */
   meanVolumeDb: number;
+  /**
+   * Seconds of actual SPEECH (total duration minus detected silence), measured
+   * on the raw channel. The gate that decides whether this side is sent to a
+   * speech model at all — mean level can't tell a quiet talker from steady
+   * line noise, and asking a model to transcribe non-speech makes it invent
+   * text (measured: pure silence → "人間失格").
+   */
+  speechSeconds: number;
 }
 
 /**
@@ -170,7 +178,7 @@ async function extractOneChannel(
   input: Uint8Array,
   channel: 0 | 1,
 ): Promise<CallChannelAudio> {
-  const bytes = await transcodeToFile(input, `ch${channel}.wav`, [
+  const raw = await transcodeToFile(input, `ch${channel}.wav`, [
     "-map_metadata", "-1",
     "-vn",
     "-filter_complex", `[0:a]pan=mono|c0=c${channel}[a]`,
@@ -179,19 +187,81 @@ async function extractOneChannel(
     "-c:a", "pcm_s16le",
     "-f", "wav",
   ]);
-  return { bytes, meanVolumeDb: await meanVolume(bytes) };
+  const { meanVolumeDb, speechSeconds } = await analyseChannel(raw);
+
+  // Only normalise a channel that actually carries speech. Running loudness
+  // normalisation over a silent leg would amplify its noise floor to speaking
+  // level and manufacture exactly the non-speech audio the gate exists to
+  // reject.
+  if (speechSeconds <= 0) return { bytes: raw, meanVolumeDb, speechSeconds };
+
+  try {
+    // The two legs arrive at wildly different levels — a browser mic against a
+    // WebRTC remote whose gain we don't control — and a quiet leg is where
+    // language detection goes wrong (the live bug: real Lebanese Arabic on the
+    // customer channel came back as Cyrillic). Normalising both to the same
+    // target gives the model comparable input on either side. Single-pass
+    // loudnorm: the two-pass version needs a measurement round-trip for a
+    // precision nothing here depends on.
+    const normalised = await transcodeToFile(raw, `ch${channel}-norm.wav`, [
+      "-map_metadata", "-1",
+      "-vn",
+      "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+      "-ar", "16000",
+      "-ac", "1",
+      "-c:a", "pcm_s16le",
+      "-f", "wav",
+    ]);
+    return { bytes: normalised, meanVolumeDb, speechSeconds };
+  } catch {
+    // Normalisation is an improvement, never a requirement.
+    return { bytes: raw, meanVolumeDb, speechSeconds };
+  }
 }
 
-/** ffmpeg volumedetect → mean_volume in dBFS. -91 (silence) when unreadable,
- *  so an unparseable probe fails toward "skip", never toward a wasted API call
- *  on an empty channel. */
-async function meanVolume(input: Uint8Array): Promise<number> {
+/**
+ * Mean level + seconds of speech, from ONE ffmpeg pass.
+ *
+ * `silencedetect` reports every silent RUN; speech is what's left over. The
+ * -45 dB floor sits below a quiet talker and above a line's noise floor, and
+ * 0.3 s minimum keeps a pause between words from being counted as silence.
+ *
+ * A probe that can't be read returns zeroes, i.e. "no speech" — the caller
+ * then skips the channel rather than sending unverified audio to a model that
+ * will confabulate over it.
+ */
+async function analyseChannel(
+  input: Uint8Array,
+): Promise<{ meanVolumeDb: number; speechSeconds: number }> {
   try {
-    const stderr = await runFfmpegStderr(input, ["-af", "volumedetect", "-f", "null", "-"]);
-    const m = /mean_volume:\s*(-?[\d.]+) dB/.exec(stderr);
-    return m ? Number(m[1]) : -91;
+    const stderr = await runFfmpegStderr(input, [
+      "-af", "volumedetect,silencedetect=noise=-45dB:d=0.3",
+      "-f", "null", "-",
+    ]);
+    const mean = /mean_volume:\s*(-?[\d.]+) dB/.exec(stderr);
+    const meanVolumeDb = mean ? Number(mean[1]) : -91;
+
+    const dur = /Duration:\s*(\d+):(\d+):(\d+\.\d+)/.exec(stderr);
+    const totalSeconds = dur
+      ? Number(dur[1]) * 3600 + Number(dur[2]) * 60 + Number(dur[3])
+      : 0;
+    if (!totalSeconds) return { meanVolumeDb, speechSeconds: 0 };
+
+    let silent = 0;
+    for (const m of stderr.matchAll(/silence_duration:\s*([\d.]+)/g)) {
+      silent += Number(m[1]);
+    }
+    // A silence run still open when the file ends prints silence_start with no
+    // matching duration — close it against the total so trailing silence counts.
+    const starts = [...stderr.matchAll(/silence_start:\s*([\d.]+)/g)];
+    const ends = [...stderr.matchAll(/silence_end:\s*([\d.]+)/g)];
+    if (starts.length > ends.length) {
+      const lastStart = Number(starts[starts.length - 1]![1]);
+      if (lastStart < totalSeconds) silent += totalSeconds - lastStart;
+    }
+    return { meanVolumeDb, speechSeconds: Math.max(0, totalSeconds - silent) };
   } catch {
-    return -91;
+    return { meanVolumeDb: -91, speechSeconds: 0 };
   }
 }
 

@@ -7,8 +7,9 @@ import { getProviderBinding } from "@/lib/providers";
 import {
   extractCallChannels,
   transcodeCallRecordingToOgg,
+  type CallChannelAudio,
 } from "@/lib/media/audio-transcode";
-import { transcribeInboundAudio } from "@/lib/ai/voice";
+import { transcribeCallChannel, transcribeInboundAudio } from "@/lib/ai/voice";
 import { configEnabled, loadAiConfig } from "@/lib/ai/runtime-config";
 
 /**
@@ -431,23 +432,62 @@ async function discardStoredRecording(callId: string): Promise<void> {
 interface TranscriptSegment {
   id: number;
   speaker: "Business" | "Customer";
+  /** Seconds from the start of the call — the shared clock both channels are
+   *  measured on, which is what makes interleaving them meaningful. */
+  start: number;
   text: string;
 }
 
 /**
- * A channel quieter than this never carried audio at all — a one-sided call,
- * or a leg that never connected. Skipping it saves an API call per recording
- * and avoids asking a speech model to transcribe silence, which makes them
- * invent text.
- *
- * DELIBERATELY set near digital silence (≈ -91 dBFS measured for a truly empty
- * leg) rather than just below speech. The failure this whole path exists to
- * fix is DROPPED WORDS, so the threshold errs the safe way: transcribing a
- * near-empty channel costs one wasted call, while skipping a quiet one loses a
- * speaker — exactly the bug being fixed. Real speech measures around -30 to
- * -20 dBFS mean, so -60 leaves an enormous margin for a bad line.
+ * A channel with less speech than this was never part of the conversation.
+ * Below it the channel is not sent to a speech model AT ALL — the only
+ * reliable defence, because a model handed non-speech does not return
+ * nothing, it returns confident nonsense (measured: silence → "人間失格",
+ * noise → "Horecaonderneming").
  */
-const CHANNEL_SILENCE_DBFS = -60;
+const MIN_SPEECH_SECONDS = 0.4;
+
+/**
+ * Quality gates on returned segments. Measured no_speech_prob:
+ *
+ *   real speech, good level        0.015 - 0.025
+ *   real speech, leg 22 dB quiet   0.598   ← genuine Lebanese Arabic
+ *   line noise, no speech          0.890
+ *   pure digital silence           0.943
+ *
+ * Hence 0.8, NOT the conventional 0.6: a quiet customer's real words scored
+ * 0.598, so 0.6 would have discarded the very speaker this pipeline exists to
+ * recover. The primary defence against hallucination is the speech gate above
+ * (a channel with no speech is never sent at all); this is the second line,
+ * and it is tuned to keep words rather than to be tidy.
+ *
+ * NOTE the usual whisper heuristic — `no_speech_prob > 0.6 AND avg_logprob <
+ * -1.0` — would not have caught the hallucinations at all: they scored -0.36
+ * and -0.51, i.e. the model was *confident* about the words it invented. The
+ * no-speech probability is the load-bearing signal; avg_logprob only catches a
+ * second, rarer failure (a garbled decode of real audio).
+ */
+const MAX_NO_SPEECH_PROB = 0.8;
+const MIN_AVG_LOGPROB = -1.0;
+/** Text-to-compressed-size ratio above this is a repetition loop. */
+const MAX_COMPRESSION_RATIO = 2.4;
+
+/** Anything with no letters or digits — " ." and friends, what a model emits
+ *  when it hears nothing but is obliged to answer. */
+function isSubstantive(text: string): boolean {
+  return /\p{L}|\p{N}/u.test(text);
+}
+
+interface ChannelResult {
+  speaker: "Business" | "Customer";
+  label: string;
+  segments: Array<{ start: number; text: string }>;
+  language?: string;
+  /** Mean confidence of the surviving segments — drives which channel's
+   *  language detection is trusted when the two disagree. */
+  confidence: number;
+  speechSeconds: number;
+}
 
 /**
  * Transcribe the agent and customer channels separately and label them.
@@ -477,41 +517,159 @@ async function transcribePerSpeaker(
     { speaker: "Customer" as const, label: "customer", audio: channels.customer },
   ];
 
-  const transcribed = await Promise.all(
-    sides.map(async (side) => {
-      if (side.audio.meanVolumeDb <= CHANNEL_SILENCE_DBFS) return { ...side, text: "", language: undefined };
-      try {
-        const r = await transcribeInboundAudio({
-          bytes: side.audio.bytes,
-          filename: `call-${callId}-${side.label}.wav`,
-          mimeType: "audio/wav",
-        });
-        return { ...side, text: r.text.trim(), language: r.language };
-      } catch (err) {
-        console.warn(
-          `[call-transcript] ${side.label} channel failed for call=${callId}: ${
-            err instanceof Error ? err.message : err
-          }`,
-        );
-        return { ...side, text: "", language: undefined };
-      }
-    }),
+  const results = await Promise.all(
+    sides.map((side) => transcribeOneChannel(side, callId)),
   );
 
-  const spoken = transcribed.filter((t) => t.text.length > 0);
-  // Both sides empty means the split produced nothing usable (a misjudged
-  // silence probe, two failed calls) — let the caller transcribe the mix
-  // rather than storing an empty transcript.
-  if (spoken.length === 0) return null;
+  // ── Cross-channel language consensus ────────────────────────────────────
+  // Both people on a call are speaking the same language essentially always,
+  // so the two channels disagreeing means one of them was mis-detected — and
+  // it is the quieter/less confident side that gets it wrong. The live bug:
+  // the agent channel resolved Arabic while the customer channel, carrying
+  // genuine Lebanese Arabic, came back as Cyrillic gibberish. Re-decode the
+  // doubted side PINNED to the trusted language rather than storing nonsense.
+  const speaking = results.filter((r) => r.segments.length > 0);
+  if (speaking.length === 2) {
+    const [a, b] = speaking as [ChannelResult, ChannelResult];
+    if (a.language && b.language && a.language !== b.language) {
+      // Trust the side with more speech to identify the language; on a tie,
+      // the more confident one.
+      const trusted =
+        Math.abs(a.speechSeconds - b.speechSeconds) > 1
+          ? (a.speechSeconds > b.speechSeconds ? a : b)
+          : (a.confidence >= b.confidence ? a : b);
+      const doubted = trusted === a ? b : a;
+      const pin = languageToIso(trusted.language!);
+      console.warn(
+        `[call-transcript] call=${callId} channel language disagreement ` +
+          `(${a.label}=${a.language} vs ${b.label}=${b.language}) — retrying ` +
+          `${doubted.label} pinned to ${pin ?? trusted.language}`,
+      );
+      if (pin) {
+        const side = sides.find((s) => s.speaker === doubted.speaker)!;
+        const retry = await transcribeOneChannel(side, callId, pin);
+        // Keep the retry only if it actually produced something; a pinned
+        // decode that comes back empty must not erase what we already had.
+        if (retry.segments.length > 0) Object.assign(doubted, retry);
+      }
+    }
+  }
+
+  // ── Interleave into one conversation ────────────────────────────────────
+  const merged = results
+    .flatMap((r) => r.segments.map((s) => ({ speaker: r.speaker, ...s })))
+    .sort((x, y) => x.start - y.start);
+  if (merged.length === 0) return null; // nothing usable — caller falls back
+
+  // Fold consecutive segments from the same speaker into one turn. Whisper
+  // splits on prosody, so a single sentence can arrive as three segments; a
+  // transcript that renders those as three labelled rows reads like a stutter.
+  const turns: TranscriptSegment[] = [];
+  for (const seg of merged) {
+    const last = turns[turns.length - 1];
+    if (last && last.speaker === seg.speaker) {
+      last.text = `${last.text} ${seg.text}`.trim();
+      continue;
+    }
+    turns.push({ id: turns.length, speaker: seg.speaker, start: seg.start, text: seg.text });
+  }
+
+  const dominant = [...results].sort((x, y) => y.speechSeconds - x.speechSeconds)[0];
+  return {
+    // Flat rendering for consumers that don't read segments (the /v1 document,
+    // the viewer's own no-segments fallback).
+    text: turns
+      .map((t) => `${t.speaker === "Business" ? "Agent" : "Customer"}: ${t.text}`)
+      .join("\n"),
+    language: dominant?.language,
+    segments: turns,
+  };
+}
+
+/** One channel → filtered segments. Returns an empty result rather than
+ *  throwing, so one side failing never costs the other side's words. */
+async function transcribeOneChannel(
+  side: { speaker: "Business" | "Customer"; label: string; audio: CallChannelAudio },
+  callId: string,
+  language?: string,
+): Promise<ChannelResult> {
+  const empty: ChannelResult = {
+    speaker: side.speaker,
+    label: side.label,
+    segments: [],
+    confidence: 0,
+    speechSeconds: side.audio.speechSeconds,
+  };
+  // THE gate: no detected speech ⇒ no API call. A model asked to transcribe
+  // silence invents text, and nothing in its answer says so.
+  if (side.audio.speechSeconds < MIN_SPEECH_SECONDS) return empty;
+
+  let res;
+  try {
+    res = await transcribeCallChannel({
+      bytes: side.audio.bytes,
+      filename: `call-${callId}-${side.label}.wav`,
+      ...(language ? { language } : {}),
+    });
+  } catch (err) {
+    console.warn(
+      `[call-transcript] ${side.label} channel failed for call=${callId}: ${
+        err instanceof Error ? err.message : err
+      }`,
+    );
+    return empty;
+  }
+
+  const kept = res.segments.filter(
+    (s) =>
+      s.no_speech_prob <= MAX_NO_SPEECH_PROB &&
+      s.avg_logprob >= MIN_AVG_LOGPROB &&
+      s.compression_ratio <= MAX_COMPRESSION_RATIO &&
+      isSubstantive(s.text),
+  );
+  if (res.segments.length > 0 && kept.length === 0) {
+    console.warn(
+      `[call-transcript] call=${callId} ${side.label}: all ${res.segments.length} ` +
+        `segment(s) rejected as non-speech — dropping the channel`,
+    );
+  }
+  if (kept.length === 0) return empty;
 
   return {
-    // Flat rendering for any consumer that doesn't read segments (the /v1
-    // document, the viewer's own no-segments fallback). Speaker-prefixed so it
-    // stays readable rather than two blocks run together.
-    text: spoken.map((t) => `${t.speaker === "Business" ? "Agent" : "Customer"}: ${t.text}`).join("\n\n"),
-    language: spoken.find((t) => t.language)?.language,
-    segments: spoken.map((t, i) => ({ id: i, speaker: t.speaker, text: t.text })),
+    speaker: side.speaker,
+    label: side.label,
+    segments: kept.map((s) => ({ start: s.start, text: s.text.trim() })),
+    language: res.language,
+    confidence: kept.reduce((a, s) => a + s.avg_logprob, 0) / kept.length,
+    speechSeconds: side.audio.speechSeconds,
   };
+}
+
+/**
+ * whisper reports the language by NAME ("arabic"), while the API's `language`
+ * PARAMETER wants ISO-639-1 ("ar"). Only the languages this platform actually
+ * sees are mapped; an unmapped name simply means no retry is attempted, which
+ * is the safe outcome.
+ */
+function languageToIso(name: string): string | null {
+  const map: Record<string, string> = {
+    arabic: "ar",
+    english: "en",
+    french: "fr",
+    spanish: "es",
+    turkish: "tr",
+    urdu: "ur",
+    hindi: "hi",
+    persian: "fa",
+    russian: "ru",
+    german: "de",
+    italian: "it",
+    portuguese: "pt",
+  };
+  const key = name.trim().toLowerCase();
+  if (map[key]) return map[key];
+  // Already an ISO code (some models answer that way).
+  return /^[a-z]{2}$/.test(key) ? key : null;
 }
 
 /**

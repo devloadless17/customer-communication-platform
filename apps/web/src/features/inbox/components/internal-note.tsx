@@ -5,16 +5,20 @@ import { Trash2 } from "lucide-react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { LocalTime } from "@/components/local-time";
-import { initials } from "@ccp/shared/utils";
+import { cn, initials } from "@ccp/shared/utils";
 import type { InternalNote as InternalNoteType, User } from "@ccp/shared/types";
 
 function InternalNoteImpl({
   note,
   author,
+  highlighted,
   onDelete,
 }: {
   note: InternalNoteType;
   author: User;
+  /** True when the Notes tab jumped here — a persistent ring, same as the
+   *  message-bubble jump target (see message-thread's `jumpHighlightId`). */
+  highlighted?: boolean;
   /** Optional hover-action: pass to expose a delete button on the note. */
   onDelete?: (noteId: string) => void;
 }) {
@@ -23,7 +27,12 @@ function InternalNoteImpl({
       {/* Content-sized (not full-width) so a short note is a small, neat box;
           grows up to max-w-2xl for longer notes. */}
       <div className="flex items-start gap-1.5">
-        <div className="w-fit min-w-55 max-w-2xl rounded-lg border border-note-border bg-note-bg px-3 py-2 text-note-fg">
+        <div
+          className={cn(
+            "w-fit min-w-55 max-w-2xl rounded-lg border border-note-border bg-note-bg px-3 py-2 text-note-fg",
+            highlighted && "ring-2 ring-primary/50 ring-offset-2 ring-offset-background",
+          )}
+        >
           {/* No "Internal note" label — the beige color is enough to read it as
               a note. Author + time sit at the top-RIGHT, signature-style. */}
           <div className="mb-0.5 flex items-center justify-end gap-1.5 text-2xs opacity-80">

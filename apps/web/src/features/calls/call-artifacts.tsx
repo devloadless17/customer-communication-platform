@@ -116,23 +116,38 @@ export function TranscriptPanel({ callId }: { callId: string }) {
       </p>
     );
   }
+  // Speaker-attributed turns. The agent's side is tinted and the customer's is
+  // neutral so the two are separable at a glance without reading the labels —
+  // which matters most in Arabic, where the text itself flips direction and a
+  // label-only distinction is easy to lose.
   return (
-    <div className="my-1 flex max-h-72 flex-col gap-1.5 overflow-y-auto rounded-md border bg-muted/30 p-3">
-      {segments.map((s, i) => (
-        <div key={s.id ?? i} className="flex flex-col">
-          <span className="text-2xs font-medium text-muted-foreground">
-            {s.speaker === "Business" ? "Agent" : "Customer"}
-            {typeof s.start === "number" && (
-              <span className="ml-1 tabular-nums opacity-60">
-                {formatSeconds(Math.floor(s.start))}
+    <div className="my-1 flex max-h-72 flex-col gap-2.5 overflow-y-auto rounded-md border bg-muted/30 p-3">
+      {segments.map((s, i) => {
+        const isAgent = s.speaker === "Business";
+        return (
+          <div
+            key={s.id ?? i}
+            className={
+              "flex flex-col gap-0.5 border-s-2 ps-2 " +
+              (isAgent ? "border-primary/40" : "border-border")
+            }
+          >
+            <span className="flex items-center gap-1.5 text-2xs font-medium">
+              <span className={isAgent ? "text-primary" : "text-muted-foreground"}>
+                {isAgent ? "Agent" : "Customer"}
               </span>
-            )}
-          </span>
-          <p dir="auto" className="text-sm leading-snug">
-            {s.text ?? ""}
-          </p>
-        </div>
-      ))}
+              {typeof s.start === "number" && (
+                <span className="tabular-nums text-muted-foreground opacity-60">
+                  {formatSeconds(Math.floor(s.start))}
+                </span>
+              )}
+            </span>
+            <p dir="auto" className="text-sm leading-snug">
+              {s.text ?? ""}
+            </p>
+          </div>
+        );
+      })}
     </div>
   );
 }

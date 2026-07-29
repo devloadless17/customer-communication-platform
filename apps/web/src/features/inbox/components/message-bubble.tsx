@@ -273,6 +273,10 @@ interface MessageBubbleProps {
    *  a persistent yellow ring around the bubble so the user can find it
    *  visually after scrollIntoView lands. */
   isActiveSearchMatch?: boolean;
+  /** True when a jump (Files/Flags "Jump", a reply quote, a deep link) landed
+   *  on this bubble. Held until the user's next click — see the thread's
+   *  `jumpHighlightId`. */
+  isJumpTarget?: boolean;
   // ----- consecutive-message grouping (driven by the thread) -----
   /**
    * Last bubble of a same-sender group. The TAIL carries the shared chrome:
@@ -382,6 +386,7 @@ function BubbleContent({
   onRetryFailed,
   searchQuery,
   isActiveSearchMatch,
+  isJumpTarget,
   showAvatar = true,
   showMeta = true,
   isTail = true,
@@ -537,7 +542,10 @@ function BubbleContent({
             // instantly readable as a selection/focus signal (matching the
             // reply-jump ring) so the active hit pops out of the thread
             // without darkening the bubble's own color.
-            isActiveSearchMatch &&
+            // Same treatment for the row a jump landed on — the pulse is over
+            // in ~1.6s, and "which of these five voice notes did I open?" is
+            // exactly the question the ring has to keep answering.
+            (isActiveSearchMatch || isJumpTarget) &&
               "ring-2 ring-primary/50 ring-offset-2 ring-offset-background",
           )}
         >

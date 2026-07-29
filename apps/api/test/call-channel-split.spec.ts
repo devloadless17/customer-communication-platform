@@ -104,6 +104,41 @@ describe.skipIf(!hasFfmpeg)("extractCallChannels", () => {
     expect(ch!.customer.meanVolumeDb).toBeLessThan(-80);
   }, 60_000);
 
+  it("measures SPEECH seconds, not just level — the gate that stops hallucination", async () => {
+    // A model handed non-speech does not return nothing, it returns confident
+    // nonsense: measured, `gpt-4o-transcribe` answered pure silence with
+    // "人間失格" and line noise with "Horecaonderneming", and whisper-1 scored
+    // the same clips at no_speech_prob 0.94 / 0.89. The live bug was a
+    // customer channel rendering as Cyrillic gibberish. So a channel with no
+    // detected speech must never reach a speech model at all.
+    //
+    // Level alone cannot decide that — noise can be louder than a quiet
+    // talker — which is why the gate counts SPEECH seconds.
+    const noisy = buildStereo(
+      "sine=frequency=440:duration=3:sample_rate=48000",
+      // Steady broadband noise, clearly audible in level terms, zero speech.
+      "anoisesrc=r=48000:a=0.0008:duration=3",
+    );
+    const ch = await extractCallChannels(noisy);
+    expect(ch).not.toBeNull();
+    // A continuous tone reads as speech-like energy; noise at this level does not.
+    expect(ch!.agent.speechSeconds).toBeGreaterThan(0.4);
+    expect(
+      ch!.customer.speechSeconds,
+      "a noise-only leg must measure no speech, or it gets transcribed into invented words",
+    ).toBeLessThan(0.4);
+  }, 60_000);
+
+  it("reports zero speech for a digitally silent leg", async () => {
+    const stereo = buildStereo(
+      "sine=frequency=440:duration=3:sample_rate=48000",
+      "anullsrc=channel_layout=mono:sample_rate=48000:duration=3",
+    );
+    const ch = await extractCallChannels(stereo);
+    expect(ch!.customer.speechSeconds).toBe(0);
+    expect(ch!.customer.meanVolumeDb).toBeLessThan(-80);
+  }, 60_000);
+
   it("returns null for a MONO source so the caller transcribes the file whole", async () => {
     const r = spawnSync(
       "ffmpeg",

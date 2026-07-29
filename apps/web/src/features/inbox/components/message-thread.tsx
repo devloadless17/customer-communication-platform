@@ -174,6 +174,7 @@ const TimelineRows = memo(function TimelineRows({
   matchedIds,
   searchQuery,
   activeMatchId,
+  jumpHighlightId,
   selecting,
   isSelected,
   onToggleSelect,
@@ -196,6 +197,11 @@ const TimelineRows = memo(function TimelineRows({
   matchedIds: Set<string>;
   searchQuery: string;
   activeMatchId: string | null;
+  /** The row a jump (Files/Flags/Notes "Jump", reply quote, deep link) landed
+   *  on. Held until the user's next click so the target stays identifiable —
+   *  a 1.6s pulse is gone before the eye finishes a smooth scroll, which is
+   *  useless in a run of near-identical rows (five voice notes in a row). */
+  jumpHighlightId: string | null;
   selecting: boolean;
   isSelected: (id: string) => boolean;
   onToggleSelect: (id: string) => void;
@@ -352,6 +358,7 @@ const TimelineRows = memo(function TimelineRows({
                         : undefined
                     }
                     isActiveSearchMatch={searchOpen && entry.data.id === activeMatchId}
+                    isJumpTarget={entry.data.id === jumpHighlightId}
                     showAvatar={isTail}
                     showMeta={showMeta}
                     isTail={isTail}
@@ -366,6 +373,7 @@ const TimelineRows = memo(function TimelineRows({
                         ? memberById.get(entry.data.authorUserId)
                         : undefined) ?? unknownAuthor(entry.data.authorUserId)
                     }
+                    highlighted={entry.data.id === jumpHighlightId}
                     onDelete={onDeleteNote}
                   />
                 ) : entry.kind === "call" ? (
@@ -781,16 +789,29 @@ function MessageThreadImpl({
     [removeOptimistic],
   );
 
-  // Ref-tracked so rapid reply-jumps cancel the prior fade instead of
-  // stomping classNames mid-transition; cleared on unmount.
-  const replyJumpTimerRef = useRef<number | null>(null);
+  // ── Jump highlight ────────────────────────────────────────────────────────
+  // Every jump into the thread (Files/Flags "Jump", the Notes tab, a reply
+  // quote, a global-search deep link) lands the row mid-viewport — but the
+  // only cue used to be a 1.6s pulse that is largely spent by the time a
+  // smooth scroll finishes. In a run of near-identical rows (five voice notes)
+  // that leaves the agent unable to tell WHICH one they jumped to.
+  //
+  // So the landed row also keeps a persistent ring, held until the user's next
+  // click anywhere (or the next jump / thread switch). Scrolling deliberately
+  // does NOT clear it: comparing the target against its neighbours is exactly
+  // what you scroll for. Keyed by ENTRY id, so it works for a note row too.
+  const [jumpHighlightId, setJumpHighlightId] = useState<string | null>(null);
   useEffect(() => {
-    return () => {
-      if (replyJumpTimerRef.current !== null) {
-        window.clearTimeout(replyJumpTimerRef.current);
-      }
-    };
-  }, []);
+    if (!jumpHighlightId) return;
+    // Installed a tick late (effect timing) so the click that CAUSED the jump
+    // — pointerdown fires before the panel's onClick — can't clear it at once.
+    const clear = () => setJumpHighlightId(null);
+    window.addEventListener("pointerdown", clear);
+    return () => window.removeEventListener("pointerdown", clear);
+  }, [jumpHighlightId]);
+  // A thread switch is a new context; nothing here should stay lit.
+  useEffect(() => setJumpHighlightId(null), [conversation.id]);
+
   const jumpToOriginal = useCallback(
     (originalId: string) => {
       const flash = (el: HTMLElement) => {
@@ -802,18 +823,11 @@ function MessageThreadImpl({
         // scroll-to-bottom; no manual re-enable needed.
         releaseStickToBottomRef.current();
         el.scrollIntoView({ behavior: jumpScrollBehavior(), block: "center" });
-        // Subtle blue flash for reply-jumps. Search-match jumps use a
-        // PERSISTENT amber ring on the bubble itself (see MessageBubble's
-        // `isActiveSearchMatch`), since the user is actively navigating
-        // through matches and the ring needs to stay until they move on.
-        if (replyJumpTimerRef.current !== null) {
-          window.clearTimeout(replyJumpTimerRef.current);
-        }
-        el.classList.add("ring-2", "ring-primary/60", "ring-offset-2");
-        replyJumpTimerRef.current = window.setTimeout(() => {
-          el.classList.remove("ring-2", "ring-primary/60", "ring-offset-2");
-          replyJumpTimerRef.current = null;
-        }, 1500);
+        // Pulse for the motion cue + a persistent ring on the landed bubble
+        // (cleared by the user's next click — see `jumpHighlightId`), the same
+        // treatment every other jump gets.
+        flashJumpTarget(el);
+        setJumpHighlightId(originalId);
       };
       // If the quoted original is older than the loaded slice, page older
       // (bounded) until it renders, then scroll+flash — otherwise the click was
@@ -862,11 +876,8 @@ function MessageThreadImpl({
           // reads as a no-op.
           releaseStickToBottomRef.current();
           el.scrollIntoView({ behavior: "auto", block: "center" });
-          el.classList.add("ring-2", "ring-primary/60", "ring-offset-2");
-          window.setTimeout(
-            () => el.classList.remove("ring-2", "ring-primary/60", "ring-offset-2"),
-            1500,
-          );
+          flashJumpTarget(el);
+          setJumpHighlightId(detail.noteId);
           return;
         }
         if (depth >= 8) return; // give up — note is very deep in history
@@ -1083,6 +1094,12 @@ function MessageThreadImpl({
   // the global inbox search. Both flow through the SAME context-window load +
   // scroll effect below. Cleared to null when neither is present.
   const jumpTargetId = activeMatchId ?? jumpToMessageId ?? null;
+  // Read inside `scrollMatchIntoView` (which must stay dep-free — it's an
+  // effect dependency): an in-thread search hit already carries its own
+  // amber ring while the user arrows through matches, so only the OTHER
+  // jumps take the persistent highlight.
+  const activeMatchIdRef = useRef<string | null>(activeMatchId);
+  activeMatchIdRef.current = activeMatchId;
 
   // Forward-ref to useChatScroll's `markBenignTailUpdate`. The hook is
   // declared later (it needs `lastEntryKey` which is computed below), but
@@ -1141,6 +1158,10 @@ function MessageThreadImpl({
         // "Jump" and global-search deep-link scroll without motion, so a static
         // highlight alone is easy to miss.
         flashJumpTarget(el);
+        // …and hold a ring on it after the pulse fades, so the row is still
+        // identifiable among near-identical neighbours. Skipped for in-thread
+        // search navigation, which already rings the active match.
+        if (messageId !== activeMatchIdRef.current) setJumpHighlightId(messageId);
 
         const content = contentRef.current;
         const viewport = viewportRef.current;
@@ -1915,6 +1936,7 @@ function MessageThreadImpl({
                 matchedIds={matchedIds}
                 searchQuery={searchQuery}
                 activeMatchId={activeMatchId}
+                jumpHighlightId={jumpHighlightId}
                 selecting={selection.selecting}
                 isSelected={selection.isSelected}
                 onToggleSelect={selection.toggle}

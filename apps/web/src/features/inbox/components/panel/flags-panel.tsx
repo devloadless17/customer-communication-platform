@@ -131,13 +131,40 @@ export function FlagsPanel({
   });
 
   return (
-    <ul className="divide-y divide-border">
+    <ul className="flex flex-col gap-1.5 p-3">
       {ordered.map((flag) => {
         const open = flag.status === "open";
         const colors = tagColorClasses(flag.definition.color);
+        const footer = [
+          flag.note ? `“${flag.note}”` : null,
+          flag.assignedToName ? `Owner: ${flag.assignedToName}` : null,
+          !open && flag.resolvedByName
+            ? `${flag.status === "dismissed" ? "Dismissed" : "Resolved"} by ${flag.resolvedByName}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
         return (
-          <li key={flag.id} className="group px-5 py-3">
-            <div className="flex items-start gap-2">
+          <li
+            key={flag.id}
+            className={cn(
+              "group relative overflow-hidden rounded-lg border transition-colors",
+              open
+                ? "border-border bg-card hover:border-foreground/15 hover:bg-accent/40"
+                : "border-border/50 bg-muted/30 hover:bg-muted/50",
+            )}
+          >
+            {/* A hairline in the flag's own color — the pill alone left the row
+                with no anchor, so a list of flags read as loose text. Handled
+                items lose the accent: the color is a "still open" signal. */}
+            <span
+              aria-hidden
+              className={cn(
+                "absolute inset-y-0 left-0 w-0.5",
+                open ? colors.swatch : "bg-border",
+              )}
+            />
+            <div className="flex items-start gap-2 py-2.5 pl-3 pr-2">
               <button
                 type="button"
                 onClick={() => onGoToMessage(flag.messageId)}
@@ -147,14 +174,14 @@ export function FlagsPanel({
                 <div className="flex flex-wrap items-center gap-1.5">
                   <span
                     className={cn(
-                      "inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-2xs leading-tight",
+                      "inline-flex max-w-full items-center gap-1 truncate rounded-full border px-1.5 py-0.5 text-2xs leading-tight",
                       open
                         ? colors.pill
                         : "border-border/60 text-muted-foreground line-through",
                     )}
                   >
-                    <Flag className="size-2.5" />
-                    {flag.definition.name}
+                    <Flag className="size-2.5 shrink-0" />
+                    <span className="truncate">{flag.definition.name}</span>
                   </span>
                   {flag.source === "ai" && (
                     <span className="rounded-sm bg-foreground/10 px-1 text-[9px] uppercase tracking-wide text-muted-foreground">
@@ -166,25 +193,21 @@ export function FlagsPanel({
                   </span>
                 </div>
 
+                {/* The excerpt is a QUOTE of someone else's message, so it gets
+                    a quote rule — otherwise it read as a stray caption under
+                    the pill. */}
                 <p
                   dir="auto"
-                  className="mt-1 line-clamp-2 text-xs text-muted-foreground"
+                  className="mt-1.5 line-clamp-2 border-l-2 border-border pl-2 text-xs leading-relaxed text-muted-foreground"
                 >
                   {flag.messageExcerpt || (
                     <i className="opacity-60">No text content</i>
                   )}
                 </p>
 
-                {(flag.note || flag.assignedToName || (!open && flag.resolvedByName)) && (
-                  <p className="mt-0.5 truncate text-2xs text-muted-foreground/80">
-                    {flag.note ? `“${flag.note}”` : null}
-                    {flag.note && flag.assignedToName ? " · " : null}
-                    {flag.assignedToName ? `Owner: ${flag.assignedToName}` : null}
-                    {!open && flag.resolvedByName
-                      ? `${flag.note || flag.assignedToName ? " · " : ""}${
-                          flag.status === "dismissed" ? "Dismissed" : "Resolved"
-                        } by ${flag.resolvedByName}`
-                      : null}
+                {footer && (
+                  <p className="mt-1 truncate text-2xs text-muted-foreground/80">
+                    {footer}
                   </p>
                 )}
               </button>
@@ -198,6 +221,7 @@ export function FlagsPanel({
                     <IconAction
                       label="Mark resolved"
                       onClick={() => void setStatus(flag.id, "resolved")}
+                      tone="positive"
                     >
                       <Check className="size-3.5" />
                     </IconAction>
@@ -228,10 +252,13 @@ export function FlagsPanel({
 function IconAction({
   label,
   onClick,
+  tone,
   children,
 }: {
   label: string;
   onClick: () => void;
+  /** `positive` tints the resolve action green — the one action you want to hit. */
+  tone?: "positive";
   children: React.ReactNode;
 }) {
   return (
@@ -240,7 +267,12 @@ function IconAction({
       onClick={onClick}
       title={label}
       aria-label={label}
-      className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+      className={cn(
+        "inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors",
+        tone === "positive"
+          ? "hover:bg-emerald-500/15 hover:text-emerald-600 dark:hover:text-emerald-400"
+          : "hover:bg-accent hover:text-foreground",
+      )}
     >
       {children}
     </button>

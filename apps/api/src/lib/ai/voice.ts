@@ -1,6 +1,6 @@
 import { isAzureVoice, speakAzure } from "./azure-tts";
-import { sttModel, ttsModel } from "./models";
-import { speak, transcribe } from "./openai-client";
+import { callSttModel, sttModel, ttsModel } from "./models";
+import { speak, transcribe, type TranscriptionSegment } from "./openai-client";
 
 /**
  * Voice adapters (OpenAI). STT for inbound voice notes, TTS for voice replies.
@@ -31,6 +31,46 @@ export async function transcribeInboundAudio(opts: {
     language: opts.language,
   });
   return { text: res.text, language: res.language, provider: "openai", model };
+}
+
+export interface CallChannelTranscription {
+  text: string;
+  language?: string;
+  segments: TranscriptionSegment[];
+  model: string;
+}
+
+/**
+ * Transcribe ONE channel of a call recording (one speaker), returning the
+ * per-segment timings and quality signals the caller filters on.
+ *
+ * Separate from `transcribeInboundAudio` on purpose: voice notes are a single
+ * known speaker on a clean leg and want the best raw text model, while call
+ * audio needs hallucination detection, confidence and timestamps — see
+ * `callSttModel()`. `language` pins the decode when the caller has already
+ * established what is being spoken (the other channel agreed), which is the
+ * retry for a channel whose language was mis-detected.
+ */
+export async function transcribeCallChannel(opts: {
+  bytes: Uint8Array;
+  filename: string;
+  language?: string;
+}): Promise<CallChannelTranscription> {
+  const model = callSttModel();
+  const res = await transcribe({
+    model,
+    bytes: opts.bytes,
+    filename: opts.filename,
+    mimeType: "audio/wav",
+    language: opts.language,
+    segments: true,
+  });
+  return {
+    text: res.text,
+    language: res.language,
+    segments: res.segments ?? [],
+    model,
+  };
 }
 
 /**
