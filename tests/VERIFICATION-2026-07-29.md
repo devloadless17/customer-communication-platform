@@ -333,9 +333,9 @@ a checklist, not on however many findings happened to surface.
 | 14 | channels / multi-account | 2 | R (adversarial, 9 doc invariants) + E + N (7) | ✅ **2026-07-29** — doc §6 walked line by line; invariant 8 was FALSE and was a data-loss path (Finding #8) |
 | 15 | outbound-webhooks (delivery/retry) | 2 | R (adversarial, 13 invariants) + E + N (16 tests) | ✅ **2026-07-29** — full checklist walked, 0 unmapped. HIGH wrong-account FIXED; signing newly covered + negative-tested ×2; one false positive of my own caught and withdrawn |
 | 16 | calls (WhatsApp calling + artifacts) | 2 | R (adversarial) + E (multi-account 05) + N | ✅ **2026-07-29** — Finding #5 fixed; SIP refusal and provider-read gate verified |
-| 17 | media / R2 / blob-storage | 2 | | ☐ |
-| 18 | queues / workers | 2 | | ☐ |
-| 19 | sweepers | 2 | R + N (6 tests) | ◐ `webhook-subscription-health` covered + negative-tested both directions; RISK-1/RISK-2 recorded; the other ~30 sweepers not re-walked |
+| 17 | media / R2 / blob-storage | 2 | R (adversarial) + E | ✅ **2026-07-29** — prod refusal, magic-byte sniff and media tenancy verified; no defect |
+| 18 | queues / workers | 2 | R (adversarial) + E | ✅ **2026-07-29** — shutdown order and the prod worker gate verified; no defect |
+| 19 | sweepers | 2 | R (mechanical, all 34) + N (2 new specs) | ✅ **2026-07-29** — 0/34 unref-less, 0/34 unguarded |
 | 20 | coexistence | 2 | R (adversarial, structural) | ✅ **2026-07-29** — quiet-ingest verified as a property of the code, not a flag; no defect |
 | 21 | **reports / analytics** *(NEW)* | 2 | R (adversarial, 11 invariants) + E + N (6) | ✅ **2026-07-29** — full checklist walked, 0 unmapped |
 | 22 | **webchat widget** *(NEW)* | 2 | R (adversarial) + E (2 e2e) | ✅ **2026-07-29** — public-surface boundary verified fail-closed; no defect |
@@ -725,6 +725,51 @@ sweep before starting the suite.
 ---
 
 ## Domain session notes
+
+### #17 media / R2 + #18 queues / workers + #19 sweepers — ✅ CLOSED (2026-07-29)
+
+The infrastructure trio, verified mechanically where the property is countable.
+
+**#17 media / R2 / blob-storage**
+
+| Invariant | Evidence |
+|---|---|
+| The filesystem driver is an explicit opt-in and **refused in production** | **R** `provider.ts` THROWS on `NODE_ENV === "production"` — never a silent fallback for absent R2 env · **E** `blob-storage-local.spec.ts` |
+| Stored-XSS defence: allowlist **plus** a magic-byte sniff | **R** `mime-guard.ts` — the sniff exists because the allowlist keys on the CLIENT-CLAIMED Content-Type, so without it `<svg onload="…">` bytes labelled `image/png` bypass the SVG exclusion entirely |
+| Media tenancy: a workspace-scoped ROW check first, plus the conversation visibility clause | **R** `/api/media/:id` filters `workspaceId` **and** `conversationRelationWhere(session)` — and that spread is safe for the same structural reason as notes (#24): it returns one relation key, not an `OR` node |
+| Key-path traversal closed | **R** WHATWG `new URL()` normalisation before the prefix check |
+| Call artifacts are cross-checked by the blob-orphan sweeper | **E** `blob-orphan-call-artifacts.spec.ts` — the predecessor's HIGH |
+
+**#18 queues / workers**
+
+| Invariant | Evidence |
+|---|---|
+| `RUN_WORKER_INLINE` stays on in prod (§18) | **R** boot FAILS LOUD on `RUN_WORKER_INLINE=0` in production, because no external worker entrypoint exists |
+| Graceful shutdown order | **R** Socket.io drained → `server.close()` → workers drain → `app.close()`, each step numbered in place. Open WebSockets otherwise keep `server.close()` from ever resolving |
+| Stable `jobId` for idempotent enqueue; bounded retries; dead-letter retention | **E** carried + `outbox-lease.spec.ts`, `send-rate-limiter.spec.ts` |
+| `lockDuration` ≥ max handler time, boot-asserted | **R** — verified in #4 |
+| Per-team AND process-wide concurrency ceilings | **R** — the recurring defect this codebase names is a per-tenant cap with no global one; both exist for sends, transfers and broadcasts |
+
+**#19 sweepers**
+
+Verified by counting, not sampling — **all 34 files**:
+
+| Property | Result |
+|---|---|
+| `setInterval` without `unref()` | **0 of 34** — none can hold the process open |
+| No mutex / pool-close guard | **0 of 34** — every one is serialized and stops on a closed pool |
+
+Plus the two written this session (`webhook-subscription-health`,
+`ops-snapshot`) now have specs, and the blob-orphan sweeper's call-artifact
+cross-check is pinned.
+
+**Edge themes (trio):** ① sweeper mutexes · ② stable jobIds make redelivery a
+no-op · ③ **the blob-orphan class — four incidents, now cross-checked rather
+than prefix-excluded** · ④ N/A · ⑤ retention windows · ⑥ N/A ·
+⑦ every retention sweeper batches · ⑧ media reads carry the visibility clause ·
+⑨ workspace-prefixed keys · ⑩ **the domain's core — unref'd, staggered, and
+pool-close aware**.
+
 
 ### #4 workflows (~22 step types) — ✅ CLOSED (2026-07-29)
 
