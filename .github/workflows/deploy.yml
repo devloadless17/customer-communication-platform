@@ -118,6 +118,7 @@ jobs:
       # contacts stuck named by their PSID, "no reachable channel" on a
       # workspace whose channels are fine. Found by hand five times before this.
       - run: node scripts/check-channel-account.mjs
+      - run: node scripts/check-v1-docs.mjs
 
   # The Vitest suite (apps/api/test — 68 files, ~745 tests) against a REAL
   # throwaway Postgres + Redis. `migrate deploy` on the empty DB also proves

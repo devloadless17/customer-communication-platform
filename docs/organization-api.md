@@ -828,6 +828,12 @@ messaging the customer themselves. It is a separate route, not a `PATCH` field, 
 note changes nothing about the ticket — it must not bump `version` (which would 409 a
 colleague's open editor) or move the SLA clock.
 
+
+**Where can this ticket be escalated?** — `GET /tickets/escalation-targets` ·
+`read:tickets`. Lists the sibling workspaces in your organization that a ticket
+may be referred to. Escalation creates a TWIN ticket in that workspace carrying
+a frozen contact snapshot; the two never share a conversation.
+
 ### Settings
 
 **`GET` / `PATCH /tickets-settings`** · `read:tickets` / `write:tickets`
@@ -971,6 +977,15 @@ curl -s "$CCP_BASE_URL/api/external/v1/whatsapp/health" \
   -H "Authorization: Bearer $CCP_API_KEY"
 ```
 
+
+**Admin-grade WhatsApp actions** — both `admin:settings`, because they change
+how a number behaves at Meta:
+
+| Action | Request |
+|---|---|
+| Force a health re-read from Meta | `POST /whatsapp/health/refresh` |
+| Register / re-register the number for Cloud API | `POST /whatsapp/register` |
+
 ### Channel accounts
 
 `GET /channels` lists which *channels* the workspace has connected. A channel can hold
@@ -1060,9 +1075,77 @@ curl -s "$CCP_BASE_URL/api/external/v1/channel-accounts" \
 Read-only by design. Connecting or disconnecting an account moves real credentials and silently
 changes which number a customer hears from, so it stays an in-app admin action.
 
+### Customers (one person, many channels)
+
+Scopes: `read:contacts` / `write:contacts`.
+
+A **contact** is one channel identity (a WhatsApp number, an Instagram handle).
+A **customer** is the PERSON those identities belong to, so an integration can
+see that `+961…` on WhatsApp and `@sara` on Instagram are the same human.
+Threads stay per-contact — merging never merges message history.
+
+| Action | Request |
+|---|---|
+| One person + their linked contacts | `GET /customers/:id` |
+| Update person-level fields | `PATCH /customers/:id` |
+| Link a contact to this person | `POST /customers/:id/link` — `{ "contactId": "…" }` |
+| Unlink a contact | `POST /customers/:id/unlink` — `{ "contactId": "…" }` |
+
+**Merge is reversible and never destructive.** Link/unlink only re-points the
+contact's owner — no contact and no message is ever deleted, so an unlink puts
+things back exactly as they were. Automatic merging (exact phone, or an email
+the customer asserted themselves) happens at ingest and is deliberately not
+exposed here: guessing that two people are one is not something an API caller
+should be able to do by accident.
+
+### Workflows (automation)
+
+Three different scopes on purpose — reading a workflow, publishing one, and
+FIRING one are three different levels of trust:
+
+| Action | Request | Scope |
+|---|---|---|
+| List | `GET /workflows` | `read:catalog` |
+| One | `GET /workflows/:id` | `read:catalog` |
+| Runs | `GET /workflows/:id/runs?limit=&cursor=` | `read:catalog` |
+| One run | `GET /workflows/:id/runs/:runId` | `read:catalog` |
+| Publish | `POST /workflows/:id/publish` | `admin:settings` |
+| Trigger | `POST /workflows/:id/trigger` | `write:workflows` |
+
+`write:workflows` exists separately from `write:catalog` because a run can
+execute billed sends — firing automation is not a catalog write. Triggering
+requires an `Idempotency-Key` and carries the chain-depth guard, so a partner
+whose own webhook handler triggers a workflow cannot build an unbounded loop.
+
+### Audience groups
+
+Scopes: `read:catalog` / `write:catalog`. A saved, re-usable contact list to
+broadcast to. Channel-agnostic — a group is a list of people, not of numbers.
+
+| Action | Request |
+|---|---|
+| List | `GET /audience-groups` |
+| One | `GET /audience-groups/:id` |
+| Create | `POST /audience-groups` — `{ "name": "VIPs", "filters": { … } }` |
+| Update | `PATCH /audience-groups/:id` |
+| Delete | `DELETE /audience-groups/:id` |
+
+### Snippets (canned replies)
+
+Scopes: `read:catalog` / `write:catalog`.
+
+| Action | Request |
+|---|---|
+| List | `GET /snippets` |
+| Create | `POST /snippets` — `{ "shortcut": "/hours", "body": "We're open 9-5." }` |
+| Update | `PATCH /snippets/:id` |
+| Delete | `DELETE /snippets/:id` |
+
 ### Teammate availability & working hours
 
-Scope: `write:users` (reads stay under `read:catalog`).
+Scope: `admin:settings` (reads stay under `read:catalog`). Changing when a
+teammate is reachable changes who customers get routed to, so it is an
+admin-grade write. `write:users` no longer exists — no route requires it.
 
 | Action | Request |
 |---|---|
@@ -1327,6 +1410,38 @@ Returns `{ items, nextCursor }`. Filters: `outcome` (`never_received`,
 Delivery and read receipts keep arriving for hours after a campaign finishes, so
 poll with `updatedSince` rather than treating the numbers as final at completion.
 
+
+**Pre-flight an audience** — `POST /broadcasts/preview-missing` · `read:broadcasts`.
+Given an audience + template, returns which recipients would be SKIPPED and why
+(missing a required variable, opted out, no reachable channel, belongs to
+another account). Run it before you spend a send.
+
+---
+
+## 7b. Reports (workspace performance)
+
+Scope: `read:reports`. One call returns every panel, so a dashboard is a single
+round-trip rather than eight.
+
+**`GET /reports/overview?from=&to=&tz=&accountId=`**
+
+| Param | Meaning |
+|---|---|
+| `from` / `to` | ISO instants, `[from, to)` — the upper bound is exclusive, so adjacent ranges never double-count a boundary message. Capped at **366 days** (`400 invalid_range` beyond it). |
+| `tz` | IANA zone the daily buckets flip in (default `UTC`). Daily bars must flip at *your* midnight, not UTC's — send the viewer's zone. |
+| `accountId` | Optional. Scope every panel to ONE channel account (a specific WhatsApp number, Page or IG handle) from `GET /channel-accounts`. Omitted = the whole workspace. |
+
+Why `accountId` matters: a workspace running a Sales number and a Support
+number is two operations sharing a medium, and a blended first-response time
+hides one drowning behind the other. An id belonging to another workspace is
+rejected (`400 invalid_range`, `detail: unknown channel account`) rather than
+silently returning an empty report that reads as "the Sales line did nothing".
+
+Returns daily volume, conversations opened/closed, first-response average AND
+median (one all-nighter outlier must not paint the team slow), resolution time,
+per-agent stats, ticket SLA counts, and the AI share — including
+`aiOnlyConversations`, the honest "handled without a human" number.
+
 ---
 
 ## 8. Calls
@@ -1458,6 +1573,26 @@ Returns `{ ok, message_id }`.
 
 **Set up:** **Settings → Integrations → Webhooks → Create** — paste your receiving URL,
 pick the events. We generate a signing secret (`ccp_whsec_…`) shown once.
+
+
+### Managing webhooks over the API
+
+All `admin:settings` — **including the reads**. A webhook is a standing
+data-egress grant: whoever can list them learns every event you receive and
+where it goes, so it is not a `read:` scope.
+
+| Action | Request |
+|---|---|
+| List | `GET /outbound-webhooks` |
+| Create | `POST /outbound-webhooks` — `{ "url": "...", "eventTypes": ["message.received"] }`. The signing secret is returned **once**. |
+| Update | `PATCH /outbound-webhooks/:id` |
+| Delete | `DELETE /outbound-webhooks/:id` |
+| Rotate the secret | `POST /outbound-webhooks/:id/rotate-secret` — returns the new secret once |
+| Send a test delivery | `POST /outbound-webhooks/:id/test` |
+| Recent deliveries | `GET /outbound-webhooks/:id/deliveries?limit=&cursor=` — status, attempt count, response code |
+
+Until these existed, an integration could not receive a single event until a
+human clicked through Settings.
 
 **Every delivery is a `POST` of JSON** with these headers:
 

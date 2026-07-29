@@ -724,6 +724,55 @@ sweep before starting the suite.
 
 ## Domain session notes
 
+### §12 /v1 DOC PARITY — 31 routes were undocumented; now CHECKER 8 (2026-07-29)
+
+CLAUDE.md §12 makes this a **locked rule**: every `/v1` endpoint documented in
+BOTH `docs/organization-api.md` and the in-app `/docs/api` page. Nothing
+enforced it, so it drifted — and the drift is invisible from every side: the
+code compiles, both docs render, and only a partner discovers the route they
+needed was never written down.
+
+Measured against the controller's 163 routes:
+
+| Surface | Undocumented routes | Missing scopes | Phantom scopes |
+|---|---|---|---|
+| `docs/organization-api.md` | **31** | 3 (`admin:settings`, `read:reports`, `write:workflows`) | 1 (`write:users`) |
+| in-app `/docs/api` page | 0 | 0 | 0 |
+
+The markdown is what rots, because it is the surface a human has to remember.
+It came back from `main` (131 commits behind) when `docs/` was restored, which
+is precisely the situation the predecessor ledger warned about: *"WHOEVER
+RESTORES docs/ MUST refresh those rows."*
+
+**The worst single entry was not a missing route — it was `write:users`.** The
+doc told partners to request a scope **no route requires any more** (the
+availability write moved to `admin:settings`). A key minted from that
+instruction 403s with nothing to explain why. A doc that advertises a dead scope
+is worse than one that omits a live route.
+
+FIXED: documented all 31 (customers, workflows, audience-groups, snippets,
+outbound-webhook management, reports, escalation targets, broadcast
+preview-missing, two WhatsApp admin actions) and corrected the scope.
+
+**A false negative in my own tooling, caught before it became a claim.** The
+first comparison probed for a route's bare stem, and "workflows" appears in
+prose throughout the document — so it reported **0 missing while 10 routes were
+genuinely absent** (6 workflows, 4 customers). I had already written down "0
+undocumented". The strict matcher requires a ROUTE-shaped context
+(`/v1/<path>`, a backticked `/<path>`, `/<path>/:`). **A checker that matches
+prose is a checker that lies**, and this one nearly shipped saying everything
+was fine.
+
+**CHECKER 8 — `scripts/check-v1-docs.mjs`.** Enumerates the controller's routes
+and `@RequireScope` values and asserts both surfaces carry them, plus flags any
+scope a surface ADVERTISES that no route requires (the `write:users` class),
+while deliberately allowing a sentence that explains a retirement. In
+`pnpm run check` and the deploy workflow. NEGATIVE-TESTED both directions:
+deleting the workflows section fails with the 6 routes + the missing scope named
+(exit 1); re-advertising `write:users` without a retirement note fails (exit 1);
+the restored doc passes (exit 0).
+
+
 ### #15 outbound-webhooks — ✅ CLOSED (2026-07-29)
 
 Checklist generated from CLAUDE.md §12 + §18 + `docs/events.md`, then each line
