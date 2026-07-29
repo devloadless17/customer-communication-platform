@@ -217,18 +217,26 @@ test("contacts: create a contact through the dialog", async ({ page }) => {
 });
 
 // ───────────────────────────────────────────────────────────────────────────
-// 6. AUDIENCE GROUPS — creation is correctly WhatsApp-gated in dev
+// 6. AUDIENCE GROUPS — channel-agnostic, NOT WhatsApp-gated
 // ───────────────────────────────────────────────────────────────────────────
-test("broadcasts/groups: new-group is WhatsApp-gated when unconfigured", async ({ page }) => {
-  // Audience groups exist to broadcast to, so /broadcasts/groups/new redirects
-  // to the WhatsApp setup when the team has no phone number configured (the
-  // dev state). Assert that real guard rather than seeding fake Meta creds on a
-  // live-pilot box (which a background job could pick up and POST to Meta).
+test("broadcasts/groups: new-group is reachable without WhatsApp configured", async ({ page }) => {
+  // This asserted the OPPOSITE until 2026-07-29: that /broadcasts/groups/new
+  // redirects to /settings/whatsapp when no number is configured. That gate was
+  // deliberately REMOVED in `4aaf3c6e` (2026-07-27) — an audience group is a
+  // saved CONTACT LIST and is channel-agnostic, so the WhatsApp-specific
+  // pre-flight bounced a Messenger-only or Instagram-only workspace to a
+  // settings page for a channel it does not use. Channel readiness is decided
+  // in the composer, where it actually matters.
+  //
+  // The stale assertion survived because the main Playwright suite had not been
+  // run to completion since (the predecessor ledger's own "Main Playwright suite
+  // ×2" row was left `in progress`).
   const errs = track(page);
   await page.goto("/broadcasts/groups/new");
-  await page.waitForURL(/\/settings\/whatsapp/, { timeout: 15_000 });
-  await expect(page.getByRole("heading", { name: "WhatsApp" }).first()).toBeVisible();
-  expect(errs, "group gate errors").toEqual([]);
+  await expect(page).toHaveURL(/\/broadcasts\/groups\/new/);
+  // The form itself rendered — not a redirect, not an error boundary.
+  await expect(page.getByRole("textbox").first()).toBeVisible({ timeout: 20_000 });
+  expect(errs, "group page errors").toEqual([]);
 });
 
 // ───────────────────────────────────────────────────────────────────────────

@@ -30,6 +30,17 @@ setup("authenticate as app admin", async ({ page }) => {
     // GOOGLE first and every login here navigated to accounts.google.com.
     page.locator('form:has(input[name="password"]) button[type="submit"]').click(),
   ]);
-  await expect(page.locator("body")).not.toBeEmpty();
+  // Assert the INBOX actually rendered, not merely that something did.
+  //
+  // This was `expect(body).not.toBeEmpty()`, and a Next 404 page has a
+  // non-empty body — so on 2026-07-29, with a stale `.next` making every
+  // authenticated route 404, this setup went green and saved that storageState
+  // for all ~537 downstream specs. A gate that cannot tell "logged in" from
+  // "the whole app is 404ing" is not a gate. The app rail is rendered by the
+  // (app) layout for every signed-in user, so its presence proves the
+  // authenticated shell resolved; the negative half proves we are not on an
+  // error page that happens to sit at this URL.
+  await expect(page.getByRole("navigation").first()).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("This page could not be found.")).toHaveCount(0);
   await page.context().storageState({ path: AUTH_FILE });
 });

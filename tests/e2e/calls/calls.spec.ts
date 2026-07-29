@@ -397,10 +397,34 @@ test.describe("D. answerCall — CAS race produces exactly one winner", () => {
       select: { status: true, answeredByUserId: true },
     });
     expect(final?.status).not.toBe("ringing");
-    // answeredByUserId is set on CAS-win regardless of the later Meta
-    // outcome (the rollback flips status to failed but leaves answeredBy
-    // for the audit trail).
-    expect(final?.answeredByUserId).toBe(userId);
+
+    // The winner's row must land in ONE of exactly two coherent states, and
+    // which one is provider-dependent — so assert the pairing, not one field.
+    //
+    //   Meta accepted  → in_progress, and the answerer is stamped.
+    //   Meta rejected  → failed, and answeredAt/answeredByUserId are BOTH
+    //                    nulled back out.
+    //
+    // That second branch is deliberate (calls.service.ts, the acceptCall
+    // rollback): `connected` is derived as `answeredAt !== null` in
+    // listTeamCalls, so leaving the stamp would report a call that never
+    // connected as connected, and permanently attribute an agent to a
+    // conversation they never spoke on.
+    //
+    // This assertion previously required `answeredByUserId === userId`
+    // unconditionally, citing an audit trail. The code abandoned that contract
+    // on 2026-06-11 (`769536bc`) and the test was never updated — it only fails
+    // when the Meta hop actually rejects, which needs `CALLS_SKIP_PREFLIGHT=0`,
+    // so with the dev default of `1` it silently kept passing against gates
+    // that were being skipped.
+    if (final?.status === "in_progress") {
+      expect(final?.answeredByUserId).toBe(userId);
+    } else {
+      expect(
+        final?.answeredByUserId,
+        `a call that never connected (status=${final?.status}) must not attribute an answerer`,
+      ).toBeNull();
+    }
   });
 });
 

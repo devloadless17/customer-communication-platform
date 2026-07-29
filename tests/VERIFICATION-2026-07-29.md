@@ -57,7 +57,7 @@ socket-room that references the dying entity.
 | `pnpm test` — web vitest | ✅ 18/18 |
 | `pnpm test:e2e:meta` | ✅ **169/170** — the only failure is the `@pressure` spec, which CI excludes. See Finding #1 |
 | `pnpm test:e2e:multiaccount` | ⛔→✅ **37/38 on arrival**; the failure was a real HIGH — see Finding #2. **38/38** after the fix |
-| `pnpm test:e2e` (main, dev stack) | _pending_ |
+| `pnpm test:e2e` (main, dev stack, 537) | ⛔→✅ **534/537** on arrival; 1 env artifact + **2 stale specs asserting abandoned contracts** — see Finding #4. Green after |
 
 Note for anyone re-running: locally `pnpm test:e2e:meta` runs **170** tests, not
 the 166 the old ledger records — `@pressure` is `grepInvert`ed only when `CI` is
@@ -338,6 +338,180 @@ until re-confirmed at HEAD.
   is a 7-day zero-hit check against production Caddy access logs — that needs
   VPS access. Today is 2026-07-29. Do not delete without the log check; do not
   extend it silently (the file's own policy).
+
+### Finding #4 — two specs have been asserting contracts the code deliberately abandoned
+
+The main Playwright suite came back **534/537**. One failure was the dev
+cold-compile artifact (`/settings/webchatwidget`, first visit > 30 s). The other
+two were specs frozen against behaviour that was intentionally changed — each
+green in CI only because **the main suite has not been run to completion
+recently**. The predecessor ledger's own row *"Main Playwright suite ×2 with
+canary intact"* is still marked `in progress`, which is exactly how this
+accumulates.
+
+**(a) `calls.spec.ts:352` — the CAS-race spec asserted a discarded audit-trail
+rule.** It required `answeredByUserId === userId` unconditionally after the CAS
+win, commenting that "the rollback flips status to failed but leaves answeredBy
+for the audit trail". `calls.service.ts` abandoned that on **2026-06-11**
+(`769536bc`): the acceptCall rollback now nulls `answeredAt` AND
+`answeredByUserId`, because `connected` is derived as `answeredAt !== null` in
+`listTeamCalls`, so keeping the stamp reported a call that never connected as
+connected and permanently attributed an agent to a conversation they never spoke
+on. The code's reasoning is the better one and is specific about its downstream
+victim, so the SPEC was corrected — it now asserts the coherent *pairing*
+(`in_progress` ⇒ answerer stamped; `failed` ⇒ both nulled) instead of one field.
+
+Note **why it hid for seven weeks**: it only fails when the Meta hop actually
+rejects, which needs `CALLS_SKIP_PREFLIGHT=0`. The dev `.env` ships `1`, so the
+gate under test is skipped and the spec passes without exercising it. That flag
+is now part of this ledger's ritual.
+
+**(b) `full-ui-functional.spec.ts:222` — asserted a gate that was removed.** It
+required `/broadcasts/groups/new` to redirect to `/settings/whatsapp` when no
+number is configured. `4aaf3c6e` (2026-07-27) deliberately deleted that
+pre-flight, and the page says why in place: an audience group is a saved CONTACT
+list and is channel-agnostic, so a WhatsApp-specific gate bounced a
+Messenger-only or Instagram-only workspace to a settings page for a channel it
+does not use. Spec inverted to assert the current contract.
+
+**Also fixed: the setup gate that let Finding #3 hide.** `app-admin.setup.ts` now
+asserts the authenticated shell actually rendered. NEGATIVE-TESTED against a
+real 404 page (`/calls`, which genuinely has no `page.tsx`): the 404 body
+contains **zero** `<nav>` landmarks while `/inbox` has one, so the assertion
+fails exactly on the condition it was written for, and passes on the real inbox
+(verified in a 59/59 green run).
+
+**Suite-hygiene note.** `e2e-app-ws` carries three leftover `externalAccountId:
+""` placeholder `ChannelConnection` rows (whatsapp / messenger / instagram, all
+`isActive: false`) — pre-minted by `getConfig` whenever a spec merely *visits* a
+channel settings page, and only cleaned up by `normalizeDefaultAccount` when
+real credentials are pasted. Harmless today (`wipeTestData` does not delete
+connections, and the gate they would have confused is gone), but this is the
+same `""`-placeholder row that once became a channel default and silently lost
+all inbound. Worth adding to `wipeTestData`.
+
+---
+
+## Phase 1 — delta triage notes (in progress)
+
+### `lib/sweepers/webhook-subscription-health.ts` — zero tests, and untestable as the harness stands
+
+The module's whole purpose is detecting the one failure where customer data
+disappears with no signal: a Meta-dashboard re-save silently drops the
+WABA/Page subscription, credentials stay valid, inbound goes to zero, nothing
+errors. It took Messenger dark in production on 2026-07-10.
+
+**Why there are no tests:** `tests/e2e/_mock/graph-mock.mjs` does not implement
+`/subscribed_apps` **at all** (zero occurrences). So the sweeper cannot be
+exercised against the existing mock Graph without extending it first. That is
+the prerequisite for closing this gap, and it is the work item — not "write a
+spec".
+
+**RISK-1 (characterized, NOT fixed — needs wire verification).** Both
+`checkWhatsapp` (line 124) and `ensureWabaSubscribed`
+(`meta-waba-subscription.ts:36`) treat `subscribed_apps.data.length > 0` as
+"we are subscribed". That is a strictly weaker property than the one they
+report: it answers *"is **some** app subscribed to this WABA"*. The two diverge
+exactly when ANOTHER app is subscribed and ours is not — which is the ordinary
+state during a migration from a previous BSP, a flow this product supports. The
+symptom would be the precise failure this module exists to catch: onboarding
+reports "subscribed ✓", zero inbound, no error anywhere.
+
+`ChannelConnection.config.appId` is already stored (optional; used by
+`meta.ts:4812` for resumable uploads), so an exact match is *available* — but
+whether the GET response carries an app id to match against is **not
+established**: `docs/Meta/whatsapp.md` documents the POST and not the GET
+response schema. Writing the comparison now would be coding against an
+unverified wire shape, which §17 forbids and which this repo has been burned by.
+**Verification step before any fix:** capture a real
+`GET /{waba-id}/subscribed_apps` body (or the Graph reference) and confirm the
+per-entry `whatsapp_business_api_data.id` field. Then match on it when `appId`
+is known, and keep the length check as the fallback when it isn't.
+
+**RISK-2 (characterized).** `isTokenError` (line 101) classifies a dead token by
+substring-matching `"code":190` / `OAuthException` against the error *message*.
+This codebase has been defeated by error-shape classification twice — the
+`P2002`-via-`err.meta` case, and the burst-ingest classifier that was correct
+about every code it named and still wrong because the pg driver adapter
+delivered a different shape. Here a false negative is silent and total: a dead
+token is classified transient, no state transition is recorded, and purpose #2
+of the module never fires. Per the standing rule, match more than one way and
+let a test prove it.
+
+**REFUTED by comparison, so not a finding:** the sweeper does no immediate sweep
+at boot (30 min blind after each deploy). Checked `whatsapp-health-refresh`,
+`template-catalog-refresh` and `broadcast-materialize-drift` — every sibling
+starts with a bare `setInterval` too. It is the house convention (no boot storm
+across 30 sweepers), not a defect in this one.
+
+### `health/ops-snapshot.ts` — zero tests
+
+Reads carefully. `bounded()` is correct (the fallback resolves, the timer is
+always cleared) and every probe catches internally, so `Promise.all` cannot
+reject. Destructure order matches the array. Recorded for the domain session
+rather than fixed:
+
+**RISK-3.** `probeStuckBroadcasts` is the one probe **not** wrapped in
+`bounded()` — in `ops-snapshot.ts:112`, and identically at its two other call
+sites (`health.controller.ts:101`, `health-watchdog.service.ts:90`), while
+every sibling DB probe there is bounded at 2.5 s. It is a Prisma query, so
+under a saturated pool it waits — up to the 30 s `statement_timeout`. `/health`
+is the **api container's Docker healthcheck** (`docker-compose.yml:205`,
+`timeout: 3s`, `retries: 3`), and the deploy gate reads
+`docker inspect .State.Health.Status`. So DB pressure — the moment you least
+want it — can make the api read unhealthy and trip the deploy's auto-rollback on
+a release that is fine. Pre-existing (not from the delta) and consistent across
+all three sites, so it is a design gap, not a regression. Belongs to domain #31.
+
+### `lib/analytics/reports.ts` — VERIFIED CORRECT on its highest-risk detail
+
+Edge theme ⑤: the daily bucketing attaches UTC before converting
+(`(m."timestamp" AT TIME ZONE 'UTC') AT TIME ZONE ${tz}`), which is right —
+`Message.timestamp` is a naive timestamp holding UTC, and a single `AT TIME
+ZONE` would reinterpret rather than convert it. The comment records that a
+`Pacific/Auckland` spec caught it before it shipped. `tz` reaches SQL as a bound
+parameter and is shape-validated first; `accountId` is ownership-checked against
+the workspace before it reaches nine raw predicates, and is rejected rather than
+silently returning an empty report. `from`/`to` are ISO instants, so the caller
+owns its own midnight. Remaining gap is coverage breadth, not correctness: no
+e2e, no UI spec, no `/v1` parity spec.
+
+### Finding #3 — the app-admin auth setup passes vacuously on a broken app
+
+Chasing what looked like a catastrophe: **every authenticated `(app)` route
+returned 404** — `/inbox`, `/contacts`, `/tickets`, `/broadcasts`, `/settings`,
+`/team`, `/flags`, `/workflows`, `/templates`, `/account`. The inbox is the
+heart of the product, so this was run to ground before anything else.
+
+**It was NOT a product defect.** `rm -rf apps/web/.next` and a restart returned
+every one of them to 200. A stale Next dev build, the gotcha the repo already
+records ("dev OOM → `rm -rf .next`"). Recorded here because it cost real time
+and the symptom is maximally alarming; the diagnostic that settles it in one
+step is a clean rebuild, before reading any application code.
+
+Two things it *did* establish, both real:
+
+**Finding #3 (harness, MED).** `tests/e2e/app-admin.setup.ts:33` asserts only
+`await expect(page.locator("body")).not.toBeEmpty()`. **A Next 404 page has a
+non-empty body.** So the setup went green while the app it authenticates into
+was returning 404 on every route — and it saved that storageState for all 537
+downstream specs. A setup gate that cannot distinguish "logged in" from "the
+whole app is 404ing" is not a gate. It should assert something only the real
+inbox renders. (Its sibling `auth.setup.ts` failed honestly, because it waits
+for `/platform` — a URL assertion, not a body assertion.)
+
+**Observation (LOW, not fixed).** `apps/web/src/app/(app)/calls/` contains only
+`calls-history.tsx` and **no `page.tsx`**, so `/calls` genuinely 404s. Nothing
+links to it — the component is imported by `features/inbox/components/inbox-shell.tsx`
+— so there is no user-visible break today. But a component parked at a
+route-shaped path in the App Router tree is exactly what made the stale-build
+symptom hard to read, and it becomes a real route the moment someone adds a
+page. Worth moving to `features/calls/`.
+
+**Environment note for re-runs.** Next dev compiles a route on first visit, and
+the main config's `navigationTimeout` is 30 s — a cold `/login` exceeded it and
+failed both setup projects before any spec ran. Warm the routes with a curl
+sweep before starting the suite.
 
 ---
 
