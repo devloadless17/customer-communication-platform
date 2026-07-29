@@ -427,7 +427,38 @@ all inbound. Worth adding to `wipeTestData`.
 
 ## Phase 1 — delta triage notes (in progress)
 
-### `lib/sweepers/webhook-subscription-health.ts` — zero tests, and untestable as the harness stands
+### ✅ The two zero-test subsystems now have specs (both NEGATIVE-TESTED)
+
+`apps/api/test/webhook-subscription-health.spec.ts` (6) and
+`apps/api/test/ops-snapshot.spec.ts` (4). Unit-level with Graph mocked at the
+module seam, in the established `whatsapp-health-per-account.spec.ts` style —
+the e2e mock Graph cannot serve these (see below).
+
+**webhook-subscription-health** pins the behaviours whose failure is silent: a
+healthy subscription is left alone; a dropped one SELF-HEALS without raising the
+banner; a heal that fails raises `needsReconnect`; **a transient Graph error is
+not mistaken for broken**; a dead token (Graph 190) IS classified broken; an
+inactive connection is never probed. Negative-tested BOTH directions on the
+classifier — forcing `isTokenError` to `true` fails exactly the transient case,
+forcing it to `false` fails exactly the dead-token case.
+
+**ops-snapshot** pins that degradation stays partial: all seven queues are
+present; a queue whose `getJobCounts` never settles degrades to `null` while
+every sibling still reports; a queue that REJECTS degrades to `null` rather than
+taking the whole `Promise.all` down; a dead database reports `db:false` and the
+outbox probe returns its `-1` sentinel rather than a reassuring "0 pending".
+Negative-tested by raising `PROBE_TIMEOUT_MS` to 600 s — the wedged-queue case
+then times out, proving the bound is what the assertion is measuring.
+
+**A vacuity trap, caught in my own spec.** The first version seeded
+`config.wabaId` but not the `wabaId` **column** — which is what the sweeper
+selects. Every case skipped the connection, and the three tests whose assertions
+are negatives (*"no heal attempted"*, *"needsReconnect stays false"*) **passed
+without executing any of the code under test**. Both now carry an explicit
+non-vacuity guard asserting the sweeper actually probed this WABA. A spec full
+of negative assertions is exactly the kind that can go green against nothing.
+
+### `lib/sweepers/webhook-subscription-health.ts` — the remaining gaps
 
 The module's whole purpose is detecting the one failure where customer data
 disappears with no signal: a Meta-dashboard re-save silently drops the

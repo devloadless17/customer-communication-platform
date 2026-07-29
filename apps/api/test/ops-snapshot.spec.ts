@@ -1,0 +1,134 @@
+/**
+ * Operational snapshot for the super-admin Platform page.
+ *
+ * Why this file exists: `health/ops-snapshot.ts` had ZERO tests (verification
+ * program, 2026-07-29). Its whole reason for being is that failed BullMQ jobs
+ * are retained for 7 days and surfaced NOWHERE — the in-process counters reset
+ * on every restart, so after a deploy they read zero while a hundred failed
+ * jobs sit in Redis. If this page lies, the operator's only signal is gone.
+ *
+ * The property that actually needs pinning is the DEGRADATION one, and it is
+ * the kind that rots silently: a wedged Redis must turn the page into PARTIAL
+ * data, never a hang and never a throw. `Promise.all` over eleven probes is one
+ * un-caught rejection away from taking the whole snapshot down, and a probe
+ * without a timeout is one wedged connection away from hanging it.
+ *
+ *   pnpm --filter @ccp/api exec vitest run test/ops-snapshot.spec.ts
+ */
+import { existsSync } from "node:fs";
+
+import type { PrismaClient } from "@prisma/client";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+
+vi.mock("@/lib/workflows/queue", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/workflows/queue")>();
+  return { ...actual, getWorkflowQueue: vi.fn(actual.getWorkflowQueue) };
+});
+
+import { getWorkflowQueue } from "@/lib/workflows/queue";
+import { buildOpsSnapshot } from "@/health/ops-snapshot";
+import type { DbService } from "@/db/db.service";
+
+import { createTestPrismaClient } from "./_prisma";
+
+if (existsSync(".env")) process.loadEnvFile(".env");
+if (existsSync("../../.env")) process.loadEnvFile("../../.env");
+
+const prisma = createTestPrismaClient();
+const mockedWorkflowQueue = vi.mocked(getWorkflowQueue);
+
+/** The snapshot needs `$queryRaw`, `broadcast` and `getPoolStats` off DbService.
+ *  Everything else it reaches through module-level queue getters. */
+function fakeDb(overrides: Partial<Record<string, unknown>> = {}): DbService {
+  return Object.assign(Object.create(Object.getPrototypeOf(prisma) as object), prisma, {
+    getPoolStats: () => ({ max: 50, total: 3, idle: 2, waiting: 0 }),
+    ...overrides,
+  }) as unknown as DbService;
+}
+
+/** The seven queues the Platform page renders. Named here so a queue silently
+ *  dropped from the snapshot fails a test rather than just vanishing from the
+ *  operator's table. */
+const EXPECTED_QUEUES = [
+  "workflows",
+  "message-sends",
+  "webhook-deliveries",
+  "broadcast-materialize",
+  "ai",
+  "contact-transfer",
+  "coexistence-history",
+];
+
+beforeAll(() => {
+  // Guard: these specs assert against a live Redis + Postgres.
+  if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL required");
+});
+
+afterAll(async () => {
+  await prisma.$disconnect();
+});
+
+describe("ops snapshot", () => {
+  it("reports every queue the Platform page renders", async () => {
+    const snap = await buildOpsSnapshot(fakeDb());
+
+    expect(Object.keys(snap.queues).sort()).toEqual([...EXPECTED_QUEUES].sort());
+    expect(snap.db).toBe(true);
+    expect(snap.uptimeSec).toBeGreaterThanOrEqual(0);
+    // outboxLag is a real read, so it must be a number, not the -1 sentinel the
+    // probe returns when the query itself failed.
+    expect(snap.outboxLag.pendingCount).toBeGreaterThanOrEqual(0);
+  });
+
+  it("a WEDGED queue degrades to null instead of hanging the page", async () => {
+    // The reason every probe is time-bounded. A queue whose getJobCounts never
+    // settles must cost the page one null cell, not the whole snapshot.
+    mockedWorkflowQueue.mockReturnValueOnce({
+      getJobCounts: () => new Promise(() => {}),
+    } as unknown as ReturnType<typeof getWorkflowQueue>);
+
+    const t0 = Date.now();
+    const snap = await buildOpsSnapshot(fakeDb());
+    const elapsed = Date.now() - t0;
+
+    expect(snap.queues.workflows).toBeNull();
+    // Bounded at 2.5s per probe; allow generous headroom for a loaded box but
+    // still fail if the bound is gone entirely.
+    expect(elapsed).toBeLessThan(20_000);
+    // The rest of the page still rendered — that is what "partial data" means.
+    expect(snap.db).toBe(true);
+    for (const name of EXPECTED_QUEUES.filter((q) => q !== "workflows")) {
+      expect(snap.queues[name], `${name} should be unaffected`).not.toBeNull();
+    }
+  }, 40_000);
+
+  it("a THROWING queue degrades to null and never rejects the snapshot", async () => {
+    // Promise.all over eleven probes: one un-caught rejection would take the
+    // entire Platform page down rather than one cell.
+    mockedWorkflowQueue.mockReturnValueOnce({
+      getJobCounts: () => Promise.reject(new Error("redis connection lost")),
+    } as unknown as ReturnType<typeof getWorkflowQueue>);
+
+    const snap = await buildOpsSnapshot(fakeDb());
+
+    expect(snap.queues.workflows).toBeNull();
+    expect(snap.db).toBe(true);
+  });
+
+  it("a DEAD database reports db:false rather than throwing", async () => {
+    const snap = await buildOpsSnapshot(
+      fakeDb({
+        $queryRaw: () => Promise.reject(new Error("connection refused")),
+        broadcast: {
+          findMany: () => Promise.reject(new Error("connection refused")),
+        },
+      }),
+    );
+
+    expect(snap.db).toBe(false);
+    // The outbox probe rides the same dead connection; it reports its -1
+    // sentinel rather than a fabricated zero, so the page cannot show a
+    // reassuring "0 pending" for a database it cannot reach.
+    expect(snap.outboxLag.pendingCount).toBe(-1);
+  });
+});
