@@ -527,6 +527,55 @@ want it — can make the api read unhealthy and trip the deploy's auto-rollback 
 a release that is fine. Pre-existing (not from the delta) and consistent across
 all three sites, so it is a design gap, not a regression. Belongs to domain #31.
 
+### The two backfill migrations — VERIFIED against the real dev database
+
+Irreversible data writes, so checked by querying the result rather than reading
+the SQL and trusting it.
+
+**`20260728110000_backfill_conversation_account` — verified complete and
+re-runnable.** It stamps `Conversation.channelConnectionId` on outbound-first
+threads that no create path stamped. Dev DB after the fact: 12 conversations,
+**6 still NULL, and 0 of those fixable** — i.e. a re-run would change nothing,
+which is what "only touches NULL rows" is supposed to buy. Inspecting the six:
+every one has **zero active connections** on its channel, so NULL is the only
+honest value. Three of them are `webchatwidget`, which has no
+`ChannelConnection` at all by design (the one allowlisted entry in
+`check-channel-account`), so those stay NULL permanently and correctly.
+
+This also **refutes, against real data, a hypothesis raised earlier in this
+pass**: that `resolveOutboundAccountId` could return its documented-harmful
+null for a workspace holding active accounts but no `isDefault` one. No such
+row exists — consistent with `normalizeDefaultAccount` (guarantees exactly one
+ACTIVE default on connect) and `ChannelAccountsService.remove` (promotes a
+viable successor, explicitly skipping inactive and `""`-placeholder rows).
+VERIFIED HELD, not a finding.
+
+**`20260728120000_backfill_template_waba` — applied clean in dev; one branch
+unexercised.** Dev DB: 11 templates, **0 legacy `wabaId = ''` rows, 0 with
+bindings**. The SQL is careful — it adopts only where the workspace has exactly
+ONE distinct real WABA, and never deletes a `''` duplicate carrying
+`variableBindings`, which is the one thing a Meta re-sync cannot give back.
+
+**RISK-4 (characterized, cannot be confirmed locally).** That preservation rule
+has a tail: a `''` row WITH bindings is kept by step 1 and then **skipped by
+step 2's unique-key guard**, so it retains `wabaId = ''` permanently — which is
+exactly the state the migration exists to eliminate, and the state in which
+`refreshTemplateAnalytics` refuses and Meta's ~7-day analytics horizon passes
+uncaptured. The workspace is also left showing two templates of the same
+name/language. The better ending is to COPY the bindings onto the real row and
+then drop the legacy one; preserving the row preserves the defect with it. Zero
+such rows exist in dev, so this is unexercised here. **Operator check for
+production:**
+
+```sql
+SELECT count(*) FROM "MessageTemplate"
+WHERE "wabaId" = '' AND "variableBindings" IS NOT NULL
+  AND "variableBindings"::text NOT IN ('{}', 'null');
+```
+
+Non-zero means those templates' analytics are permanently dark and want a
+follow-up migration.
+
 ### `lib/analytics/reports.ts` — VERIFIED CORRECT on its highest-risk detail
 
 Edge theme ⑤: the daily bucketing attaches UTC before converting
