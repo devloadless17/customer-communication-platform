@@ -319,7 +319,7 @@ a checklist, not on however many findings happened to surface.
 | 2 | outbound send + idempotency ledger | 1 | | ☐ |
 | 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
 | 4 | workflows (~22 step types) | 1 | | ☐ |
-| 5 | assignment (policies/rules/capacity) | 1 | | ☐ |
+| 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
 | 6 | broadcasts (+audience/templates/analytics) | 1 | | ☐ |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 | 8 | realtime layer | 1 | | ☐ |
@@ -724,6 +724,45 @@ sweep before starting the suite.
 
 ## Domain session notes
 
+### #5 assignment (policies / rules / capacity) — ✅ CLOSED (2026-07-29)
+
+Checklist from `docs/assignment.md` + CLAUDE.md §18. No defect.
+
+| Invariant | Evidence |
+|---|---|
+| **§18: automation never takes a thread from a human** | **R** verified in DEPTH — see below · **E** `assignment-pick-burst.spec.ts`, `workflows-events/assignment-*.spec.ts` |
+| Every automated caller passes `onlyIfUnassigned` | **R** all four automated callers do: AI orchestrator, broadcast runner (`!assignmentOverwrite`), and both workflow `assign_to` modes. The AI ESCALATION path passes `false` deliberately, and says why in place — an escalation is a re-route a human asked for |
+| Every automated assignment writes through `assignConversation` | **R** `apply.ts` calls it at both sites; nothing writes `assignedUserId` directly |
+| Deactivated agents never receive new work | **R** the member lookup filters `deactivatedAt: null` |
+| Assignment never sets `open` — only chatting does | **R** explicit in the status branch |
+| Restricted agents are scoped by ROOM MEMBERSHIP, not emit-time filtering | **R** `isRestrictedViewer` at the gateway's join |
+| Campaign assignment respects `assignmentOverwrite` (default false) | **R** `onlyIfUnassigned: !broadcast.assignmentOverwrite` |
+
+**The §18 enforcement is structural, and I checked it twice because the first
+reading looked wrong.** `assignConversation` compares `onlyIfUnassigned` against
+a PRE-READ `previousAssignedUserId`, which on its own is a TOCTOU: a human
+claiming the thread between the read and the write would still be overwritten.
+It is not, because that comparison is only a fast-path short-circuit — the write
+itself is a CAS pinning **both** `assignedUserId` AND `status` in the `where`,
+inside `publishInTx`. A human who claims the thread in the window makes the CAS
+match zero rows, Prisma raises P2025, and `isP2025` maps it to
+`{ ok: false, reason: "conflict" }` rather than a 500. So the guarantee holds
+even if the fast path is wrong, which is the right way round.
+
+Recorded because the pre-read pattern READS like the exact bug the predecessor
+fixed in `79b2597` ("`assignByPolicy` never forwarded `onlyIfUnassigned` into
+the CAS"), and a reviewer who stopped at the comparison would report a HIGH that
+isn't there. **The fifth claim I raised and withdrew in this program by reading
+further.**
+
+**Edge themes:** ① **covered — the CAS is the domain's core** · ② at-least-once
+redelivery is idempotent precisely because of fill-empty-only · ③ deactivated
+assignee degrades rather than drops · ④ N/A · ⑤ work-hours windows ·
+⑥ N/A · ⑦ the offline rebalance is bounded · ⑧ restricted-agent scoping ·
+⑨ policy/member writes carry `workspaceId` · ⑩ the pick lock + single-flighted
+config survive a restart; presence returning an EMPTY set means "do nothing".
+
+
 ### #7 tickets (+SLA + numbering + escalation) — ✅ CLOSED (2026-07-29)
 
 Checklist from `docs/ticketing.md` + CLAUDE.md §2/§18. One real defect, already
@@ -826,7 +865,7 @@ safe", plus the §58 composition warning. **All seven hold.** No defect found.
 | 2 | No fuzzy / name matching, ever | **R** `name` appears in identity-service only to SEED a new customer — it is never a predicate |
 | 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
 | 4 | Merge is non-destructive | **R** zero `contact.delete*` / `message.delete*` in `customers.service.ts`; the only delete is empty-customer cleanup, which the doc sanctions |
-| 5 | Tenant-scoped — identity never crosses `workspaceId` | **R** `workspaceId` in the candidate `where` and on the created `Customer` |
+| 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
 | 6 | ONE writer | **R** `resolveCustomerId` called only from ingest (×3), ingest-call and the drift sweeper — never a controller or provider |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 
@@ -909,7 +948,7 @@ in five separate prior sessions. Checklist taken verbatim from
 | 2 | Dedup keys stay **workspace**-scoped, NOT per-account | **R** `Message @@unique([workspaceId, channel, externalId])`, `Call @@unique([workspaceId, channel, externalCallId])` — adding the account would make status webhooks miss |
 | 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
 | 4 | The account is re-stamped on every inbound; the widget binding is **sticky** | **R** `ingest.ts:2217-2223` (guarded so the common case writes nothing, and explicitly *"unlike webchat's sticky webchatWidgetId"*) + **E** `webhook-account-attribution.spec.ts`, `multi-account/01` |
-| 5 | No credentials in the member-readable directory | **R** `secrets` is never selected in `channel-accounts.service.ts` — zero occurrences |
+| 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
 | 6 | Attribution renders ONLY above one account per channel | **R** `showAccountFor(channel)` gates every `AccountLabel`; a single-account inbox stays byte-identical |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 | 8 | The account narrow is ANDed, and **must be part of `filterKey`** | **N** — **it was NOT.** Fixed + `filter-key.spec.ts` (6), negative-tested |
@@ -976,7 +1015,7 @@ CLAUDE.md §7/§12/§15/§18 + the module docblock.
 | 2 | `accountId` proved to belong to THIS workspace before it reaches nine raw predicates | **R** + **N** `reports-accounts.spec.ts` — an unknown id is REJECTED, not silently emptied |
 | 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
 | 4 | Range capped (`MAX_RANGE_DAYS = 366`) → `400 invalid_range` | **E** `reports-overview.spec.ts` |
-| 5 | `tz` never interpolated — bound parameter, shape-validated first | **R** `reports.ts:87` + `Prisma.sql` binding |
+| 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
 | 6 | Internal route gated on `teamActivity:view` | **R** `@RequireCapability("teamActivity:view")` under `SessionGuard`; the web redirect is UX only, the API is authoritative |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 | 8 | `/v1` parity + documented in BOTH surfaces (§12 locked rule) | **N** CHECKER 8 now enforces it mechanically |
@@ -1064,7 +1103,7 @@ unmapped.**
 | 2 | Idempotent for the partner: stable `X-CCP-Delivery` id | **E** `outbox-redelivery-dedupe.spec.ts` + **R** `worker.ts:431` |
 | 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
 | 4 | Auto-disable after repeated failure | **R** `worker.ts` `consecutiveFailures` increment + reset-on-success |
-| 5 | Stable, versioned payload | **N** `webhook-signing.spec.ts` pins `WEBHOOK_WIRE_VERSION = 1`, so a silent bump costs a deliberate test edit |
+| 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
 | 6 | SSRF-safe egress | **R** `worker.ts:425` routes through `safeFetch` (DNS-pinned, private ranges + all IPv6 notations blocked) — verified in depth by the predecessor program; R-only because exercising it needs a live resolver |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 | 8 | Tenancy: `OutboundWebhookDelivery` is a parent-scoped exception | **R** the one request-reachable read proves ownership of the workspace-scoped PARENT first, then queries by `webhookId`; the worker's bare-id read is a BullMQ job path, never request input |
