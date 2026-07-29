@@ -114,6 +114,30 @@ describe("ops snapshot", () => {
     expect(snap.db).toBe(true);
   });
 
+  it("a SLOW stuck-broadcast probe cannot hang the snapshot", async () => {
+    // /health is the api container's Docker healthcheck (timeout 3s, retries 3)
+    // and the deploy gate reads .State.Health.Status. This probe was the ONE
+    // unbounded one across all three of its callers, so a saturated pg pool —
+    // the exact moment you least want it — could hold it until the 30s
+    // statement_timeout, read the api as unhealthy, and auto-roll-back a
+    // perfectly good release. `catch` does not help: the query does not fail,
+    // it just takes too long.
+    const t0 = Date.now();
+    const snap = await buildOpsSnapshot(
+      fakeDb({
+        broadcast: { findMany: () => new Promise(() => {}) },
+      }),
+    );
+    const elapsed = Date.now() - t0;
+
+    // Bounded at 2.5s here; generous headroom for a loaded box, but nowhere
+    // near the 30s statement_timeout an unbounded probe would wait for.
+    expect(elapsed).toBeLessThan(20_000);
+    // And the rest of the page still rendered.
+    expect(snap.db).toBe(true);
+    expect(Object.keys(snap.queues)).toHaveLength(EXPECTED_QUEUES.length);
+  }, 40_000);
+
   it("a DEAD database reports db:false rather than throwing", async () => {
     const snap = await buildOpsSnapshot(
       fakeDb({

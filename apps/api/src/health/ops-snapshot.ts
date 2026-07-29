@@ -109,7 +109,7 @@ export async function buildOpsSnapshot(db: DbService): Promise<OpsSnapshot> {
       ),
       probeRedisMemory(getRedisConnection(), PROBE_TIMEOUT_MS),
       probeOutboxLag(db),
-      probeStuckBroadcasts(db, STUCK_BROADCAST_PROBE_MIN),
+      probeStuckBroadcasts(db, STUCK_BROADCAST_PROBE_MIN, PROBE_TIMEOUT_MS),
       queueCounts(getWorkflowQueue),
       queueCounts(getMessageSendQueue),
       queueCounts(getWebhookDeliverQueue),

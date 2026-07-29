@@ -31,8 +31,39 @@ import {
 export async function probeStuckBroadcasts(
   db: PrismaClient,
   thresholdMin: number,
+  /**
+   * Wall-clock ceiling, mirroring `probeRedisMemory(redis, timeoutMs)`.
+   *
+   * WHY IT IS NOT OPTIONAL-BY-OMISSION. `catch` covers a query that FAILS; it
+   * does nothing for one that merely takes a long time, and this probe runs on
+   * every `/health` hit — which is the api container's Docker healthcheck
+   * (`docker-compose.yml`, `timeout: 3s`, `retries: 3`), and the deploy gate
+   * reads `docker inspect .State.Health.Status`. Unbounded, a saturated pg pool
+   * (the exact moment you least want it) makes this wait behind pool acquisition
+   * up to the 30s `statement_timeout`, wget times out, the api reads unhealthy,
+   * and a perfectly good release gets auto-rolled-back. Every sibling probe in
+   * all three callers is already bounded at 2s for precisely this reason; this
+   * one was the exception.
+   *
+   * On timeout it degrades exactly like the catch does — an all-clear, which is
+   * the same posture `outboxLag` takes: /health's job is to report, and a probe
+   * that cannot answer must not take the whole report down with it.
+   */
+  timeoutMs?: number,
 ): Promise<StuckBroadcastReport> {
   const cutoff = new Date(Date.now() - thresholdMin * 60_000);
+  const allClear: StuckBroadcastReport = { count: 0, oldestPausedMin: null, reasons: [] };
+  if (timeoutMs && timeoutMs > 0) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<StuckBroadcastReport>((resolve) => {
+      timer = setTimeout(() => resolve(allClear), timeoutMs);
+    });
+    try {
+      return await Promise.race([probeStuckBroadcasts(db, thresholdMin), timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
   try {
     const stuck = await db.broadcast.findMany({
       where: { status: "paused", pausedAt: { lte: cutoff } },

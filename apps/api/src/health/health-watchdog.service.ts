@@ -87,7 +87,7 @@ export class HealthWatchdogService implements OnModuleInit, OnModuleDestroy {
         this.pingRedis(),
         probeRedisMemory(getRedisConnection(), HealthWatchdogService.PROBE_TIMEOUT_MS),
         this.probeOutboxLag(),
-        probeStuckBroadcasts(this.db, STUCK_BROADCAST_PROBE_MIN),
+        probeStuckBroadcasts(this.db, STUCK_BROADCAST_PROBE_MIN, HealthWatchdogService.PROBE_TIMEOUT_MS),
       ]);
       const poolStats = this.db.getPoolStats();
       const degraded = computeDegradations({

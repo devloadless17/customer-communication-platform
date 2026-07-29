@@ -553,8 +553,8 @@ always cleared) and every probe catches internally, so `Promise.all` cannot
 reject. Destructure order matches the array. Recorded for the domain session
 rather than fixed:
 
-**RISK-3.** `probeStuckBroadcasts` is the one probe **not** wrapped in
-`bounded()` — in `ops-snapshot.ts:112`, and identically at its two other call
+**RISK-3 — FIXED 2026-07-29.** `probeStuckBroadcasts` was the one probe **not**
+wrapped in `bounded()` — in `ops-snapshot.ts:112`, and identically at its two other call
 sites (`health.controller.ts:101`, `health-watchdog.service.ts:90`), while
 every sibling DB probe there is bounded at 2.5 s. It is a Prisma query, so
 under a saturated pool it waits — up to the 30 s `statement_timeout`. `/health`
@@ -563,7 +563,20 @@ is the **api container's Docker healthcheck** (`docker-compose.yml:205`,
 `docker inspect .State.Health.Status`. So DB pressure — the moment you least
 want it — can make the api read unhealthy and trip the deploy's auto-rollback on
 a release that is fine. Pre-existing (not from the delta) and consistent across
-all three sites, so it is a design gap, not a regression. Belongs to domain #31.
+all three sites, so it was a design gap rather than a regression.
+
+**Fixed at the source** rather than at three call sites: the probe now takes a
+`timeoutMs` and races internally, mirroring `probeRedisMemory(redis, timeoutMs)`
+— the shape its sibling already used — and all three callers pass their existing
+2 s constant. On timeout it degrades to the same all-clear its `catch` returns,
+the posture `outboxLag` already takes: /health's job is to report, and a probe
+that cannot answer must not take the whole report down with it.
+
+The distinction that made this worth fixing: `catch` covers a query that FAILS
+and does nothing for one that merely takes too long, which is exactly the pool-
+saturation case. Pinned by *"a SLOW stuck-broadcast probe cannot hang the
+snapshot"* and NEGATIVE-TESTED — dropping the timeout argument at the
+`ops-snapshot` call site makes the test hang until its own 40 s ceiling.
 
 ### Finding #5 — in-app call recording deleted the interim raw BEFORE moving the row pointer
 

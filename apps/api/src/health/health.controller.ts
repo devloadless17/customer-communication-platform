@@ -98,7 +98,7 @@ export class HealthController {
       this.pingRedis(),
       this.probeRedisMemory(),
       this.probeOutboxLag(),
-      probeStuckBroadcasts(this.db, STUCK_BROADCAST_PROBE_MIN),
+      probeStuckBroadcasts(this.db, STUCK_BROADCAST_PROBE_MIN, HealthController.PROBE_TIMEOUT_MS),
     ]);
     const poolStats = this.db.getPoolStats();
     const saturationPercent =
