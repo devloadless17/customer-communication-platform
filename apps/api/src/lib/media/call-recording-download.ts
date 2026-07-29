@@ -621,9 +621,19 @@ async function transcribePerSpeaker(
     { speaker: "Customer" as const, label: "customer", audio: channels.customer },
   ];
 
-  const results = await Promise.all(
-    sides.map((side) => transcribeOneChannel(side, callId, policy)),
-  );
+  // Transcribe the isolated legs AND the playback mix, then keep whichever
+  // actually held the conversation. See `pickBestRendering` — this is the
+  // difference between "usually better" and "never worse".
+  const [agentR, customerR, mixR] = await Promise.all([
+    transcribeOneChannel(sides[0]!, callId, policy),
+    transcribeOneChannel(sides[1]!, callId, policy),
+    transcribeOneChannel(
+      { speaker: "Business", label: "mixed", audio: channels.mixed },
+      callId,
+      policy,
+    ),
+  ]);
+  const results = [agentR, customerR];
 
   // ── Cross-channel language consensus ────────────────────────────────────
   // Both people on a call are speaking the same language essentially always,
@@ -663,7 +673,6 @@ async function transcribePerSpeaker(
   const merged = results
     .flatMap((r) => r.segments.map((s) => ({ speaker: r.speaker, ...s })))
     .sort((x, y) => x.start - y.start);
-  if (merged.length === 0) return null; // nothing usable — caller falls back
 
   // Fold consecutive segments from the same speaker into one turn. Whisper
   // splits on prosody, so a single sentence can arrive as three segments; a
@@ -679,15 +688,81 @@ async function transcribePerSpeaker(
   }
 
   const dominant = [...results].sort((x, y) => y.speechSeconds - x.speechSeconds)[0];
-  return {
-    // Flat rendering for consumers that don't read segments (the /v1 document,
-    // the viewer's own no-segments fallback).
-    text: turns
-      .map((t) => `${t.speaker === "Business" ? "Agent" : "Customer"}: ${t.text}`)
-      .join("\n"),
-    language: dominant?.language,
-    segments: turns,
-  };
+  const perSpeaker =
+    turns.length > 0
+      ? {
+          // Flat rendering for consumers that don't read segments (the /v1
+          // document, the viewer's own no-segments fallback).
+          text: turns
+            .map((t) => `${t.speaker === "Business" ? "Agent" : "Customer"}: ${t.text}`)
+            .join("\n"),
+          language: dominant?.language,
+          segments: turns,
+        }
+      : null;
+
+  const mixed =
+    mixR.segments.length > 0
+      ? {
+          text: mixR.segments.map((s) => s.text).join(" "),
+          language: mixR.language,
+          // A mix cannot be attributed. Leaving segments empty says so honestly
+          // rather than labelling every word with a speaker we didn't identify.
+          segments: [] as TranscriptSegment[],
+        }
+      : null;
+
+  return pickBestRendering(perSpeaker, mixed, callId);
+}
+
+/**
+ * Choose between the speaker-attributed rendering and the flat mix.
+ *
+ * Neither is better in every room, which is the whole reason both are
+ * transcribed:
+ *
+ *   - Legs that are independent (a customer on a distant phone) → isolating
+ *     the channels is clearly right. Measured: transcribing the MIX of such a
+ *     call dropped an entire speaker.
+ *   - Both devices in ONE room (an agent testing against their own handset,
+ *     a speakerphone right next to the laptop) → each leg carries the same
+ *     voice, and the browser's echo canceller chews up the microphone leg
+ *     fighting it. The isolated channels are then WORSE than the mix, which
+ *     is what a human hears on playback and finds perfectly clear.
+ *
+ * So the split has to earn its place per call: it wins only if it retained
+ * essentially all of the words the mix found. Speaker labels are worth having,
+ * but never at the cost of the words themselves — losing content is the
+ * complaint that started this whole thread.
+ */
+function pickBestRendering(
+  perSpeaker: { text: string; language?: string; segments: TranscriptSegment[] } | null,
+  mixed: { text: string; language?: string; segments: TranscriptSegment[] } | null,
+  callId: string,
+): { text: string; language?: string; segments: TranscriptSegment[] } | null {
+  if (!perSpeaker) return mixed;
+  if (!mixed) return perSpeaker;
+
+  // Compare CONTENT, not characters: the per-speaker text carries "Agent:" /
+  // "Customer:" prefixes the mix doesn't have, and counting those would hand
+  // the split a free advantage.
+  const splitLen = perSpeaker.segments.reduce((n, s) => n + s.text.length, 0);
+  const mixLen = mixed.text.length;
+
+  // This gate exists to catch a COLLAPSE, not to police normal variance. The
+  // echo failure it was built from left the split at ~40% of the mix
+  // ("I don't...just...just..." against a clear sentence), while two healthy
+  // decodes of the same audio routinely differ by 10-20% over filler words
+  // alone. At 0.85 the split would lose its labels over an "um"; 0.7 catches
+  // the collapse and keeps attribution everywhere else.
+  if (splitLen >= mixLen * 0.7) return perSpeaker;
+
+  console.warn(
+    `[call-transcript] call=${callId}: per-speaker split kept ${splitLen} chars vs ` +
+      `${mixLen} from the mix — the legs are probably echoing each other ` +
+      `(two devices in one room); using the mix and dropping speaker labels`,
+  );
+  return mixed;
 }
 
 /**
@@ -815,6 +890,7 @@ export const __testing__ = {
   isPlausibleLanguage,
   languagePolicyFrom,
   isSubstantive,
+  pickBestRendering,
 };
 
 /** File extension matching an audio wire type. The transcription API accepts

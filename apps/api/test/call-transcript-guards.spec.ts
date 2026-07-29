@@ -25,7 +25,7 @@ import {
   __testing__,
 } from "@/lib/media/call-recording-download";
 
-const { looksLikeRepetitionLoop, isPlausibleLanguage, languagePolicyFrom, isSubstantive } =
+const { looksLikeRepetitionLoop, isPlausibleLanguage, languagePolicyFrom, isSubstantive, pickBestRendering } =
   __testing__;
 
 describe("looksLikeRepetitionLoop", () => {
@@ -106,6 +106,70 @@ describe("language plausibility (validate, never force)", () => {
       specificLanguage: "en",
     });
     expect(specific.fallback).toBe("en");
+  });
+});
+
+describe("pickBestRendering — speaker labels never cost words", () => {
+  const seg = (speaker: "Business" | "Customer", text: string, start = 0) => ({
+    id: 0, speaker, start, text,
+  });
+
+  it("uses the MIX when the isolated legs lost most of the conversation", () => {
+    // The echo case the maintainer identified: two devices in one room, so both
+    // legs carry the same voice and the browser's echo canceller mangles the
+    // microphone leg. The split then yields fragments ("I don't...just...just")
+    // while the mix — what a human hears on playback — is perfectly clear.
+    const split = {
+      text: "Agent: I don't...just...just...",
+      segments: [seg("Business", "I don't...just...just...")],
+    };
+    const mixed = {
+      text: "Hello, test test. Yes I can hear you fine, go ahead please.",
+      segments: [],
+    };
+    expect(pickBestRendering(split, mixed, "c1")).toBe(mixed);
+  });
+
+  it("keeps the SPEAKER-ATTRIBUTED rendering when the split held the words", () => {
+    // Independent legs (a customer on a distant phone). Here the mix is the
+    // lossy one — measured, it can drop an entire speaker — so attribution wins.
+    const split = {
+      text: "Agent: Hello, how can I help?\nCustomer: I want to ask about my order please.",
+      segments: [
+        seg("Business", "Hello, how can I help?"),
+        seg("Customer", "I want to ask about my order please.", 3),
+      ],
+    };
+    const mixed = {
+      text: "Hello, how can I help? I want to ask about my order please.",
+      segments: [],
+    };
+    expect(pickBestRendering(split, mixed, "c2")).toBe(split);
+  });
+
+  it("does not surrender attribution over a couple of filler words", () => {
+    // Two decodes never agree exactly; a 15% slack keeps the labels.
+    const split = {
+      text: "Agent: Hello how can I help you today",
+      segments: [seg("Business", "Hello how can I help you today")],
+    };
+    const mixed = { text: "Um, hello, how can I help you today, uh", segments: [] };
+    expect(pickBestRendering(split, mixed, "c3")).toBe(split);
+  });
+
+  it("returns whichever rendering exists when only one does", () => {
+    const only = { text: "Hello", segments: [] };
+    expect(pickBestRendering(null, only, "c4")).toBe(only);
+    expect(pickBestRendering(only, null, "c5")).toBe(only);
+    expect(pickBestRendering(null, null, "c6")).toBeNull();
+  });
+
+  it("ignores the speaker prefixes when comparing — they are not content", () => {
+    // "Agent: " / "Customer: " inflate the split's text length. Comparing raw
+    // strings would hand it a free win over an equally good mix.
+    const split = { text: "Agent: hi\nCustomer: ok", segments: [seg("Business", "hi"), seg("Customer", "ok", 1)] };
+    const mixed = { text: "hi ok and quite a lot more was actually said here", segments: [] };
+    expect(pickBestRendering(split, mixed, "c7")).toBe(mixed);
   });
 });
 

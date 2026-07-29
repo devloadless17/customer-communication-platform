@@ -162,26 +162,44 @@ export interface CallChannelAudio {
  */
 export async function extractCallChannels(
   input: Uint8Array,
-): Promise<{ agent: CallChannelAudio; customer: CallChannelAudio } | null> {
+): Promise<{
+  agent: CallChannelAudio;
+  customer: CallChannelAudio;
+  /**
+   * The two legs summed — the same audio a human hears on playback.
+   *
+   * Carried alongside the isolated channels because neither form is better in
+   * every room. Isolating channels is right when the legs are independent (a
+   * customer on a distant phone): the mix then loses a whole speaker. But when
+   * the two devices are in ONE room, both legs carry the same voice and the
+   * browser's echo canceller mangles the microphone leg, so the isolated
+   * channels are worse than the mix. The caller transcribes both and keeps
+   * whichever actually retained the words — see `transcribeCallAudio`.
+   */
+  mixed: CallChannelAudio;
+} | null> {
   const channels = await probeChannelCount(input);
   if (channels < 2) return null;
   // `pan` is what actually isolates a channel: `-map_channel`/`-ac 1` would
   // DOWNMIX (sum) the two, reproducing the very crosstalk this exists to undo.
-  const [agent, customer] = await Promise.all([
+  const [agent, customer, mixed] = await Promise.all([
     extractOneChannel(input, 0),
     extractOneChannel(input, 1),
+    extractOneChannel(input, "mix"),
   ]);
-  return { agent, customer };
+  return { agent, customer, mixed };
 }
 
 async function extractOneChannel(
   input: Uint8Array,
-  channel: 0 | 1,
+  channel: 0 | 1 | "mix",
 ): Promise<CallChannelAudio> {
+  // `pan=mono|c0=c0+c1` sums the legs (the playback mix); `c0=cN` isolates one.
+  const pan = channel === "mix" ? "pan=mono|c0=0.5*c0+0.5*c1" : `pan=mono|c0=c${channel}`;
   const raw = await transcodeToFile(input, `ch${channel}.wav`, [
     "-map_metadata", "-1",
     "-vn",
-    "-filter_complex", `[0:a]pan=mono|c0=c${channel}[a]`,
+    "-filter_complex", `[0:a]${pan}[a]`,
     "-map", "[a]",
     "-ar", "16000",
     "-c:a", "pcm_s16le",
@@ -203,7 +221,7 @@ async function extractOneChannel(
     // target gives the model comparable input on either side. Single-pass
     // loudnorm: the two-pass version needs a measurement round-trip for a
     // precision nothing here depends on.
-    const normalised = await transcodeToFile(raw, `ch${channel}-norm.wav`, [
+    const normalised = await transcodeToFile(raw, `ch${channel}-n.wav`, [
       "-map_metadata", "-1",
       "-vn",
       "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
