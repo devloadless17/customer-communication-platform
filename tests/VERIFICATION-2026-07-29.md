@@ -327,7 +327,7 @@ a checklist, not on however many findings happened to surface.
 | 10 | external `/v1` API | 1 | | ☐ |
 | 11 | contacts (+import/export/transfer) | 2 | | ☐ |
 | 12 | customers / identity | 2 | | ☐ |
-| 13 | inbox-views | 2 | | ☐ |
+| 13 | inbox-views | 2 | R (adversarial, 6 doc invariants) + E (31) | ✅ **2026-07-29** — all six already covered; no defect, one stale comment fixed |
 | 14 | channels / multi-account | 2 | R (adversarial, 9 doc invariants) + E + N (7) | ✅ **2026-07-29** — doc §6 walked line by line; invariant 8 was FALSE and was a data-loss path (Finding #8) |
 | 15 | outbound-webhooks (delivery/retry) | 2 | R (adversarial, 13 invariants) + E + N (16 tests) | ✅ **2026-07-29** — full checklist walked, 0 unmapped. HIGH wrong-account FIXED; signing newly covered + negative-tested ×2; one false positive of my own caught and withdrawn |
 | 16 | calls (WhatsApp calling + artifacts) | 2 | | ☐ |
@@ -724,6 +724,43 @@ sweep before starting the suite.
 
 ## Domain session notes
 
+### #13 inbox-views — ✅ CLOSED (2026-07-29)
+
+Checklist taken from `docs/inbox-views.md` §1–§6. **The best-covered domain
+found so far**: all six invariants already map to green tests in
+`inbox-views.spec.ts` (31), and the walk found no defect — only one stale
+comment.
+
+| Doc § | Invariant | Evidence |
+|---|---|---|
+| §1 | An empty list is "no opinion", never `in: []` — a view with every box unticked shows everything, not nothing | **E** *"treats an EMPTY list as no opinion, not as 'match nothing'"* |
+| §2 | Visibility is a READ boundary in the workspace-scoped `where`, never fetch-all-filter-in-JS; a personal view 404s (not 403) for a teammate | **E** the whole `visibility` block (6) incl. cross-workspace and the API-key actor |
+| §3 | `inboxViewWhereClauses` returns INDEPENDENT predicates that callers AND — **never** a merged object | **E** *"returns INDEPENDENT clauses so a visibility restriction can't be clobbered"* + *"CANNOT escape the agent-visibility restriction"*; **R** both callers verified to splice `...viewClauses` into an AND array, never a sibling spread |
+| §4 | Dangling references WIDEN, they don't empty — and resolution runs on the list AND the counts path | **E** `dangling references` block (4) + *"counts the same set the list returns"* |
+| §5 | Counts are a separate endpoint keyed by the filter document | **E** + **R** `GET /inbox-views/counts` resolves before counting |
+| §6 | The client mirror `matchesInboxViewFilters` must agree with the server, and EXCLUDES when it cannot decide | **E** `client matcher` block (4) — incl. agreement on the empty document and *"EXCLUDES a row whose data it cannot see"* |
+
+**The one thing found: a stale comment that would have misled the next reader.**
+`InboxViewsService.get`'s docblock said dangling-id cleanup is opt-in "because
+it costs three extra queries and **the list path is the only caller that needs
+it**." That has not been true since counts started resolving. It is the exact
+shape of comment that causes a later change to skip resolution on counts for
+"performance" — and a badge that skips it counts a dangling tag as matching
+nothing while the list it labels widens, so the number and the rows disagree.
+Corrected in place, citing §4.
+
+**Edge themes:** ① N/A (views are documents, not counters) · ② N/A ·
+③ **covered — this is the domain's whole §4** · ④ N/A · ⑤ N/A ·
+⑥ covered (§1) · ⑦ per-scope view cap · ⑧ covered (§2, incl. shared-view
+capability and the API-key actor getting shared-only) · ⑨ covered
+(*"does not leak a view across workspaces"*) · ⑩ N/A.
+
+Notable for the program: the predecessor recorded this invariant as having been
+defeated "3+ times" by an object spread. It is now genuinely closed — the
+builder's SHAPE (an array) makes the old mistake unrepresentable, which is a
+better fix than remembering not to make it.
+
+
 ### #14 channels / multi-account — ✅ CLOSED (2026-07-29)
 
 The domain the maintainer cares most about, and the one that has produced a HIGH
@@ -899,7 +936,7 @@ unmapped.**
 | 10 | Retention cleanup batched | **R** `MAX_BATCHES` loop — the unbounded `deleteMany` the predecessor fixed is gone |
 | 11 | Fires at tier `OUTBOUND_WEBHOOKS` (50), self-registers | **R** + **E** `fanout-storm-guard.spec.ts` |
 | 12 | Redelivery dedupe per (outbox row, webhook) | **E** `outbox-redelivery-dedupe.spec.ts` + `partial-indexes.spec.ts` pins the raw partial UNIQUE |
-| 13 | Names the account that ACTUALLY carried the event | **N** `webhook-channel-provenance.spec.ts` (7) + **E** `multi-account/03` — the HIGH fixed today |
+| 13 | inbox-views | 2 | R (adversarial, 6 doc invariants) + E (31) | ✅ **2026-07-29** — all six already covered; no defect, one stale comment fixed |
 
 **A false positive I caught in my own audit, worth recording.** I reported that
 the three `*_event_key_uniq` partial UNIQUE indexes — the only thing preventing

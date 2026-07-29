@@ -120,8 +120,13 @@ export class InboxViewsService {
    * `?viewId=` into a filter document.
    *
    * Returns the STORED filters. Dangling-id cleanup happens in
-   * `resolveFilters` because it costs three extra queries and the list path is
-   * the only caller that needs it.
+   * `resolveFilters` because it costs three extra queries, so callers opt in.
+   *
+   * (This used to say the list path was "the only caller that needs it". Not
+   * true: `GET /inbox-views/counts` resolves too, deliberately — a badge that
+   * skipped resolution would count a dangling tag as matching nothing while the
+   * list it labels widens, so the number and the rows would disagree.
+   * docs/inbox-views.md §4 states the rule.)
    */
   async get(actor: InboxViewActor, id: string): Promise<InboxView> {
     const row = await this.db.inboxView.findFirst({
