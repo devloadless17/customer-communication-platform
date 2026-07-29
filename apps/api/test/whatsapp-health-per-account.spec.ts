@@ -82,7 +82,24 @@ function armGraphMock() {
         verification_status: "verified",
       };
     }
-    throw new Error(`unexpected graph call in test: ${url}`);
+    // A FOREIGN connection, not one of ours. `sweepWhatsappHealthOnce` sweeps
+    // every active WhatsApp connection ON THE PLATFORM, so under a full
+    // parallel run it legitimately reaches fixtures owned by other specs
+    // (e2e-multi-account-team, webhook-subscription-health's row, whatever a
+    // concurrent file just created). Throwing here made this spec fail
+    // intermittently for a reason that has nothing to do with what it asserts.
+    //
+    // Answer benignly instead — but ONLY for rows that are not ours. An
+    // unexpected call naming one of THIS spec's ids is still a genuine
+    // surprise and still throws, so the signal the throw existed for is kept.
+    if ([PHONE_A, PHONE_B, WABA, PORTFOLIO].some((id) => url.includes(id))) {
+      throw new Error(`unexpected graph call for OUR fixture: ${url}`);
+    }
+    return {
+      whatsapp_business_manager_messaging_limit: "TIER_1K",
+      quality_rating: "GREEN",
+      throughput: { level: "STANDARD" },
+    };
   });
 }
 
