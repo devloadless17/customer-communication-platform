@@ -26,6 +26,7 @@ import { createTestPrismaClient } from "./_prisma";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
+  allocateNumber,
   createTicket,
   deleteTicket,
   fillActiveTicketAssignee,
@@ -122,6 +123,44 @@ describe("numbering", () => {
     expect(new Set(numbers).size).toBe(numbers.length);
     // Sequential from 1 — a workspace's first ticket is #1, not #0 or #2.
     expect([...numbers].sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+
+  it("a burnt number leaves a GAP and is never handed out twice", async () => {
+    // Pins the tradeoff that lets `createTicket` allocate OUTSIDE its
+    // transaction (2026-07-29). Holding the counter's row lock until the create
+    // committed serialized every concurrent create in a workspace behind a full
+    // create — eight at once blew the 15s interactive-transaction ceiling, i.e.
+    // a 500 for whoever was at the back. Allocating first means a create that
+    // fails afterwards burns its number.
+    //
+    // docs/ticketing.md sanctions exactly this: "Gaps are fine; collisions are
+    // not." So assert BOTH halves — the gap is tolerated, and the burnt number
+    // is never reissued. Simulating the burn by allocating directly is what a
+    // failed-after-allocation create leaves behind.
+    const before = await createTicket(db, {
+      workspaceId,
+      conversationId: await makeConversation(),
+      actor: { userId },
+    });
+    expect(before.ok).toBe(true);
+    const lastGood = before.ok ? before.ticket.number : -1;
+
+    const burnt = await allocateNumber(prisma, workspaceId);
+    expect(burnt).toBe(lastGood + 1);
+
+    const after = await createTicket(db, {
+      workspaceId,
+      conversationId: await makeConversation(),
+      actor: { userId },
+    });
+    expect(after.ok).toBe(true);
+    const next = after.ok ? after.ticket.number : -1;
+    // The gap is real...
+    expect(next).toBe(burnt + 1);
+    // ...and nothing reuses the burnt one, which is the half that matters:
+    // reissuing it would collide with `@@unique([workspaceId, number])`.
+    const reused = await prisma.ticket.count({ where: { workspaceId, number: burnt } });
+    expect(reused).toBe(0);
   });
 });
 

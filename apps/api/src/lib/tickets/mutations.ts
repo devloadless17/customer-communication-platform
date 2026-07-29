@@ -114,8 +114,8 @@ export interface CreateTicketArgs extends EventGates {
  * counter row, but a workspace whose counter drifted behind an existing ticket
  * (a restored backup, a hand-inserted row) would collide on
  * `@@unique([workspaceId, number])`. A P2002 inside a Postgres transaction
- * poisons it, so the retry has to re-run the whole thing — by which point the
- * counter has advanced past the collision.
+ * poisons it, so the retry has to re-run the whole thing — including a FRESH
+ * allocation, by which point the counter has advanced past the collision.
  */
 export async function createTicket(db: Db, args: CreateTicketArgs): Promise<TicketOutcome> {
   const conversation = await db.conversation.findFirst({
@@ -136,17 +136,19 @@ export async function createTicket(db: Db, args: CreateTicketArgs): Promise<Tick
     return { ok: false, reason: "team_not_found" };
   }
 
-  return withUniqueRetry(() =>
-    db
-      .$transaction(async (tx) => {
-        const created = await createTicketInTx(tx, args, conversation);
-        return created;
-      })
-      .then((r) => {
-        kickOutbox();
-        return r;
-      }),
-  );
+  return withUniqueRetry(async () => {
+    // Allocated BEFORE the transaction opens, so the counter's row lock is held
+    // for one statement rather than for the whole create — see allocateNumber's
+    // header for the measurement that motivated this and for why a burnt number
+    // is the sanctioned tradeoff. Inside the retry, so a P2002 re-allocates
+    // (which is the entire point of retrying).
+    const number = await allocateNumber(db, args.workspaceId);
+    const created = await db.$transaction(async (tx) =>
+      createTicketInTx(tx, args, conversation, number),
+    );
+    kickOutbox();
+    return created;
+  });
 }
 
 interface ConversationRef {
@@ -158,15 +160,21 @@ interface ConversationRef {
 }
 
 /**
- * The create, INSIDE a caller-supplied transaction. Split out because the
- * ingest path opens a ticket in the same transaction as the message write —
- * a message that exists with no ticket (or a ticket with no message) is exactly
- * the inconsistency `Message.ticketId` is meant to rule out.
+ * The create, INSIDE the caller's transaction.
+ *
+ * `number` is allocated by the caller, OUTSIDE this transaction, so the
+ * counter's row lock does not span everything below — see `allocateNumber`.
+ *
+ * (This used to say it was split out "because the ingest path opens a ticket in
+ * the same transaction as the message write". That has not been true since
+ * auto-open was removed on 2026-07-25: ingest only ATTACHES or REOPENS, and
+ * `createTicket` is now the sole caller.)
  */
 async function createTicketInTx(
   tx: TxClient,
   args: CreateTicketArgs,
   conversation: ConversationRef,
+  number: number,
 ): Promise<Extract<TicketOutcome, { ok: true }>> {
   const priority = args.priority ?? "normal";
   // Inherit the thread's owner when the caller names none: the person already
@@ -179,7 +187,6 @@ async function createTicketInTx(
   const { policy, schedule } = await loadSlaContext(tx, args.workspaceId, priority);
   const now = Date.now();
   const due = computeDueDates(now, policy, schedule);
-  const number = await allocateNumber(tx, args.workspaceId);
 
   // Drop any tag id that isn't this workspace's — connect-by-id doesn't filter.
   const safeTagIds = args.tagIds?.length
@@ -981,8 +988,35 @@ export async function markSlaBreached(
  * concurrent allocator until the first commits — two simultaneous creates can
  * never read the same value. `upsert` seeds the counter on a workspace's first
  * ever ticket without a separate provisioning step.
+ *
+ * WHERE YOU CALL THIS DECIDES HOW LONG THAT LOCK IS HELD, and it matters.
+ * Postgres holds the row lock until the enclosing transaction COMMITS — not
+ * until this statement returns. Called from inside the create transaction, the
+ * lock therefore covered the tag lookup, the ticket insert, the openTicketCount
+ * bump, the conversation update, the read-back, the TicketEvent, the timeline
+ * pill and the outbox insert — so N concurrent creates in one workspace cost
+ * the Nth caller N × (a whole create), not N × (one increment). Measured
+ * 2026-07-29: eight concurrent creates blew the 15 s interactive-transaction
+ * ceiling (`lockwait=7` in pg_stat_activity), which in production is a 500 for
+ * whoever is at the back of the queue. Raising that ceiling had already been
+ * tried twice (5 s → 15 s) and treats the symptom.
+ *
+ * So `createTicket` calls this on the BASE client, before opening its
+ * transaction: the lock lives for one statement and concurrent creates then
+ * proceed in parallel. The cost is that a create which fails after allocating
+ * burns its number — explicitly sanctioned by docs/ticketing.md: *"Gaps are
+ * fine; collisions are not."* The collision backstop is unchanged
+ * (`@@unique([workspaceId, number])` + the P2002 retry, which re-allocates).
+ *
+ * `escalations.ts` still calls this inside its transaction. That is left alone
+ * deliberately: creating an escalation twin is a rare, operator-driven act, so
+ * it has no concurrency to serialize, and keeping it in-transaction means a
+ * failed escalation leaves no gap.
  */
-export async function allocateNumber(tx: TxClient, workspaceId: string): Promise<number> {
+export async function allocateNumber(
+  tx: Pick<TxClient, "ticketNumberCounter">,
+  workspaceId: string,
+): Promise<number> {
   const row = await tx.ticketNumberCounter.upsert({
     where: { workspaceId },
     create: { workspaceId, next: 2 },

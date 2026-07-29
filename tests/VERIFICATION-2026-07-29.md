@@ -125,12 +125,45 @@ artifact: ticket creation does not scale with concurrency *within a workspace*,
 and the failure mode for the agents at the back of the queue is a hard 500. The
 15 s ceiling is a mitigation that hides it until the box is loaded enough.
 
-**Not fixed here.** Phase 0's job is the baseline. The fix is a tickets-domain
-decision (batch B3) between: allocating from a per-workspace sequence or a
-separate short transaction (no serialization, but gaps on rollback — normal for
-invoice-style numbering), versus documenting a measured concurrency ceiling with
-a named trigger. Recorded here so the next person sees a diagnosis rather than a
-fourth "flaky test".
+**FIXED 2026-07-29.** `createTicket` now allocates on the base client, before
+opening its transaction, so the counter's row lock lives for one statement
+instead of spanning the whole create. Concurrent creates then proceed in
+parallel. The allocation sits INSIDE the `withUniqueRetry` closure, so a P2002
+still re-allocates — the collision backstop is untouched.
+
+The tradeoff is that a create failing after allocation burns its number.
+`docs/ticketing.md` sanctions exactly that: *"Gaps are fine; collisions are
+not."* — the contract was checked before the code was changed, not after.
+
+`escalations.ts:175` still allocates inside its transaction, deliberately:
+creating an escalation twin is a rare operator-driven act with no concurrency to
+serialize, and keeping it in-transaction means a failed escalation leaves no gap.
+
+**MEASURED**, three runs each on an idle box, N concurrent `createTicket` calls
+in one workspace (temporary harness, since removed):
+
+| N | before (allocate in-tx) | after (allocate pre-tx) |
+|---|---|---|
+| 8 | 202 / 241 / 209 ms | **107 / 87 / 125 ms** |
+| 24 | 338 / 346 / 333 ms | **208 / 289 / 235 ms** |
+
+~2× at N=8 with no overlap between the two ranges. The absolute numbers are
+small because the box is idle; the win scales with how long each in-lock
+statement takes, which is exactly the loaded case where the 15 s ceiling was
+being blown.
+
+Pinned by a new case in `tickets.spec.ts` — *"a burnt number leaves a GAP and is
+never handed out twice"* — NEGATIVE-TESTED by swapping in the gap-reusing
+`max(number)+1` implementation, which fails it and the sequential-allocation
+case together. **Stated honestly: that pin protects the numbering CONTRACT, not
+the lock placement.** A revert of the perf change would not fail it; the
+evidence for the perf property is the measurement above. A timing assertion
+strong enough to catch a revert would be flaky in CI, which is a worse trade.
+
+**Stale comment corrected on the way**: `createTicketInTx`'s docblock claimed it
+was split out "because the ingest path opens a ticket in the same transaction as
+the message write". Untrue since auto-open was removed on 2026-07-25 — ingest
+only ATTACHES or REOPENS, and `createTicket` is the sole caller.
 
 ### Finding #1 — the pressure harness cannot converge, and its failure message misdiagnoses why
 
