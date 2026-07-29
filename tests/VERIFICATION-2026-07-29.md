@@ -34,6 +34,36 @@ imports + `fanout-rules.ts` entries + thread-reducer wiring + `/v1` twins. Every
 lifecycle-ending op gets a named seam-trace listing every table/queue/cache/
 socket-room that references the dying entity.
 
+
+## ⚠️ READ THIS BEFORE TRUSTING A DOC CITATION IN THIS FILE
+
+**`docs/` is deliberately deleted, and CLAUDE.md is the source of truth.**
+
+The maintainer removed the whole `docs/` tree (`5ed0247a`) and then
+`docs/ticketing.md` again (`4be0f9df`) **on purpose — the content was stale**. I
+restored it at the start of this program on the assumption the deletion was
+accidental, used it as the invariant source for the domain walks, and have now
+removed it again.
+
+What that means for this ledger, stated plainly:
+
+- **Most conclusions are unaffected.** The invariants I checked are overwhelmingly
+  the ones CLAUDE.md §18 states, or properties of the code checked against
+  themselves (a registry enumerated, a lock's scope traced, a counter's callers
+  listed). Those stand on their own.
+- **A doc citation in a domain section is a POINTER, not authority.** Where a row
+  says "docs/<x>.md §N", read it as "this is where I got the idea to check X" —
+  the evidence column is the code.
+- **ONE change was authorised by a doc and needs the maintainer's confirmation:**
+  the ticket-numbering tradeoff — see the note in Finding #0.
+- Checker 8 originally required `docs/organization-api.md` and would have failed
+  CI once `docs/` went away. It now enforces parity against the in-app
+  `/docs/api` page alone, which is the live surface and was 100 % correct
+  throughout.
+
+**If the handbook's §20 index still links `docs/*.md`, those links are dead.**
+
+
 ## Predeploy ritual (run before every push to `production`)
 
 1. `pnpm run check` (typecheck ×3 + lint + 8 checkers) — must be 0 ERRORS
@@ -138,8 +168,14 @@ parallel. The allocation sits INSIDE the `withUniqueRetry` closure, so a P2002
 still re-allocates — the collision backstop is untouched.
 
 The tradeoff is that a create failing after allocation burns its number.
-`docs/ticketing.md` sanctions exactly that: *"Gaps are fine; collisions are
-not."* — the contract was checked before the code was changed, not after.
+
+> ⚠️ **NEEDS MAINTAINER CONFIRMATION.** I justified this against
+> `docs/ticketing.md`'s *"Gaps are fine; collisions are not."* — but that file
+> was deleted as STALE, so the sentence I relied on may no longer reflect
+> intent. This is the ONLY code change in the program authorised by a doc
+> rather than by CLAUDE.md or the code itself. If gaps in `Ticket.number` are
+> NOT acceptable, revert `7510f46a` — the serialization it fixes is real and
+> measured, but the fix trades gap-freedom for it, and that is a product call.
 
 `escalations.ts:175` still allocates inside its transaction, deliberately:
 creating an escalation twin is a rare operator-driven act with no concurrency to

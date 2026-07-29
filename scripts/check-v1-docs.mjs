@@ -1,27 +1,32 @@
 #!/usr/bin/env node
 /**
- * CHECKER 8 — every `/v1` route and scope is documented in BOTH doc surfaces.
+ * CHECKER 8 — every `/v1` route is scope-gated and documented.
  *
- * CLAUDE.md §12 makes this a LOCKED RULE: "full parity with the internal UI
- * actions ... every endpoint is documented in both docs/organization-api.md and
- * the in-app /docs/api page." It was enforced by nothing, so it drifted, and
- * the drift is invisible from either side — the code compiles, both docs render,
- * and only a partner discovers the route they needed was never written down.
+ * TWO properties, both previously enforced by nothing:
  *
- * Measured on 2026-07-29: 31 of 163 routes were missing from
- * `docs/organization-api.md` (customers, workflows, audience-groups, snippets,
- * outbound-webhook management, reports, escalation targets, two WhatsApp admin
- * actions), three scopes were absent (`admin:settings`, `read:reports`,
- * `write:workflows`), and the doc still told partners to request `write:users`
- * — a scope NO route requires any more, so a key minted from the doc would 403
- * with nothing to explain why. The in-app page was correct on every count; it
- * is the markdown that rots, because it is the one a human has to remember.
+ *   1. Every route carries `@RequireScope`. `ScopeGuard` is permissive by
+ *      DEFAULT (`if (!required) return true`), so a route added without the
+ *      decorator is reachable by ANY valid API key whatever its scopes. All 163
+ *      carried it on 2026-07-29 — but that held only because someone re-counted
+ *      by hand, on a controller that grew from 111 to 163 routes in a month.
  *
- * WHY THE MATCH IS STRICT. The first version of this comparison probed for the
- * route's bare stem, and "workflows" appears in prose all over the document —
- * so it reported 0 missing while 6 workflow routes and 4 customer routes were
- * genuinely absent. A checker that matches prose is a checker that lies. The
- * path must appear in a ROUTE-shaped context.
+ *   2. Every route appears in the in-app `/docs/api` page, which CLAUDE.md §12
+ *      makes a locked rule ("every capability the UI has, the API has, and
+ *      every endpoint is documented"). Undocumented routes are invisible from
+ *      every side: the code compiles, the page renders, and only a partner
+ *      discovers the route they needed was never written down.
+ *
+ * DOC SURFACE: the in-app page ONLY. `docs/organization-api.md` was deleted
+ * from this branch on purpose — the maintainer removed the whole `docs/` tree
+ * as stale, and CLAUDE.md is the source of truth. A checker that requires a
+ * file the project deliberately dropped is a checker that fails for a reason
+ * nobody wants fixed. If a markdown reference ever comes back, add it to
+ * SURFACES and this check covers it again for free.
+ *
+ * WHY THE MATCH IS STRICT. A first version probed for the route's bare stem,
+ * and "workflows" appears in prose all over a reference page — it reported 0
+ * missing while 10 routes were genuinely absent. A checker that matches prose
+ * is a checker that lies. The path must appear in a ROUTE-shaped context.
  *
  * Run: node scripts/check-v1-docs.mjs
  */
@@ -29,7 +34,6 @@ import { readFileSync } from "node:fs";
 
 const CONTROLLER = "apps/api/src/external/v1/external-v1.controller.ts";
 const SURFACES = [
-  { label: "docs/organization-api.md", path: "docs/organization-api.md" },
   { label: "the in-app /docs/api page", path: "apps/web/src/app/docs/api/page.tsx" },
 ];
 
@@ -172,12 +176,13 @@ if (missingScope.length) {
 
 if (failures) {
   console.error(
-    `\n  CLAUDE.md §12 makes /v1 doc parity a LOCKED RULE. Document the route in\n` +
-      `  BOTH surfaces, or add it to ALLOWLIST in this file with a reason.`,
+    `\n  CLAUDE.md §12 makes /v1 parity a LOCKED RULE: document the route in the\n` +
+      `  in-app /docs/api page and give it an @RequireScope, or add it to\n` +
+      `  ALLOWLIST in this file with a reason.`,
   );
   process.exit(1);
 }
 
 console.log(
-  `✓ v1-docs check passed (${routes.length} routes, ${scopes.length} scopes, all @RequireScope-gated and documented in both surfaces)`,
+  `✓ v1-docs check passed (${routes.length} routes, ${scopes.length} scopes, all @RequireScope-gated and documented)`,
 );
