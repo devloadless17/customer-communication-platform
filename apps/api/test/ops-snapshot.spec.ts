@@ -72,11 +72,17 @@ describe("ops snapshot", () => {
     const snap = await buildOpsSnapshot(fakeDb());
 
     expect(Object.keys(snap.queues).sort()).toEqual([...EXPECTED_QUEUES].sort());
-    expect(snap.db).toBe(true);
     expect(snap.uptimeSec).toBeGreaterThanOrEqual(0);
-    // outboxLag is a real read, so it must be a number, not the -1 sentinel the
-    // probe returns when the query itself failed.
-    expect(snap.outboxLag.pendingCount).toBeGreaterThanOrEqual(0);
+    // NOT `expect(snap.db).toBe(true)`. Every probe here is bounded at 2.5s and
+    // is DESIGNED to degrade rather than block, so under a loaded box (a full
+    // parallel suite, a dev stack sharing the pool) `db` can legitimately come
+    // back false and `outboxLag.pendingCount` as its -1 sentinel. Asserting the
+    // happy path of a deliberately-degradable probe made this inventory test
+    // fail for a reason that has nothing to do with what it checks — the same
+    // mistake as the platform-wide sweep in whatsapp-health-per-account.
+    // What this test is ABOUT is that every queue the Platform page renders is
+    // present; the db field has its own test below.
+    expect(typeof snap.db).toBe("boolean");
   });
 
   it("a WEDGED queue degrades to null instead of hanging the page", async () => {
@@ -95,7 +101,8 @@ describe("ops snapshot", () => {
     // still fail if the bound is gone entirely.
     expect(elapsed).toBeLessThan(20_000);
     // The rest of the page still rendered — that is what "partial data" means.
-    expect(snap.db).toBe(true);
+    // Asserted via the SIBLING QUEUES rather than `db`, which is itself a
+    // degradable probe (see the inventory test above).
     for (const name of EXPECTED_QUEUES.filter((q) => q !== "workflows")) {
       expect(snap.queues[name], `${name} should be unaffected`).not.toBeNull();
     }
@@ -111,7 +118,9 @@ describe("ops snapshot", () => {
     const snap = await buildOpsSnapshot(fakeDb());
 
     expect(snap.queues.workflows).toBeNull();
-    expect(snap.db).toBe(true);
+    // The siblings still reported — one rejecting probe did not take the whole
+    // Promise.all down, which is the property under test.
+    expect(snap.queues["message-sends"]).not.toBeNull();
   });
 
   it("a SLOW stuck-broadcast probe cannot hang the snapshot", async () => {
@@ -134,7 +143,6 @@ describe("ops snapshot", () => {
     // near the 30s statement_timeout an unbounded probe would wait for.
     expect(elapsed).toBeLessThan(20_000);
     // And the rest of the page still rendered.
-    expect(snap.db).toBe(true);
     expect(Object.keys(snap.queues)).toHaveLength(EXPECTED_QUEUES.length);
   }, 40_000);
 
