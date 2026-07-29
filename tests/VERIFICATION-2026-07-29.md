@@ -55,7 +55,7 @@ socket-room that references the dying entity.
 | `pnpm run check` | ✅ **0 errors**, 28 warnings, 7/7 checkers green |
 | `pnpm test` — api vitest | ⚠️ **INTERMITTENT**: run 1 **812/813** (1 failed), runs 2+3 **813/813**. See Finding #0 |
 | `pnpm test` — web vitest | ✅ 18/18 |
-| `pnpm test:e2e:meta` | ✅ **169/170** — the only failure is the `@pressure` spec, which CI excludes. See Finding #1 |
+| `pnpm test:e2e:meta` | ⛔→✅ **169/170** on arrival; the one failure was the `@pressure` harness, not the app — **170/170** after Finding #1 was fixed |
 | `pnpm test:e2e:multiaccount` | ⛔→✅ **37/38 on arrival**; the failure was a real HIGH — see Finding #2. **38/38** after the fix |
 | `pnpm test:e2e` (main, dev stack, 537) | ⛔→✅ **534/537** on arrival; 1 env artifact + **2 stale specs asserting abandoned contracts** — see Finding #4. Green after |
 
@@ -196,26 +196,53 @@ band, and p95 728 ms is *better* than the recorded 883–950 ms. Passes 3–5 ar
 fast because they are the rate limiter refusing instantly, not because work got
 faster.
 
-**The harness defect is arithmetic.** The webhook budget is
-`ip-rate-limit.middleware.ts:31` `PER_MINUTE = 600` — and it is per-**IP**, not
-per-team as the spec header states. Pass 1 spends 500 of it; pass 2 spends
-`shed`. Once cumulative requests in the window exceed 600, every remaining
-redelivery is refused 429 and convergence becomes *impossible regardless of
-whether the app is correct*. At the historically recorded 9–22 % shed the total
-was 545–610 — so this harness has always passed by a margin of at most ~55
-requests, and at 22 % it was already at the edge. It is not measuring what it
-claims to measure.
+**The harness defect is arithmetic.** The budget is
+`WebhookRateLimitGuard` — 600/min **per workspace** (plus 1200/min per IP), a
+continuously-refilling token bucket at `perMin/60_000` per ms, i.e. 10
+tokens/second. *(An earlier draft of this entry blamed
+`ip-rate-limit.middleware.ts` `PER_MINUTE = 600`. Wrong source, same number:
+that middleware explicitly `shouldSkip`s `/webhooks/*`. Corrected.)*
 
-**Open question for the webhooks-ingest session (B1): why is shed 59 % when the
-recorded baseline is 9–22 %?** 503s come from write conflicts under the
-Serializable ingest transaction, so a higher shed means more conflicts.
-*Hypothesis raised and REFUTED by reading the code*: the new account re-stamp
-does **not** add an unconditional write — `ingest.ts:2223` writes
-`channelConnectionId` only when it actually differs, and a freshly created
-conversation already carries it from the insert at line 2207. Remaining
-candidates are box contention (25 in flight on 22 cores) versus a genuine
-increase in per-request transaction work. Resolve it in B1 with a bisect against
-`857f420f`, not by adjusting the threshold.
+Pass 1 spends 500 of the 600, leaving ~100. So redelivery has headroom only
+while pass 1 shed fewer than ~100 of 500 — **under about 20 %**, which is
+exactly the 9–22 % band this harness has historically measured. It has always
+passed by a margin of at most a few dozen requests. At a 60 % shed every
+redelivery pass is refused 429 and convergence is arithmetically impossible *no
+matter how correct ingest is* — so the harness reports the rate limiter as data
+loss. The spec's own comment claimed redelivering only the missing indices
+avoided this; that mitigation silently stops working above ~20 % shed.
+
+**FIXED.** The harness now waits for the tokens each redelivery round will
+spend (`length / 10` seconds + margin) before sending it — the honest model,
+since Meta honours `Retry-After` rather than giving up. It also asserts **zero
+429s** in every redelivery round, so if it is ever measuring the limiter again
+it fails loudly instead of reporting throttling as lost data.
+
+**RESOLVED — ingest is CORRECT under burst.** With the harness fixed, the spec
+**passes**:
+
+```
+pass1  500 webhooks  8860ms  56.4/s  p50=421ms p95=892ms max=1575ms
+       shed 318/500 (63.6%) as retryable 503
+pass2  318 (after a 32.8s token wait)  58.5/s  p50=386ms p95=938ms
+pass3  173 (after 18.3s)               66.2/s
+pass4  1   (after 1.1s)
+→ converged: all 500 committed, no duplicates, no thread fragmentation
+```
+
+Throughput and latency sit inside the recorded band (42–63/s, p95 883–950 ms),
+so nothing regressed. **The shed rate is not a correctness signal** — this
+ledger's predecessor says so explicitly, having watched shed RISE when conflicts
+that used to vanish as a silent 200 started being reported honestly as 503s.
+What matters is the pair: every non-2xx is a status Meta retries, and the burst
+converges. Both hold.
+
+*Two hypotheses raised and refuted on the way, both worth recording so they are
+not re-run:* (1) the new account re-stamp adds an unconditional write —
+**refuted by reading**, `ingest.ts:2223` writes `channelConnectionId` only when
+it differs, and a fresh conversation already carries it from the insert at 2207;
+(2) the elevated shed was contention from my own dev stack sharing Postgres —
+**refuted by measurement**, 61.6 % on a quiet box with the dev stack stopped.
 
 ### Finding #2 — HIGH, FIXED: every `message.sent` outbound webhook named the wrong account after a thread re-stamp
 

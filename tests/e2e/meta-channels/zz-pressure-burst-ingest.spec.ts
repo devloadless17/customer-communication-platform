@@ -163,14 +163,43 @@ test("@pressure 500-webhook burst sheds only retryably, then converges on redeli
   // ── Pass 2+: Meta redelivers. Convergence is the real requirement ────────
   // Every accepted message must be committed exactly once, and every shed one
   // must land on a retry — with no duplicates from the copies that DID commit.
-  // Meta redelivers what it failed to deliver, not the whole world — and the
-  // per-workspace webhook bucket is 600/min, so blindly re-blasting all 500
-  // just earns 429s (correct product behavior, but it means the harness would
-  // measure the rate limiter instead of the ingest path).
+  //
+  // THE BUDGET, and why redelivering only the missing ones is not enough.
+  // `WebhookRateLimitGuard` gives each workspace a 600/min token bucket that
+  // refills continuously at `perMin/60_000` per ms — i.e. 10 tokens/second.
+  // Pass 1 spends 500 of them, leaving ~100. So redelivery has headroom only
+  // while pass 1 shed FEWER THAN ~100 of 500 — under about 20 %. That is
+  // exactly the 9–22 % band this harness has historically measured, so it has
+  // always passed by a margin of at most a few dozen requests; at a 60 % shed
+  // (measured 2026-07-29 on an idle box) every redelivery pass is refused 429
+  // and convergence becomes ARITHMETICALLY IMPOSSIBLE no matter how correct
+  // ingest is. The harness would then be reporting the rate limiter — the very
+  // thing the comment here used to say it was avoiding.
+  //
+  // Meta does not behave that way: it honours `Retry-After` and comes back. So
+  // the harness waits for the tokens it needs before each round. Sleeping is
+  // the honest model of a real redelivery schedule, and it keeps the assertion
+  // about INGEST rather than about throttling.
+  const REFILL_PER_SEC = 10; // 600/min, see WebhookRateLimitGuard
   for (let round = 2; round <= 5; round++) {
     const stillMissing = await missingIndices();
     if (stillMissing.length === 0) break;
-    await runBurst(`pass${round}-redelivery`, stillMissing);
+    // Buy back the tokens this round will spend, plus a small margin.
+    const waitMs = Math.ceil((stillMissing.length / REFILL_PER_SEC) * 1000) + 1_000;
+    console.log(
+      `[pressure:pass${round}-redelivery] waiting ${waitMs}ms for ${stillMissing.length} webhook tokens`,
+    );
+    await new Promise((r) => setTimeout(r, waitMs));
+    const redelivered = await runBurst(`pass${round}-redelivery`, stillMissing);
+    // If this ever fires, the harness is measuring the limiter again and every
+    // convergence number below is meaningless — fail LOUDLY rather than report
+    // a throttled retry as lost data.
+    const throttled = redelivered.filter((t) => t.status === 429).length;
+    expect(
+      throttled,
+      `pass${round} was rate-limited (${throttled}/${stillMissing.length} got 429) — ` +
+        `the harness is measuring WebhookRateLimitGuard, not ingest. Raise the wait.`,
+    ).toBe(0);
   }
 
   // Before asserting convergence, name exactly WHAT is missing and what the
