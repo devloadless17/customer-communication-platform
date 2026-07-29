@@ -320,7 +320,7 @@ a checklist, not on however many findings happened to surface.
 | 1 | webhooks ingest | 1 | R (adversarial) + E (meta 170) + N (pressure) | ✅ **2026-07-29** — both halves of the dedupe rule verified; fail-soft envelope named per reason |
 | 2 | outbound send + idempotency ledger | 1 | R (adversarial) + E | ✅ **2026-07-29** — Idempotency-Key required, one shared release-vs-retain rule; 2 tradeoffs carried |
 | 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
-| 4 | workflows (~22 step types) | 1 | | ☐ |
+| 4 | workflows (~22 step types) | 1 | R (adversarial) + E (144 e2e) | ✅ **2026-07-29** — three guards enforced by SHAPE (assignment, absent trigger, boot throw); no defect |
 | 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
 | 6 | broadcasts (+audience/templates/analytics) | 1 | R (adversarial) + E (10 meta specs + storm guard) | ✅ **2026-07-29** — NULL rules, irreversible-enable scoping and keyset paging all verified; no defect |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
@@ -725,6 +725,43 @@ sweep before starting the suite.
 ---
 
 ## Domain session notes
+
+### #4 workflows (~22 step types) — ✅ CLOSED (2026-07-29)
+
+Checklist from CLAUDE.md §11 + `lib/workflows/README.md`. No defect.
+
+| Invariant | Evidence |
+|---|---|
+| **Loop/recursion guards TERMINATE** | **R** — see below · **E** 144 workflow e2e |
+| `MAX_STEPS_PER_RUN` equals the publish-time node cap | **R** and structurally: `const MAX_STEPS_PER_RUN = MAX_WORKFLOW_NODES` — an ASSIGNMENT, not two constants that could drift to different values. §11 states the identity; the code makes it unrepresentable to break |
+| Cross-workflow chains are depth-bounded | **R** `TRIGGER_DEPTH_MAX`, read back off the run rather than trusted from the caller |
+| Cross-SYSTEM chains are depth-bounded | **R** `X-CCP-Depth`, fails closed |
+| **`send_message` cannot self-retrigger** | **R** there is NO `message_sent` trigger type — zero occurrences in the shared workflow types. The loop is prevented by the trigger vocabulary not containing the event, which is stronger than a runtime guard |
+| `lockDuration` must exceed the longest possible step | **R** **boot-asserted, not commented**: `worker.ts` throws at module load if `WORKFLOW_LOCK_DURATION_MS <= MAX_STEP_TIMEOUT_MS + WORKFLOW_LOCK_MARGIN_MS`, so a slow `http_request` can never outlive its lock and double-fire |
+| Redelivery cannot re-execute a run | **E** `outbox-redelivery-dedupe.spec.ts` + the `WorkflowRun.eventKey` partial UNIQUE, pinned by `partial-indexes.spec.ts` |
+| A retried step does not re-send | **R** the `in_progress` journal turns a half-completed send into `skipped_after_crash`, NOT a re-send |
+| §18 assignment: `assign_to` passes `onlyIfUnassigned` unless overwrite | **R** — verified in #5 |
+| Step targets are tenancy-scoped, and the account is nameable | **E** `workflow-account-conditions.spec.ts` |
+
+**The pattern worth naming across this domain:** three of its guards are
+enforced by SHAPE rather than by vigilance — the step ceiling is an assignment
+from the node cap, the self-retrigger loop is impossible because the trigger
+vocabulary lacks the event, and the lock/timeout relationship throws at boot.
+That is the same property that made #13's inbox-view invariant genuinely closed
+after three failures, and it is the most durable outcome an audit can find.
+
+**Edge themes:** ① `triggerOncePerContact` uses a race-safe ledger ·
+② **covered — the redelivery dedup key** · ③ wait/ask_question resume handles a
+deleted contact or conversation gracefully · ④ N/A · ⑤ `wait` steps ·
+⑥ N/A · ⑦ per-team concurrency cap · ⑧ `write:workflows` is separate from
+`write:catalog` because a run executes billed sends · ⑨ step targets scoped ·
+⑩ the `queued` sweeper is the crash-window backstop.
+
+**ACCEPTED, carried forward:** `send_message` / `send_template` / `ask_question`
+bypass the `OutboundSendAttempt` ledger (journal-protected only, so a crash in
+the narrow pre-journal window can re-send); and branch presets read LIVE contact
+state while generic conditions read the frozen trigger snapshot.
+
 
 ### #1 webhooks ingest + #2 outbound send — ✅ CLOSED (2026-07-29)
 
@@ -1235,7 +1272,7 @@ safe", plus the §58 composition warning. **All seven hold.** No defect found.
 | 1 | webhooks ingest | 1 | R (adversarial) + E (meta 170) + N (pressure) | ✅ **2026-07-29** — both halves of the dedupe rule verified; fail-soft envelope named per reason |
 | 2 | outbound send + idempotency ledger | 1 | R (adversarial) + E | ✅ **2026-07-29** — Idempotency-Key required, one shared release-vs-retain rule; 2 tradeoffs carried |
 | 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
-| 4 | Merge is non-destructive | **R** zero `contact.delete*` / `message.delete*` in `customers.service.ts`; the only delete is empty-customer cleanup, which the doc sanctions |
+| 4 | workflows (~22 step types) | 1 | R (adversarial) + E (144 e2e) | ✅ **2026-07-29** — three guards enforced by SHAPE (assignment, absent trigger, boot throw); no defect |
 | 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
 | 6 | broadcasts (+audience/templates/analytics) | 1 | R (adversarial) + E (10 meta specs + storm guard) | ✅ **2026-07-29** — NULL rules, irreversible-enable scoping and keyset paging all verified; no defect |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
@@ -1318,7 +1355,7 @@ in five separate prior sessions. Checklist taken verbatim from
 | 1 | webhooks ingest | 1 | R (adversarial) + E (meta 170) + N (pressure) | ✅ **2026-07-29** — both halves of the dedupe rule verified; fail-soft envelope named per reason |
 | 2 | outbound send + idempotency ledger | 1 | R (adversarial) + E | ✅ **2026-07-29** — Idempotency-Key required, one shared release-vs-retain rule; 2 tradeoffs carried |
 | 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
-| 4 | The account is re-stamped on every inbound; the widget binding is **sticky** | **R** `ingest.ts:2217-2223` (guarded so the common case writes nothing, and explicitly *"unlike webchat's sticky webchatWidgetId"*) + **E** `webhook-account-attribution.spec.ts`, `multi-account/01` |
+| 4 | workflows (~22 step types) | 1 | R (adversarial) + E (144 e2e) | ✅ **2026-07-29** — three guards enforced by SHAPE (assignment, absent trigger, boot throw); no defect |
 | 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
 | 6 | broadcasts (+audience/templates/analytics) | 1 | R (adversarial) + E (10 meta specs + storm guard) | ✅ **2026-07-29** — NULL rules, irreversible-enable scoping and keyset paging all verified; no defect |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
@@ -1385,7 +1422,7 @@ CLAUDE.md §7/§12/§15/§18 + the module docblock.
 | 1 | webhooks ingest | 1 | R (adversarial) + E (meta 170) + N (pressure) | ✅ **2026-07-29** — both halves of the dedupe rule verified; fail-soft envelope named per reason |
 | 2 | outbound send + idempotency ledger | 1 | R (adversarial) + E | ✅ **2026-07-29** — Idempotency-Key required, one shared release-vs-retain rule; 2 tradeoffs carried |
 | 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
-| 4 | Range capped (`MAX_RANGE_DAYS = 366`) → `400 invalid_range` | **E** `reports-overview.spec.ts` |
+| 4 | workflows (~22 step types) | 1 | R (adversarial) + E (144 e2e) | ✅ **2026-07-29** — three guards enforced by SHAPE (assignment, absent trigger, boot throw); no defect |
 | 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
 | 6 | broadcasts (+audience/templates/analytics) | 1 | R (adversarial) + E (10 meta specs + storm guard) | ✅ **2026-07-29** — NULL rules, irreversible-enable scoping and keyset paging all verified; no defect |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
@@ -1473,7 +1510,7 @@ unmapped.**
 | 1 | webhooks ingest | 1 | R (adversarial) + E (meta 170) + N (pressure) | ✅ **2026-07-29** — both halves of the dedupe rule verified; fail-soft envelope named per reason |
 | 2 | outbound send + idempotency ledger | 1 | R (adversarial) + E | ✅ **2026-07-29** — Idempotency-Key required, one shared release-vs-retain rule; 2 tradeoffs carried |
 | 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
-| 4 | Auto-disable after repeated failure | **R** `worker.ts` `consecutiveFailures` increment + reset-on-success |
+| 4 | workflows (~22 step types) | 1 | R (adversarial) + E (144 e2e) | ✅ **2026-07-29** — three guards enforced by SHAPE (assignment, absent trigger, boot throw); no defect |
 | 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
 | 6 | broadcasts (+audience/templates/analytics) | 1 | R (adversarial) + E (10 meta specs + storm guard) | ✅ **2026-07-29** — NULL rules, irreversible-enable scoping and keyset paging all verified; no defect |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
