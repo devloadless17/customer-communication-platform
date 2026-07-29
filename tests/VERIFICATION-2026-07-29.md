@@ -327,7 +327,7 @@ a checklist, not on however many findings happened to surface.
 | 8 | realtime layer | 1 | R (adversarial) + E (18 reducer + storm guard) | ✅ **2026-07-29** — all three reducer consumers verified table-driven; no defect |
 | 9 | auth / org / workspaces / members | 1 | | ☐ |
 | 10 | external `/v1` API | 1 | | ☐ |
-| 11 | contacts (+import/export/transfer) | 2 | | ☐ |
+| 11 | contacts (+import/export/transfer) | 2 | R (adversarial) + E (19 e2e + 72-assertion smoke + 100k load) | ✅ **2026-07-29** — no defect; format abstraction made literally true |
 | 12 | customers / identity | 2 | R (adversarial, 7 doc rules + §58) + E | ✅ **2026-07-29** — all seven hold, incl. the both-directions ephemeral exclusion; no defect. Merge-audit gap carried forward (doc-declared) |
 | 13 | inbox-views | 2 | R (adversarial, 6 doc invariants) + E (31) | ✅ **2026-07-29** — all six already covered; no defect, one stale comment fixed |
 | 14 | channels / multi-account | 2 | R (adversarial, 9 doc invariants) + E + N (7) | ✅ **2026-07-29** — doc §6 walked line by line; invariant 8 was FALSE and was a data-loss path (Finding #8) |
@@ -725,6 +725,40 @@ sweep before starting the suite.
 ---
 
 ## Domain session notes
+
+### #11 contacts (+import / export / transfer) — ✅ CLOSED (2026-07-29)
+
+Checklist from `docs/contact-import-export.md`. No defect; one precision fix so
+the doc's central claim is literally true.
+
+| Invariant | Evidence |
+|---|---|
+| The format abstraction: everything above `formats.ts` works on `Row` and never branches CSV-vs-Excel | **R** — see the fix below |
+| OWASP formula-injection defuse is a SINGLE implementation | **R** `escapeCell` in `lib/csv.ts`, delegated to by the CSV sink rather than reimplemented. Contact names come from inbound WhatsApp AND from uploaded files — both attacker-controlled — so one defuse is the point |
+| An imported **email is stored but NEVER used as an identity key** | **R** the transfer runners never pass `trustEmailAsStrongKey` (**0** occurrences), so a hand-typed address in a spreadsheet cannot fold two customers into one. Cross-checked against #12 rule 1 |
+| Rows key on a normalized phone, stamped `identityChannel: 'whatsapp'` | **R** the only channel whose natural key a person can type into a spreadsheet |
+| **The automations gate** — a 100k import must not become 100k workflow runs and 100k webhook deliveries | **R** `IMPORT_EVENT_FANOUT_CAP` (5,000): under it, per-row events publish exactly as before with `suppressSocketFanout`; above it the caller stops publishing per-row entirely. Same reasoning as §18's audit/workflow broadcast exclusion |
+| BOTH concurrency ceilings, deliberately | **R** `MAX_CONCURRENT_TRANSFERS_PER_TEAM = 1` (a 409, not a silent queue) **and** `MAX_CONCURRENT_TRANSFERS = 2` process-wide — the doc names the recurring defect it guards: a per-tenant cap with no process-wide ceiling |
+| Downloads are 302s to short-lived presigned URLs; R2 keys never appear in a body | **R** both `/download` and `/errors`, team-checked before the redirect |
+| Streaming is real, proven under a hard heap cap | **E** `contact-transfer-load.ts` at 100k rows — the cap IS the test: a buffering implementation OOMs, a streaming one completes |
+| HTTP surface: multer → disk → R2 → parser, capability-gated, tenant-isolated | **E** `tests/e2e/contacts-transfer/transfer-api.spec.ts` (19) |
+
+**Precision fix — the doc's claim was very slightly untrue.** "A third format is
+one new sink + one new source and **zero** changes to the runners" was off by
+two: `export-runner.ts` and `import-runner.ts` each carried their own
+`format === "xlsx" ? … : …` ternary to pick a MIME type — the only place either
+runner knew a format name at all, duplicated, and two places to forget. Moved to
+`artifactContentType()` in `formats.ts` beside the sinks. Row logic never
+branched, so the substance of the invariant already held; now the statement does
+too.
+
+**Edge themes:** ① the per-team gate is a 409, not a queue · ② a re-queued job
+is idempotent per row · ③ artifacts are snapshotted before a workspace cascade ·
+④ N/A · ⑤ N/A · ⑥ an empty file finishes with a row count of 0 ·
+⑦ **the domain's headline — 100k rows under a 384 MB cap** · ⑧ capability-gated ·
+⑨ upload-key isolation is pinned by the e2e suite · ⑩ a resumed import writes
+its error report from the resume marker.
+
 
 ### #20 coexistence — ✅ CLOSED (2026-07-29)
 
@@ -1177,7 +1211,7 @@ CLAUDE.md §7/§12/§15/§18 + the module docblock.
 | 8 | realtime layer | 1 | R (adversarial) + E (18 reducer + storm guard) | ✅ **2026-07-29** — all three reducer consumers verified table-driven; no defect |
 | 9 | One response shape shared by both routes | **R** both call `getWorkspaceReport` and return `WorkspaceReport`; the docblock names the 2026-07-28 calls-artifact regression a second mapper caused |
 | 10 | Multi-account lens: every panel scopable to one account | **N** `multi-account/08-reports.spec.ts` (4) |
-| 11 | Heavy queries ride an index, not a scan | **R** the module documents `(workspaceId, timestamp)`; the account filter rides the FK index added in `20260728100000` |
+| 11 | contacts (+import/export/transfer) | 2 | R (adversarial) + E (19 e2e + 72-assertion smoke + 100k load) | ✅ **2026-07-29** — no defect; format abstraction made literally true |
 
 **Edge themes:** ① N/A (read-only) · ② N/A · ③ an agent deleted mid-range simply
 stops matching · ④ N/A · ⑤ **covered — the highest-risk detail in the domain**
@@ -1265,7 +1299,7 @@ unmapped.**
 | 8 | realtime layer | 1 | R (adversarial) + E (18 reducer + storm guard) | ✅ **2026-07-29** — all three reducer consumers verified table-driven; no defect |
 | 9 | Chain-depth guard (`X-CCP-Depth`) | **E** `workflows.spec.ts:159,224` (at-cap and below-cap) + **R** `worker.ts:440` |
 | 10 | Retention cleanup batched | **R** `MAX_BATCHES` loop — the unbounded `deleteMany` the predecessor fixed is gone |
-| 11 | Fires at tier `OUTBOUND_WEBHOOKS` (50), self-registers | **R** + **E** `fanout-storm-guard.spec.ts` |
+| 11 | contacts (+import/export/transfer) | 2 | R (adversarial) + E (19 e2e + 72-assertion smoke + 100k load) | ✅ **2026-07-29** — no defect; format abstraction made literally true |
 | 12 | customers / identity | 2 | R (adversarial, 7 doc rules + §58) + E | ✅ **2026-07-29** — all seven hold, incl. the both-directions ephemeral exclusion; no defect. Merge-audit gap carried forward (doc-declared) |
 | 13 | inbox-views | 2 | R (adversarial, 6 doc invariants) + E (31) | ✅ **2026-07-29** — all six already covered; no defect, one stale comment fixed |
 

@@ -32,7 +32,9 @@ import { blobStorage } from "@/lib/blob-storage";
 import { buildContactFilterWhere, type ListContactsOpts } from "@/lib/queries/contacts";
 
 import { fieldHeader, resolveExportColumns } from "./columns";
-import { createSink, type Row } from "./formats";
+import { createSink, type Row,
+  artifactContentType,
+} from "./formats";
 
 /** Rows per page. Matches the broadcast recipient export's proven page size. */
 const PAGE = 2_000;
@@ -152,10 +154,7 @@ export async function runContactExport(opts: {
       key,
       // Streamed from disk by the storage layer, not read into a Buffer here.
       path: tmpPath,
-      contentType:
-        format === "xlsx"
-          ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-          : "text/csv; charset=utf-8",
+      contentType: artifactContentType(format),
     });
 
     return { artifactKey: key, artifactBytes: sizeBytes, rowCount, truncated };

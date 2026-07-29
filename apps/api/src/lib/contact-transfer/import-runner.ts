@@ -44,7 +44,9 @@ import { toContactWire } from "@/lib/queries/_shared";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
 
 import { resolveImportMapping, type HeaderMapping, type TeamFieldDef } from "./columns";
-import { createSink, createSource, type Row } from "./formats";
+import { createSink, createSource, type Row,
+  artifactContentType,
+} from "./formats";
 
 /** Rows per DB batch. Big enough to amortize round-trips, small enough that
  *  every statement stays plannable and no single transaction runs long. */
@@ -1073,10 +1075,7 @@ async function writeErrorReport(args: {
     await blobStorage.putObjectFromFile({
       key,
       path,
-      contentType:
-        format === "xlsx"
-          ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-          : "text/csv; charset=utf-8",
+      contentType: artifactContentType(format),
     });
     return key;
   } finally {

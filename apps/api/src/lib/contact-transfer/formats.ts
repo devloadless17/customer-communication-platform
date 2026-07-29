@@ -26,6 +26,21 @@ import { csvHeader, csvRows } from "@/lib/csv";
 
 export type Row = Record<string, string>;
 
+/**
+ * The MIME type a finished artifact is stored and served with.
+ *
+ * Lives HERE, beside the sinks, because the module's whole contract is that a
+ * third format costs one new sink + one new source and nothing else. This
+ * ternary was duplicated in `export-runner.ts` and `import-runner.ts` — two
+ * places to forget, in the only spot where the runners knew a format name at
+ * all. Now they don't.
+ */
+export function artifactContentType(format: "csv" | "xlsx"): string {
+  return format === "xlsx"
+    ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    : "text/csv; charset=utf-8";
+}
+
 /** Writes a tabular document. Call `writeHeader` once, then `writeRows` N times, then `finish`. */
 export interface RowSink {
   writeHeader(columns: string[]): Promise<void>;
