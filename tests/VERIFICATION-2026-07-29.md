@@ -302,15 +302,22 @@ Carried from the predecessor's 28 rows, plus 3 surfaces that never had one.
 All rows reset to ☐ — a prior ✅ is scoped to the code that existed when it was
 written, and 225 files have landed since.
 
+**Status key.** ☐ = untouched · ◐ = real evidence gathered, but the domain's
+full invariant checklist has NOT been generated and walked, so it is NOT closed
+· ✅ = every invariant maps to a green test or a written R-only reason, commit
+hash recorded. **Nothing here is ✅ yet, and ◐ must not be read as "probably
+fine"** — the whole point of the predecessor's method is that a domain closes on
+a checklist, not on however many findings happened to surface.
+
 | # | Domain | Tier | Method | Status |
 |---|---|---|---|---|
-| 1 | webhooks ingest | 1 | | ☐ |
+| 1 | webhooks ingest | 1 | E (meta 170/170) + N (pressure harness) | ◐ burst behaviour VERIFIED: converges to exactly 500, no duplicates, no thread fragmentation, 56.4/s p95 892ms — inside the recorded band. Full checklist not yet walked |
 | 2 | outbound send + idempotency ledger | 1 | | ☐ |
 | 3 | event bus / outbox | 1 | | ☐ |
 | 4 | workflows (~22 step types) | 1 | | ☐ |
 | 5 | assignment (policies/rules/capacity) | 1 | | ☐ |
 | 6 | broadcasts (+audience/templates/analytics) | 1 | | ☐ |
-| 7 | tickets (+SLA+numbering+escalation) | 1 | | ☐ |
+| 7 | tickets (+SLA+numbering+escalation) | 1 | R (create path) + N (gap pin) | ◐ number-allocation serialization FIXED + measured (`7510f46a`); SLA / escalation / routing checklist not yet walked |
 | 8 | realtime layer | 1 | | ☐ |
 | 9 | auth / org / workspaces / members | 1 | | ☐ |
 | 10 | external `/v1` API | 1 | | ☐ |
@@ -318,13 +325,13 @@ written, and 225 files have landed since.
 | 12 | customers / identity | 2 | | ☐ |
 | 13 | inbox-views | 2 | | ☐ |
 | 14 | channels / multi-account | 2 | | ☐ |
-| 15 | outbound-webhooks (delivery/retry) | 2 | | ☐ |
+| 15 | outbound-webhooks (delivery/retry) | 2 | R (account resolution) + N (2 pins) | ◐ HIGH wrong-account on `message.sent` FIXED (`3bb0f6fb`); the `conversationId` fallback claim verified across all 10 conversation-scoped events; delivery/retry/SSRF not re-walked |
 | 16 | calls (WhatsApp calling + artifacts) | 2 | | ☐ |
 | 17 | media / R2 / blob-storage | 2 | | ☐ |
 | 18 | queues / workers | 2 | | ☐ |
-| 19 | sweepers | 2 | | ☐ |
+| 19 | sweepers | 2 | R + N (6 tests) | ◐ `webhook-subscription-health` covered + negative-tested both directions; RISK-1/RISK-2 recorded; the other ~30 sweepers not re-walked |
 | 20 | coexistence | 2 | | ☐ |
-| 21 | **reports / analytics** *(NEW — never had a row)* | 2 | | ☐ |
+| 21 | **reports / analytics** *(NEW)* | 2 | R (adversarial) + E (2 unit) + N (4 multi-account e2e) | ◐ tz bucketing VERIFIED correct (double `AT TIME ZONE`); `accountId` ownership-checked and NEGATIVE-TESTED end to end; agent-permission + UI surface not yet covered |
 | 22 | **webchat widget** *(NEW — never had a row)* | 2 | | ☐ |
 | 23 | tags / stages / fields / snippets / flags | 3 | | ☐ |
 | 24 | notes | 3 | | ☐ |
@@ -334,7 +341,7 @@ written, and 225 files have landed since.
 | 28 | registration / invites | 3 | | ☐ |
 | 29 | common guards / pipes / filters | 3 | | ☐ |
 | 30 | api-keys lifecycle | 3 | | ☐ |
-| 31 | **ops / health / deploy pipeline** *(NEW — never had a row)* | 3 | | ☐ |
+| 31 | **ops / health / deploy pipeline** *(NEW)* | 3 | R + N (4 tests) | ◐ `ops-snapshot` degradation covered + negative-tested; RISK-3 (`probeStuckBroadcasts` unbounded on the container healthcheck) OPEN; deploy pipeline not yet reviewed |
 
 ### Never-audited subsystems (Phase 1 triage targets, risk order)
 
