@@ -336,7 +336,7 @@ a checklist, not on however many findings happened to surface.
 | 19 | sweepers | 2 | R + N (6 tests) | ◐ `webhook-subscription-health` covered + negative-tested both directions; RISK-1/RISK-2 recorded; the other ~30 sweepers not re-walked |
 | 20 | coexistence | 2 | | ☐ |
 | 21 | **reports / analytics** *(NEW)* | 2 | R (adversarial, 11 invariants) + E + N (6) | ✅ **2026-07-29** — full checklist walked, 0 unmapped |
-| 22 | **webchat widget** *(NEW — never had a row)* | 2 | | ☐ |
+| 22 | **webchat widget** *(NEW)* | 2 | R (adversarial) + E (2 e2e) | ✅ **2026-07-29** — public-surface boundary verified fail-closed; no defect |
 | 23 | tags / stages / fields / snippets / flags | 3 | | ☐ |
 | 24 | notes | 3 | R (adversarial) | ✅ **2026-07-29** — clean; the visibility spread verified safe for a structural reason (scalar return shape) |
 | 25 | team-chat (+DMs) | 3 | R (adversarial, 11 doc invariants + mechanical tenancy scan) | ✅ **2026-07-29** — no defect; 5 satellites re-verified, 0 real violations |
@@ -723,6 +723,31 @@ sweep before starting the suite.
 ---
 
 ## Domain session notes
+
+### #22 webchat widget — ✅ CLOSED (2026-07-29)
+
+A live channel that never had a matrix row. Checklist from
+`docs/webchatwidget.md` + `docs/identity.md`'s ephemeral rules. No defect.
+
+| Invariant | Evidence |
+|---|---|
+| The handshake is gated by an **origin allow-list**, fail-closed | **R** `originAllowed(origin, resolved.allowedOrigins)` → `next(new Error("origin_not_allowed"))` **before** any room join, and after the site-key check. The rejection log carries the actual origin so support can say exactly what to add |
+| Trust-on-first-use origin recording **never gates a connection** | **R** fire-and-forget with a non-consuming catch, and it no-ops once the widget is locked — a visitor's handshake must never wait on, or fail from, a bookkeeping write |
+| Per-IP handshake rate limit | **R** `createTokenBucket({ perMin: 120 })`, with the reason recorded in place: without it one IP could mint ~120 Contacts + Conversations a minute |
+| Anonymous, WebSocket-only transport so browser CORS never applies | **R** |
+| A visitor only ever joins ITS OWN conversation room | **R** both joins are `widgetRoom(conversationId)` = `widget:conv:<id>` — there is no team room, no channel room, and no visitor-to-visitor surface |
+| Widget contacts stay out of the directory, CSV, audience counts and search | **R** `EPHEMERAL_CONTACT_CHANNELS` drives `directoryContactWhere` / `DIRECTORY_CONTACT_SQL`; membership is DERIVED (has a phone or an email), so a visitor who self-identifies is promoted automatically and there is no flag to forget to flip |
+| …but full-quality in the inbox, and workflows still fire | **R** the exclusion is a directory/audience concern only |
+| A widget contact's self-typed value never acts as a strong key | **R** the candidate-set exclusion — see #12 rule 7, where the both-directions reasoning is recorded |
+| Widget conversation binding is STICKY (unlike a channel account's re-stamp) | **R** `ingest.ts` calls it out explicitly when re-stamping `channelConnectionId` |
+
+**Edge themes:** ① `createOrGet` on the visitor conversation is idempotent ·
+② N/A · ③ N/A · ④ the visitor re-joins its room on reconnect ·
+⑤ N/A · ⑥ the pre-chat form is optional · ⑦ per-IP bucket ·
+⑧ **the whole domain is an unauthenticated public surface — the site key plus
+the origin allow-list ARE the boundary** · ⑨ the widget resolves to one
+workspace from its site key, never from client input · ⑩ N/A.
+
 
 ### #25 team-chat (+DMs) — ✅ CLOSED (2026-07-29)
 
