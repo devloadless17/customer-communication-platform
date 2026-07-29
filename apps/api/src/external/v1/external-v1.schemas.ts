@@ -81,9 +81,18 @@ export type ExternalSendMessageInput = z.infer<typeof ExternalSendMessageSchema>
  * `Send Message` node which accepts either identifier. Saves the customer
  * from a contact-lookup → channel-lookup → send chain.
  *
- * `channel_id` is accepted but advisory today (single channel per team);
- * passing the team's actual channel id is a no-op, passing something else
- * is ignored (we don't reject for forward-compat with multi-channel UX).
+ * `account_id` picks WHICH of the workspace's accounts on the channel a
+ * BRAND-NEW thread is opened on — the counterpart to the `account` block on
+ * every outbound webhook, so "reply from the number they messaged" is a
+ * round-trip a partner can actually complete. Without it a first outbound to a
+ * never-messaged contact always went out the workspace DEFAULT number, while
+ * the internal UI has been able to choose since multi-account landed — a /v1
+ * parity gap (§12). Ignored when the contact already has a thread: that thread
+ * owns its account, and a reply must leave from the account the customer
+ * messaged (passing a DIFFERENT one is rejected rather than silently ignored).
+ *
+ * `channel_id` is accepted but advisory and DEPRECATED — it predates
+ * multi-account and never did anything. Use `account_id`.
  *
  * `client_temp_id` round-trips through the message envelope so n8n nodes
  * (or any caller doing optimistic UI) can correlate the sent message back
@@ -224,6 +233,9 @@ export const ExternalTopLevelSendMessageSchema = z.object({
         .default({ body: [] }),
     })
     .optional(),
+  /** `ChannelConnection.id` — the account to open a NEW thread on. See above. */
+  account_id: z.string().min(1).optional(),
+  /** @deprecated advisory no-op, predates multi-account. Use `account_id`. */
   channel_id: z.string().min(1).optional(),
   client_temp_id: z.string().min(1).max(255).optional(),
   reply_to_message_id: z.string().min(1).optional(),

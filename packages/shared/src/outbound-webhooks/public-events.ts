@@ -101,8 +101,9 @@ export type PublicEventType = (typeof PUBLIC_EVENT_TYPES)[number];
  * INTERNAL `PublicEnvelope.data` shape — NOT what we POST. The docs page runs
  * each sample through `toWirePayload` (see below) to render the real FLAT wire
  * body partners actually receive: `{ team_id, event_type, …event blocks }`
- * with NO `event_id` / `occurred_at` / `data` wrapper (dedup rides the
- * `X-CCP-Delivery` header). `PublicEnvelope` is the mapper's intermediate
+ * with NO `occurred_at` / `data` wrapper. (`event_id` IS on the wire body — the
+ * subscriber stamps the delivery row id there, matching the `X-CCP-Delivery`
+ * header, so either can be used to dedupe.) `PublicEnvelope` is the mapper's intermediate
  * representation only. Strings use the `cmp…` placeholder convention so
  * partners don't paste fake-looking ids into their workflows.
  */
@@ -584,11 +585,14 @@ export interface AssigneeInfo {
  * Mapper INTERMEDIATE representation — NOT the wire body. `toPublicEnvelopes`
  * produces these; the subscriber then runs `data` through `toWirePayload` and
  * posts the resulting FLAT shape (`{ team_id, event_type, …blocks }`). None of
- * `event_id` / `occurred_at` / the `data` wrapper appear in what partners
- * receive — they were never sent. Dedup is the `X-CCP-Delivery` header.
+ * `occurred_at` / the `data` wrapper appear in what partners receive — they
+ * were never sent. Dedup is `event_id` in the body, which equals the
+ * `X-CCP-Delivery` header.
  */
 export interface PublicEnvelope<T extends PublicEventType, P> {
-  /** Internal-only: the delivery row id the subscriber stamps before persisting. Echoed on the X-CCP-Delivery header; NOT in the wire body. */
+  /** The delivery row id, stamped by the subscriber. Shipped BOTH as the wire
+   *  body's `event_id` and on the `X-CCP-Delivery` header — a receiver whose
+   *  platform exposes only one of the two can still dedupe. */
   event_id: string;
   event_type: T;
   /** When the envelope was generated. Surfaced to partners as the top-level
@@ -1391,6 +1395,18 @@ export interface WireChannelBase {
   account_label: string | null;
   account_address: string | null;
   account_external_id: string | null;
+  /**
+   * TRUE when the account reported here is the workspace's DEFAULT connection
+   * for the medium rather than the account the event actually happened on.
+   *
+   * The subscriber resolves the real account from the event (message stamp →
+   * conversation pointer); only when neither carries one does it fall back to
+   * the default. Without this flag the two cases are indistinguishable on the
+   * wire, so a partner routing on `account.id` cannot tell an authoritative
+   * answer from a guess — which is precisely the failure that made every
+   * webhook on a multi-number workspace report the default number.
+   */
+  account_is_default_fallback: boolean;
 }
 
 /** Map our `Channel` medium to the partner's `source` convention. */
@@ -1454,6 +1470,54 @@ function wireChannel(
     account_label: base.account_label,
     account_address: base.account_address,
     account_external_id: base.account_external_id,
+    account_is_default_fallback: base.account_is_default_fallback,
+  };
+}
+
+/**
+ * The ACCOUNT block — WHICH of the workspace's connected accounts this event
+ * happened on, as its own top-level block on every event.
+ *
+ * The `channel` block already carries the same facts, but it answers two
+ * questions with one name: `channel.id` is not a channel id, it is the
+ * `ChannelConnection` cuid (the account), while `channel.name` is the medium.
+ * A receiver reading "channel" reasonably assumes the medium and routes on the
+ * wrong field. One pointer answering two questions has to be two blocks, so
+ * this one is unambiguous:
+ *
+ *   `id`          — the ChannelConnection cuid. Pass it back as `account_id`
+ *                   on `POST /v1/messages` to reply from this same account.
+ *   `channel`     — the medium ("whatsapp" | "messenger" | "instagram" | …).
+ *   `label`       — the admin-set name in Settings ("Sales"), null if unnamed.
+ *   `address`     — the customer-visible address (E.164 for WhatsApp), else null.
+ *   `external_id` — the provider's own id (phone_number_id, Page id, IG id).
+ *   `is_default_fallback` — see `WireChannelBase.account_is_default_fallback`.
+ *
+ * `channel` is kept as-is for existing receivers; this is additive.
+ */
+/**
+ * Adapt whatever contact block an envelope happens to carry into the two fields
+ * `wireChannel` reads. Message events carry the full snake_case `PublicContact`;
+ * the lean-enriched events carry `{ id, phoneNumber, name }`. Reading only one
+ * shape would silently drop `waId` / `profileName` from the channel block on
+ * half the event types.
+ */
+function normalizeContactForChannel(
+  c: { phone_number?: string | null; phoneNumber?: string | null; name?: string | null } | null | undefined,
+): { phone_number: string | null; name: string | null } | null {
+  if (!c) return null;
+  return { phone_number: c.phone_number ?? c.phoneNumber ?? null, name: c.name ?? null };
+}
+
+function wireAccount(base: WireChannelBase | null): Record<string, unknown> | null {
+  if (!base) return null;
+  return {
+    id: base.id,
+    channel: base.name,
+    label: base.account_label,
+    address: base.account_address,
+    external_id: base.account_external_id,
+    is_default_fallback: base.account_is_default_fallback,
   };
 }
 
@@ -1574,6 +1638,38 @@ export function toWirePayload(
      *  greets instead) — we force `ai_enabled:false` on that one delivery so
      *  existing partner flows that gate on `ai_enabled` skip it with no change.
      *  Absent / "ai" = no suppression. */
+    firstTouchGreeter?: "ai" | "workflow";
+  },
+): Record<string, unknown> {
+  const wire = wirePayloadForType(type, data, ctx);
+  const d = data as Record<string, any>;
+  // Provenance on EVERY event, present or future. Nine of the seventeen types
+  // (contact.*, note.*, message.flag_changed, ticket.changed) emitted no
+  // `channel` block at all, so a receiver handling those could not tell which
+  // channel — let alone which of the workspace's numbers — the work belonged
+  // to, even though the subscriber had already resolved it and threw it away.
+  //
+  // Stamped HERE rather than in each `case` on purpose: per-case stamping is
+  // what let nine of them drift, and a new event type added later would drift
+  // the same way. The cases that DO build their own `channel` (they pass the
+  // contact profile into it) still win — this only fills what is absent.
+  if (!("channel" in wire)) {
+    wire.channel = wireChannel(ctx.channelBase, normalizeContactForChannel(d.contact));
+  }
+  // The unambiguous account block — see `wireAccount`. Always stamped; no case
+  // builds its own.
+  wire.account = wireAccount(ctx.channelBase);
+  return wire;
+}
+
+/** Per-type wire body. Wrapped by `toWirePayload`, which stamps the provenance
+ *  blocks every type needs so no individual case can forget them. */
+function wirePayloadForType(
+  type: PublicEventType,
+  data: unknown,
+  ctx: {
+    channelBase: WireChannelBase | null;
+    teamAiAutopilotEnabled?: boolean;
     firstTouchGreeter?: "ai" | "workflow";
   },
 ): Record<string, unknown> {

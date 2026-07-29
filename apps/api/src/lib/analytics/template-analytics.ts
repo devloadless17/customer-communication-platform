@@ -43,16 +43,35 @@ export const ANALYTICS_TEMPLATE_BATCH = 10;
  * `insightsEnabledAt` so the UI can offer it exactly once and every later
  * "why is there no data before March" has a dated answer.
  */
-export async function enableTemplateInsights(workspaceId: string): Promise<{
+export async function enableTemplateInsights(
+  workspaceId: string,
+  /**
+   * WHICH number's WABA to enable. Insights are a per-WABA switch, so on a
+   * workspace running two WABAs the default-only version could enable exactly
+   * one of them and left the other permanently dark with no route to turn it
+   * on — the analytics equivalent of replying from the wrong number. Omitted
+   * still means the default account, so every existing caller is unchanged.
+   */
+  accountId?: string | null,
+): Promise<{
   enabledAt: string;
   alreadyEnabled: boolean;
 }> {
   const connection = await db.channelConnection.findFirst({
-    where: { workspaceId, channel: "whatsapp", isDefault: true },
+    // workspaceId stays in the WHERE alongside an explicit id — same tenant-
+    // scoping rule every other account lookup follows.
+    where: accountId
+      ? { id: accountId, workspaceId, channel: "whatsapp" }
+      : { workspaceId, channel: "whatsapp", isDefault: true },
     select: { id: true, insightsEnabledAt: true },
   });
   if (!connection) {
-    throw new BadRequestException({ error: "whatsapp_not_connected" });
+    // A NAMED account that doesn't exist is a caller error worth distinguishing
+    // from "no WhatsApp at all" — otherwise a typo'd id reads as a disconnected
+    // channel and sends the admin to reconnect a working number.
+    throw new BadRequestException({
+      error: accountId ? "account_not_found" : "whatsapp_not_connected",
+    });
   }
   if (connection.insightsEnabledAt) {
     // Not an error the caller must handle — idempotent success, because the
@@ -72,9 +91,6 @@ export async function enableTemplateInsights(workspaceId: string): Promise<{
   // customers most likely to want analytics. Naming the row also keeps the
   // Graph call and the `insightsEnabledAt` stamp below on the SAME account.
   //
-  // Still default-account-only by design: insights are a per-WABA switch and
-  // this route takes no `?accountId=` (unlike its siblings on this controller),
-  // so a second WABA cannot be enabled yet. Tracked as an open gap.
   const config = await binding.getSendConfig(workspaceId, connection.id);
   await provider.enableTemplateInsights(config);
 
@@ -98,13 +114,19 @@ export async function enableTemplateInsights(workspaceId: string): Promise<{
   return { enabledAt: enabledAt.toISOString(), alreadyEnabled: false };
 }
 
-export async function getInsightsStatus(workspaceId: string): Promise<{
+/** Insights state for ONE number's WABA (`accountId`), or the default number's. */
+export async function getInsightsStatus(
+  workspaceId: string,
+  accountId?: string | null,
+): Promise<{
   connected: boolean;
   enabled: boolean;
   enabledAt: string | null;
 }> {
   const connection = await db.channelConnection.findFirst({
-    where: { workspaceId, channel: "whatsapp", isDefault: true },
+    where: accountId
+      ? { id: accountId, workspaceId, channel: "whatsapp" }
+      : { workspaceId, channel: "whatsapp", isDefault: true },
     select: { insightsEnabledAt: true },
   });
   return {

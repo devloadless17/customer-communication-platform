@@ -248,6 +248,7 @@ describe("the delivered body", () => {
       account_label: "Sales",
       account_address: "+15550100002",
       account_external_id: "109876543210987",
+      account_is_default_fallback: false,
     };
     const sample = PUBLIC_EVENT_GROUPS.flatMap((g) => g.events).find(
       (e) => e.type === "message.received",
@@ -271,5 +272,73 @@ describe("the delivered body", () => {
     expect(body.conversation.id).toBeTruthy();
     expect(body.message.conversationId).toBe(body.conversation.id);
     expect(body.message.contactId).toBeTruthy();
+  });
+
+  /**
+   * The provenance blocks were stamped per-`case`, and nine of the seventeen
+   * cases never got them — a receiver handling `ticket.changed` or
+   * `note.created` could not tell which channel, let alone which of the
+   * workspace's numbers, the work belonged to. They are now stamped once for
+   * every type, and this is the tripwire: a NEW event type added later inherits
+   * the blocks, and this fails the moment someone reintroduces per-case
+   * stamping and misses one.
+   */
+  it("carries channel + account on EVERY event type, not just message events", () => {
+    const channelBase: WireChannelBase = {
+      id: "cmpchan_01",
+      name: "whatsapp",
+      source: "whatsapp_business",
+      created_at: 1773145944,
+      account_label: "Sales",
+      account_address: "+15550100002",
+      account_external_id: "109876543210987",
+      account_is_default_fallback: false,
+    };
+    const every = PUBLIC_EVENT_GROUPS.flatMap((g) => g.events);
+    expect(every.length).toBeGreaterThan(0);
+    for (const sample of every) {
+      const body = toWirePayload(sample.type, sample.samplePayload, { channelBase }) as {
+        channel: Record<string, unknown> | null;
+        account: Record<string, unknown> | null;
+      };
+      expect(body.channel, `${sample.type} has no channel block`).not.toBeNull();
+      expect(body.channel!.id, `${sample.type} channel.id`).toBe("cmpchan_01");
+      // The unambiguous block: `channel.id` is really the ACCOUNT id, which
+      // reads as the medium to anyone who hasn't read the docs.
+      expect(body.account, `${sample.type} has no account block`).not.toBeNull();
+      expect(body.account!.id, `${sample.type} account.id`).toBe("cmpchan_01");
+      expect(body.account!.channel, `${sample.type} account.channel`).toBe("whatsapp");
+      expect(body.account!.label).toBe("Sales");
+      expect(body.account!.address).toBe("+15550100002");
+      expect(body.account!.external_id).toBe("109876543210987");
+      expect(body.account!.is_default_fallback).toBe(false);
+    }
+  });
+
+  /**
+   * A guessed account and a resolved one must not look alike on the wire. The
+   * subscriber only knows the real account when the event carries one; every
+   * other path reports the workspace default, which on a multi-number workspace
+   * is routinely a DIFFERENT number than the one involved.
+   */
+  it("flags a default-account fallback instead of passing a guess off as the answer", () => {
+    const guessed: WireChannelBase = {
+      id: "cmpchan_default",
+      name: "whatsapp",
+      source: "whatsapp_business",
+      created_at: 1773145944,
+      account_label: "Support",
+      account_address: "+15550100001",
+      account_external_id: "109876543210000",
+      account_is_default_fallback: true,
+    };
+    const sample = PUBLIC_EVENT_GROUPS.flatMap((g) => g.events).find(
+      (e) => e.type === "contact.created",
+    )!;
+    const body = toWirePayload("contact.created", sample.samplePayload, {
+      channelBase: guessed,
+    }) as { account: Record<string, unknown>; channel: Record<string, unknown> };
+    expect(body.account.is_default_fallback).toBe(true);
+    expect(body.channel.account_is_default_fallback).toBe(true);
   });
 });

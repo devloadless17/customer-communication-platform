@@ -21,6 +21,10 @@ const SAMPLE_CHANNEL: WireChannelBase = {
   account_label: "Sales",
   account_address: "+15550100001",
   account_external_id: "109876543210987",
+  // A real event resolves its own account, so the sample shows the answer, not
+  // the fallback. `true` on a delivered event means "this is the workspace
+  // default for the medium, not the account the event happened on".
+  account_is_default_fallback: false,
 };
 
 export const metadata = { title: "API reference" };
@@ -850,6 +854,8 @@ export default function ApiDocsPage() {
           Whether Meta&apos;s template analytics are switched on. Enabling is a{" "}
           <strong>one-time, irreversible</strong> opt-in per WABA, so there is no
           API to do it — it&apos;s an in-app admin action (Settings → WhatsApp).
+          Because the switch is per-WABA, <code>?accountId=</code> reads one
+          number&apos;s state; omitted it reads the default number&apos;s.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/whatsapp/health">
           Messaging tier + 24h unique-recipient cap, spend so far, quality rating
@@ -1183,6 +1189,21 @@ export default function ApiDocsPage() {
           expired). Supplying the wrong set is rejected with a named error such as{" "}
           <code>named_body_vars_required</code> or{" "}
           <code>button_params_required</code>, not an opaque Meta code.
+          <br />
+          <br />
+          <code>account_id</code> (a <code>ChannelConnection</code> id from{" "}
+          <code>GET /v1/channels</code>) picks <strong>which of your accounts on
+          the channel</strong> a <strong>brand-new</strong> thread is opened on —
+          pass back the <code>account.id</code> from the webhook that prompted
+          the send and the reply leaves from the same number/Page the customer
+          reached. If the contact <em>already</em> has a conversation, that
+          thread owns its account and <code>account_id</code> is not needed;
+          naming a <em>different</em> one returns{" "}
+          <code>400 account_mismatch</code> rather than silently sending from
+          somewhere else. An unknown or inactive id returns{" "}
+          <code>404 account_not_found</code>. Omit it and a new thread opens on
+          the channel&apos;s default account. (<code>channel_id</code> is a
+          deprecated no-op that predates multi-account.)
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/messages/:id">
           Find a single message by id.

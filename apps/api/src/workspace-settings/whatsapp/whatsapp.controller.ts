@@ -121,17 +121,27 @@ export class WhatsappController {
    * Split into two routes on purpose. Enabling cannot be undone at Meta, so it
    * must be an explicit, confirmed action and never a side effect of the UI
    * checking whether data is available.
+   *
+   * `?accountId=` picks the number whose WABA to read/enable, like the business-
+   * profile and QR routes below. Insights are per-WABA, so without it a second
+   * WABA could never be enabled at all.
    */
   @Get("insights/status")
-  async insightsStatus(@CurrentSession() session: ApiSession) {
-    return getInsightsStatus(session.workspaceId);
+  async insightsStatus(
+    @CurrentSession() session: ApiSession,
+    @Query("accountId") accountId?: string,
+  ) {
+    return getInsightsStatus(session.workspaceId, accountId || null);
   }
 
   @Post("insights/enable")
   @HttpCode(200)
   @RateLimit({ perMinute: 3 })
-  async enableInsights(@CurrentSession() session: ApiSession) {
-    return enableTemplateInsights(session.workspaceId);
+  async enableInsights(
+    @CurrentSession() session: ApiSession,
+    @Query("accountId") accountId?: string,
+  ) {
+    return enableTemplateInsights(session.workspaceId, accountId || null);
   }
 
   /**

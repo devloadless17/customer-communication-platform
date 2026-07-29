@@ -296,6 +296,10 @@ export class OutboundWebhooksService {
           account_address:
             (conn.config as { displayPhoneNumber?: string } | null)?.displayPhoneNumber ?? null,
           account_external_id: conn.externalAccountId || null,
+          // The ping has no event to resolve an account FROM, so this pick IS
+          // the fallback — and saying so keeps the ping honest rather than
+          // teaching a partner that the flag is always false.
+          account_is_default_fallback: true,
         }
       : null;
 
@@ -312,6 +316,10 @@ export class OutboundWebhooksService {
     const payload = {
       v: WEBHOOK_WIRE_VERSION,
       team_id: workspaceId,
+      // Same dedup key the production fanout stamps (= the delivery row id, =
+      // the X-CCP-Delivery header) — the ping exists to validate a parser, so
+      // it must carry every field a live delivery does.
+      event_id: deliveryId,
       test: true,
       // Top-level `timestamp` — production fanout always stamps it (epoch ms)
       // BEFORE the spread, so a Test ping must too, or it wouldn't be byte-shape

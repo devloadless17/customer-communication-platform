@@ -2115,10 +2115,14 @@ export class ExternalV1Controller {
     return { ok: true };
   }
 
+  /** `?accountId=` reads ONE number's WABA; omitted reads the default number's. */
   @Get("whatsapp/insights/status")
   @RequireScope("read:catalog")
-  async insightsStatus(@CurrentApiKey() auth: ApiKeyContext) {
-    return getInsightsStatus(auth.workspaceId);
+  async insightsStatus(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query("accountId") accountId?: string,
+  ) {
+    return getInsightsStatus(auth.workspaceId, accountId || null);
   }
 
   @Get("broadcasts/:id/timeseries")

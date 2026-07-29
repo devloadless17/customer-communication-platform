@@ -1159,6 +1159,21 @@ export class ExternalV1MessagingService {
     // failed validation flip an agent-closed thread to pending and re-fire
     // conversation.status_changed + reopen workflows/webhooks.
     const wasClosed = conv?.status === "closed";
+    // An EXISTING thread owns its account: the customer messaged that number,
+    // the 24h window belongs to it, and their reply comes back to it. So an
+    // `account_id` naming a different one is a caller mistake worth surfacing —
+    // silently ignoring it would send from a number the partner did not ask for
+    // while their logs say otherwise. Matching (the normal case, echoing the
+    // webhook's `account.id` straight back) passes through.
+    if (conv && input.account_id && conv.channelConnectionId !== input.account_id) {
+      throw new BadRequestException({
+        error: "account_mismatch",
+        detail:
+          `this contact's conversation belongs to account ${conv.channelConnectionId ?? "(unbound)"}, ` +
+          `not ${input.account_id}. A reply must go out the account the customer messaged — ` +
+          "omit `account_id` to use the thread's own account.",
+      });
+    }
     if (!conv) {
       // Stamp the new thread's channel from the contact's identity — the
       // source of truth at creation (contacts are siloed + immutable-identity).
@@ -1182,7 +1197,24 @@ export class ExternalV1MessagingService {
       // integration-started thread must be as attributable as an inbound one,
       // and in a multi-account workspace a null here makes every later send
       // fail `account-unresolved`.
-      const { accountId } = await resolveOutboundAccountId(this.db, workspaceId, channel);
+      const { accountId, explicitNotFound } = await resolveOutboundAccountId(
+        this.db,
+        workspaceId,
+        channel,
+        input.account_id,
+      );
+      // A named account that doesn't exist (or isn't active, or belongs to a
+      // different channel than the contact is reachable on) must NOT quietly
+      // degrade to the default — that is the same "wrong number, no signal"
+      // failure the account block on the webhook exists to end.
+      if (explicitNotFound) {
+        throw new NotFoundException({
+          error: "account_not_found",
+          detail:
+            `no active ${channel} account ${input.account_id} in this workspace. ` +
+            "List them with GET /v1/channels.",
+        });
+      }
       try {
         conv = await this.db.conversation.create({
           data: {

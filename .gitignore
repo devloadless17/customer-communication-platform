@@ -17,6 +17,11 @@ node_modules
 
 # production
 /build
+# Compiled output. `apps/api` (NestJS) and the packages emit here; ~1000 files
+# that are 100% reproducible from source by `pnpm build`. Never tracked — the
+# rule was simply missing, so every build filled the VS Code source-control
+# panel with untracked artifacts and buried the real diff.
+dist/
 
 # misc
 .DS_Store

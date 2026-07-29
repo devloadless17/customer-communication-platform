@@ -362,11 +362,22 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
                 eventType: type,
                 ...(eventKey ? { eventKey } : {}),
                 correlationId,
+                // (see the payload spread below — event_id is per-DELIVERY)
                 // minor#8: persist the chain depth on the row so the orphan
                 // sweeper's re-enqueue preserves the loop-guard counter (it only
                 // has the row, not the original BullMQ job arg).
                 chainDepth,
-                payload: payload as unknown as Parameters<
+                // `event_id` is the DELIVERY row id — the same value that rides
+                // on the X-CCP-Delivery header, so the two agree and a partner
+                // can dedupe from either. It lives per-delivery (not on the
+                // shared `payload` built once per envelope) because each
+                // matching webhook gets its own delivery row and its own id.
+                //
+                // Header-only was a real gap: several no-code receivers (Zapier
+                // Catch Hook, some n8n configurations) expose the BODY and not
+                // the request headers, leaving those partners with no dedup key
+                // at all on an at-least-once delivery contract.
+                payload: { ...payload, event_id: deliveryId } as unknown as Parameters<
                   typeof this.db.outboundWebhookDelivery.create
                 >[0]["data"]["payload"],
               },
@@ -920,6 +931,8 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
           account_label: null,
           account_address: null,
           account_external_id: null,
+          // Not a fallback — this medium HAS no ChannelConnection to guess at.
+          account_is_default_fallback: false,
         };
         this.channelCache.set(key, synthetic);
         return synthetic;
@@ -942,6 +955,14 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
       account_address:
         (conn.config as { displayPhoneNumber?: string } | null)?.displayPhoneNumber ?? null,
       account_external_id: conn.externalAccountId || null,
+      // Whether this account was resolved FROM the event or merely defaulted to.
+      // Only the `accountId` branch above reads the account the event actually
+      // happened on; the other two are "the workspace's default / first active
+      // connection for the medium", which on a multi-account workspace may well
+      // be a different number. Reporting a guess as if it were the answer is
+      // the bug this whole resolver exists to prevent — so we ship the guess
+      // AND say it is one.
+      account_is_default_fallback: !accountId,
     };
     this.channelCache.set(key, base);
     return base;
