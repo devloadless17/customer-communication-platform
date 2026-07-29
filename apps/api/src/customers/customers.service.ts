@@ -95,7 +95,7 @@ export interface CustomerProfile {
 
 /**
  * Unified customer profile + manual, reversible merge/split (§6 /
- * docs/identity.md). A Customer is a person; linking joins a channel-contact to
+ * lib/identity/identity-service.ts). A Customer is a person; linking joins a channel-contact to
  * that person, unlinking splits it back to its own person. Message histories are
  * never touched — only `Contact.customerId` moves. Tenant-scoped throughout.
  */
@@ -112,7 +112,7 @@ export class CustomersService {
    * but nothing on the bus said so — so other agents' open contact panels, the
    * group-by-person rollup, and identity-syncing partner webhooks kept the
    * pre-merge view until a manual reload. Publish the same `contact.updated` the
-   * contact-share re-point does (docs/identity.md §6) so the existing socket
+   * contact-share re-point does (lib/identity/identity-service.ts) so the existing socket
    * fanout + outbound-webhook subscriber converge with no new wiring.
    * Best-effort: a publish failure must never undo a committed merge.
    */

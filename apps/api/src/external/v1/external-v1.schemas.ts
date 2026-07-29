@@ -544,7 +544,7 @@ export type ExternalUpdateTagInput = z.infer<typeof ExternalUpdateTagSchema>;
  * reachable only from the composer. Those chips are the ONLY way a Messenger /
  * Instagram contact's phone or email ever reaches us, and therefore the only
  * source of a self-asserted email that may auto-merge a unified Customer
- * (docs/identity.md). An automation that can't send them can't build a person.
+ * (lib/identity/identity-service.ts). An automation that can't send them can't build a person.
  */
 export const ExternalSendInteractiveSchema = z
   .object({

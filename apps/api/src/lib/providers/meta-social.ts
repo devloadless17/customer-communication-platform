@@ -93,7 +93,7 @@ interface SocialEntry {
   time?: number;
   messaging?: MessagingEvent[];
   // Messenger Calling lifecycle events (connect / call_status / media_update /
-  // terminate) ride their own array on the entry — see docs/messenger-calling.md.
+  // terminate) ride their own array on the entry.
   calls?: SocialCallWire[];
   // Business-initiated call permission opt-in reply lands at the entry level.
   sender?: { id?: string };
@@ -447,7 +447,7 @@ function socialStructuredFromAttachments(
  * webhooks carry the caller PSID only on `connect` (`from`) and `call_status`
  * (`recipient_id`); `media_update` / `terminate` reference an existing call by
  * id, so `externalContactId` is left undefined and ingest resolves the row by
- * `externalCallId`. Full shape reference: docs/messenger-calling.md.
+ * `externalCallId`. The wire shapes are defined below.
  */
 function mapSocialCall(c: SocialCallWire): NormalizedCallEvent | null {
   const externalCallId = c.id;
@@ -1263,7 +1263,7 @@ export async function fetchSocialProfile(
 }
 
 // ─── Messenger Calling (unified POST /{page-id}/calls) ──────────────────────
-// Full wire reference: docs/messenger-calling.md. Meta uses ONE endpoint with
+// Meta uses ONE endpoint with
 // an `action` discriminator and returns SDP synchronously — unlike WhatsApp's
 // method-per-action + webhook-delivered answer, so these are their own funcs.
 
@@ -1345,7 +1345,7 @@ export async function socialCallFeatureEnabled(opts: SocialSendTarget): Promise<
  * inbox — vs Meta's own surfaces (`META`). The Page MUST be on `PARTNERS` (and
  * subscribed to the `calls` webhook) to receive inbound calls here; without it
  * inbound calls only ring Meta Business Inbox. Business-initiated calls work
- * regardless. Idempotent. See docs/messenger-calling.md.
+ * regardless. Idempotent.
  */
 export async function setSocialCallRouting(
   ringTarget: "META" | "PARTNERS",

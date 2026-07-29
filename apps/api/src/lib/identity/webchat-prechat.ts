@@ -17,7 +17,7 @@ import type { Channel } from "@ccp/shared/types";
  * contact (the agent can see and act on them) but NEVER act as a merge key in
  * either direction — see the NO-AUTO-MERGE block below, and the matching candidate
  * exclusion in `findExistingCustomerIdByStrongKey`. Name is display-only — never a
- * key (no fuzzy matching, ever — docs/identity.md).
+ * key (no fuzzy matching, ever — lib/identity/identity-service.ts).
  *
  * Landing a phone or email here DOES promote the visitor out of ephemeral status
  * into the contacts directory (`directoryContactWhere`) — that is visibility, not

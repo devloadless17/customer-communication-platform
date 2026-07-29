@@ -11,7 +11,7 @@ export const metadata = { title: "Website chat — installation guide" };
  * account. Deliberately written for someone who has never seen this platform:
  * no build tooling, no npm package, one script tag.
  *
- * The prose twin lives at docs/webchat-install-guide.md for internal reference;
+ * The prose twin lives at apps/web/src/app/docs/webchat-install/ for internal reference;
  * keep the two in step when the embed contract changes.
  */
 export default function WebchatInstallDocsPage() {

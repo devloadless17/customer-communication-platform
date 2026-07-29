@@ -16,7 +16,7 @@
  *      every side: the code compiles, the page renders, and only a partner
  *      discovers the route they needed was never written down.
  *
- * DOC SURFACE: the in-app page ONLY. `docs/organization-api.md` was deleted
+ * DOC SURFACE: the in-app page ONLY. `the in-app /docs/api page` was deleted
  * from this branch on purpose — the maintainer removed the whole `docs/` tree
  * as stale, and CLAUDE.md is the source of truth. A checker that requires a
  * file the project deliberately dropped is a checker that fails for a reason

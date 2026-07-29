@@ -1693,7 +1693,7 @@ export class ExternalV1Controller {
    * `POST /api/messages/interactive`; §12 locks `/v1` to UI parity.
    *
    * Parity gap (tracked, documented as a roadmap exception in both
-   * docs/organization-api.md and the /docs/api page alongside the URL-media
+   * the in-app /docs/api page and the /docs/api page alongside the URL-media
    * note): the composer send types shipped 2026-07-13 — location, contact-card,
    * reaction (+dismiss), and forward — plus direct media upload have no `/v1`
    * twin yet. They're not silently missing: the doc surfaces list them as

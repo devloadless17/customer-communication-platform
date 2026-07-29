@@ -245,7 +245,7 @@ export class MetaService {
    *       fail with Meta code 200;
    *   - missing `business_management` → the business portfolio can't resolve,
    *     so the shared 24h budget + template-limit panels read "not resolved"
-   *     and broadcasts send ungated (docs/meta-manual-onboarding.md);
+   *     and broadcasts send ungated (lib/providers/README.md);
    *   - a USER-type token or one with an expiry → works today, dies quietly
    *     later (User tokens live hours; the onboarding doc says non-expiring
    *     system-user token).

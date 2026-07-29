@@ -3981,7 +3981,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // that only pays off if ids are reusable. Every current caller uploads one
     // id per message, so nothing depends on the answer today. It matters the
     // moment a broadcast wants to upload once and reuse across recipients; see
-    // docs/whatsapp-templates.md §12 for how to settle it.
+    // lib/templates/ for how to settle it.
     const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/media`;
     const fd = new FormData();
     fd.append("messaging_product", "whatsapp");

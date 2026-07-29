@@ -15,7 +15,7 @@
  * can type into a spreadsheet. An imported EMAIL is stored on the row but never
  * used as an identity key: `IdentityService` only treats email as a strong key
  * when it was self-asserted through the contact-share chip. A spreadsheet
- * address must never be able to fold two people into one Customer (docs/identity.md).
+ * address must never be able to fold two people into one Customer (lib/identity/identity-service.ts).
  */
 
 import { unlink } from "node:fs/promises";

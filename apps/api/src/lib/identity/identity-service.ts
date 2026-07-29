@@ -4,7 +4,7 @@ import { db } from "@/lib/db";
 import { EPHEMERAL_CONTACT_CHANNELS } from "@ccp/shared/providers/capabilities";
 
 /**
- * Unified customer identity resolution (§6 / docs/identity.md).
+ * Unified customer identity resolution (CLAUDE.md §6). THIS FILE is the authority.
  *
  * Resolves which `Customer` a contact belongs to, then RETURNS the id (the
  * caller sets it via a CAS update). Auto-merge is DELIBERATELY conservative —

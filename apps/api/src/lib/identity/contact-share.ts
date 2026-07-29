@@ -12,7 +12,7 @@ import type { ContactShareField, InteractiveReply } from "@ccp/shared/providers/
  *
  * This is the ONLY moment a Messenger/Instagram contact can acquire a strong
  * identity key. Until it happens they are unmergeable: `resolveCustomerId` only
- * auto-merges on exact phone/email (docs/identity.md — no fuzzy/name matching,
+ * auto-merges on exact phone/email (lib/identity/identity-service.ts — no fuzzy/name matching,
  * ever), and Meta exposes neither for social profiles. So this path is what
  * turns "an Instagram handle" into "the same person as this WhatsApp thread".
  *

@@ -25,7 +25,7 @@
  *     camelCase (`conversationId`, `unreadCount`, `changedByUserId`,
  *     `closedCategory`, …). Document partner-facing fields from `toWirePayload`,
  *     NOT from the snake_case shapes here. (Canonical partner reference:
- *     docs/organization-api.md.)
+ *     the in-app /docs/api page.)
  *
  * `sender` and `assignee` are structured `{ type, id, ... }` objects on
  * purpose: when AI agents start authoring messages and being assigned to

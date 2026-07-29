@@ -385,7 +385,7 @@ export interface NormalizedCallEvent {
 // Meta social calling uses ONE endpoint (`POST /{page-id}/calls`) with an
 // `action` discriminator and returns SDP synchronously — structurally distinct
 // from WhatsApp's method-per-action + webhook-delivered answer, so it gets its
-// own provider methods below. Wire reference: docs/messenger-calling.md.
+// own provider methods below. Wire reference: lib/providers/meta-social.ts.
 
 export interface CallActionArgs {
   action: "connect" | "accept" | "reject" | "terminate" | "media_update";
@@ -1247,7 +1247,7 @@ export interface SendInteractiveArgs {
    * This is the ONLY route by which a social contact's phone/email can ever reach
    * us — and therefore the only way a Messenger/Instagram contact becomes
    * auto-mergeable into a unified `Customer` (identity resolution keys on exact
-   * phone/email; see docs/identity.md). A tap shares the value once and grants
+   * phone/email; see lib/identity/identity-service.ts). A tap shares the value once and grants
    * no standing access to it.
    */
   contactShare?: ContactShareField[];

@@ -18,7 +18,7 @@ import type { Filter } from "@/features/inbox/components/inbox-controls";
  * Support and clicking delete would irreversibly destroy Sales threads they
  * could not see.
  *
- * `docs/channel-accounts.md` §6 already stated the rule — *"the account narrow
+ * `workspace-settings/channel-accounts/` §6 already stated the rule — *"the account narrow
  * is ANDed, never merged, and must be part of `filterKey` or it silently does
  * nothing"* — so this exists to make the rule executable rather than
  * remembered. Every future filter dimension belongs HERE, not inline at a call

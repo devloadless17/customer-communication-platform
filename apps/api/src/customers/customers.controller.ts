@@ -15,7 +15,7 @@ import {
 } from "./customers.schemas";
 
 /**
- * Unified customer profile + manual merge/split (§6 / docs/identity.md).
+ * Unified customer profile + manual merge/split (§6 / lib/identity/identity-service.ts).
  *
  *   GET  /api/customers/:id          — the person + their channel-contacts
  *   POST /api/customers/:id/link     — join a contact to this person

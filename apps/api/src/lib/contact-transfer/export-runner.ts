@@ -268,7 +268,7 @@ async function hydrate(workspaceId: string, ids: string[]): Promise<ExportContac
     // branch gets it via `buildContactFilterWhere`; this explicit-ids branch
     // had no such gate, so a client could pass visitor ids — obtainable from
     // the sanctioned `?channel=webchatwidget` view — and export anonymous
-    // EPHEMERAL contacts into a CSV. docs/contact-import-export.md states the
+    // EPHEMERAL contacts into a CSV. lib/contact-transfer/ states the
     // opposite ("directoryContactWhere still applies, so anonymous webchat
     // visitors stay out"), and §6 makes directory membership a DERIVED
     // property, not a per-call-site choice. Same tenant either way, so this is

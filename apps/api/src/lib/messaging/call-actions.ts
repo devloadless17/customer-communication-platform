@@ -6,7 +6,7 @@
  *     / `rejectCall` / `endCall`); the SDP answer for a placed/accepted call
  *     arrives LATER via webhook, so these return no SDP.
  *   - Messenger — a single `callAction` (`connect`/`accept`/`reject`/`terminate`)
- *     that returns the SDP answer SYNCHRONOUSLY (see docs/messenger-calling.md).
+ *     that returns the SDP answer SYNCHRONOUSLY (see lib/providers/meta-social.ts).
  *
  * CallsService should not care which. These helpers dispatch on whichever the
  * channel's provider implements and normalize the result, so the service +

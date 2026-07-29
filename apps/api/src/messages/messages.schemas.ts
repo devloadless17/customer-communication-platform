@@ -308,7 +308,7 @@ export const SendInteractiveSchema = z
     // Meta renders these beside the options and pre-fills them from the
     // customer's profile — the only way a social contact's phone/email can ever
     // reach us, and therefore the only way they become auto-mergeable into a
-    // unified Customer. See docs/identity.md.
+    // unified Customer. See lib/identity/identity-service.ts.
     contactShare: z.array(z.enum(["phone", "email"])).max(2).optional(),
     // Pre-Meta idempotency key (same as text/media/template sends). A double-
     // click or network-retry that re-POSTs the same clientTempId within the

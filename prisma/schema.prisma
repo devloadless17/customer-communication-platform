@@ -131,7 +131,7 @@ enum MessageOrigin {
 // NOT yet implemented — the enum value + capability/identity maps exist so the
 // architecture is ready, but there is no provider/webhook/onboarding, so no row
 // can ever carry these channels until a focused session ships them (see
-// @ccp/shared LIVE_CHANNELS + docs/adding-a-channel.md).
+// @ccp/shared LIVE_CHANNELS + lib/providers/README.md).
 enum Channel {
   whatsapp
   messenger
@@ -900,8 +900,8 @@ model ChannelConnection {
   // calling enforcement above; cleared by the *_UNBAN / *_RECOVERY webhook.
   // First-class (not just `lastAccountAlert`) because the composer must WARN
   // before an operator fires a utility campaign into a rate-limited WABA.
-  utilityRestrictionType  String?
-  utilityRestrictedUntil  DateTime?
+  utilityRestrictionType String?
+  utilityRestrictedUntil DateTime?
 
   // Policy/spam MESSAGING enforcement (`account_update` → ACCOUNT_RESTRICTION /
   // DISABLED_UPDATE — the policy-enforcement guide's escalation ladder: 1/3-day
@@ -1322,7 +1322,7 @@ model Contact {
   // opaque per-business id + an optional `@username`; a webhook may then omit
   // the phone. These nullable columns let ingest persist + resolve on the BSUID
   // when the phone is absent, so we don't drop those inbounds once Meta flips.
-  // NULL for every contact today (phone stays the identity). See docs/identity.md.
+  // NULL for every contact today (phone stays the identity). See lib/identity/identity-service.ts.
   bsuid                 String?
   // The customer's public WhatsApp @username, when they've set one (2026). Kept
   // for display + as a softer future match key; NEVER auto-merged on (name/
@@ -1375,7 +1375,7 @@ model Contact {
   // removing a stage doesn't take its contacts with it; the bulk-move flow
   // in /api/team/stages/[id] DELETE empties this manually first.
   stageId               String?
-  // UNIFIED CUSTOMER (§6 / docs/identity.md). A Contact is one channel identity;
+  // UNIFIED CUSTOMER (§6 / lib/identity/identity-service.ts). A Contact is one channel identity;
   // the Customer it rolls up to is the PERSON, so an agent sees one profile
   // across all a person's channels. Nullable during rollout; the IdentityService
   // (called from ingest + manual create) ensures every contact gets one. Merge
@@ -1561,7 +1561,7 @@ model Contact {
 }
 
 // The unified CUSTOMER (a person) — the profile layer above channel-scoped
-// Contacts (§6 / docs/identity.md). One Customer owns many Contacts (one per
+// Contacts (§6 / lib/identity/identity-service.ts). One Customer owns many Contacts (one per
 // channel the person uses); the agent sees a single profile + a channel
 // switcher over the person's separate per-channel threads. Message histories
 // are NEVER merged — the Customer only re-points `Contact.customerId`.
@@ -1586,7 +1586,7 @@ model Customer {
 }
 
 // Persisted audit trail for the manual, reversible merge/split of the unified
-// customer identity (§6 / docs/identity.md). Previously merge/split was only
+// customer identity (§6 / lib/identity/identity-service.ts). Previously merge/split was only
 // logged to stdout; this makes it queryable + reversible-with-context (who
 // merged whom, and when). One row per `linkContact` / `unlinkContact` action.
 // Auto-merge at ingest (deterministic strong keys) is NOT recorded here — it's
@@ -2317,8 +2317,8 @@ model Invite {
   expiresAt   DateTime
   acceptedAt  DateTime?
 
-  workspace      Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  createdBy      User?         @relation("InvitedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy User?     @relation("InvitedBy", fields: [createdById], references: [id], onDelete: SetNull)
 
   @@index([workspaceId, email])
 }
@@ -2336,17 +2336,17 @@ model Invite {
 // id — the sync upserts by the natural key so the cached row tracks the
 // latest version.
 model MessageTemplate {
-  id               String           @id @default(cuid())
-  workspaceId      String
+  id                    String            @id @default(cuid())
+  workspaceId           String
   // The WABA whose catalog this template belongs to. Part of the uniqueness key,
   // so it is NOT NULL: Postgres treats NULLs as distinct, which would have let
   // two templates with the same name+language coexist under an unknown WABA.
   // Empty string = legacy/unknown WABA (rows synced before multi-account).
-  wabaId           String           @default("")
-  externalId       String?
-  name             String
-  language         String
-  category         TemplateCategory
+  wabaId                String            @default("")
+  externalId            String?
+  name                  String
+  language              String
+  category              TemplateCategory
   // The category Meta has decided this template SHOULD be, when it disagrees
   // with `category`. Meta announces this IN ADVANCE (`correct_category` on the
   // template node, and the notice form of the `template_category_update`
@@ -2356,13 +2356,13 @@ model MessageTemplate {
   // actually moves it, the template is still reviewed, rendered and BILLED as
   // `category`. Writing the future value into `category` mispriced every
   // broadcast quote for up to a month. Null = not impacted.
-  correctCategory  TemplateCategory?
-  status           TemplateStatus
+  correctCategory       TemplateCategory?
+  status                TemplateStatus
   // Meta's `reason` from the last `message_template_status_update` — the
   // difference between "rejected" and the actionable "rejected:
   // INCORRECT_CATEGORY", which tells the author to resubmit under a different
   // category rather than rewrite the copy.
-  statusReason     String?
+  statusReason          String?
   // The status webhook's rich sub-objects, which the coarse `statusReason`
   // can't carry: `rejection_info` (Meta's detailed explanation AND its fix
   // recommendation for INVALID_FORMAT rejections), `other_info` (the pause
@@ -2372,7 +2372,7 @@ model MessageTemplate {
   //   { title?, description?, rejectionReason?, recommendation?, disabledAt? }
   // Cleared alongside statusReason on any status that arrives without one, so
   // stale guidance can't hang off a since-recovered template.
-  statusDetail     Json?
+  statusDetail          Json?
   // Meta's `message_send_ttl_seconds`: how long delivery is retried before the
   // message is dropped. Null = the template uses Meta's per-category default
   // (minutes for authentication, days for marketing/utility) — we never
@@ -2386,7 +2386,7 @@ model MessageTemplate {
   // delivered it, approximate when a catalog sync found a template already
   // archived. The UI says "about N days" for that reason. Cleared when the
   // template leaves the archived state.
-  archivedAt      DateTime?
+  archivedAt            DateTime?
   // Meta's `quality_score.score` for this template: GREEN | YELLOW | RED |
   // UNKNOWN. A plain String, NOT an enum, for the same reason the number's
   // `qualityRating` is one — Meta's quality vocabulary churns and we never want
@@ -2395,44 +2395,44 @@ model MessageTemplate {
   // This is the EARLY warning. Quality feeds Meta's template pacing and
   // pausing, so a RED template is one about to stop sending; by the time the
   // `PAUSED` status arrives the campaign is already dead. Null = never reported.
-  qualityScore    String?
+  qualityScore          String?
   // When Meta last recomputed the score (`quality_score.date`, unix seconds).
   // Shown beside the band because a GREEN from three months ago says much less
   // than one from yesterday.
-  qualityScoreAt  DateTime?
+  qualityScoreAt        DateTime?
   // Last time this template was actually SENT — the activity that resets Meta's
   // 12-month archival clock (along with create/edit/appeal/unarchive).
   //
   // Written once per direct send and once per broadcast RUN, never per
   // recipient: a 100k campaign is one use of the template, and a write per
   // recipient would add 100k pointless updates to the hot send path.
-  lastUsedAt      DateTime?
+  lastUsedAt            DateTime?
   // The Template Library blueprint this template was instantiated from.
   //
   // Meta's own marker: a template carrying `library_template_name` has FIXED,
   // uneditable copy and is subject to per-parameter TYPE CHECKS at send time.
   // Both facts change what the UI may offer, so the marker is stored rather than
   // inferred. Null for a template authored in the composer or in Manager.
-  libraryTemplateName String?
+  libraryTemplateName   String?
   // Per-template button-click tracking opt-out (Meta's
   // `cta_url_link_tracking_opted_out`). True = clicks are NOT tracked, so the
   // insights UI explains an empty click series instead of looking broken.
   // Null = Meta hasn't reported the flag for this row yet (distinct from
   // false); synced with the leave-alone rule, toggled via the provider.
-  linkTrackingOptedOut Boolean?
+  linkTrackingOptedOut  Boolean?
   // Per-body-parameter value types (`["TEXT","AMOUNT","DATE"]`), positionally
   // aligned with the body's `{{n}}`. ONLY library templates have these, and they
   // are only readable from the library catalogue — the template node doesn't
   // return them — so they are captured at instantiation. Without them, a value
   // Meta rejects at send time fails the message with no indication of which
   // parameter was wrong.
-  bodyParamTypes  String[]      @default([])
+  bodyParamTypes        String[]          @default([])
   // Body text with `{{1}}, {{2}}, …` placeholders. Denormalized from components
   // for cheap previews / search; the canonical source is `components`.
-  bodyText         String           @default("")
+  bodyText              String            @default("")
   // Full components array as Meta returned it. Schema:
   //   [{ type: "HEADER" | "BODY" | "FOOTER" | "BUTTONS", format?, text?, buttons? }]
-  components       Json
+  components            Json
   // Per-variable metadata layered on top of Meta's positional `{{n}}` model:
   // human-readable label + source (manual / contact field / custom field) +
   // optional fallback value used at send time when the contact's field is
@@ -2449,14 +2449,14 @@ model MessageTemplate {
   // Empty `{}` for templates synced from Meta before bindings existed — the
   // runner treats a missing binding the same as `manual`, so old broadcasts
   // keep working.
-  variableBindings Json             @default("{}")
+  variableBindings      Json              @default("{}")
   // Meta's `parameter_format`: "positional" (`{{1}}`) or "named" (`{{order_id}}`).
   // Stored rather than inferred from the body text — a regex misreads a
   // positional template that contains `{{order_id}}` as literal copy, and the
   // wrong wire shape fails every recipient with Meta error 132000. Defaults to
   // positional so every row synced before this column keeps its exact behaviour.
-  parameterFormat  String           @default("positional")
-  syncedAt         DateTime         @default(now())
+  parameterFormat       String            @default("positional")
+  syncedAt              DateTime          @default(now())
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
@@ -3216,9 +3216,25 @@ model Ticket {
   id          String @id @default(cuid())
   workspaceId String
   // Human-facing sequential id ("#1042"), unique per workspace. NOT the cuid —
-  // agents and customers quote this number to each other. Allocated from
-  // TicketNumberCounter inside the create transaction; gaps are acceptable
-  // (a rolled-back create burns a number), collisions are not.
+  // agents and customers quote this number to each other.
+  //
+  // GAPS ARE ACCEPTABLE; COLLISIONS ARE NOT. Allocated from TicketNumberCounter
+  // by `allocateNumber`, which `createTicket` calls BEFORE opening its
+  // transaction — so a create that fails after allocating burns its number.
+  //
+  // That is not a new property, which is the point: `deleteTicket` (UI and
+  // DELETE /v1/tickets/:id) removes a ticket without renumbering survivors, and
+  // the counter is only ever incremented — never decremented. Deleting #5
+  // already leaves a permanent, user-visible gap, through a far more common
+  // path than a failed create. Gaplessness is therefore not something this
+  // product has ever offered, and making it true would mean holding the
+  // counter's row lock until COMMIT — which serialized every concurrent create
+  // in a workspace and blew the 15s transaction ceiling at 8 of them
+  // (measured 2026-07-29).
+  //
+  // Nothing derives from contiguity: every consumer renders `#{number}` and
+  // nothing does arithmetic on it, counts by it, or computes a "next".
+  // The `@@unique([workspaceId, number])` below is the property that matters.
   number      Int
 
   // Nullable ONLY for an escalated-in ticket (source "escalation"): the target
@@ -3237,15 +3253,15 @@ model Ticket {
   // the UI falls back to the first inbound message excerpt — deliberately not
   // auto-filled into the column, so a real subject is distinguishable from a
   // guess.
-  subject  String?
+  subject     String?
   // The CAUSE — why this ticket exists, in the raising agent's words. Distinct
   // from `subject` (a one-line title) and from a `team_changed` handoff reason
   // (which is per-handoff): this is the ticket's defining context, set when it
   // is raised and read by whoever the ticket is handed to so they understand the
   // issue without re-reading the whole thread. Free-form, so @db.Text.
   description String?        @db.Text
-  status   TicketStatus   @default(new)
-  priority TicketPriority @default(normal)
+  status      TicketStatus   @default(new)
+  priority    TicketPriority @default(normal)
 
   // Independent of Conversation.assignedUserId: the thread can belong to one
   // agent while a specific ticket on it is owned by someone else. Same
@@ -3325,20 +3341,20 @@ model Ticket {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  workspace    Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  conversation Conversation?    @relation("ConversationTickets", fields: [conversationId], references: [id], onDelete: Cascade)
-  contact      Contact?         @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  assignedUser User?            @relation("AssignedTickets", fields: [assignedUserId], references: [id], onDelete: SetNull)
-  assignedTeam AssignmentPolicy? @relation("TeamTickets", fields: [assignedTeamId], references: [id], onDelete: SetNull)
-  resolvedBy   User?            @relation("ResolvedTickets", fields: [resolvedById], references: [id], onDelete: SetNull)
-  slaPolicy    TicketSlaPolicy? @relation(fields: [slaPolicyId], references: [id], onDelete: SetNull)
+  workspace     Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  conversation  Conversation?     @relation("ConversationTickets", fields: [conversationId], references: [id], onDelete: Cascade)
+  contact       Contact?          @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  assignedUser  User?             @relation("AssignedTickets", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  assignedTeam  AssignmentPolicy? @relation("TeamTickets", fields: [assignedTeamId], references: [id], onDelete: SetNull)
+  resolvedBy    User?             @relation("ResolvedTickets", fields: [resolvedById], references: [id], onDelete: SetNull)
+  slaPolicy     TicketSlaPolicy?  @relation(fields: [slaPolicyId], references: [id], onDelete: SetNull)
   // Shared taxonomy with contacts — an org that already colour-codes "VIP" and
   // "billing" should not maintain a second parallel tag list.
-  tags         Tag[]            @relation("TicketTags")
-  events       TicketEvent[]
-  messages     Message[]
+  tags          Tag[]             @relation("TicketTags")
+  events        TicketEvent[]
+  messages      Message[]
   // Back-reference for Conversation.activeTicketId.
-  activeOn     Conversation[]   @relation("ConversationActiveTicket")
+  activeOn      Conversation[]    @relation("ConversationActiveTicket")
   // The escalation pair, from either side. At most one each — a ticket is
   // escalated once in its lifetime, and an escalation TARGET is never
   // escalated onward (chains banned; see TicketEscalation).
@@ -3908,7 +3924,7 @@ model OutboundWebhookDelivery {
   /// a partner-side failure back to the originating request in our logs.
   /// Nullable: events published outside an HTTP request (sweepers, the boot
   /// reconciler) have no correlation scope. F6 in
-  /// docs/audit-guide.md.
+  /// tests/VERIFICATION-2026-07-29.md.
   correlationId  String?
   /// minor#8: cross-system loop-guard depth (inbound X-CCP-Depth) of the action
   /// that caused this delivery, captured at row creation. The worker stamps
@@ -4004,7 +4020,7 @@ model ConversationEvent {
   // Drives the retention sweeper's `WHERE at < cutoff` scan — the composite
   // index above leads with conversationId and can't serve an at-only filter.
   // See lib/sweepers/conversation-event-retention.ts (N2,
-  // docs/audit-guide.md).
+  // tests/VERIFICATION-2026-07-29.md).
   @@index([at])
   // FK index for the `user` relation's onDelete: SetNull — without it,
   // hard-deleting a teammate seq-scans this (large, append-only) audit table

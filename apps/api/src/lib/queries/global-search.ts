@@ -102,7 +102,7 @@ export async function searchContacts(
       // `visibilityClause` goes inside AND, never spread at the top level:
       // `directoryContactWhere` is itself an OR node, and a sibling spread
       // would widen rather than narrow it (a bug this codebase has already
-      // paid for once — see docs/identity.md).
+      // paid for once — see lib/identity/identity-service.ts).
       where: from
         ? {
             workspaceId,

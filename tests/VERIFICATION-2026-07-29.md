@@ -178,17 +178,26 @@ still re-allocates — the collision backstop is untouched.
 
 The tradeoff is that a create failing after allocation burns its number.
 
-> ⚠️ **NEEDS MAINTAINER CONFIRMATION.** I justified this against
-> `docs/ticketing.md`'s *"Gaps are fine; collisions are not."* — but that file
-> was deleted as STALE, so the sentence I relied on may no longer reflect
-> intent. This is the ONLY code change in the program authorised by a doc
-> rather than by CLAUDE.md or the code itself. If gaps in `Ticket.number` are
-> NOT acceptable, revert `7510f46a` — the serialization it fixes is real and
-> measured, but the fix trades gap-freedom for it, and that is a product call.
-
-`escalations.ts:175` still allocates inside its transaction, deliberately:
-creating an escalation twin is a rare operator-driven act with no concurrency to
-serialize, and keeping it in-transaction means a failed escalation leaves no gap.
+> **RESOLVED 2026-07-29 — keep it, and the reason is now in the schema.**
+> I had justified this against `docs/ticketing.md`'s *"Gaps are fine; collisions
+> are not."* — a file deleted as stale, so that citation was worthless. Re-decided
+> on evidence from the code instead:
+>
+> 1. **`deleteTicket` already creates permanent gaps.** It is reachable from the
+>    UI and from `DELETE /v1/tickets/:id`, it does not renumber survivors, and
+>    `TicketNumberCounter` is only ever incremented — never decremented. Deleting
+>    #5 leaves a visible hole, through a path far more common than a failed
+>    create. Gaplessness is not a property this product has ever offered.
+> 2. **Nothing derives from contiguity.** Every consumer of `Ticket.number`
+>    renders `#{number}` — the board, the detail header, delete confirmations,
+>    event payloads. No arithmetic, no "next", no counting, no paging.
+> 3. **Gaplessness would cost the fix.** Guaranteeing it means holding the
+>    counter's row lock until COMMIT, which is exactly the serialization that
+>    blew the 15 s ceiling at 8 concurrent creates.
+>
+> The contract now lives on `Ticket.number` in `prisma/schema.prisma` and in
+> `allocateNumber`'s header, both grounded in `deleteTicket` and the unique
+> constraint rather than in a document that can be deleted.
 
 **MEASURED**, three runs each on an idle box, N concurrent `createTicket` calls
 in one workspace (temporary harness, since removed):

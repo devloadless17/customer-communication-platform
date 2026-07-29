@@ -1028,7 +1028,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   // send its media `id` instead, so nothing is fetched from us at all.
   //
   // Whether one media id may be reused across many messages is NOT something we
-  // could confirm from Meta's docs (see docs/whatsapp-templates.md §12), and a
+  // could confirm from Meta's docs (see lib/templates/), and a
   // broadcast is billed and irreversible — so this does not bet on the answer.
   // The id is used optimistically and `mediaState` FALLS BACK to the per-
   // recipient presigned link the first time an id-mode send fails, retrying that
@@ -2310,7 +2310,7 @@ async function processOneRecipient(
         } else if (usedRunMediaId && !isFreeform) {
           // This send used the run-scoped media id. We could not confirm from
           // Meta's docs that one uploaded id may be referenced by MANY messages
-          // (docs/whatsapp-templates.md §12), so an id-mode failure is treated as
+          // (lib/templates/), so an id-mode failure is treated as
           // "the id didn't work" and the run falls back to per-recipient
           // presigned links — permanently, so at most ONE recipient ever pays
           // for the uncertainty.

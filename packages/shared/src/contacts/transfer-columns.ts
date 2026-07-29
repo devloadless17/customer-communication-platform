@@ -209,7 +209,7 @@ export const IMPORTABLE_TRANSFER_COLUMNS: readonly TransferColumn[] = TRANSFER_C
  * mode: it's the sole channel whose natural key a person can actually type into
  * a spreadsheet (social channels key on a vendor-issued `externalContactId`).
  * An imported email is stored but NEVER treated as a strong identity key — see
- * docs/identity.md; letting a hand-typed address merge two Customers is the
+ * lib/identity/identity-service.ts; letting a hand-typed address merge two Customers is the
  * impersonation hole that was closed in the widget pre-chat flow.
  */
 export const TRANSFER_IDENTITY_CHANNEL = "whatsapp" as const;

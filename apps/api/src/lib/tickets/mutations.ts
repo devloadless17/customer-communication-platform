@@ -320,8 +320,8 @@ export async function routeMessageToTicket(
   }
 
   // Pointer null or stale — but the ROUTING RULE is "an active ticket on the
-  // thread → attach" (docs/ticketing.md §2 rule 1), and the pointer is only a
-  // hot-path cache of it. With two tickets raised on one thread, solving the
+  // thread → attach" (CLAUDE.md §2; this function's own header states it), and
+  // the pointer is only a hot-path cache of it. With two tickets raised on one thread, solving the
   // pointer-holder left the OTHER active ticket invisible here: the fall-
   // through went straight to the reopen query and resurrected the solved one
   // while live work sat unroutable until its SLA breached. Scan, attach to the
@@ -1004,8 +1004,21 @@ export async function markSlaBreached(
  * So `createTicket` calls this on the BASE client, before opening its
  * transaction: the lock lives for one statement and concurrent creates then
  * proceed in parallel. The cost is that a create which fails after allocating
- * burns its number — explicitly sanctioned by docs/ticketing.md: *"Gaps are
- * fine; collisions are not."* The collision backstop is unchanged
+ * burns its number.
+ *
+ * THAT COST WAS ALREADY BEING PAID, which is what makes it acceptable rather
+ * than merely tolerable. `deleteTicket` — reachable from the UI and from
+ * `DELETE /v1/tickets/:id` — removes a ticket without renumbering survivors,
+ * and this counter is only ever incremented, never decremented. Deleting #5
+ * leaves a permanent, user-visible gap through a far more common path than a
+ * failed create. Nothing derives from contiguity either: every consumer renders
+ * `#{number}` and none does arithmetic on it. The guarantee that matters is
+ * `@@unique([workspaceId, number])`, and it is untouched.
+ *
+ * (This previously cited docs/ticketing.md's "Gaps are fine; collisions are
+ * not." That file was deleted as stale, so the reasoning now stands on the
+ * code — `deleteTicket` and the unique constraint — which cannot go stale
+ * without someone changing the behaviour it describes.) The collision backstop is unchanged
  * (`@@unique([workspaceId, number])` + the P2002 retry, which re-allocates).
  *
  * `escalations.ts` still calls this inside its transaction. That is left alone

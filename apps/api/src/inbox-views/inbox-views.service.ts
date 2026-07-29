@@ -126,7 +126,7 @@ export class InboxViewsService {
    * true: `GET /inbox-views/counts` resolves too, deliberately — a badge that
    * skipped resolution would count a dangling tag as matching nothing while the
    * list it labels widens, so the number and the rows would disagree.
-   * docs/inbox-views.md §4 states the rule.)
+   * lib/inbox-views/where.ts is the one authority.)
    */
   async get(actor: InboxViewActor, id: string): Promise<InboxView> {
     const row = await this.db.inboxView.findFirst({
