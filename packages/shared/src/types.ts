@@ -1118,14 +1118,21 @@ export interface CallSnapshot {
   durationSeconds: number | null;
   /**
    * Call artifacts (recording / transcript). OPTIONAL because live socket
-   * frames build snapshots before artifacts exist — they arrive ~1min after
-   * the call ends and resolve on the next thread hydrate, the same
-   * eventual-refetch pattern the attribution fields use.
+   * frames build snapshots before artifacts exist — they land seconds-to-a-
+   * minute after the call ends and arrive live on the `call:artifacts` frame
+   * (see `applyCallArtifacts`), with the next thread hydrate as the backstop.
    */
   hasRecording?: boolean;
   hasTranscript?: boolean;
   /** Auto-detected spoken language of the transcript (ISO 639, e.g. "ar"). */
   transcriptLanguage?: string | null;
+  /**
+   * A transcript is still being produced for this call (live-frame state
+   * only — never hydrated). Set by a `call:artifacts` frame and always
+   * cleared by a later one, so the "Transcribing…" affordance it drives
+   * cannot get stuck on a failed or skipped transcription.
+   */
+  transcriptPending?: boolean;
   /** Why a FAILED call failed, from the provider's terminate webhook (e.g.
    *  "Media receive timeout"). Hydrate-only like the artifact fields. */
   errorTitle?: string | null;

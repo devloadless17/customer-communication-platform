@@ -1309,6 +1309,37 @@ export interface CallFailedEvent {
 }
 
 /**
+ * A call's stored artifacts changed — the recording landed in R2, or the
+ * transcript document did. Published by the artifact pipeline
+ * ([call-recording-download.ts](../../../../apps/api/src/lib/media/call-recording-download.ts))
+ * AFTER the row's key column is committed, so a subscriber that re-reads sees
+ * the artifact. Published once per landing (the writes CAS on the key still
+ * being null), so webhook redelivery / a sweeper racing the inline attempt
+ * can't produce a second frame.
+ *
+ * Why it exists: artifacts land SECONDS-to-a-minute after the call's terminal
+ * event, long after `call.ended` fanned out. Without this the thread bubble
+ * only grew its play/transcript buttons on the next hydrate — i.e. the agent
+ * had to reload the page to discover the call they just finished was recorded.
+ *
+ * `transcriptPending` is the forward-looking half: true while we KNOW a
+ * transcript is still being produced (in-app Whisper running, or the provider
+ * announced a transcript media id we haven't fetched). It always arrives
+ * false in a later frame — success, failure and skip all publish a clearing
+ * frame — so a UI can show a "transcribing…" affordance that can't get stuck.
+ */
+export interface CallArtifactsChangedEvent {
+  workspaceId: string;
+  conversationId: string;
+  callId: string;
+  hasRecording: boolean;
+  hasTranscript: boolean;
+  /** Auto-detected spoken language (ISO 639, e.g. "ar"); null until known. */
+  transcriptLanguage: string | null;
+  transcriptPending: boolean;
+}
+
+/**
  * The customer's call-permission state changed via a `call_permission_reply`
  * webhook — after the ingest already committed the contact/request mutation
  * AND wrote the matching timeline pill. Fanout emits `call:permission` so open
@@ -1460,6 +1491,7 @@ export interface DomainEventMap {
   "call.rejected": CallRejectedEvent;
   "call.failed": CallFailedEvent;
   "call.sdp_offer": CallSdpOfferEvent;
+  "call.artifacts_changed": CallArtifactsChangedEvent;
   "call.permission_changed": CallPermissionChangedEvent;
 }
 

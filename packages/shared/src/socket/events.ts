@@ -1006,6 +1006,27 @@ export interface ServerToClientEvents {
     status: "completed" | "missed" | "rejected" | "failed";
   }) => void;
 
+  /**
+   * A call's stored artifacts changed — its recording and/or transcript is
+   * now playable/readable. Arrives seconds-to-a-minute AFTER `call:ended`
+   * (the browser's final upload has to remux, Whisper has to run), which is
+   * exactly why it's a frame of its own: without it the thread bubble only
+   * learned about the artifacts on the next hydrate.
+   *
+   * `transcriptPending` means "a transcript is still being produced" — a
+   * clearing frame (pending false) always follows, on failure and skip too,
+   * so a spinner bound to it cannot get stuck.
+   */
+  "call:artifacts": (payload: {
+    workspaceId: string;
+    conversationId: string;
+    callId: string;
+    hasRecording: boolean;
+    hasTranscript: boolean;
+    transcriptLanguage: string | null;
+    transcriptPending: boolean;
+  }) => void;
+
   /** SDP delivered by Meta. Inbound: type="offer" (customer's offer →
    *  browser generates answer → POST /answer). Outbound: type="answer"
    *  (customer's answer to our offer → browser calls setRemoteDescription

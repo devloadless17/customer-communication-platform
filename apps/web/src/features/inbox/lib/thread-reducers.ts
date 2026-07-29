@@ -476,6 +476,54 @@ export function applyCallEnded(
   };
 }
 
+/**
+ * A call's recording / transcript landed (or is still being produced).
+ *
+ * Arrives seconds-to-a-minute after `call:ended` — the browser's final
+ * upload has to remux and Whisper has to run — which is why it's a separate
+ * frame: before it existed the agent had to reload the page to discover that
+ * the call they had just finished was recorded and transcribed.
+ *
+ * Patches the existing history entry only. A frame for a call not in the
+ * snapshot means we never saw the call itself (opened the thread after it
+ * ended, mid-backfill); the hydrate that brings the call in carries its
+ * artifact flags anyway, so there is nothing to reconstruct here — and
+ * returning `prev` keeps the no-change identity contract (§10).
+ */
+export function applyCallArtifacts(
+  prev: ConversationWithRefs,
+  payload: {
+    callId: string;
+    hasRecording: boolean;
+    hasTranscript: boolean;
+    transcriptLanguage: string | null;
+    transcriptPending: boolean;
+  },
+): ConversationWithRefs {
+  const history = prev.calls;
+  if (!history) return prev;
+  const idx = history.findIndex((c) => c.id === payload.callId);
+  if (idx < 0) return prev;
+  const existing = history[idx]!;
+  if (
+    (existing.hasRecording ?? false) === payload.hasRecording &&
+    (existing.hasTranscript ?? false) === payload.hasTranscript &&
+    (existing.transcriptLanguage ?? null) === payload.transcriptLanguage &&
+    (existing.transcriptPending ?? false) === payload.transcriptPending
+  ) {
+    return prev;
+  }
+  const nextHistory = history.slice();
+  nextHistory[idx] = {
+    ...existing,
+    hasRecording: payload.hasRecording,
+    hasTranscript: payload.hasTranscript,
+    transcriptLanguage: payload.transcriptLanguage,
+    transcriptPending: payload.transcriptPending,
+  };
+  return { ...prev, calls: nextHistory };
+}
+
 // ---------------------------------------------------------------------------
 // Iterated wiring contract
 //
@@ -532,6 +580,7 @@ export const THREAD_REDUCER_EVENTS = [
   reducerEntry({ event: "call:ringing", apply: applyCallRinging }),
   reducerEntry({ event: "call:answered", apply: applyCallAnswered }),
   reducerEntry({ event: "call:ended", apply: applyCallEnded }),
+  reducerEntry({ event: "call:artifacts", apply: applyCallArtifacts }),
 ] as const;
 
 /**

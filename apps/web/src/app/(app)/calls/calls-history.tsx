@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   AudioLines,
@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Pagination } from "@/components/ui/pagination";
 import { LocalTime } from "@/components/local-time";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { getClientSocket } from "@/lib/socket-client";
 import {
   RecordingPlayer,
   TranscriptPanel,
@@ -104,13 +105,16 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
     setPage(1);
   }, [appliedQ, from, to]);
 
-  // Fetch the current page whenever filters or the page number change. A
-  // request token drops a slow earlier response so a fast filter/page switch
-  // can't be overwritten by a stale one.
-  useEffect(() => {
-    const reqId = ++reqIdRef.current;
-    setLoading(true);
-    void (async () => {
+  // Fetch the current page. A request token drops a slow earlier response so a
+  // fast filter/page switch can't be overwritten by a stale one.
+  //
+  // `silent` skips the loading flag: a live refresh triggered by a call ending
+  // must not dim the table the agent is reading. Same request, same token
+  // discipline — only the chrome differs.
+  const fetchPage = useCallback(
+    async ({ silent }: { silent?: boolean } = {}) => {
+      const reqId = ++reqIdRef.current;
+      if (!silent) setLoading(true);
       try {
         const p = new URLSearchParams({ take: String(PAGE), page: String(page) });
         if (appliedQ) p.set("q", appliedQ);
@@ -121,7 +125,10 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
         const res = await apiFetch(`/api/calls?${p.toString()}`);
         if (reqId !== reqIdRef.current) return; // superseded by a newer fetch
         if (!res.ok) {
-          setError("Couldn't load calls");
+          // A failed BACKGROUND refresh must not replace good rows with an
+          // error screen — the agent didn't ask for it and the next frame or
+          // interaction retries. Only a fetch the agent triggered reports.
+          if (!silent) setError("Couldn't load calls");
           return;
         }
         const json = (await res.json()) as {
@@ -135,13 +142,85 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
       } catch {
         // Network error / aborted json — surface it rather than silently
         // leaving the previous page's rows (or a blank list) with no feedback.
-        if (reqId === reqIdRef.current) setError("Couldn't load calls");
+        if (reqId === reqIdRef.current && !silent) setError("Couldn't load calls");
+      } finally {
+        // NOT gated on `silent`. A silent refresh bumps the request token, so
+        // it can supersede a user-initiated fetch that is still in flight —
+        // and that fetch then returns without clearing the flag it set. If the
+        // silent winner didn't clear it too, the table would stay dimmed
+        // forever. Redundant when nothing was loading; React bails on a
+        // same-value setState.
+        if (reqId === reqIdRef.current) setLoading(false);
       }
-    })().finally(() => {
-      if (reqId === reqIdRef.current) setLoading(false);
-    });
-    // reloadNonce lets the error-state Retry re-run this effect.
-  }, [appliedQ, from, to, page, reloadNonce]);
+    },
+    [appliedQ, from, to, page],
+  );
+
+  // Re-fetch whenever filters or the page number change.
+  // reloadNonce lets the error-state Retry re-run this effect.
+  useEffect(() => {
+    void fetchPage();
+  }, [fetchPage, reloadNonce]);
+
+  // Artifacts land AFTER the call ends — often while this page is open,
+  // showing the very call the agent just hung up. Patch the row in place off
+  // the team-wide `call:artifacts` frame rather than refetching the page: no
+  // scroll jump, no re-sort, and the play/transcript buttons simply appear.
+  // A row not on the current page is nobody's concern; the fetch that brings
+  // it in carries the same flags.
+  useEffect(() => {
+    const socket = getClientSocket();
+    const onArtifacts: Parameters<typeof socket.on<"call:artifacts">>[1] = (p) => {
+      setRows((prev) => {
+        const idx = prev.findIndex((r) => r.id === p.callId);
+        if (idx < 0) return prev;
+        const row = prev[idx]!;
+        if (
+          row.hasRecording === p.hasRecording &&
+          row.hasTranscript === p.hasTranscript &&
+          row.transcriptLanguage === p.transcriptLanguage
+        ) {
+          return prev;
+        }
+        const next = prev.slice();
+        next[idx] = {
+          ...row,
+          hasRecording: p.hasRecording,
+          hasTranscript: p.hasTranscript,
+          transcriptLanguage: p.transcriptLanguage,
+        };
+        return next;
+      });
+    };
+    socket.on("call:artifacts", onArtifacts);
+    return () => {
+      socket.off("call:artifacts", onArtifacts);
+    };
+  }, []);
+
+  // A call that ENDS while this page is open belongs at the top of it. Only
+  // page 1 of an unfiltered list can receive it — on page 3, or under a filter
+  // the new call may not even match, a silent re-fetch would either do nothing
+  // or yank the rows the agent is reading out from under them.
+  //
+  // Deliberately a re-fetch, not a client-side prepend: the row carries
+  // server-resolved attribution (agent names, account label, connected) that
+  // the terminal frame doesn't. Debounced so a burst of endings coalesces.
+  const liveRefreshable = page === 1 && !hasFilters;
+  useEffect(() => {
+    if (!liveRefreshable) return;
+    const socket = getClientSocket();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const onEnded = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => void fetchPage({ silent: true }), 400);
+    };
+    socket.on("call:ended", onEnded);
+    return () => {
+      if (timer) clearTimeout(timer);
+      socket.off("call:ended", onEnded);
+    };
+  }, [liveRefreshable, fetchPage]);
 
   const goToPage = (next: number) => {
     setPage(Math.min(Math.max(1, next), pageCount));

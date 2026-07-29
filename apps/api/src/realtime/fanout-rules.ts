@@ -881,6 +881,10 @@ export const FANOUT_RULES: FanoutRuleMap = {
   //                              filters by callId; broadcasting it widely
   //                              avoids the "agent A clicked answer but the
   //                              SDP only went to agent B" race.
+  //   call.artifacts_changed  → TEAM room. The recording/transcript lands
+  //                              AFTER the terminal frame; every agent with
+  //                              the thread cached (and the /calls page)
+  //                              grows the artifact buttons live.
   "call.permission_changed": (e, emitter) => {
     // Team-visible on purpose (same fan as the sibling call frames): the
     // whole point is that a callback request must reach agents who are NOT
@@ -994,6 +998,24 @@ export const FANOUT_RULES: FanoutRuleMap = {
       // Real failure time off the event, not a fanout-synthesized `new Date()`.
       endedAt: e.endedAt,
       status: "failed",
+    });
+  },
+
+  "call.artifacts_changed": (e, emitter) => {
+    // TEAM room, like every sibling call frame. The recording of a call is
+    // team property, not the answering agent's: the /calls history page and
+    // any agent with the thread cached must grow the play/transcript buttons
+    // the moment the artifact lands, not on their next reload. One frame per
+    // artifact landing (twice per recorded call at most), so the team-wide
+    // fan is nothing like a per-message storm.
+    emitter.emitAboutConversation(e.workspaceId, e.conversationId, "call:artifacts", {
+      workspaceId: e.workspaceId,
+      conversationId: e.conversationId,
+      callId: e.callId,
+      hasRecording: e.hasRecording,
+      hasTranscript: e.hasTranscript,
+      transcriptLanguage: e.transcriptLanguage,
+      transcriptPending: e.transcriptPending,
     });
   },
 

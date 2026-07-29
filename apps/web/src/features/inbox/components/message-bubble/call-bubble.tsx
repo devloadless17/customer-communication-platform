@@ -4,6 +4,7 @@ import { useState } from "react";
 import {
   AudioLines,
   FileText,
+  Loader2,
   Phone,
   PhoneCall,
   PhoneIncoming,
@@ -121,13 +122,20 @@ export function CallBubble({
 
   // Call artifacts, revealed on demand right in the thread — agents shouldn't
   // have to leave the conversation to hear a call or read its (Arabic-RTL)
-  // transcript. Optional fields: live-frame bubbles predate the artifacts,
-  // which appear on the next thread hydrate ~1min after the call ends.
+  // transcript. They land seconds-to-a-minute after the call ends (browser
+  // upload → remux → Whisper) and arrive live on the `call:artifacts` frame,
+  // so the buttons grow in on their own; the fields stay optional because a
+  // live-built bubble exists before the first frame does.
   const [openPanel, setOpenPanel] = useState<"recording" | "transcript" | null>(
     null,
   );
   const togglePanel = (panel: "recording" | "transcript") =>
     setOpenPanel((prev) => (prev === panel ? null : panel));
+
+  // Transcription is the slow half. Say so rather than leaving a gap the agent
+  // reads as "no transcript" — the server always sends a clearing frame
+  // (success, failure or skip), so this can't get stuck spinning.
+  const transcribing = call.transcriptPending === true && !call.hasTranscript;
 
   return (
     <div className="flex flex-col items-center py-1.5">
@@ -154,6 +162,9 @@ export function CallBubble({
         {call.status === "failed" && call.errorTitle && (
           <span className="min-w-0 truncate opacity-70">· {call.errorTitle}</span>
         )}
+        {/* `animate-in` on both buttons: these appear a beat AFTER the pill is
+            already on screen (the artifact lands post-call), and a control
+            that pops in with no transition reads as a glitch. */}
         {call.hasRecording && (
           <button
             type="button"
@@ -162,7 +173,7 @@ export function CallBubble({
             aria-pressed={openPanel === "recording"}
             onClick={() => togglePanel("recording")}
             className={
-              "shrink-0 rounded-full p-0.5 transition-colors hover:bg-foreground/10 " +
+              "shrink-0 rounded-full p-0.5 transition-colors hover:bg-foreground/10 animate-in fade-in-0 zoom-in-75 duration-200 " +
               (openPanel === "recording" ? "text-primary" : "")
             }
           >
@@ -177,20 +188,36 @@ export function CallBubble({
             aria-pressed={openPanel === "transcript"}
             onClick={() => togglePanel("transcript")}
             className={
-              "shrink-0 rounded-full p-0.5 transition-colors hover:bg-foreground/10 " +
+              "shrink-0 rounded-full p-0.5 transition-colors hover:bg-foreground/10 animate-in fade-in-0 zoom-in-75 duration-200 " +
               (openPanel === "transcript" ? "text-primary" : "")
             }
           >
             <FileText className="size-3.5" />
           </button>
         )}
+        {transcribing && (
+          <span
+            className="flex shrink-0 items-center gap-1 whitespace-nowrap opacity-70"
+            // Announced politely: it resolves on its own within seconds and
+            // must not interrupt an agent mid-reply.
+            aria-live="polite"
+          >
+            <Loader2 className="size-3 animate-spin" aria-hidden />
+            Transcribing…
+          </span>
+        )}
       </div>
-      {openPanel === "recording" && (
+      {/* Gated on the flag, not just the open state: an artifact can go away
+          under an open panel — a transcription-only workspace drops the audio
+          seconds after the call, and a `call:artifacts` frame flips
+          hasRecording back to false. Without the gate the player would linger
+          and 404 on play. */}
+      {openPanel === "recording" && call.hasRecording && (
         <div className="mt-1.5 w-full max-w-md">
           <RecordingPlayer callId={call.id} />
         </div>
       )}
-      {openPanel === "transcript" && (
+      {openPanel === "transcript" && call.hasTranscript && (
         <div className="mt-1.5 w-full max-w-md">
           <TranscriptPanel callId={call.id} />
         </div>

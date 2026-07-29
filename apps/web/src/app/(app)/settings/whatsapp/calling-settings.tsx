@@ -432,7 +432,7 @@ export function CallingSettings({
           <div className="border-t pt-4">
             <ArtifactPolicyEditor
               title="Transcribe calls"
-              description="Every recorded call is transcribed by your own AI — the spoken language is auto-detected, and Arabic, English and French (even mixed in one call) come out as written text moments after the call ends. Requires your workspace AI (OpenAI) to be configured, the same one that transcribes voice notes."
+              description="Every call is transcribed by your own AI — the spoken language is auto-detected, and Arabic, English and French (even mixed in one call) come out as written text moments after the call ends. Requires your workspace AI (OpenAI) to be configured, the same one that transcribes voice notes. With recording off, the audio is used only to produce the transcript and is deleted straight after — unless the transcription fails, in which case it is kept so the call isn't lost."
               saveLabel="Save transcription"
               enabled={trEnabled}
               disabled={saving || !settings.enabled}

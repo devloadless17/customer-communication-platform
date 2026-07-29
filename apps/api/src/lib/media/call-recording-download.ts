@@ -2,10 +2,67 @@ import { createHash } from "node:crypto";
 
 import { db } from "@/lib/db";
 import { blobStorage } from "@/lib/blob-storage";
+import { publish } from "@/lib/events/bus";
 import { getProviderBinding } from "@/lib/providers";
 import { transcodeCallRecordingToOgg } from "@/lib/media/audio-transcode";
 import { transcribeInboundAudio } from "@/lib/ai/voice";
 import { configEnabled, loadAiConfig } from "@/lib/ai/runtime-config";
+
+/**
+ * Announce a call's artifact state to the team, AFTER the key column is
+ * committed — the frame is what makes a just-finished call grow its play /
+ * transcript buttons without a page reload (§10: emit only after a successful
+ * state change).
+ *
+ * Re-reads the row rather than taking the caller's word for it, so the frame
+ * reports both artifacts truthfully whichever one just landed, and a losing
+ * CAS never publishes a half-state. Every caller gates on having actually
+ * written, so this runs at most twice per recorded call.
+ *
+ * Best-effort by construction: a failed publish costs the live update, never
+ * the artifact — the next thread hydrate still shows it.
+ */
+async function publishCallArtifacts(
+  callId: string,
+  opts: { transcriptPending?: boolean } = {},
+): Promise<void> {
+  try {
+    const row = await db.call.findUnique({
+      where: { id: callId },
+      select: {
+        id: true,
+        workspaceId: true,
+        conversationId: true,
+        recordingKey: true,
+        transcriptKey: true,
+        transcriptLanguage: true,
+        transcriptMediaId: true,
+      },
+    });
+    if (!row) return;
+    const hasTranscript = row.transcriptKey !== null;
+    await publish({
+      type: "call.artifacts_changed",
+      workspaceId: row.workspaceId,
+      conversationId: row.conversationId,
+      callId: row.id,
+      hasRecording: row.recordingKey !== null,
+      hasTranscript,
+      transcriptLanguage: row.transcriptLanguage,
+      // Explicit caller intent wins (the in-app path knows whether Whisper is
+      // about to run — nothing on the row says so). Otherwise: the provider
+      // announced a transcript media id we haven't fetched yet.
+      transcriptPending:
+        !hasTranscript && (opts.transcriptPending ?? row.transcriptMediaId !== null),
+    });
+  } catch (err) {
+    console.warn(
+      `[call-artifacts] publish failed for call=${callId}: ${
+        err instanceof Error ? err.message : err
+      }`,
+    );
+  }
+}
 
 /**
  * Download an opted-in call recording from the provider and persist it to R2.
@@ -84,10 +141,13 @@ export async function downloadCallRecording(
   const key = `call-recordings/${call.workspaceId}/${call.id}.ogg`;
   await blobStorage.putObject({ key, bytes: media.bytes, contentType });
 
-  await db.call.updateMany({
+  const written = await db.call.updateMany({
     where: { id: call.id, recordingKey: null },
     data: { recordingKey: key, recordingMimeType: contentType },
   });
+  // Only the CAS winner announces, so a redelivered webhook racing the
+  // sweeper produces exactly one frame.
+  if (written.count > 0) await publishCallArtifacts(call.id);
   return true;
 }
 
@@ -171,13 +231,14 @@ export async function downloadCallTranscript(
     contentType: "application/json",
   });
 
-  await db.call.updateMany({
+  const written = await db.call.updateMany({
     where: { id: call.id, transcriptKey: null },
     data: {
       transcriptKey: key,
       ...(language ? { transcriptLanguage: language } : {}),
     },
   });
+  if (written.count > 0) await publishCallArtifacts(call.id);
   return true;
 }
 
@@ -198,7 +259,18 @@ export async function downloadCallTranscript(
 export async function storeInAppRecording(
   callId: string,
   file: { bytes: Uint8Array; mimeType: string },
-  opts: { final: boolean; transcribe: boolean },
+  opts: {
+    final: boolean;
+    transcribe: boolean;
+    /**
+     * Does the number's policy actually want the AUDIO kept? False in the
+     * transcription-only configuration, where the browser still records
+     * because Whisper needs bytes to work from — but the workspace said
+     * "don't record calls", so the audio is transient input, not an artifact.
+     * See `discardStoredRecording`.
+     */
+    retainRecording?: boolean;
+  },
 ): Promise<void> {
   const call = await db.call.findUnique({
     where: { id: callId },
@@ -262,16 +334,91 @@ export async function storeInAppRecording(
   // — which is what "best-effort" should have meant all along.
   if (key !== rawKey) await blobStorage.delete(rawKey).catch(() => undefined);
 
+  // The recording is playable NOW — tell the team before Whisper runs, so the
+  // bubble the agent is looking at grows its play button immediately instead
+  // of waiting on the transcription (or on a page reload).
+  await publishCallArtifacts(call.id, { transcriptPending: opts.transcribe });
+
   if (opts.transcribe) {
     // Detached — the upload response must not wait on Whisper.
-    void transcribeInAppCallRecording(call.id, bytesForTranscription, contentType).catch(
-      (err) => {
+    void transcribeInAppCallRecording(call.id, bytesForTranscription, contentType)
+      .then(async (ok) => {
+        // A skip (AI not configured) resolves false having published nothing;
+        // clear the pending flag so the "Transcribing…" chip doesn't hang.
+        if (!ok) {
+          await publishCallArtifacts(call.id, { transcriptPending: false });
+          return;
+        }
+        // Transcription-only policy: the transcript is written, so the audio
+        // has served its purpose and the workspace never asked to keep it.
+        if (opts.retainRecording === false) await discardStoredRecording(call.id);
+      })
+      .catch((err) => {
         console.warn(
           `[call-transcript] in-app transcription failed for call=${callId}: ${
             err instanceof Error ? err.message : err
           }`,
         );
-      },
+        void publishCallArtifacts(call.id, { transcriptPending: false });
+      });
+  }
+}
+
+/**
+ * Drop a call's stored audio once its transcript exists, for the
+ * transcription-only policy ("Transcribe calls" on, "Record calls" off).
+ *
+ * The browser has to record either way — Whisper needs bytes — so without
+ * this the workspace ends up with a playable recording it explicitly turned
+ * off, and a play button next to a call it believes was never recorded.
+ *
+ * ONLY runs after a SUCCESSFUL transcription (re-checked here, not taken on
+ * the caller's word). A failed or skipped transcription KEEPS the audio: it is
+ * then the only artifact of that call, and losing both is a worse outcome than
+ * briefly retaining audio while the transcription problem is fixed.
+ *
+ * ORDER IS LOAD-BEARING, and it is the REVERSE of the store path's. The row
+ * pointer is cleared BEFORE the bytes are deleted, so a crash in between
+ * leaves an unreferenced object the blob-orphan sweeper reclaims — never a
+ * `recordingKey` naming an object that no longer exists (the failure mode
+ * that file's header documents four instances of).
+ */
+async function discardStoredRecording(callId: string): Promise<void> {
+  try {
+    const row = await db.call.findUnique({
+      where: { id: callId },
+      select: { id: true, recordingKey: true, transcriptKey: true },
+    });
+    if (!row?.recordingKey) return;
+    if (!row.transcriptKey) return; // no transcript ⇒ the audio is all we have
+
+    const key = row.recordingKey;
+    // CAS on the key we read: if a concurrent write re-pointed the row (a
+    // late final upload landing after this transcription), leave it alone
+    // rather than deleting bytes the new pointer names.
+    const cleared = await db.call.updateMany({
+      where: { id: row.id, recordingKey: key },
+      data: { recordingKey: null, recordingMimeType: null },
+    });
+    if (cleared.count === 0) return;
+
+    await blobStorage.delete(key).catch((err) => {
+      // Orphaned object, reclaimed by the blob-orphan sweeper within 24h. The
+      // pointer is already gone, which is the part that matters.
+      console.warn(
+        `[call-recording] discard: blob delete failed for call=${callId} key=${key}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+    });
+    // Tell the open inboxes the play button is gone, same frame that put it
+    // there — otherwise it lingers until reload and 404s when clicked.
+    await publishCallArtifacts(row.id, { transcriptPending: false });
+  } catch (err) {
+    console.warn(
+      `[call-recording] discard failed for call=${callId}: ${
+        err instanceof Error ? err.message : err
+      }`,
     );
   }
 }
@@ -339,7 +486,7 @@ export async function transcribeInAppCallRecording(
     bytes: new TextEncoder().encode(JSON.stringify(doc)),
     contentType: "application/json",
   });
-  await db.call.updateMany({
+  const written = await db.call.updateMany({
     where: { id: call.id, transcriptKey: null },
     data: {
       transcriptKey: key,
@@ -348,5 +495,6 @@ export async function transcribeInAppCallRecording(
         : {}),
     },
   });
+  if (written.count > 0) await publishCallArtifacts(call.id);
   return true;
 }

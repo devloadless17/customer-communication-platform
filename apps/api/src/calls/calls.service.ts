@@ -1210,6 +1210,10 @@ export class CallsService {
     await storeInAppRecording(call.id, file, {
       final,
       transcribe: final && policies.transcriptionEnabled,
+      // Transcription-only: the browser recorded because Whisper needs audio,
+      // but this workspace turned call recording OFF — the bytes are dropped
+      // once the transcript is written.
+      retainRecording: policies.recordingEnabled,
     });
     return { ok: true, stored: true };
   }

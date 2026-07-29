@@ -135,6 +135,197 @@ describe("storeInAppRecording", () => {
     });
     expect(after?.transcriptKey).toBeNull();
   });
+
+  it("announces the artifact so the inbox updates live — and always clears the pending flag", async () => {
+    // The bug this pins: every artifact write site committed its key and
+    // published NOTHING, so a just-finished call only grew its play/transcript
+    // buttons on the next page reload. A state change landing AFTER its
+    // entity's TERMINAL event (`call.ended`) is the class — the same one
+    // `message.media_ready` exists to solve on the message side.
+    //
+    // Asserted through the outbox rows `publish()` writes, which is where the
+    // event is durable — the socket emit itself is the fanout layer's job
+    // (fanout-rules.ts) and is covered by its own table.
+    const rows = await prisma.outboundEvent.findMany({
+      where: { workspaceId, type: "call.artifacts_changed" },
+      orderBy: { publishedAt: "asc" },
+      select: { payload: true },
+    });
+    const frames = rows.map(
+      (r) =>
+        r.payload as unknown as {
+          callId: string;
+          hasRecording: boolean;
+          hasTranscript: boolean;
+          transcriptPending: boolean;
+        },
+    );
+    expect(
+      frames.length,
+      "the final upload published no artifact frame — the inbox can only learn about the recording on a page refresh",
+    ).toBeGreaterThanOrEqual(2);
+    expect(frames.every((f) => f.callId === callId)).toBe(true);
+
+    // The interim flush (test 1) must NOT announce: it stamps recordingKey
+    // mid-call, and a play button on a call still in progress is a lie.
+    // So the first frame is the FINAL upload's, carrying the playable
+    // recording plus "a transcript is coming".
+    expect(frames[0]!.hasRecording).toBe(true);
+    expect(frames[0]!.hasTranscript).toBe(false);
+    expect(frames[0]!.transcriptPending).toBe(true);
+
+    // THE GUARANTEE: transcription was skipped (no AI config), and the skip
+    // still published a clearing frame. Without it the "Transcribing…" chip
+    // bound to this flag would spin forever on every workspace whose AI is
+    // unconfigured — a stuck spinner is worse than no spinner.
+    const last = frames.at(-1)!;
+    expect(
+      last.transcriptPending,
+      "a skipped transcription left transcriptPending set — the UI chip would hang",
+    ).toBe(false);
+    expect(last.hasTranscript).toBe(false);
+    expect(last.hasRecording).toBe(true);
+  });
+});
+
+describe("transcription-only policy — the audio is input, not an artifact", () => {
+  // "Transcribe calls" ON with "Record calls" OFF: the browser still records
+  // (Whisper needs bytes), so without a discard the workspace ends up with a
+  // playable recording it explicitly turned off. The audio is dropped once the
+  // transcript exists — but NEVER while it's the only artifact of the call.
+
+  async function makeCall(tag: string): Promise<string> {
+    const contact = await prisma.contact.create({
+      data: {
+        workspaceId,
+        name: `IAR ${tag}`,
+        identityChannel: "whatsapp",
+        phoneNumber: `9614${Date.now().toString().slice(-6)}${tag.length}`,
+      },
+    });
+    const conversation = await prisma.conversation.create({
+      data: { workspaceId, contactId: contact.id, channel: "whatsapp", status: "open" },
+    });
+    return (
+      await prisma.call.create({
+        data: {
+          workspaceId,
+          conversationId: conversation.id,
+          externalCallId: `${S}_${tag}`,
+          direction: "out",
+          status: "completed",
+          ringingAt: new Date(),
+          answeredAt: new Date(),
+          endedAt: new Date(),
+          durationSeconds: 12,
+          rawPayload: {},
+        },
+      })
+    ).id;
+  }
+
+  it("KEEPS the audio when transcription fails — never leaves the call with nothing", async () => {
+    // This workspace has no AI config, so transcription is skipped. Recording
+    // is off, but dropping the audio here would erase the call entirely.
+    const id = await makeCall("keep");
+    await storeInAppRecording(
+      id,
+      { bytes: new TextEncoder().encode(`WEBM_KEEP_${S}`), mimeType: "audio/webm" },
+      { final: true, transcribe: true, retainRecording: false },
+    );
+    await new Promise((r) => setTimeout(r, 1_500));
+    const row = await prisma.call.findUnique({
+      where: { id },
+      select: { recordingKey: true, transcriptKey: true },
+    });
+    expect(row?.transcriptKey, "no AI config ⇒ no transcript").toBeNull();
+    expect(
+      row?.recordingKey,
+      "the audio was discarded despite the transcription failing — the call has no artifact at all",
+    ).not.toBeNull();
+    storedKeys.push(row!.recordingKey!);
+    // Still readable: a kept recording that 404s would be worse than none.
+    await expect(blobStorage.fetch(row!.recordingKey!)).resolves.toBeTruthy();
+  });
+
+  it("drops the audio once a transcript exists — pointer cleared BEFORE the bytes", async () => {
+    const id = await makeCall("drop");
+    await storeInAppRecording(
+      id,
+      { bytes: new TextEncoder().encode(`WEBM_DROP_${S}`), mimeType: "audio/webm" },
+      { final: true, transcribe: false, retainRecording: false },
+    );
+    const stored = await prisma.call.findUnique({
+      where: { id },
+      select: { recordingKey: true },
+    });
+    const audioKey = stored!.recordingKey!;
+    // The delete is spied below, so the object survives the run — hand it to
+    // the afterAll cleanup rather than leaking it into the test bucket.
+    storedKeys.push(audioKey);
+
+    // Stand in for a completed transcription, then drive the same path the
+    // detached Whisper callback takes.
+    await prisma.call.update({
+      where: { id },
+      data: { transcriptKey: `call-transcripts/${workspaceId}/${id}.json` },
+    });
+
+    // ORDER IS THE ASSERTION (reverse of the store path's): read the row at
+    // the instant the delete fires. A pointer still naming the object means a
+    // crash in that window leaves `recordingKey` pointing at deleted bytes.
+    let pointerWhenDeleted: string | null | undefined = "unset";
+    const deleteSpy = vi
+      .spyOn(blobStorage, "delete")
+      .mockImplementation(async (key: string) => {
+        if (key === audioKey) {
+          const row = await prisma.call.findUnique({
+            where: { id },
+            select: { recordingKey: true },
+          });
+          pointerWhenDeleted = row?.recordingKey;
+        }
+      });
+    try {
+      await storeInAppRecording(
+        id,
+        { bytes: new TextEncoder().encode(`WEBM_DROP2_${S}`), mimeType: "audio/webm" },
+        { final: true, transcribe: true, retainRecording: false },
+      );
+      await new Promise((r) => setTimeout(r, 1_500));
+    } finally {
+      deleteSpy.mockRestore();
+    }
+
+    const after = await prisma.call.findUnique({
+      where: { id },
+      select: { recordingKey: true, recordingMimeType: true, transcriptKey: true },
+    });
+    expect(after?.transcriptKey).not.toBeNull();
+    expect(after?.recordingKey, "the audio pointer survived the discard").toBeNull();
+    expect(after?.recordingMimeType).toBeNull();
+    expect(
+      pointerWhenDeleted,
+      "the bytes were deleted while the row still pointed at them — a crash there leaves a dangling recordingKey",
+    ).toBeNull();
+  });
+
+  it("announces the discard so an open inbox drops the play button", async () => {
+    // The frame that PUT the play button there has to be the one that takes it
+    // away; otherwise it lingers until reload and 404s when clicked.
+    const frames = (
+      await prisma.outboundEvent.findMany({
+        where: { workspaceId, type: "call.artifacts_changed" },
+        orderBy: { publishedAt: "asc" },
+        select: { payload: true },
+      })
+    ).map((r) => r.payload as unknown as { hasRecording: boolean; hasTranscript: boolean });
+    const discardFrame = frames.find((f) => !f.hasRecording && f.hasTranscript);
+    expect(
+      discardFrame,
+      "no frame reported the recording gone — the button stays until the agent reloads",
+    ).toBeDefined();
+  });
 });
 
 const hasFfmpeg = spawnSync("ffmpeg", ["-version"]).status === 0;

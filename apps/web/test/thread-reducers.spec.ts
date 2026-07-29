@@ -17,6 +17,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  applyCallArtifacts,
   applyContactUpdate,
   applyConversationAssignment,
   applyConversationRead,
@@ -27,7 +28,12 @@ import {
   REDUCER_EXCLUSIONS,
   THREAD_REDUCER_EVENTS,
 } from "@/features/inbox/lib/thread-reducers";
-import type { ConversationWithRefs, Message, User } from "@ccp/shared/types";
+import type {
+  CallSnapshot,
+  ConversationWithRefs,
+  Message,
+  User,
+} from "@ccp/shared/types";
 
 // Minimal thread fixture — reducers only touch the fields they patch, so the
 // cast keeps the fixture honest without replicating the full hydration shape.
@@ -177,6 +183,69 @@ describe("applyMessageReaction — two-sided reactions", () => {
     let thread = makeThread({ messages: [msg("m1", "delivered")] });
     thread = applyMessageReaction(thread, { messageId: "m1", emoji: "👍" });
     expect(applyMessageReaction(thread, { messageId: "m1", emoji: "👍" })).toBe(thread);
+  });
+});
+
+describe("applyCallArtifacts — post-call recording / transcript arrival", () => {
+  function threadWithCall(call?: Partial<CallSnapshot>): ConversationWithRefs {
+    const base = makeThread();
+    return {
+      ...base,
+      calls: [
+        {
+          id: "call1",
+          conversationId: "conv1",
+          status: "completed",
+          direction: "out",
+          ...call,
+        } as CallSnapshot,
+      ],
+    };
+  }
+
+  const frame = (over?: Partial<Parameters<typeof applyCallArtifacts>[1]>) => ({
+    callId: "call1",
+    hasRecording: true,
+    hasTranscript: false,
+    transcriptLanguage: null,
+    transcriptPending: true,
+    ...over,
+  });
+
+  it("patches the matching call and leaves a new array (recording landed)", () => {
+    const prev = threadWithCall();
+    const next = applyCallArtifacts(prev, frame());
+    expect(next).not.toBe(prev);
+    expect(next.calls?.[0]?.hasRecording).toBe(true);
+    expect(next.calls?.[0]?.transcriptPending).toBe(true);
+    // Untouched fields survive the merge — the frame is a patch, not a replace.
+    expect(next.calls?.[0]?.status).toBe("completed");
+  });
+
+  it("clears transcriptPending when the transcript itself lands", () => {
+    const prev = threadWithCall({ hasRecording: true, transcriptPending: true });
+    const next = applyCallArtifacts(
+      prev,
+      frame({ hasTranscript: true, transcriptLanguage: "ar", transcriptPending: false }),
+    );
+    expect(next.calls?.[0]?.hasTranscript).toBe(true);
+    expect(next.calls?.[0]?.transcriptLanguage).toBe("ar");
+    expect(next.calls?.[0]?.transcriptPending).toBe(false);
+  });
+
+  it("is identity for a redelivered frame that changes nothing", () => {
+    const prev = threadWithCall({
+      hasRecording: true,
+      hasTranscript: false,
+      transcriptLanguage: null,
+      transcriptPending: true,
+    });
+    expect(applyCallArtifacts(prev, frame())).toBe(prev);
+  });
+
+  it("is identity for a call the snapshot has never seen", () => {
+    const prev = threadWithCall();
+    expect(applyCallArtifacts(prev, frame({ callId: "some-other-call" }))).toBe(prev);
   });
 });
 
