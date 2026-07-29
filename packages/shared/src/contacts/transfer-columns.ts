@@ -26,7 +26,8 @@ export type TransferColumnId =
   | "tags"
   | "stage"
   | "source"
-  | "id";
+  | "id"
+  | "channel_account";
 
 export interface TransferColumn {
   id: TransferColumnId;
@@ -134,6 +135,25 @@ export const TRANSFER_COLUMNS: readonly TransferColumn[] = [
   },
   // Emitted by export so a file is self-describing; ignored on import.
   { id: "source", header: "source", label: "Source", aliases: [], importable: false },
+  /**
+   * WHICH of the workspace's accounts this person's thread is on — the account
+   * label when it has one, else its address, else the raw id.
+   *
+   * The directory can already FILTER by account, so you could export "everyone
+   * on the Sales number" and get a file that never says Sales — the account was
+   * the whole reason for the export and the only place it didn't survive.
+   *
+   * Export-only. Import must NOT accept it: an account is established by which
+   * number the person actually messaged, not by a spreadsheet cell, and a
+   * writable column here would let a CSV silently re-point live threads.
+   */
+  {
+    id: "channel_account",
+    header: "channel_account",
+    label: "Channel account",
+    aliases: ["account", "channel account"],
+    importable: false,
+  },
   { id: "id", header: "id", label: "Contact ID", aliases: ["contact_id", "contact id"], importable: false },
 ];
 

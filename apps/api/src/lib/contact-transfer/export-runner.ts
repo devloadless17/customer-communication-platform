@@ -82,6 +82,23 @@ export async function runContactExport(opts: {
   });
   const stageNameById = new Map(stageRows.map((s) => [s.id, s.name]));
 
+  // Account id → what a human calls it. Same precedence the inbox uses (label,
+  // else the customer-visible address, else the raw id) so the file matches
+  // what the person who ran the export saw on screen. A handful of rows per
+  // workspace — loaded once, like the stages above.
+  const accountRows = await db.channelConnection.findMany({
+    where: { workspaceId },
+    select: { id: true, label: true, config: true },
+  });
+  const accountNameById = new Map(
+    accountRows.map((a) => [
+      a.id,
+      a.label ||
+        (a.config as { displayPhoneNumber?: string } | null)?.displayPhoneNumber ||
+        a.id,
+    ]),
+  );
+
   const tmpPath = join(tmpdir(), `ccp-export-${jobId}-${randomUUID()}.${format}`);
   const sink = createSink(format, tmpPath, "Contacts");
 
@@ -122,6 +139,13 @@ export async function runContactExport(opts: {
           tags: c.tags.map((t) => t.name).join(", "),
           stage: (c.stageId && stageNameById.get(c.stageId)) || "",
           source: c.source,
+          // The account the person's thread lives on. Empty for a contact with
+          // no conversation yet (imported, never messaged) — that is genuinely
+          // "no account", not a missing lookup.
+          channel_account: (() => {
+            const id = c.conversations[0]?.channelConnectionId;
+            return id ? accountNameById.get(id) ?? id : "";
+          })(),
         };
         for (const def of fieldDefs) {
           const v = cf[def.key];
@@ -186,6 +210,8 @@ type ExportContact = {
   stageId: string | null;
   customFields: unknown;
   tags: Array<{ name: string }>;
+  /** At most one — `@@unique([workspaceId, contactId])` on Conversation. */
+  conversations: Array<{ channelConnectionId: string | null }>;
 };
 
 /**
@@ -293,6 +319,11 @@ async function hydrate(workspaceId: string, ids: string[]): Promise<ExportContac
       stageId: true,
       customFields: true,
       tags: { select: { name: true } },
+      // One row max (unique on [workspaceId, contactId]) — drives the
+      // `channel_account` column. `take: 1` regardless, so a future schema
+      // change can't turn this into an unbounded per-contact fan-out inside a
+      // 100k-row streaming export.
+      conversations: { select: { channelConnectionId: true }, take: 1 },
     },
   });
   // findMany does not preserve the `in` order; restore the keyset order so the

@@ -1464,6 +1464,15 @@ export function useConversationEvents(
             lastMessageAt: payload.lastMessageAt,
             lastMessagePreview: payload.preview,
             lastMessageDirection: payload.message.direction,
+            // The account this thread now belongs to. Ingest re-stamps it when
+            // the customer writes to a different number of ours, and the OPEN
+            // thread is where a stale value does real damage: the reply box
+            // scopes its template list by this id, so an agent kept being
+            // offered templates from the previous account's WABA — which Meta
+            // rejects at send time. `undefined` (outbound frames) leaves it be.
+            ...(payload.channelConnectionId !== undefined
+              ? { channelConnectionId: payload.channelConnectionId }
+              : {}),
           },
           messages: reconciled,
           lastInboundAt: nextLastInbound,

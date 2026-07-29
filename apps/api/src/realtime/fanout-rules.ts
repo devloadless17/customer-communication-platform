@@ -76,6 +76,12 @@ export const FANOUT_RULES: FanoutRuleMap = {
       preview: e.preview,
       lastMessageAt: e.lastMessageAt,
       unreadCount: e.unreadCount,
+      // The thread's account as of THIS inbound. Ingest re-stamps it when the
+      // customer writes to a different number of ours, and this is the only
+      // path that carries the change to an open inbox — see the field doc on
+      // `message:new`. Read off the conversation snapshot the event already
+      // carries, so no extra query.
+      channelConnectionId: e.conversation.channelConnectionId ?? null,
       ...(e.newConversation ? { newConversation: e.newConversation } : {}),
     });
     // Reopen broadcast removed 2026-05-26 — the ingest tx now publishes a

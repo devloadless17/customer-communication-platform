@@ -54,6 +54,25 @@ export interface ServerToClientEvents {
     unreadCount: number;
     newConversation?: ConversationWithRefs;
     /**
+     * The thread's account AFTER this message landed
+     * (`Conversation.channelConnectionId`).
+     *
+     * Ingest RE-STAMPS this whenever the customer writes to a different one of
+     * our numbers — the live thread, and the 24h window governing free-form
+     * replies, now belong to that account. Nothing carried that change to an
+     * open inbox, so the list badge and thread header kept naming the OLD
+     * account, and worse, the reply box scopes its template list by this id
+     * (`?accountId=`) — an agent was offered templates from the previous
+     * account's WABA, which Meta rejects on send.
+     *
+     * Rides on `message:new` rather than getting its own frame because an
+     * inbound message is the ONLY thing that re-stamps a thread; a separate
+     * event would double the frames for a field that never moves on its own.
+     * Present on inbound (`message.received`); absent on outbound, which never
+     * re-stamps — consumers treat absent as "unchanged", never as "cleared".
+     */
+    channelConnectionId?: string | null;
+    /**
      * Echoed from the originating client so it can swap its optimistic bubble
      * for this real one without flicker. Absent for inbound messages.
      */

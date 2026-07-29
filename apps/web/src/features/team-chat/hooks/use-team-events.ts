@@ -1055,6 +1055,7 @@ export function useTeamEvents(
       unreadCount,
       message,
       newConversation,
+      channelConnectionId,
     }) => {
       // Replay guard by message id — NOT by timestamp. Socket.io
       // connection-state-recovery REPLAYS buffered `message:new` frames on
@@ -1180,6 +1181,16 @@ export function useTeamEvents(
                 }
               : {}),
             unreadCount: nextUnread,
+            // The thread's account, re-stamped by ingest when the customer
+            // writes to a different number of ours. Without this the row's
+            // account badge kept naming the number they used to message.
+            // `undefined` means the frame didn't carry one (outbound) — leave
+            // the row alone; only an explicit value (including null) moves it.
+            // Gated on `advances` for the same reason as the preview: an
+            // out-of-order OLDER inbound must not rewind the account either.
+            ...(channelConnectionId !== undefined && advances
+              ? { channelConnectionId }
+              : {}),
           },
           // Inbound messages reset the 24h customer-service window. The
           // conversation list uses this for its window chip; outbound
