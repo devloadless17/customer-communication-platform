@@ -44,6 +44,13 @@ const SURFACES = [
   { name: "tickets", path: "/tickets" },
   { name: "broadcasts", path: "/broadcasts" },
   { name: "workflows", path: "/workflows" },
+  // Added 2026-07-29. `/reports` is a 528-line client dashboard that shipped in
+  // the unaudited delta and had never been through this rubric — the suite
+  // stayed at 53 checks across the whole feature landing, which is precisely
+  // how the settings subpages went unscanned until the deep sweep found 10 of
+  // 16 failing. A surface the rubric does not name is a surface the rubric
+  // cannot vouch for, however green the total looks.
+  { name: "reports", path: "/reports" },
   { name: "settings", path: "/settings" },
   { name: "team-chat", path: "/team" },
   { name: "inbox", path: "/inbox" },

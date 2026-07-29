@@ -489,7 +489,7 @@ function StatTile({
         <div className="tabular-nums text-2xl font-semibold">{value}</div>
       )}
       <div className="text-xs text-muted-foreground">{label}</div>
-      {hint && value !== null && <div className="text-2xs text-muted-foreground/70">{hint}</div>}
+      {hint && value !== null && <div className="text-2xs text-muted-foreground">{hint}</div>}
     </div>
   );
 }
@@ -499,7 +499,7 @@ function MiniStat({ label, value, hint }: { label: string; value: string; hint?:
     <div className="min-w-0">
       <div className="tabular-nums text-xl font-semibold">{value}</div>
       <div className="text-xs text-muted-foreground">{label}</div>
-      {hint && <div className="mt-0.5 text-2xs text-muted-foreground/70">{hint}</div>}
+      {hint && <div className="mt-0.5 text-2xs text-muted-foreground">{hint}</div>}
     </div>
   );
 }

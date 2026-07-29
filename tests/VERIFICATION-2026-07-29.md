@@ -837,6 +837,46 @@ cross-workspace row, so "delete one side" is the question worth asking.
 | **`Message.channelConnectionId` → connection delete** *(new)* | ✅ the column is history, not a live pointer — it is deliberately NOT re-stamped, which is what makes `message.sent` attribution correct (Finding #2) |
 
 
+
+## Phase 5 — UI/UX rubric re-measure (2026-07-29)
+
+**53/53 green on arrival — and that number was the finding.** The rubric scored
+53 before the delta landed and 53 after, across a release that added a whole
+`/reports` dashboard, the Platform ops card, the escalation dialog and the
+account-label chrome. A score that does not move when the product does is not
+measuring the product.
+
+The cause: `SURFACES` names seven pages — contacts, tickets, broadcasts,
+workflows, settings, team-chat, inbox — and **`/reports` was not one of them**.
+Identical shape to the predecessor's highest-yield hour, when the rubric had
+only ever scanned `/settings` and the deep sweep found **10 of 16** subpages
+failing. A surface the rubric does not name is a surface it cannot vouch for,
+however green the total looks.
+
+**Adding `/reports` immediately failed it.** `axe` reported a *serious*
+`color-contrast` violation on two nodes: `text-muted-foreground/70` at
+`text-2xs` (11 px) measuring **3.12:1** against white, where AA requires 4.50.
+
+This is the SAME token mistake the predecessor fixed — *"every small uppercase
+section label used `text-muted-foreground` at 60–80 % opacity and failed AA — one
+token decision surfacing as five separate surface failures"*. The opacity
+modifier is the defect, not the token: computing the sRGB values independently,
+`--muted-foreground` at full opacity gives **6.00:1**, and at `/70` over white
+**3.12:1** — matching axe's measurement exactly, which is the check that the
+diagnosis is right rather than plausible.
+
+FIXED by dropping the `/70` on both nodes. **58/58** after.
+
+The remaining 48 `text-muted-foreground/NN` uses across the web app were
+reviewed rather than swept: they are `aria-hidden` separators, chevrons and
+icons, where a contrast ratio does not apply. Only text carrying meaning needs
+the full token.
+
+**Not automated, deliberately** — the subjective half (visual hierarchy, copy
+tone, motion, empty-state helpfulness) is a reading task and does not belong in
+a fake assertion. Unchanged from the predecessor's position.
+
+
 ## Domain session notes
 
 ### #26 AI · #27 admin/platform · #28 registration · #31 ops — ✅ CLOSED (2026-07-29)
