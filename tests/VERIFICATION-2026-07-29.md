@@ -780,6 +780,63 @@ sweep before starting the suite.
 
 ---
 
+
+## Phase 3 — cross-domain seam traces (2026-07-29)
+
+Re-run against current code rather than trusted from the predecessor, because
+the delta added three new references that cross domains: `Message.channelConnectionId`,
+`Call.recordingKey`/`transcriptKey`, and the cross-workspace escalation twin.
+
+### Workspace delete → every model — ✅ MACHINE-CHECKED
+
+Enumerated from `schema.prisma` rather than sampled. **73 models**:
+
+| | |
+|---|---|
+| `workspaceId` + `onDelete: Cascade` from Workspace | **56** |
+| `workspaceId`, cascading via a PARENT | **2** — `ApiIdempotencyKey` → `WorkspaceApiKey`, `AssignmentPolicyMember` → `AssignmentPolicy`, both of which carry `workspaceId` and cascade themselves |
+| no `workspaceId` (auth/root tables + documented exceptions) | **14** |
+| `Workspace` itself | 1 |
+
+56 + 2 + 14 + 1 = 73. Nothing is orphaned. This matches the predecessor's count
+on a schema that has since grown by a model, so the property survived the delta.
+
+### The escalation twin → workspace delete — ✅ CLEAN, and clean by DESIGN
+
+The genuinely new seam. `TicketEscalation` is the one deliberately
+cross-workspace row, so "delete one side" is the question worth asking.
+
+- **Both** `sourceWorkspace` and `targetWorkspace` are `onDelete: Cascade`, so
+  deleting either side removes the escalation row — no dangling cross-workspace
+  pointer survives.
+- `sourceTicket` is `SetNull` (nullable), `targetTicket` cascades — so deleting
+  the source TICKET leaves the referral intact for the side still working it,
+  while deleting the target ticket ends the pair. That asymmetry is deliberate
+  and matches the doc-comment in the schema.
+- **The surviving ticket cannot show stale escalation state, because there is no
+  state to go stale.** `Ticket` carries NO denormalized `escalated` boolean —
+  the UI derives it from the `escalationOut` / `escalationIn` relations. When
+  the row cascades away, the ticket simply stops reporting an escalation. Same
+  "derived, never stored" principle as directory membership in #12, and the same
+  reason it cannot drift.
+- An escalated-in ticket whose source workspace is deleted keeps
+  `source: "escalation"` and a possibly-null `conversationId` — which is exactly
+  the state `ticketVisibilityWhere` was fixed to handle (it falls back to the
+  ticket's own assignee), so it stays visible to the person working it rather
+  than 404ing.
+
+### The other four seams — carried, with the delta's new references checked
+
+| Seam | Status |
+|---|---|
+| Member removal → assignments, tickets, views, policies, DMs, rooms, session | ✅ one `remove-member.ts` definition serves every caller (#9) |
+| Channel-connection delete → threads, campaigns, caches, templates | ✅ `SetNull` on both `Conversation` and `Broadcast`, with the >1-account confirm guard (#14) and the `account-unresolved` refusal preventing the silent default fallback |
+| Org delete → workspaces, users, globally-unique emails, sessions, keys | ✅ cascades; emails freed |
+| Queued job whose target row vanished | ✅ workers drop cleanly; the coexistence history worker's retry-storm remains the one documented LOW |
+| **Call artifacts → workspace delete** *(new)* | ✅ `WorkspaceRootService.destroy` collects `recordingKey`/`transcriptKey`, and the blob-orphan sweeper cross-checks both columns (#16, #19) |
+| **`Message.channelConnectionId` → connection delete** *(new)* | ✅ the column is history, not a live pointer — it is deliberately NOT re-stamped, which is what makes `message.sent` attribution correct (Finding #2) |
+
+
 ## Domain session notes
 
 ### #26 AI · #27 admin/platform · #28 registration · #31 ops — ✅ CLOSED (2026-07-29)
