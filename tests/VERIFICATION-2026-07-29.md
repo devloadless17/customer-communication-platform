@@ -317,7 +317,7 @@ a checklist, not on however many findings happened to surface.
 |---|---|---|---|---|
 | 1 | webhooks ingest | 1 | E (meta 170/170) + N (pressure harness) | ◐ burst behaviour VERIFIED: converges to exactly 500, no duplicates, no thread fragmentation, 56.4/s p95 892ms — inside the recorded band. Full checklist not yet walked |
 | 2 | outbound send + idempotency ledger | 1 | | ☐ |
-| 3 | event bus / outbox | 1 | | ☐ |
+| 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
 | 4 | workflows (~22 step types) | 1 | | ☐ |
 | 5 | assignment (policies/rules/capacity) | 1 | | ☐ |
 | 6 | broadcasts (+audience/templates/analytics) | 1 | | ☐ |
@@ -724,6 +724,36 @@ sweep before starting the suite.
 
 ## Domain session notes
 
+### #3 event bus / outbox — ✅ CLOSED (2026-07-29)
+
+Checklist from `docs/events.md` §1–§4 + CLAUDE.md §9/§18. No defect.
+
+| Invariant | Evidence |
+|---|---|
+| Events are notifications — a subscriber reacts, never owns the mutation | **R** every subscriber consumes a committed change |
+| Priority tiers, in order | **R** `REALTIME 0 · REALTIME_SECONDARY 1 · AUDIT 10 · ANALYTICS 20 · WORKFLOW_DISPATCH 30 · OUTBOUND_WEBHOOKS 50 · DEFAULT 100` — exactly what §9 and the doc state (40 removed, with the reason recorded in place) |
+| Only ONE subscriber runs in the critical tier | **R** `assertSingleCriticalSubscriber()` — and it is genuinely CALLED, from the outbox drainer's bootstrap after every module has registered, not merely defined |
+| **§18: never subscribe audit or workflow-dispatch to `broadcast.*`** | **R** verified against the REGISTRIES from both sides: `audit.ts` 12 subscriptions / **0** `broadcast.*`; `workflow-dispatch.ts` 4 / **0**; and a repo-wide scan finds **no** file subscribing `broadcast.*` by literal |
+| …and broadcast events still ARE delivered, to socket-fanout alone | **R** they are registered TABLE-DRIVEN — `realtime-fanout.service.ts` iterates `FANOUT_RULES`, which carries `broadcast.status_changed`, `progress`, `recipient_message_sent`, `conversation_reopened` — plus **E** `fanout-storm-guard.spec.ts` pins the per-recipient ones conversation-scoped |
+| Durable outbox survives a crash between the DB write and fanout | **E** `outbox-lease.spec.ts` |
+| Consumers tolerate at-least-once redelivery | **E** `outbox-redelivery-dedupe.spec.ts` + the three `*_event_key_uniq` partial UNIQUEs, pinned by `partial-indexes.spec.ts` |
+| Ordering assumed only within one publish's tiers | **R** documented and not relied on across events |
+
+**Method note worth keeping.** The broadcast-exclusion check had to be run from
+BOTH sides. A repo-wide grep for `subscribe("broadcast.…")` returns **zero
+files**, which naively reads as "the events go nowhere" — a second, different
+bug. They are delivered because socket-fanout registers from the `FANOUT_RULES`
+table rather than by literal string. Proving an absence-based invariant means
+also proving the thing that SHOULD consume the event still does; otherwise the
+strongest evidence for the invariant is indistinguishable from the feature being
+dead.
+
+**Edge themes:** ① N/A · ② **covered — the domain's core** · ③ subscribers
+tolerate a vanished row · ④ N/A · ⑤ N/A · ⑥ N/A · ⑦ the drainer batches
+(200/tick, ≤10 drains) · ⑧ N/A · ⑨ every payload carries `workspaceId` ·
+⑩ the drainer re-dispatches claimed-but-uncommitted rows after a restart.
+
+
 ### #12 customers / identity — ✅ CLOSED (2026-07-29)
 
 Checklist = the seven numbered rules in `docs/identity.md` "Rules that keep this
@@ -733,7 +763,7 @@ safe", plus the §58 composition warning. **All seven hold.** No defect found.
 |---|---|---|
 | 1 | Auto-merge ONLY on deterministic strong keys | **R** `strongKeys` is exactly `phoneNumber`, plus `email` gated on `trustEmailAsStrongKey` (default OFF, one caller: the self-asserted contact-share chip) |
 | 2 | No fuzzy / name matching, ever | **R** `name` appears in identity-service only to SEED a new customer — it is never a predicate |
-| 3 | Everything else is manual and reversible | **E** `v1-parity.spec.ts` — *"unlink must never delete the contact"* |
+| 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
 | 4 | Merge is non-destructive | **R** zero `contact.delete*` / `message.delete*` in `customers.service.ts`; the only delete is empty-customer cleanup, which the doc sanctions |
 | 5 | Tenant-scoped — identity never crosses `workspaceId` | **R** `workspaceId` in the candidate `where` and on the created `Customer` |
 | 6 | ONE writer | **R** `resolveCustomerId` called only from ingest (×3), ingest-call and the drift sweeper — never a controller or provider |
@@ -816,7 +846,7 @@ in five separate prior sessions. Checklist taken verbatim from
 |---|---|---|
 | 1 | `@@unique([workspaceId, channel, externalAccountId])` — re-connecting updates, never duplicates | **R** schema |
 | 2 | Dedup keys stay **workspace**-scoped, NOT per-account | **R** `Message @@unique([workspaceId, channel, externalId])`, `Call @@unique([workspaceId, channel, externalCallId])` — adding the account would make status webhooks miss |
-| 3 | Sends never guess an account | **R** `ProviderNotConfiguredError.accountUnresolved` + **E** `send-account-unresolved.spec.ts` + **CHECKER 7** enforces it mechanically across 46 call sites |
+| 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
 | 4 | The account is re-stamped on every inbound; the widget binding is **sticky** | **R** `ingest.ts:2217-2223` (guarded so the common case writes nothing, and explicitly *"unlike webchat's sticky webchatWidgetId"*) + **E** `webhook-account-attribution.spec.ts`, `multi-account/01` |
 | 5 | No credentials in the member-readable directory | **R** `secrets` is never selected in `channel-accounts.service.ts` — zero occurrences |
 | 6 | Attribution renders ONLY above one account per channel | **R** `showAccountFor(channel)` gates every `AccountLabel`; a single-account inbox stays byte-identical |
@@ -883,7 +913,7 @@ CLAUDE.md §7/§12/§15/§18 + the module docblock.
 |---|---|---|
 | 1 | `workspaceId` in EVERY query | **R** all ten query functions verified individually |
 | 2 | `accountId` proved to belong to THIS workspace before it reaches nine raw predicates | **R** + **N** `reports-accounts.spec.ts` — an unknown id is REJECTED, not silently emptied |
-| 3 | Daily buckets flip at the caller's midnight, not UTC's (theme ⑤) | **E** `reports-overview.spec.ts` (`Pacific/Auckland`) + **R** the double `AT TIME ZONE` |
+| 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
 | 4 | Range capped (`MAX_RANGE_DAYS = 366`) → `400 invalid_range` | **E** `reports-overview.spec.ts` |
 | 5 | `tz` never interpolated — bound parameter, shape-validated first | **R** `reports.ts:87` + `Prisma.sql` binding |
 | 6 | Internal route gated on `teamActivity:view` | **R** `@RequireCapability("teamActivity:view")` under `SessionGuard`; the web redirect is UX only, the API is authoritative |
@@ -971,7 +1001,7 @@ unmapped.**
 |---|---|---|
 | 1 | Signed `X-CCP-Signature: t=…,v1=…`, HMAC-SHA256 over the RAW posted bytes | **N** `webhook-signing.spec.ts` (9) — incl. a receiver-side recomputation and a re-serialized-body case. NEGATIVE-TESTED ×2 |
 | 2 | Idempotent for the partner: stable `X-CCP-Delivery` id | **E** `outbox-redelivery-dedupe.spec.ts` + **R** `worker.ts:431` |
-| 3 | Bounded retries — 7 attempts, exponential backoff from 30 s | **R** `queue.ts:110-111` (R-only: asserting BullMQ's own backoff schedule would test the library, not us) |
+| 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
 | 4 | Auto-disable after repeated failure | **R** `worker.ts` `consecutiveFailures` increment + reset-on-success |
 | 5 | Stable, versioned payload | **N** `webhook-signing.spec.ts` pins `WEBHOOK_WIRE_VERSION = 1`, so a silent bump costs a deliberate test edit |
 | 6 | SSRF-safe egress | **R** `worker.ts:425` routes through `safeFetch` (DNS-pinned, private ranges + all IPv6 notations blocked) — verified in depth by the predecessor program; R-only because exercising it needs a live resolver |
