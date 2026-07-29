@@ -336,7 +336,7 @@ a checklist, not on however many findings happened to surface.
 | 17 | media / R2 / blob-storage | 2 | | ☐ |
 | 18 | queues / workers | 2 | | ☐ |
 | 19 | sweepers | 2 | R + N (6 tests) | ◐ `webhook-subscription-health` covered + negative-tested both directions; RISK-1/RISK-2 recorded; the other ~30 sweepers not re-walked |
-| 20 | coexistence | 2 | | ☐ |
+| 20 | coexistence | 2 | R (adversarial, structural) | ✅ **2026-07-29** — quiet-ingest verified as a property of the code, not a flag; no defect |
 | 21 | **reports / analytics** *(NEW)* | 2 | R (adversarial, 11 invariants) + E + N (6) | ✅ **2026-07-29** — full checklist walked, 0 unmapped |
 | 22 | **webchat widget** *(NEW)* | 2 | R (adversarial) + E (2 e2e) | ✅ **2026-07-29** — public-surface boundary verified fail-closed; no defect |
 | 23 | tags / stages / fields / snippets / flags | 3 | | ☐ |
@@ -725,6 +725,27 @@ sweep before starting the suite.
 ---
 
 ## Domain session notes
+
+### #20 coexistence — ✅ CLOSED (2026-07-29)
+
+Checklist from `docs/whatsapp-coexistence.md`. No defect; both hazards the
+predecessor fixed are still fixed.
+
+| Invariant | Evidence |
+|---|---|
+| History backfill is a **QUIET** ingest — no unread bump, no automation or webhook fanout, no per-message socket frame, and backfilled-only threads land `closed` | **R** verified STRUCTURALLY over the whole 110-line function: `publish(` **0**, `unreadCount` **0**, `emitTo` **0**, and exactly one `status: "closed"`. The quietness is a property of the code, not of a flag someone must remember to pass |
+| `smb_app_state_sync` names an EXISTING contact — never creates one | **R** `if (!contact) return` after a workspace-scoped `findFirst` |
+| …and never clobbers an agent-set name | **R** overwrites only when the current name is blank or still equals the phone-number default we stamp on first contact; `action: "remove"` is ignored outright |
+| A poison event must not lose the rest of its chunk | **R** the worker's loop has a per-event `try/catch` and continues — the predecessor's fix holds |
+| Direction detection must not fail open to `"in"` | **R** each branch sets `direction` explicitly and skips an event with no `contactPhone`; there is no fall-through default |
+| Backfill carries the account | **R** `HistoricalMessageInput.channelConnectionId`, with the docblock recording that without it a backfilled thread is unsendable in a multi-account workspace until the customer writes in |
+
+**Edge themes:** ① N/A · ② the worker dedupes by wamid, so a redelivered chunk
+is safe · ③ the worker drops cleanly when its workspace is gone · ④ N/A ·
+⑤ the 24 h onboarding trigger window is Meta's, documented not enforced ·
+⑥ N/A · ⑦ 180-day backfill is chunked through BullMQ · ⑧ N/A ·
+⑨ workspace-scoped · ⑩ chunks resume.
+
 
 ### #16 calls (WhatsApp calling + artifacts) — ✅ CLOSED (2026-07-29)
 
