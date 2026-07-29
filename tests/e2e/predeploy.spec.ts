@@ -261,7 +261,15 @@ test.describe("logout flow", () => {
     // abort the in-flight navigation (net::ERR_ABORTED), which is expected —
     // the waitForURL below is the real proof that logout landed on /login.
     await page.goto("/logout").catch(() => {});
-    await page.waitForURL(/\/login/, { timeout: 10_000 });
+    // `waitUntil: "commit"` — the property under test is that logout LANDS on
+    // /login, not that the login page finished loading. The default waits for
+    // the `load` event, which couples this assertion to how long Next's dev
+    // server takes to compile and hydrate /login; on a loaded box that blew the
+    // 10s budget and made the test fail ~2 runs in 3 while /logout itself was
+    // answering a clean 307. It also has to survive the login page's own
+    // `?bc=1` handling, which broadcasts the cross-tab signout and then STRIPS
+    // the flag with history.replaceState — a URL change mid-wait.
+    await page.waitForURL(/\/login/, { timeout: 15_000, waitUntil: "commit" });
     const cookies = await context.cookies();
     const session = cookies.find((c) => c.name.toLowerCase().includes("session"));
     if (session) {

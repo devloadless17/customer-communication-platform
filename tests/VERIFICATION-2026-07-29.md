@@ -877,6 +877,75 @@ tone, motion, empty-state helpfulness) is a reading task and does not belong in
 a fake assertion. Unchanged from the predecessor's position.
 
 
+
+## Predeploy step 5 — the main Playwright suite (2026-07-29)
+
+The one gate I had not re-run after ~40 commits. It took four attempts to get a
+trustworthy answer, and **none of the failures were product defects**.
+
+### Attempt 1 — 91 failures. Postgres and Redis had stopped mid-run.
+
+`ECONNREFUSED 127.0.0.1:6380` in the api log; both containers `Exited (0)` about
+eleven minutes in; RSC pages answering 500. The box was at **771 MB free of
+5.9 GB**. Restarting the containers and freeing memory changed the picture
+completely. This is the repo's own standing rule — *health-check the
+infrastructure before believing a failure set* — and I nearly reported a
+catastrophe that was a stopped container.
+
+### Attempt 2 — the web dev server was OOM-KILLED (exit 137).
+
+Next dev + Nest dev + Chromium + Postgres + Redis does not fit in 5.9 GB. A
+single full-suite invocation therefore **cannot** finish on this machine; the
+failures it produces are the stack dying.
+
+### Attempt 3 — batched, with a heap cap. 524 passed / 21 failed.
+
+Running in 8 chunks with `--max-old-space-size=1400` and a stack restart between
+them completes. Clean batches: inbox-views + inbox-multi-account + message-flags
+(18), availability + meta-ui (31), team-chat + webchatwidget (70),
+**workflows-events (144)**, **post-audit-fixes (171)**.
+
+### Attempt 4 — the 21 failures, re-run in isolation on a fresh `.next`
+
+| Spec | In-batch | Alone, clean `.next` |
+|---|---|---|
+| `launch-smoke` | 15 failed | **20/20** |
+| `workspace-isolation` | 5 failed | **31/31** |
+| `contacts-transfer` | 1 failed | **20/20** |
+| `predeploy` | 1 failed | **28/28 ×2** |
+| section-chrome · auth-recovery · workspace-switch | — | 10/10 · 8/8 · 5/5 |
+
+**Three distinct environmental causes, each identified rather than assumed:**
+
+1. **A corrupt `.next`.** The 404s were on `/settings/whatsapp`, `/settings/channels`,
+   `/team`, `/organization/*` — all of which exist as files. Artifacts truncated
+   when the OOM killer hit mid-compile. Same symptom as the stale-cache 404s at
+   the start of this program.
+2. **Cross-spec session interference.** The `workspace-isolation` failures were
+   **403, not a leak** — the endpoint refused, so the leak assertion never ran.
+   That spec seeds a second workspace the admin is deliberately a member of; a
+   sibling spec leaving the session parked there makes admin-gated reads 403.
+   **31/31 alone.** No tenancy defect.
+3. **Next dev compile latency.** Measured on a warm stack: every route answers in
+   under 1.2 s except **`/reports` at 24.5 s** cold. That is what blew the
+   10–20 s navigation waits.
+
+### The one change worth keeping
+
+`predeploy.spec.ts`'s logout assertion waited for the `load` event, coupling
+"did logout land on /login" to how long Next takes to compile and hydrate the
+login page. Now `waitUntil: "commit"` — the property under test is the LANDING.
+It also has to survive the login page's own `?bc=1` handling, which broadcasts
+the cross-tab signout and then strips the flag with `history.replaceState`, i.e.
+a URL change mid-wait. `/logout` itself was answering a clean 307 throughout.
+
+**Not papered over:** the residual flakiness is the box, not the suite. Inflating
+every timeout would hide exactly the kind of real slowness this gate should
+catch. The honest statement is that **this machine cannot run the browser suite
+in one pass**, and the batched runner in the scratchpad is how to get a real
+answer from it.
+
+
 ## Domain session notes
 
 ### #26 AI · #27 admin/platform · #28 registration · #31 ops — ✅ CLOSED (2026-07-29)
