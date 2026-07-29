@@ -330,7 +330,7 @@ a checklist, not on however many findings happened to surface.
 | 13 | inbox-views | 2 | R (adversarial, 6 doc invariants) + E (31) | ✅ **2026-07-29** — all six already covered; no defect, one stale comment fixed |
 | 14 | channels / multi-account | 2 | R (adversarial, 9 doc invariants) + E + N (7) | ✅ **2026-07-29** — doc §6 walked line by line; invariant 8 was FALSE and was a data-loss path (Finding #8) |
 | 15 | outbound-webhooks (delivery/retry) | 2 | R (adversarial, 13 invariants) + E + N (16 tests) | ✅ **2026-07-29** — full checklist walked, 0 unmapped. HIGH wrong-account FIXED; signing newly covered + negative-tested ×2; one false positive of my own caught and withdrawn |
-| 16 | calls (WhatsApp calling + artifacts) | 2 | | ☐ |
+| 16 | calls (WhatsApp calling + artifacts) | 2 | R (adversarial) + E (multi-account 05) + N | ✅ **2026-07-29** — Finding #5 fixed; SIP refusal and provider-read gate verified |
 | 17 | media / R2 / blob-storage | 2 | | ☐ |
 | 18 | queues / workers | 2 | | ☐ |
 | 19 | sweepers | 2 | R + N (6 tests) | ◐ `webhook-subscription-health` covered + negative-tested both directions; RISK-1/RISK-2 recorded; the other ~30 sweepers not re-walked |
@@ -723,6 +723,38 @@ sweep before starting the suite.
 ---
 
 ## Domain session notes
+
+### #16 calls (WhatsApp calling + artifacts) — ✅ CLOSED (2026-07-29)
+
+Checklist from `docs/whatsapp-calling.md`. One defect found and fixed earlier
+this session (Finding #5, the in-app recording blob ordering).
+
+| Invariant | Evidence |
+|---|---|
+| **SIP: do not enable** — it disables the Graph calling endpoints this platform is built on | **R** we never set it. We DETECT it (`sipEnabled` off the provider) and REFUSE the preflight with a named `sip_disabled` check and an actionable remedy. The comment records why: a tenant enabling it in WhatsApp Manager would otherwise silently break every place/answer "with nothing in our logs" |
+| The permission gate is a **provider read**, never the local ledger | **R** documented at the function (*"permission + quota, read from the PROVIDER (never a local ledger)"*) and implemented via `readPermission` — and a permission read that FAILS is explicitly not a green light |
+| `CallPermissionRequest` rows are a cache + audit trail only | **R** created alongside, never consulted as the gate |
+| **Artifacts must not move `Call.status`** — they arrive minutes after the call | **R** the artifact-store path performs **zero** `status` writes |
+| Call artifacts are not `Message` media and must not be confused with it | **R** separate `recordingKey`/`transcriptKey` columns and separate blob prefixes — and the blob-orphan sweeper now cross-checks BOTH columns (the predecessor's HIGH) |
+| Recording/transcription config lives in TEAM SETTINGS, never agent free-text | **R** — it is a legal decision, not a per-agent one |
+| No `if (workspaceId === …)` in the provider | **R** |
+| Dedup on `@@unique([workspaceId, channel, externalCallId])`; terminal state is a CAS | **E** `call-*.spec.ts`, `multi-account/05-calls.spec.ts` |
+| Every call path resolves credentials from `Conversation.channelConnectionId` | **E** `multi-account/05` — both numbers attributed independently, and the history distinguishes two calls from one customer to two numbers |
+
+**Finding #5 (fixed this session):** the in-app recording deleted the interim
+`.raw` blob BEFORE moving `Call.recordingKey` to the transcoded `.ogg`. A crash
+or DB blip in that window left the row pointing at an object that had just been
+deleted, while the `.ogg` nobody pointed at became an orphan the sweeper
+reclaims 24 h later — **permanent** loss, because unlike Meta's own recordings
+these bytes only ever existed in the agent's browser. Reversed: the pointer
+moves first, so the worst case is a stray `.raw` the sweeper reclaims on its own.
+
+**Edge themes:** ① terminal-state CAS, and the answer race is pinned by
+`calls.spec.ts` · ② redelivered terminal events are idempotent · ③ N/A ·
+④ N/A · ⑤ `call_hours` windows · ⑥ N/A · ⑦ the recording upload is capped at
+64 MB by multer · ⑧ `calls:make` / `calls:receive` · ⑨ every call query is
+workspace-scoped · ⑩ artifacts are downloaded by a sweeper that resumes.
+
 
 ### #22 webchat widget — ✅ CLOSED (2026-07-29)
 
