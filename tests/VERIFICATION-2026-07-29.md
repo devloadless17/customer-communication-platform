@@ -339,7 +339,7 @@ a checklist, not on however many findings happened to surface.
 | 22 | **webchat widget** *(NEW — never had a row)* | 2 | | ☐ |
 | 23 | tags / stages / fields / snippets / flags | 3 | | ☐ |
 | 24 | notes | 3 | R (adversarial) | ✅ **2026-07-29** — clean; the visibility spread verified safe for a structural reason (scalar return shape) |
-| 25 | team-chat (+DMs) | 3 | | ☐ |
+| 25 | team-chat (+DMs) | 3 | R (adversarial, 11 doc invariants + mechanical tenancy scan) | ✅ **2026-07-29** — no defect; 5 satellites re-verified, 0 real violations |
 | 26 | ai-assistant | 3 | | ☐ |
 | 27 | admin / platform (superadmin) | 3 | | ☐ |
 | 28 | registration / invites | 3 | | ☐ |
@@ -723,6 +723,53 @@ sweep before starting the suite.
 ---
 
 ## Domain session notes
+
+### #25 team-chat (+DMs) — ✅ CLOSED (2026-07-29)
+
+Checklist from `docs/team-chat.md` (11 numbered invariants + the UI notes). No
+defect.
+
+| Invariant | Evidence |
+|---|---|
+| A deliberately SEPARATE message graph — a `Message` query can never leak into team chat | **R** distinct models, distinct hooks, never cross-wired |
+| `dmKey` is ALWAYS derived server-side | **R** `createOrGetDm(workspaceId, actorUserId, targetUserId)` — the schemas and controller never accept a `dmKey` or a raw pair, so a caller cannot claim a conversation between two other people |
+| `createOrGetDm` re-reads on P2002, never a bare create | **R** `isP2002` → re-read on `workspaceId_dmKey` |
+| Membership failures 404, never 403 | **R** — a 403 would teach a non-member the channel exists |
+| Public channels are join-to-read; there is deliberately NO "public → allow read" branch | **R** browsing has its own metadata-only endpoint |
+| `browsePublicChannels` must never touch `TeamChannelMessage` | **R** **zero** references in that function — it is served to non-members |
+| **`subscribe:channel` re-checks membership on EVERY subscribe**, and LEAVES on failure | **R** the check is not gated on `!alreadyJoined`, and failure does `if (alreadyJoined) client.leave(room)`. Socket.io's `connectionStateRecovery` restores rooms with no handler running, so skipping the re-check left a revoked member in `chan:<id>` while their laptop slept · plus `pruneRecoveredChannelRooms()` on `client.recovered` |
+| Mention counters compare `COALESCE(editedAt, createdAt)` | **R** in the SQL — an edit is the only way to be mentioned without a new message, and by then `createdAt` is already behind the reader's receipt |
+| Reaction `emoji` must actually be an emoji | **R** `EMOJI_ONLY_RE` (Extended_Pictographic + modifiers + regional indicators + ZWJ/VS16/keycap) **AND** a separate non-ASCII requirement, because the class must admit ASCII digits as keycap bases — so `1️⃣` passes and a bare `"1"` does not — plus a per-message distinct cap |
+| `ChannelExistenceGuard` must consult BOTH lists | **R** `channels.some(...) \|\| dms.some(...)` for existence AND `channels.length + dms.length` for emptiness, plus a 2 s grace period so a just-created DM isn't evicted by whichever round-trip loses |
+
+**The five `TeamChannel*` TENANCY EXCEPTIONS — re-verified mechanically, and my
+scanner was wrong twice before it was right.** A structural scan of every query
+against the five satellites flagged 11 sites, then 7 after a fix, then **0 real
+ones** after reading each.
+
+- First pass: the alternation `(update|updateMany)` matched `update` as a
+  PREFIX of `updateMany`, so the captured `where` block started mid-token and
+  the `workspaceId` sitting right there was invisible. Longest-alternative-first
+  fixed it.
+- Second pass: the remaining 7 are all safe on inspection — each reaches the
+  satellite by a **server-derived id from an already-scoped row** (a paging
+  anchor, a `threadRootId` FK off a verified message, a reaction found by the
+  `messageId_userId_emoji` compound unique whose channel access was asserted
+  upstream). That IS the documented parent-scoped pattern.
+
+And the code is stricter than the pattern requires: `editMessage` adds
+`workspaceId` to every mutate WHERE as defence-in-depth *even though* the
+preceding `findFirst` already proved ownership, using `updateMany`/`deleteMany`
+because `id` alone is the unique key.
+
+**Edge themes:** ① the thread-reply counter is an atomic in-transaction
+increment returning the POST value, so two concurrent replies can't both
+publish `N+1` · ② N/A · ③ a lost concurrent-delete race bails BEFORE the
+decrement, so the root counter can't drift negative with no sweeper ·
+④ head-resync on every connect · ⑤ N/A · ⑥ N/A · ⑦ distinct-reaction cap ·
+⑧ private creation stays admin/manager; public is open · ⑨ every satellite
+reaches a workspace-scoped parent · ⑩ recovery prunes restored rooms.
+
 
 ### #8 realtime layer — ✅ CLOSED (2026-07-29)
 
