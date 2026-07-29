@@ -116,6 +116,139 @@ export async function transcodeCallRecordingToOgg(
   ]);
 }
 
+/** One side of the stereo call master, ready for a speech model. */
+export interface CallChannelAudio {
+  /** Mono 16 kHz WAV — the shape speech models actually want. */
+  bytes: Uint8Array;
+  /** Mean level in dBFS (ffmpeg volumedetect). ≈ -91 is digital silence. */
+  meanVolumeDb: number;
+}
+
+/**
+ * Split the stereo call master into its two speakers — agent (left) and
+ * customer (right) — as separate mono 16 kHz WAVs.
+ *
+ * WHY THIS EXISTS (measured 2026-07-29, against `gpt-4o-transcribe`).
+ * Transcribing the MIXED stereo silently loses a whole speaker. Two-party
+ * audio synthesised with each leg bleeding into the other at a realistic
+ * -30 dB, agent "Hello? Test test." then customer "Yes, I can hear you. I
+ * want to ask about my order please.":
+ *
+ *   mixed        → "Hello? Test test."          ← the customer is GONE
+ *   agent channel   → "Hello? Test test."       ✓
+ *   customer channel→ "Yes, I can hear you…"    ✓
+ *
+ * Same at -20 dB. Downmixing to mono does not help — it is the same sum. The
+ * model reliably transcribes ONE voice out of overlapping speech and stops,
+ * and which one it picks is not predictable. Isolating the channels is what
+ * fixes it, which is exactly what the browser mixer's left/right split was
+ * preserved for.
+ *
+ * Under pathological crosstalk (-9 dB: an agent testing against their own
+ * handset in the same room, no echo cancellation on the far leg) each channel
+ * genuinely contains BOTH voices, so attribution blurs — but every word still
+ * appears, which the mixed path could not promise.
+ *
+ * Returns null when the source is not stereo (nothing to split) — the caller
+ * then transcribes the file as-is.
+ */
+export async function extractCallChannels(
+  input: Uint8Array,
+): Promise<{ agent: CallChannelAudio; customer: CallChannelAudio } | null> {
+  const channels = await probeChannelCount(input);
+  if (channels < 2) return null;
+  // `pan` is what actually isolates a channel: `-map_channel`/`-ac 1` would
+  // DOWNMIX (sum) the two, reproducing the very crosstalk this exists to undo.
+  const [agent, customer] = await Promise.all([
+    extractOneChannel(input, 0),
+    extractOneChannel(input, 1),
+  ]);
+  return { agent, customer };
+}
+
+async function extractOneChannel(
+  input: Uint8Array,
+  channel: 0 | 1,
+): Promise<CallChannelAudio> {
+  const bytes = await transcodeToFile(input, `ch${channel}.wav`, [
+    "-map_metadata", "-1",
+    "-vn",
+    "-filter_complex", `[0:a]pan=mono|c0=c${channel}[a]`,
+    "-map", "[a]",
+    "-ar", "16000",
+    "-c:a", "pcm_s16le",
+    "-f", "wav",
+  ]);
+  return { bytes, meanVolumeDb: await meanVolume(bytes) };
+}
+
+/** ffmpeg volumedetect → mean_volume in dBFS. -91 (silence) when unreadable,
+ *  so an unparseable probe fails toward "skip", never toward a wasted API call
+ *  on an empty channel. */
+async function meanVolume(input: Uint8Array): Promise<number> {
+  try {
+    const stderr = await runFfmpegStderr(input, ["-af", "volumedetect", "-f", "null", "-"]);
+    const m = /mean_volume:\s*(-?[\d.]+) dB/.exec(stderr);
+    return m ? Number(m[1]) : -91;
+  } catch {
+    return -91;
+  }
+}
+
+async function probeChannelCount(input: Uint8Array): Promise<number> {
+  try {
+    const stderr = await runFfmpegStderr(input, ["-f", "null", "-"]);
+    // ffmpeg's stream line: "Audio: opus, 48000 Hz, stereo, fltp"
+    if (/Audio:.*\bstereo\b/.test(stderr)) return 2;
+    if (/Audio:.*\b(\d+) channels\b/.test(stderr)) {
+      return Number(/Audio:.*\b(\d+) channels\b/.exec(stderr)![1]);
+    }
+    return 1;
+  } catch {
+    return 1;
+  }
+}
+
+/** Run ffmpeg for its ANALYSIS output (stderr); the decoded audio is discarded. */
+async function runFfmpegStderr(input: Uint8Array, args: string[]): Promise<string> {
+  return withFfmpegSlot(FFMPEG_WAIT_OUTBOUND_MS, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ccp-voice-"));
+    const inPath = join(dir, "in");
+    try {
+      await writeFile(inPath, Buffer.from(input));
+      return await new Promise<string>((resolve, reject) => {
+        const ff = spawn(
+          "ffmpeg",
+          // `info` loglevel: volumedetect + the stream summary both report there.
+          ["-hide_banner", "-loglevel", "info", "-i", inPath, ...args],
+          { stdio: ["ignore", "ignore", "pipe"] },
+        );
+        let stderr = "";
+        let settled = false;
+        const finish = (fn: () => void) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          fn();
+        };
+        const timer = setTimeout(() => {
+          finish(() => {
+            ff.kill("SIGKILL");
+            reject(new Error("ffmpeg analysis timed out"));
+          });
+        }, TRANSCODE_TIMEOUT_MS);
+        ff.on("error", (err) => finish(() => reject(err)));
+        ff.stderr.on("data", (c: Buffer) => {
+          if (stderr.length < 16_000) stderr += c.toString();
+        });
+        ff.on("close", () => finish(() => resolve(stderr)));
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+}
+
 export async function transcodeToM4a(
   input: Uint8Array,
 ): Promise<Uint8Array<ArrayBuffer>> {

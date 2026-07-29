@@ -4,7 +4,10 @@ import { db } from "@/lib/db";
 import { blobStorage } from "@/lib/blob-storage";
 import { publish } from "@/lib/events/bus";
 import { getProviderBinding } from "@/lib/providers";
-import { transcodeCallRecordingToOgg } from "@/lib/media/audio-transcode";
+import {
+  extractCallChannels,
+  transcodeCallRecordingToOgg,
+} from "@/lib/media/audio-transcode";
 import { transcribeInboundAudio } from "@/lib/ai/voice";
 import { configEnabled, loadAiConfig } from "@/lib/ai/runtime-config";
 
@@ -423,12 +426,117 @@ async function discardStoredRecording(callId: string): Promise<void> {
   }
 }
 
+/** Viewer-compatible transcript segment. `speaker` is the transcript
+ *  document's own vocabulary — the panel maps `Business` → "Agent". */
+interface TranscriptSegment {
+  id: number;
+  speaker: "Business" | "Customer";
+  text: string;
+}
+
+/**
+ * A channel quieter than this never carried audio at all — a one-sided call,
+ * or a leg that never connected. Skipping it saves an API call per recording
+ * and avoids asking a speech model to transcribe silence, which makes them
+ * invent text.
+ *
+ * DELIBERATELY set near digital silence (≈ -91 dBFS measured for a truly empty
+ * leg) rather than just below speech. The failure this whole path exists to
+ * fix is DROPPED WORDS, so the threshold errs the safe way: transcribing a
+ * near-empty channel costs one wasted call, while skipping a quiet one loses a
+ * speaker — exactly the bug being fixed. Real speech measures around -30 to
+ * -20 dBFS mean, so -60 leaves an enormous margin for a bad line.
+ */
+const CHANNEL_SILENCE_DBFS = -60;
+
+/**
+ * Transcribe the agent and customer channels separately and label them.
+ * Returns null when the audio can't be split, so the caller falls back to the
+ * whole-file pass. Never throws for a per-channel failure: one side failing
+ * still yields the other side's words.
+ */
+async function transcribePerSpeaker(
+  bytes: Uint8Array,
+  callId: string,
+): Promise<{ text: string; language?: string; segments: TranscriptSegment[] } | null> {
+  let channels: Awaited<ReturnType<typeof extractCallChannels>>;
+  try {
+    channels = await extractCallChannels(bytes);
+  } catch (err) {
+    console.warn(
+      `[call-transcript] channel split failed for call=${callId} (${
+        err instanceof Error ? err.message : err
+      }) — falling back to the mixed transcript`,
+    );
+    return null;
+  }
+  if (!channels) return null; // mono source — nothing to separate
+
+  const sides = [
+    { speaker: "Business" as const, label: "agent", audio: channels.agent },
+    { speaker: "Customer" as const, label: "customer", audio: channels.customer },
+  ];
+
+  const transcribed = await Promise.all(
+    sides.map(async (side) => {
+      if (side.audio.meanVolumeDb <= CHANNEL_SILENCE_DBFS) return { ...side, text: "", language: undefined };
+      try {
+        const r = await transcribeInboundAudio({
+          bytes: side.audio.bytes,
+          filename: `call-${callId}-${side.label}.wav`,
+          mimeType: "audio/wav",
+        });
+        return { ...side, text: r.text.trim(), language: r.language };
+      } catch (err) {
+        console.warn(
+          `[call-transcript] ${side.label} channel failed for call=${callId}: ${
+            err instanceof Error ? err.message : err
+          }`,
+        );
+        return { ...side, text: "", language: undefined };
+      }
+    }),
+  );
+
+  const spoken = transcribed.filter((t) => t.text.length > 0);
+  // Both sides empty means the split produced nothing usable (a misjudged
+  // silence probe, two failed calls) — let the caller transcribe the mix
+  // rather than storing an empty transcript.
+  if (spoken.length === 0) return null;
+
+  return {
+    // Flat rendering for any consumer that doesn't read segments (the /v1
+    // document, the viewer's own no-segments fallback). Speaker-prefixed so it
+    // stays readable rather than two blocks run together.
+    text: spoken.map((t) => `${t.speaker === "Business" ? "Agent" : "Customer"}: ${t.text}`).join("\n\n"),
+    language: spoken.find((t) => t.language)?.language,
+    segments: spoken.map((t, i) => ({ id: i, speaker: t.speaker, text: t.text })),
+  };
+}
+
 /**
  * Transcribe an in-app recording through the SAME Whisper pipeline that
- * handles inbound voice notes — Arabic-native, auto-detected. Produces a
- * viewer-compatible transcript document (text + language; no per-speaker
- * segments in v1 — the stereo master preserves the channel split for a
- * future per-speaker pass).
+ * handles inbound voice notes — Arabic-native, auto-detected.
+ *
+ * PER SPEAKER, not per mix. The stereo master carries the agent on the left
+ * channel and the customer on the right, and each is transcribed on its own.
+ * That is not a nicety: transcribing the MIX silently drops words whenever
+ * both channels carry the same voice at different delays (speakerphone, an
+ * agent testing against their own handset, any room where both legs are
+ * audible). Measured 2026-07-29 — a 250 ms / -8 dB echo turned "Hello? Test
+ * test." into "Hello, test."; the same audio, one channel isolated,
+ * transcribed in full. See `extractCallChannels`.
+ *
+ * Falls back to a single whole-file pass when the source isn't stereo, when
+ * ffmpeg is unavailable, or when the split yields nothing usable — a
+ * mix-transcript beats no transcript.
+ *
+ * Output carries `segments` tagged `Business` / `Customer`, which the
+ * transcript viewer already renders as "Agent" / "Customer". There are no
+ * per-utterance timestamps: the configured STT model (`gpt-4o-transcribe` —
+ * measurably better than whisper-1 on Arabic, which is this product's primary
+ * language) doesn't expose them, so the two sides appear as one block each
+ * rather than interleaved turns.
  */
 export async function transcribeInAppCallRecording(
   callId: string,
@@ -464,20 +572,31 @@ export async function transcribeInAppCallRecording(
     return false;
   }
 
-  const result = await transcribeInboundAudio({
-    bytes,
-    filename: `call-${call.id}.ogg`,
-    mimeType: mimeType ?? "audio/ogg",
-  });
+  const perSpeaker = await transcribePerSpeaker(bytes, call.id);
+  let result = perSpeaker;
+  if (!result) {
+    // Not stereo / no ffmpeg / both channels came back empty — transcribe the
+    // file as it stands. A mix transcript beats no transcript.
+    const mixed = await transcribeInboundAudio({
+      bytes,
+      filename: `call-${call.id}.ogg`,
+      mimeType: mimeType ?? "audio/ogg",
+    });
+    result = { text: mixed.text, language: mixed.language, segments: [] };
+  }
+
   const doc = {
     metadata: {
       processed_at: new Date().toISOString(),
       source: "inapp",
+      // Which path produced this — a mix transcript is the degraded one, and
+      // when a call reads badly this is the first thing worth knowing.
+      channels: result.segments.length > 0 ? "per-speaker" : "mixed",
     },
     transcript: {
       text: result.text,
       language: result.language ?? null,
-      segments: [],
+      segments: result.segments,
     },
   };
   const key = `call-transcripts/${call.workspaceId}/${call.id}.json`;
