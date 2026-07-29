@@ -321,7 +321,7 @@ a checklist, not on however many findings happened to surface.
 | 4 | workflows (~22 step types) | 1 | | ☐ |
 | 5 | assignment (policies/rules/capacity) | 1 | | ☐ |
 | 6 | broadcasts (+audience/templates/analytics) | 1 | | ☐ |
-| 7 | tickets (+SLA+numbering+escalation) | 1 | R (create path) + N (gap pin) | ◐ number-allocation serialization FIXED + measured (`7510f46a`); SLA / escalation / routing checklist not yet walked |
+| 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 | 8 | realtime layer | 1 | | ☐ |
 | 9 | auth / org / workspaces / members | 1 | | ☐ |
 | 10 | external `/v1` API | 1 | | ☐ |
@@ -724,6 +724,39 @@ sweep before starting the suite.
 
 ## Domain session notes
 
+### #7 tickets (+SLA + numbering + escalation) — ✅ CLOSED (2026-07-29)
+
+Checklist from `docs/ticketing.md` + CLAUDE.md §2/§18. One real defect, already
+fixed this session (Finding #0).
+
+| Invariant | Evidence |
+|---|---|
+| **No auto-open** — an inbound never creates a ticket | **R** `routeMessageToTicket` only ATTACHES to an active ticket or REOPENS one inside the window; it returns `opened: null` on the attach path and has no create call · **E** `tickets.spec.ts` *"does NOT open a ticket on an inbound"* |
+| **§18: broadcasts never open tickets** | **R** `broadcast-runner.ts` contains **zero** references to `commitOutboundSend` — the bypass is structural, not a runtime flag |
+| Outbound never reopens — an agent's follow-up on closed work is not new work | **R** the reopen branch is gated on `args.direction === "in"` |
+| Due dates are computed at create and **STORED**, never derived on read | **R** `computeDueDates` appears only on WRITE paths: create, the escalation twin, and a priority change — the last gated on an active final status, because recomputing "from now" on a solved ticket would arm the sweeper against finished work |
+| The handed-to team is validated against THIS workspace **and** must not be archived, on create AND update | **R** `assertWorkspaceTeam` filters `{ id, workspaceId, archivedAt: null }`, called 4× — the FK alone only proves the row exists |
+| `Message.ticketId` is explicit, never derived from timestamps | **R** stored column; deriving would silently rewrite which work a past message belonged to when a boundary moves |
+| Number allocation is race-safe; gaps are fine, collisions are not | **E** `tickets.spec.ts` (28) incl. the new burnt-number case · **FIXED** Finding #0 |
+| An escalated-in ticket is visible to its assignee even while unbound | **E** `tickets-escalation.spec.ts` — one `ticketVisibilityWhere` now serves list, counts and the per-ticket guard |
+| Escalation never crosses the read boundary | **E** twin + frozen snapshot + MIRRORED events, each workspace-scoped |
+
+**Edge themes:** ① **the domain's headline** — Finding #0, measured and fixed ·
+② ingest redelivery is gated by the message dedupe + a co-committed reopen ·
+③ `Ticket.conversationId` is nullable for the escalation twin, and the
+visibility predicate accounts for it (the post-matrix delta's MED) ·
+④ N/A · ⑤ `businessHoursOnly` walks forward through `Workspace.workHours` ·
+⑥ N/A · ⑦ `listTicketEvents` bounded to the newest 500 · ⑧ restricted agents
+cannot raise a ticket outside their visibility · ⑨ every ticket/event/field/SLA
+query is workspace-scoped · ⑩ the SLA sweeper is mutexed and CAS-marks.
+
+**CARRIED FORWARD** (unchanged by this pass, both doc-level product decisions):
+closing a conversation does not stop its ticket's SLA → a permanent false breach
+on work finished on time; and `shiftDueDates` credits WALL-CLOCK pause time
+against a deadline computed in BUSINESS hours (a Fri-17:00 → Mon-09:00 hold
+credits ~64 h never owed).
+
+
 ### #24 notes — ✅ CLOSED (2026-07-29)
 
 Small domain, re-walked rather than trusted. The predecessor recorded it as
@@ -795,7 +828,7 @@ safe", plus the §58 composition warning. **All seven hold.** No defect found.
 | 4 | Merge is non-destructive | **R** zero `contact.delete*` / `message.delete*` in `customers.service.ts`; the only delete is empty-customer cleanup, which the doc sanctions |
 | 5 | Tenant-scoped — identity never crosses `workspaceId` | **R** `workspaceId` in the candidate `where` and on the created `Customer` |
 | 6 | ONE writer | **R** `resolveCustomerId` called only from ingest (×3), ingest-call and the drift sweeper — never a controller or provider |
-| 7 | A strong key needs a VERIFIED identity, **in both directions** | **R** `identityChannel: { notIn: [...EPHEMERAL_CONTACT_CHANNELS] }` excludes ephemeral contacts from the CANDIDATE SET, not merely from initiating |
+| 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 
 **Rule 7 is the subtle one and it is genuinely implemented.** Blocking only the
 outbound half would leave the attack reachable from the far side: a stranger
@@ -878,7 +911,7 @@ in five separate prior sessions. Checklist taken verbatim from
 | 4 | The account is re-stamped on every inbound; the widget binding is **sticky** | **R** `ingest.ts:2217-2223` (guarded so the common case writes nothing, and explicitly *"unlike webchat's sticky webchatWidgetId"*) + **E** `webhook-account-attribution.spec.ts`, `multi-account/01` |
 | 5 | No credentials in the member-readable directory | **R** `secrets` is never selected in `channel-accounts.service.ts` — zero occurrences |
 | 6 | Attribution renders ONLY above one account per channel | **R** `showAccountFor(channel)` gates every `AccountLabel`; a single-account inbox stays byte-identical |
-| 7 | The broadcast gate reads the **sending** account's portfolio, never the channel default's | **R** both `getSendConfig` and `getWhatsappHealth` are passed `broadcast.channelConnectionId` |
+| 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 | 8 | The account narrow is ANDed, and **must be part of `filterKey`** | **N** — **it was NOT.** Fixed + `filter-key.spec.ts` (6), negative-tested |
 | 9 | `business_management` is required in practice | **R-only** — a Meta permission, not our code; both onboarding guides and the settings panel say so |
 
@@ -945,7 +978,7 @@ CLAUDE.md §7/§12/§15/§18 + the module docblock.
 | 4 | Range capped (`MAX_RANGE_DAYS = 366`) → `400 invalid_range` | **E** `reports-overview.spec.ts` |
 | 5 | `tz` never interpolated — bound parameter, shape-validated first | **R** `reports.ts:87` + `Prisma.sql` binding |
 | 6 | Internal route gated on `teamActivity:view` | **R** `@RequireCapability("teamActivity:view")` under `SessionGuard`; the web redirect is UX only, the API is authoritative |
-| 7 | `/v1` twin gated on `read:reports`, workspace from the KEY | **R** `@RequireScope("read:reports")`, `auth.workspaceId` — never from input (§18 letter) |
+| 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 | 8 | `/v1` parity + documented in BOTH surfaces (§12 locked rule) | **N** CHECKER 8 now enforces it mechanically |
 | 9 | One response shape shared by both routes | **R** both call `getWorkspaceReport` and return `WorkspaceReport`; the docblock names the 2026-07-28 calls-artifact regression a second mapper caused |
 | 10 | Multi-account lens: every panel scopable to one account | **N** `multi-account/08-reports.spec.ts` (4) |
@@ -1033,7 +1066,7 @@ unmapped.**
 | 4 | Auto-disable after repeated failure | **R** `worker.ts` `consecutiveFailures` increment + reset-on-success |
 | 5 | Stable, versioned payload | **N** `webhook-signing.spec.ts` pins `WEBHOOK_WIRE_VERSION = 1`, so a silent bump costs a deliberate test edit |
 | 6 | SSRF-safe egress | **R** `worker.ts:425` routes through `safeFetch` (DNS-pinned, private ranges + all IPv6 notations blocked) — verified in depth by the predecessor program; R-only because exercising it needs a live resolver |
-| 7 | §18: **never** subscribe to `broadcast.*` | **R** verified against the actual `busEventTypesToSubscribe()` list (15 events, zero `broadcast.*`) — against the registry, not a comment |
+| 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 | 8 | Tenancy: `OutboundWebhookDelivery` is a parent-scoped exception | **R** the one request-reachable read proves ownership of the workspace-scoped PARENT first, then queries by `webhookId`; the worker's bare-id read is a BullMQ job path, never request input |
 | 9 | Chain-depth guard (`X-CCP-Depth`) | **E** `workflows.spec.ts:159,224` (at-cap and below-cap) + **R** `worker.ts:440` |
 | 10 | Retention cleanup batched | **R** `MAX_BATCHES` loop — the unbounded `deleteMany` the predecessor fixed is gone |
