@@ -339,14 +339,14 @@ a checklist, not on however many findings happened to surface.
 | 20 | coexistence | 2 | R (adversarial, structural) | ✅ **2026-07-29** — quiet-ingest verified as a property of the code, not a flag; no defect |
 | 21 | **reports / analytics** *(NEW)* | 2 | R (adversarial, 11 invariants) + E + N (6) | ✅ **2026-07-29** — full checklist walked, 0 unmapped |
 | 22 | **webchat widget** *(NEW)* | 2 | R (adversarial) + E (2 e2e) | ✅ **2026-07-29** — public-surface boundary verified fail-closed; no defect |
-| 23 | tags / stages / fields / snippets / flags | 3 | | ☐ |
+| 23 | tags / stages / fields / snippets / flags | 3 | R (adversarial) + E | ✅ **2026-07-29** — tag-delete view scrub and the 300 caps verified; no defect |
 | 24 | notes | 3 | R (adversarial) | ✅ **2026-07-29** — clean; the visibility spread verified safe for a structural reason (scalar return shape) |
 | 25 | team-chat (+DMs) | 3 | R (adversarial, 11 doc invariants + mechanical tenancy scan) | ✅ **2026-07-29** — no defect; 5 satellites re-verified, 0 real violations |
 | 26 | ai-assistant | 3 | | ☐ |
 | 27 | admin / platform (superadmin) | 3 | | ☐ |
 | 28 | registration / invites | 3 | | ☐ |
 | 29 | common guards / pipes / filters | 3 | R (adversarial) + N | ✅ **2026-07-29** — RoleGuard flag-keyed; ScopeGuard's permissive default now backstopped by checker 8 |
-| 30 | api-keys lifecycle | 3 | | ☐ |
+| 30 | api-keys lifecycle | 3 | R (adversarial) + E | ✅ **2026-07-29** — rotate CAS closed the two-live-keys race; no defect |
 | 31 | **ops / health / deploy pipeline** *(NEW)* | 3 | R + N (4 tests) | ◐ `ops-snapshot` degradation covered + negative-tested; RISK-3 (`probeStuckBroadcasts` unbounded on the container healthcheck) OPEN; deploy pipeline not yet reviewed |
 
 ### Never-audited subsystems (Phase 1 triage targets, risk order)
@@ -725,6 +725,36 @@ sweep before starting the suite.
 ---
 
 ## Domain session notes
+
+### #23 catalog + #30 api-keys — ✅ CLOSED (2026-07-29)
+
+Both re-walked against the predecessor's recorded fixes; both still hold.
+
+**#30 api-keys**
+
+| Invariant | Evidence |
+|---|---|
+| Tokens are SHA-256 hashed, never stored recoverably | **R** `createHash("sha256")` |
+| Rotate is a CAS, so a double-click cannot leave TWO live keys | **R** `updateMany({ where: { id, workspaceId, revokedAt: null } })` then `if (claimed.count === 0)` — the loser 409s. The predecessor's MED (liveness read outside the transaction, no CAS, both requests revoking and both creating, one secret returned to a request nobody watched) is genuinely closed |
+| Revoke uses the same scoped `updateMany` | **R** — §18 letter, "not a bare-id update after a scoped read", stated in place |
+| Scopes are server-validated; no self-escalation | **E** `v1-parity.spec.ts` scope boundaries |
+| The plaintext is shown exactly once | **E** the secret-shown-once contract |
+
+**#23 catalog (tags / stages / fields / snippets / flags)**
+
+| Invariant | Evidence |
+|---|---|
+| Deleting a tag SCRUBS it from `InboxView.filters` | **R** the delete transaction re-reads views and rewrites their filter documents. A dangling tagId made a SHARED `tagMatch:"all"` view return an empty inbox **forever** — the predecessor's bcf656d8 |
+| Usage counts include saved views | **R** the same `inboxView.findMany` feeds `usage()` |
+| Catalogs are capped | **R** `MAX_TAGS_PER_WORKSPACE = 300`, `MAX_SNIPPETS_PER_WORKSPACE = 300` — these lists are unpaginated and every client refetches them on `team.catalog_changed`, and `tags:manage` defaults TRUE for agents |
+| Message-flag definitions and stages follow the same shape | **E** `message-flags.spec.ts`, `inbox-views.spec.ts` |
+
+**Edge themes:** ① the rotate CAS **is** ① for keys; the stage `isDefault` race
+reports itself rather than a bogus name collision · ② N/A · ③ **the tag-delete
+scrub IS ③** — the canonical mid-flight-deletion case in this codebase ·
+④ N/A · ⑤ N/A · ⑥ N/A · ⑦ the 300 caps · ⑧ `admin:settings` on catalog
+writes · ⑨ every catalog query is workspace-scoped · ⑩ N/A.
+
 
 ### #10 external `/v1` API + #29 common guards — ✅ CLOSED (2026-07-29)
 
