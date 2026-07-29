@@ -50,13 +50,17 @@ socket-room that references the dying entity.
 
 ## Phase 0 — Baseline (2026-07-29, HEAD `44d538e0`)
 
+**Gate status after this session's fixes — all four green, re-run end to end:**
+`pnpm run check` 0 errors / 7 checkers · vitest **827/827** + web **18/18** ·
+meta e2e **170/170** · multi-account e2e **42/42**.
+
 | Gate | Result |
 |---|---|
 | `pnpm run check` | ✅ **0 errors**, 28 warnings, 7/7 checkers green |
-| `pnpm test` — api vitest | ⚠️ **INTERMITTENT**: run 1 **812/813** (1 failed), runs 2+3 **813/813**. See Finding #0 |
+| `pnpm test` — api vitest | ⚠️→✅ **INTERMITTENT on arrival** (812/813, then 813/813 ×2 — Finding #0, root-caused and fixed). Now **827/827**, zero skipped under `BLOB_STORAGE_DRIVER=local` |
 | `pnpm test` — web vitest | ✅ 18/18 |
-| `pnpm test:e2e:meta` | ⛔→✅ **169/170** on arrival; the one failure was the `@pressure` harness, not the app — **170/170** after Finding #1 was fixed |
-| `pnpm test:e2e:multiaccount` | ⛔→✅ **37/38 on arrival**; the failure was a real HIGH — see Finding #2. **38/38** after the fix |
+| `pnpm test:e2e:meta` | ⛔→✅ **169/170** on arrival; the one failure was the `@pressure` harness, not the app — **170/170** after Finding #1 |
+| `pnpm test:e2e:multiaccount` | ⛔→✅ **37/38 on arrival**; the failure was a real HIGH — Finding #2. Now **42/42** (＋4 new reports-lens cases) |
 | `pnpm test:e2e` (main, dev stack, 537) | ⛔→✅ **534/537** on arrival; 1 env artifact + **2 stale specs asserting abandoned contracts** — see Finding #4. Green after |
 
 Note for anyone re-running: locally `pnpm test:e2e:meta` runs **170** tests, not
