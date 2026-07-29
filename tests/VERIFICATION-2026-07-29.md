@@ -149,7 +149,7 @@ in one workspace (temporary harness, since removed):
 | N | before (allocate in-tx) | after (allocate pre-tx) |
 |---|---|---|
 | 8 | 202 / 241 / 209 ms | **107 / 87 / 125 ms** |
-| 24 | 338 / 346 / 333 ms | **208 / 289 / 235 ms** |
+| 24 | notes | 3 | R (adversarial) | ✅ **2026-07-29** — clean; the visibility spread verified safe for a structural reason (scalar return shape) |
 
 ~2× at N=8 with no overlap between the two ranges. The absolute numbers are
 small because the box is idle; the win scales with how long each in-lock
@@ -338,7 +338,7 @@ a checklist, not on however many findings happened to surface.
 | 21 | **reports / analytics** *(NEW)* | 2 | R (adversarial, 11 invariants) + E + N (6) | ✅ **2026-07-29** — full checklist walked, 0 unmapped |
 | 22 | **webchat widget** *(NEW — never had a row)* | 2 | | ☐ |
 | 23 | tags / stages / fields / snippets / flags | 3 | | ☐ |
-| 24 | notes | 3 | | ☐ |
+| 24 | notes | 3 | R (adversarial) | ✅ **2026-07-29** — clean; the visibility spread verified safe for a structural reason (scalar return shape) |
 | 25 | team-chat (+DMs) | 3 | | ☐ |
 | 26 | ai-assistant | 3 | | ☐ |
 | 27 | admin / platform (superadmin) | 3 | | ☐ |
@@ -723,6 +723,34 @@ sweep before starting the suite.
 ---
 
 ## Domain session notes
+
+### #24 notes — ✅ CLOSED (2026-07-29)
+
+Small domain, re-walked rather than trusted. The predecessor recorded it as
+"CLEAN, zero findings"; that still holds at HEAD.
+
+| Invariant | Evidence |
+|---|---|
+| Visibility boundary on BOTH mutations — a restricted agent cannot note on a thread they can't see, and gets 404 not 403 | **R** `visibilityWhere(viewer)` on create (`notes.service.ts:34`) and delete (`:89`), the delete rooted through the `conversation` relation because `InternalNote` has no `workspaceId` |
+| Durable: the note and its event commit together | **R** `publishInTx` + `kickOutbox`, not fire-and-forget |
+| Body capped | **R** `z.string().trim().min(1).max(8000)` |
+| No edit route exists | **R** the controller exposes only `@Post()` and `@Delete(":id")` |
+
+**The spread is safe here, and for a STRUCTURAL reason worth writing down.**
+Both call sites apply visibility via object spread —
+`...(viewer ? visibilityWhere(viewer) : {})` — which is the exact shape that has
+defeated this codebase repeatedly (the inbox-view clobber, `directoryContactWhere`,
+and Finding #8 this session). It is safe *here* because `visibilityWhere`
+returns a single scalar key `{ assignedUserId?: string }`, not an `OR` node or a
+predicate array, so the only thing it could clobber is a sibling
+`assignedUserId` — which neither site has. The danger in the other three cases
+came from the RETURN SHAPE, not from spreading as such. Checked, not assumed.
+
+**Edge themes:** ① N/A · ② the event is outbox-delivered, so at-least-once ·
+③ delete on a vanished note 404s · ④ N/A · ⑤ N/A · ⑥ `min(1)` rejects an
+empty body · ⑦ `max(8000)` · ⑧ covered · ⑨ workspace-scoped through the
+conversation · ⑩ N/A.
+
 
 ### #3 event bus / outbox — ✅ CLOSED (2026-07-29)
 
