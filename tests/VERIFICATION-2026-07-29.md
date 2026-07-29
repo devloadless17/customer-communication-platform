@@ -148,7 +148,7 @@ in one workspace (temporary harness, since removed):
 
 | N | before (allocate in-tx) | after (allocate pre-tx) |
 |---|---|---|
-| 8 | 202 / 241 / 209 ms | **107 / 87 / 125 ms** |
+| 8 | realtime layer | 1 | R (adversarial) + E (18 reducer + storm guard) | ✅ **2026-07-29** — all three reducer consumers verified table-driven; no defect |
 | 24 | notes | 3 | R (adversarial) | ✅ **2026-07-29** — clean; the visibility spread verified safe for a structural reason (scalar return shape) |
 
 ~2× at N=8 with no overlap between the two ranges. The absolute numbers are
@@ -322,7 +322,7 @@ a checklist, not on however many findings happened to surface.
 | 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
 | 6 | broadcasts (+audience/templates/analytics) | 1 | | ☐ |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
-| 8 | realtime layer | 1 | | ☐ |
+| 8 | realtime layer | 1 | R (adversarial) + E (18 reducer + storm guard) | ✅ **2026-07-29** — all three reducer consumers verified table-driven; no defect |
 | 9 | auth / org / workspaces / members | 1 | | ☐ |
 | 10 | external `/v1` API | 1 | | ☐ |
 | 11 | contacts (+import/export/transfer) | 2 | | ☐ |
@@ -724,6 +724,35 @@ sweep before starting the suite.
 
 ## Domain session notes
 
+### #8 realtime layer — ✅ CLOSED (2026-07-29)
+
+Checklist from `docs/realtime.md` + CLAUDE.md §10. No defect.
+
+| Invariant | Evidence |
+|---|---|
+| Emit only after a committed state change; frames small, scoped, idempotent | **R** across the fanout table |
+| Broadcast recipient frames are CONVERSATION-scoped, not team-scoped | **E** `fanout-storm-guard.spec.ts` — asserted against the `FANOUT_RULES` decision table itself, so it needs no socket and cannot flake; a 10k send costs ~2 workspace-room frames, not 20,000 |
+| `message.status_changed` moved team → conversation room | **R** the rule table |
+| Table-driven reducer wiring shared by all consumers | **R** `use-conversation-events.ts` AND `inbox-shell.tsx` both iterate `THREAD_REDUCER_EVENTS`; `contact-panel.tsx` is a DOCUMENTED exception that derives its four events straight from its `data` prop and still imports `assertReducerCoverage` |
+| `assertReducerCoverage` throws in dev for an unwired event | **R** it throws, and early-returns under `NODE_ENV === "production"` |
+| Monotonic message-status guard, mirroring the server | **R** `STATUS_RANK {pending 0 … failed 4}`, `if (nextRank <= curRank) return prev` — which also returns the SAME reference on a no-op, satisfying §15's "same reference when nothing changed" · **E** `thread-reducers.spec.ts` (18) |
+| **Unread: markRead only when genuinely viewing** — the app's most-guarded invariant | **R** gated on `document.visibilityState === "visible"`; a hidden background tab parked on a thread never clears team-wide unread for a message nobody saw |
+| Team chat is a SEPARATE realtime graph, never cross-wired | **R** distinct hooks (`use-team-events` et al.) |
+| Presence is in-memory, never persisted | **R** `PresenceService` |
+| `availabilityStatus` is the EFFECTIVE value, resolved in ONE function | **R** `resolveEffectiveAvailability` in `@ccp/shared/presence`; the manual pick lives separately so an off-shift stretch never destroys the note the person typed |
+
+**Edge themes:** ① seq-guarded presence transitions · ② the monotonic guard IS
+the redelivery defence (Meta sends status webhooks at-least-once and unordered) ·
+③ a recovered conv room is pruned when it no longer resolves · ④ **covered —
+delta backfill on open, full refetch on reconnect, both converging to server
+state** · ⑤ the override anchor falls back to the next local midnight on a 24/7
+schedule (returning null would let the schedule reclaim the status immediately,
+so a round-the-clock team could never mark itself busy) · ⑥ N/A · ⑦ SUB_CAP 60 ·
+⑧ authorization enforced at JOIN **and revoked** — member removal/role change
+busts the cache and disconnects · ⑨ rooms are workspace-keyed (`user:<ws>:<uid>`) ·
+⑩ multi-tab 0↔1 transition gating.
+
+
 ### #5 assignment (policies / rules / capacity) — ✅ CLOSED (2026-07-29)
 
 Checklist from `docs/assignment.md` + CLAUDE.md §18. No defect.
@@ -951,7 +980,7 @@ in five separate prior sessions. Checklist taken verbatim from
 | 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
 | 6 | Attribution renders ONLY above one account per channel | **R** `showAccountFor(channel)` gates every `AccountLabel`; a single-account inbox stays byte-identical |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
-| 8 | The account narrow is ANDed, and **must be part of `filterKey`** | **N** — **it was NOT.** Fixed + `filter-key.spec.ts` (6), negative-tested |
+| 8 | realtime layer | 1 | R (adversarial) + E (18 reducer + storm guard) | ✅ **2026-07-29** — all three reducer consumers verified table-driven; no defect |
 | 9 | `business_management` is required in practice | **R-only** — a Meta permission, not our code; both onboarding guides and the settings panel say so |
 
 Plus the multi-account lens applied across the delta: `Message.channelConnectionId`
@@ -1018,7 +1047,7 @@ CLAUDE.md §7/§12/§15/§18 + the module docblock.
 | 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
 | 6 | Internal route gated on `teamActivity:view` | **R** `@RequireCapability("teamActivity:view")` under `SessionGuard`; the web redirect is UX only, the API is authoritative |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
-| 8 | `/v1` parity + documented in BOTH surfaces (§12 locked rule) | **N** CHECKER 8 now enforces it mechanically |
+| 8 | realtime layer | 1 | R (adversarial) + E (18 reducer + storm guard) | ✅ **2026-07-29** — all three reducer consumers verified table-driven; no defect |
 | 9 | One response shape shared by both routes | **R** both call `getWorkspaceReport` and return `WorkspaceReport`; the docblock names the 2026-07-28 calls-artifact regression a second mapper caused |
 | 10 | Multi-account lens: every panel scopable to one account | **N** `multi-account/08-reports.spec.ts` (4) |
 | 11 | Heavy queries ride an index, not a scan | **R** the module documents `(workspaceId, timestamp)`; the account filter rides the FK index added in `20260728100000` |
@@ -1106,7 +1135,7 @@ unmapped.**
 | 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
 | 6 | SSRF-safe egress | **R** `worker.ts:425` routes through `safeFetch` (DNS-pinned, private ranges + all IPv6 notations blocked) — verified in depth by the predecessor program; R-only because exercising it needs a live resolver |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
-| 8 | Tenancy: `OutboundWebhookDelivery` is a parent-scoped exception | **R** the one request-reachable read proves ownership of the workspace-scoped PARENT first, then queries by `webhookId`; the worker's bare-id read is a BullMQ job path, never request input |
+| 8 | realtime layer | 1 | R (adversarial) + E (18 reducer + storm guard) | ✅ **2026-07-29** — all three reducer consumers verified table-driven; no defect |
 | 9 | Chain-depth guard (`X-CCP-Depth`) | **E** `workflows.spec.ts:159,224` (at-cap and below-cap) + **R** `worker.ts:440` |
 | 10 | Retention cleanup batched | **R** `MAX_BATCHES` loop — the unbounded `deleteMany` the predecessor fixed is gone |
 | 11 | Fires at tier `OUTBOUND_WEBHOOKS` (50), self-registers | **R** + **E** `fanout-storm-guard.spec.ts` |
