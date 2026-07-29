@@ -326,7 +326,7 @@ a checklist, not on however many findings happened to surface.
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 | 8 | realtime layer | 1 | R (adversarial) + E (18 reducer + storm guard) | ✅ **2026-07-29** — all three reducer consumers verified table-driven; no defect |
 | 9 | auth / org / workspaces / members | 1 | R (adversarial) + E | ✅ **2026-07-29** — one resolver with exactly the three §18 callers; all guards FOR UPDATE; no defect |
-| 10 | external `/v1` API | 1 | | ☐ |
+| 10 | external `/v1` API | 1 | R (adversarial, all 163 routes) + E + N (checker 8) | ✅ **2026-07-29** — Finding #9: scope-gating now mechanically enforced |
 | 11 | contacts (+import/export/transfer) | 2 | R (adversarial) + E (19 e2e + 72-assertion smoke + 100k load) | ✅ **2026-07-29** — no defect; format abstraction made literally true |
 | 12 | customers / identity | 2 | R (adversarial, 7 doc rules + §58) + E | ✅ **2026-07-29** — all seven hold, incl. the both-directions ephemeral exclusion; no defect. Merge-audit gap carried forward (doc-declared) |
 | 13 | inbox-views | 2 | R (adversarial, 6 doc invariants) + E (31) | ✅ **2026-07-29** — all six already covered; no defect, one stale comment fixed |
@@ -345,7 +345,7 @@ a checklist, not on however many findings happened to surface.
 | 26 | ai-assistant | 3 | | ☐ |
 | 27 | admin / platform (superadmin) | 3 | | ☐ |
 | 28 | registration / invites | 3 | | ☐ |
-| 29 | common guards / pipes / filters | 3 | | ☐ |
+| 29 | common guards / pipes / filters | 3 | R (adversarial) + N | ✅ **2026-07-29** — RoleGuard flag-keyed; ScopeGuard's permissive default now backstopped by checker 8 |
 | 30 | api-keys lifecycle | 3 | | ☐ |
 | 31 | **ops / health / deploy pipeline** *(NEW)* | 3 | R + N (4 tests) | ◐ `ops-snapshot` degradation covered + negative-tested; RISK-3 (`probeStuckBroadcasts` unbounded on the container healthcheck) OPEN; deploy pipeline not yet reviewed |
 
@@ -725,6 +725,52 @@ sweep before starting the suite.
 ---
 
 ## Domain session notes
+
+### #10 external `/v1` API + #29 common guards — ✅ CLOSED (2026-07-29)
+
+Closed together because the finding spans both: the guard layer is what makes
+`/v1` safe, and the one structural hole was in how they meet.
+
+| Invariant | Evidence |
+|---|---|
+| **Every `/v1` route carries `@RequireScope`** | **N** — all **163** verified, and now MECHANICALLY ENFORCED (checker 8) |
+| `ScopeGuard` refuses a scope-gated route without a key | **R** `no_credentials` |
+| `RoleGuard` keys superAdmin on the FLAG, never the collapsed role | **R** — `resolveSession` resolves both a platform superAdmin and an ordinary org admin to `"admin"`, so a role check there would hand every org admin the platform console. It checks `session.isSuperAdmin` |
+| `@RequireOrgRole("owner")` is strict, with **no** superAdmin bypass | **R** stated at the decorator |
+| `workspaceId` comes only from the key | **R** `auth.workspaceId` throughout |
+| Zod on every route; keyset pagination; hashed key tokens | **E** carried + `v1-parity.spec.ts` |
+| `/v1` writes publish the same domain events as the UI | **R** they call the same services |
+| Documented in BOTH surfaces | **N** checker 8 |
+
+### Finding #9 — `ScopeGuard` is permissive by default, and nothing enforced the decorator
+
+`ScopeGuard.canActivate` opens with `if (!required) return true`. So a `/v1`
+route added **without** `@RequireScope` is reachable by ANY valid API key,
+regardless of its scopes — a key scoped to `read:contacts` could call it.
+
+All 163 routes do carry it today; I verified every one. But that invariant was
+held by nothing except someone re-counting by hand, on a controller that grew
+from 111 routes to 163 during the very window this program is auditing. The
+predecessor's evidence was "all 111 routes carry `@RequireScope`" — a true
+statement with a shelf life.
+
+**Now enforced**: checker 8 asserts it per route, in `pnpm run check` and CI.
+NEGATIVE-TESTED in isolation — removing one `@RequireScope("read:contacts")`
+decorator (a scope used 11× elsewhere, so the scope set is unchanged and only
+this assertion can fire) exits 1 naming the route.
+
+**And my detector was wrong first — the 9th time in this program.** The initial
+scan reported **78 of 163** routes undecorated. It searched only BACKWARD from
+the verb, and this controller places `@RequireScope` AFTER it. A 78-route
+"authorization hole" would have been the most alarming finding of the session
+and was entirely an artifact of my own regex. The shipped version searches the
+whole decorator block, from the previous verb to the start of the method body.
+
+**Edge themes (guards):** ① N/A · ② N/A · ③ N/A · ④ N/A · ⑤ N/A ·
+⑥ N/A · ⑦ the `@RateLimit` ceiling is per-bucket AND global · ⑧ **the
+domain's core** · ⑨ `SessionGuard`'s cache is keyed `(userId, workspaceId)` ·
+⑩ N/A.
+
 
 ### #6 broadcasts (+ audience / templates / analytics) — ✅ CLOSED (2026-07-29)
 
@@ -1272,7 +1318,7 @@ CLAUDE.md §7/§12/§15/§18 + the module docblock.
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 | 8 | realtime layer | 1 | R (adversarial) + E (18 reducer + storm guard) | ✅ **2026-07-29** — all three reducer consumers verified table-driven; no defect |
 | 9 | auth / org / workspaces / members | 1 | R (adversarial) + E | ✅ **2026-07-29** — one resolver with exactly the three §18 callers; all guards FOR UPDATE; no defect |
-| 10 | Multi-account lens: every panel scopable to one account | **N** `multi-account/08-reports.spec.ts` (4) |
+| 10 | external `/v1` API | 1 | R (adversarial, all 163 routes) + E + N (checker 8) | ✅ **2026-07-29** — Finding #9: scope-gating now mechanically enforced |
 | 11 | contacts (+import/export/transfer) | 2 | R (adversarial) + E (19 e2e + 72-assertion smoke + 100k load) | ✅ **2026-07-29** — no defect; format abstraction made literally true |
 
 **Edge themes:** ① N/A (read-only) · ② N/A · ③ an agent deleted mid-range simply
@@ -1360,7 +1406,7 @@ unmapped.**
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 | 8 | realtime layer | 1 | R (adversarial) + E (18 reducer + storm guard) | ✅ **2026-07-29** — all three reducer consumers verified table-driven; no defect |
 | 9 | auth / org / workspaces / members | 1 | R (adversarial) + E | ✅ **2026-07-29** — one resolver with exactly the three §18 callers; all guards FOR UPDATE; no defect |
-| 10 | Retention cleanup batched | **R** `MAX_BATCHES` loop — the unbounded `deleteMany` the predecessor fixed is gone |
+| 10 | external `/v1` API | 1 | R (adversarial, all 163 routes) + E + N (checker 8) | ✅ **2026-07-29** — Finding #9: scope-gating now mechanically enforced |
 | 11 | contacts (+import/export/transfer) | 2 | R (adversarial) + E (19 e2e + 72-assertion smoke + 100k load) | ✅ **2026-07-29** — no defect; format abstraction made literally true |
 | 12 | customers / identity | 2 | R (adversarial, 7 doc rules + §58) + E | ✅ **2026-07-29** — all seven hold, incl. the both-directions ephemeral exclusion; no defect. Merge-audit gap carried forward (doc-declared) |
 | 13 | inbox-views | 2 | R (adversarial, 6 doc invariants) + E (31) | ✅ **2026-07-29** — all six already covered; no defect, one stale comment fixed |

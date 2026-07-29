@@ -79,6 +79,40 @@ function documented(path, text) {
   ].some((re) => re.test(text));
 }
 
+
+/**
+ * Every route must carry `@RequireScope`.
+ *
+ * ScopeGuard is permissive by DEFAULT — `if (!required) return true` — so a
+ * route added without the decorator is reachable by ANY valid API key,
+ * whatever its scopes. Nothing enforced this; the invariant held only because
+ * someone re-counted by hand. All 163 routes carried it on 2026-07-29; this is
+ * what keeps that true.
+ *
+ * The decorator sits AFTER the verb in this controller, so the search window
+ * runs from the previous verb to the start of the method body. (A first pass
+ * that looked only backwards reported 78 false positives.)
+ */
+function routesMissingScope(src) {
+  const lines = src.split("\n");
+  const verb = /@(Get|Post|Patch|Put|Delete)\(\s*"([^"]*)"\s*\)/;
+  const body = /^\s*(public |private |protected )?(async )?[A-Za-z_]\w*\s*\(/;
+  const verbLines = [];
+  lines.forEach((l, i) => { if (verb.test(l)) verbLines.push(i); });
+  const missing = [];
+  verbLines.forEach((i, idx) => {
+    const m = verb.exec(lines[i]);
+    const start = idx > 0 ? verbLines[idx - 1] + 1 : 0;
+    let end = i;
+    while (end < lines.length && !body.test(lines[end]) && end - i <= 25) end++;
+    const block = lines.slice(start, end + 1).join("\n");
+    if (!block.includes("@RequireScope(")) {
+      missing.push(`${m[1].toUpperCase()} /v1/${m[2]} (line ${i + 1})`);
+    }
+  });
+  return missing;
+}
+
 const controller = read(CONTROLLER);
 const routes = routesFrom(controller);
 const scopes = [...new Set([...controller.matchAll(/@RequireScope\("([^"]+)"\)/g)].map((m) => m[1]))].sort();
@@ -128,6 +162,14 @@ for (const { label, path } of SURFACES) {
   }
 }
 
+
+const missingScope = routesMissingScope(controller);
+if (missingScope.length) {
+  failures += missingScope.length;
+  console.error(`✖ ${missingScope.length} /v1 route(s) with NO @RequireScope — reachable by any valid key:`);
+  for (const r of missingScope) console.error(`    ${r}`);
+}
+
 if (failures) {
   console.error(
     `\n  CLAUDE.md §12 makes /v1 doc parity a LOCKED RULE. Document the route in\n` +
@@ -137,5 +179,5 @@ if (failures) {
 }
 
 console.log(
-  `✓ v1-docs check passed (${routes.length} routes, ${scopes.length} scopes, documented in both surfaces)`,
+  `✓ v1-docs check passed (${routes.length} routes, ${scopes.length} scopes, all @RequireScope-gated and documented in both surfaces)`,
 );
