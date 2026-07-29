@@ -335,7 +335,7 @@ a checklist, not on however many findings happened to surface.
 | 18 | queues / workers | 2 | | ☐ |
 | 19 | sweepers | 2 | R + N (6 tests) | ◐ `webhook-subscription-health` covered + negative-tested both directions; RISK-1/RISK-2 recorded; the other ~30 sweepers not re-walked |
 | 20 | coexistence | 2 | | ☐ |
-| 21 | **reports / analytics** *(NEW)* | 2 | R (adversarial) + E (2 unit) + N (4 multi-account e2e) | ◐ tz bucketing VERIFIED correct (double `AT TIME ZONE`); `accountId` ownership-checked and NEGATIVE-TESTED end to end; agent-permission + UI surface not yet covered |
+| 21 | **reports / analytics** *(NEW)* | 2 | R (adversarial, 11 invariants) + E + N (6) | ✅ **2026-07-29** — full checklist walked, 0 unmapped |
 | 22 | **webchat widget** *(NEW — never had a row)* | 2 | | ☐ |
 | 23 | tags / stages / fields / snippets / flags | 3 | | ☐ |
 | 24 | notes | 3 | | ☐ |
@@ -723,6 +723,45 @@ sweep before starting the suite.
 ---
 
 ## Domain session notes
+
+### #21 reports / analytics — ✅ CLOSED (2026-07-29)
+
+A domain that never had a matrix row: it shipped in the unaudited delta with 2
+unit specs, no e2e, no UI spec and no `/v1` parity spec. Checklist from
+CLAUDE.md §7/§12/§15/§18 + the module docblock.
+
+| # | Invariant | Evidence |
+|---|---|---|
+| 1 | `workspaceId` in EVERY query | **R** all ten query functions verified individually |
+| 2 | `accountId` proved to belong to THIS workspace before it reaches nine raw predicates | **R** + **N** `reports-accounts.spec.ts` — an unknown id is REJECTED, not silently emptied |
+| 3 | Daily buckets flip at the caller's midnight, not UTC's (theme ⑤) | **E** `reports-overview.spec.ts` (`Pacific/Auckland`) + **R** the double `AT TIME ZONE` |
+| 4 | Range capped (`MAX_RANGE_DAYS = 366`) → `400 invalid_range` | **E** `reports-overview.spec.ts` |
+| 5 | `tz` never interpolated — bound parameter, shape-validated first | **R** `reports.ts:87` + `Prisma.sql` binding |
+| 6 | Internal route gated on `teamActivity:view` | **R** `@RequireCapability("teamActivity:view")` under `SessionGuard`; the web redirect is UX only, the API is authoritative |
+| 7 | `/v1` twin gated on `read:reports`, workspace from the KEY | **R** `@RequireScope("read:reports")`, `auth.workspaceId` — never from input (§18 letter) |
+| 8 | `/v1` parity + documented in BOTH surfaces (§12 locked rule) | **N** CHECKER 8 now enforces it mechanically |
+| 9 | One response shape shared by both routes | **R** both call `getWorkspaceReport` and return `WorkspaceReport`; the docblock names the 2026-07-28 calls-artifact regression a second mapper caused |
+| 10 | Multi-account lens: every panel scopable to one account | **N** `multi-account/08-reports.spec.ts` (4) |
+| 11 | Heavy queries ride an index, not a scan | **R** the module documents `(workspaceId, timestamp)`; the account filter rides the FK index added in `20260728100000` |
+
+**Edge themes:** ① N/A (read-only) · ② N/A · ③ an agent deleted mid-range simply
+stops matching · ④ N/A · ⑤ **covered — the highest-risk detail in the domain**
+(`Message.timestamp` is a naive timestamp holding UTC, so a single `AT TIME
+ZONE` would REINTERPRET rather than convert; the code attaches UTC first) ·
+⑥ empty range → zeros, not a crash · ⑦ 366-day cap · ⑧ covered (6, 7) ·
+⑨ covered (1, 2) · ⑩ N/A.
+
+**A third false positive from my own tooling, caught by reading.** My scoping
+detector reported `querySla` as having a raw query with no `workspaceId`. It
+does not — the detector counted the NESTED `Prisma.sql` fragment (the
+account-filter `EXISTS` sub-clause) as an independent query. The outer statement
+is scoped, and the fragment is transitively safe because it joins on
+`t."conversationId"` of an already-scoped row. Three of my own detectors have
+now produced a wrong answer in this program (a missing-index claim, a
+prose-matching doc probe, and this); every one was caught by reading the code
+instead of trusting the grep. Worth stating plainly, because the same instinct
+is what the ledger keeps demanding of the app's own checkers.
+
 
 ### §12 /v1 DOC PARITY — 31 routes were undocumented; now CHECKER 8 (2026-07-29)
 
