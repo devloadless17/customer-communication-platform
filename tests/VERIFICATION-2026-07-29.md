@@ -322,7 +322,7 @@ a checklist, not on however many findings happened to surface.
 | 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
 | 4 | workflows (~22 step types) | 1 | | ☐ |
 | 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
-| 6 | broadcasts (+audience/templates/analytics) | 1 | | ☐ |
+| 6 | broadcasts (+audience/templates/analytics) | 1 | R (adversarial) + E (10 meta specs + storm guard) | ✅ **2026-07-29** — NULL rules, irreversible-enable scoping and keyset paging all verified; no defect |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 | 8 | realtime layer | 1 | R (adversarial) + E (18 reducer + storm guard) | ✅ **2026-07-29** — all three reducer consumers verified table-driven; no defect |
 | 9 | auth / org / workspaces / members | 1 | R (adversarial) + E | ✅ **2026-07-29** — one resolver with exactly the three §18 callers; all guards FOR UPDATE; no defect |
@@ -726,6 +726,40 @@ sweep before starting the suite.
 
 ## Domain session notes
 
+### #6 broadcasts (+ audience / templates / analytics) — ✅ CLOSED (2026-07-29)
+
+Checklist from `docs/campaign-analytics.md` + CLAUDE.md §16/§18. No defect.
+
+| Invariant | Evidence |
+|---|---|
+| Two sources of truth reported side by side, never blended | **R** the doc's whole framing; the report keeps them distinct |
+| **A later NULL never overwrites a captured value** | **R** `COALESCE(EXCLUDED.x, existing.x)` on the upsert — and the comment records the subtler half: within a window Meta RESETS these to zero, so a plain COALESCE would let a late ZERO win, which is handled by mapping the reset to null first |
+| Enabling insights is irreversible, so it is its own endpoint, **not exposed on `/v1`** | **R** `/v1` carries only `GET whatsapp/insights/status` — a READ. The irreversible `POST /api/workspace/whatsapp/insights/enable` is in-app only, and refuses when already enabled (`alreadyEnabled: true`), stamping `insightsEnabledAt` so "why is there no data before March" has a dated answer |
+| The send-rate bucket is keyed on the PROVIDER's account id | **R** `accountKey` = WhatsApp `phoneNumberId` — the grain Meta itself throttles on, not our row id |
+| **A 100k broadcast is never loaded whole** | **R** recipients are cursor-paged in `runBroadcast` (~PAGE_SIZE rows resident) |
+| §18: broadcasts never open tickets | **R** — proven structurally in #7: `broadcast-runner.ts` has **zero** references to `commitOutboundSend` |
+| §18: audit and workflow never subscribe to `broadcast.*` | **R** — proven against the registries in #3 |
+| Per-recipient frames are conversation-scoped, not team-scoped | **E** `fanout-storm-guard.spec.ts` — a 10k send costs ~2 workspace-room frames |
+| The pacing/limit gate reads the SENDING account, never the channel default | **R** — verified in #14: both `getSendConfig` and `getWhatsappHealth` take `broadcast.channelConnectionId` |
+
+**A claim I raised and withdrew — by reading the section header.** I flagged the
+doc's *"it is not exposed on `/v1` at all"* against the existing
+`POST /v1/broadcasts/:id/analytics/refresh`. They are different actions: that
+bullet sits under **"Enabling it is irreversible"** and refers to the one-time
+`is_enabled_for_insights` write, which genuinely is in-app only. The refresh is
+a separate, repeatable pull and is correctly on `/v1`. Eighth withdrawn claim in
+this program; the tell was reading a bullet without its heading.
+
+**Edge themes:** ① the recipient ledger makes a send idempotent across a restart ·
+② redelivered status webhooks ride the monotonic delivery ladder ·
+③ a deleted workspace mid-flight is a documented LOW · ④ N/A ·
+⑤ **UTC-day normalisation on the analytics rollup** · ⑥ an empty audience is
+refused before it spends anything · ⑦ **100k keyset-paged, lanes derived from
+the number's Meta tier** · ⑧ `write:broadcasts` deliberately not implied by
+`read:broadcasts` — the most dangerous scope in the API · ⑨ workspace-scoped ·
+⑩ paused campaigns resume to `scheduled`, not to an immediate send.
+
+
 ### #9 auth / org / workspaces / members — ✅ CLOSED (2026-07-29)
 
 Checklist from `docs/workspaces.md` + CLAUDE.md §18. No defect.
@@ -1084,7 +1118,7 @@ safe", plus the §58 composition warning. **All seven hold.** No defect found.
 | 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
 | 4 | Merge is non-destructive | **R** zero `contact.delete*` / `message.delete*` in `customers.service.ts`; the only delete is empty-customer cleanup, which the doc sanctions |
 | 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
-| 6 | ONE writer | **R** `resolveCustomerId` called only from ingest (×3), ingest-call and the drift sweeper — never a controller or provider |
+| 6 | broadcasts (+audience/templates/analytics) | 1 | R (adversarial) + E (10 meta specs + storm guard) | ✅ **2026-07-29** — NULL rules, irreversible-enable scoping and keyset paging all verified; no defect |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 
 **Rule 7 is the subtle one and it is genuinely implemented.** Blocking only the
@@ -1167,7 +1201,7 @@ in five separate prior sessions. Checklist taken verbatim from
 | 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
 | 4 | The account is re-stamped on every inbound; the widget binding is **sticky** | **R** `ingest.ts:2217-2223` (guarded so the common case writes nothing, and explicitly *"unlike webchat's sticky webchatWidgetId"*) + **E** `webhook-account-attribution.spec.ts`, `multi-account/01` |
 | 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
-| 6 | Attribution renders ONLY above one account per channel | **R** `showAccountFor(channel)` gates every `AccountLabel`; a single-account inbox stays byte-identical |
+| 6 | broadcasts (+audience/templates/analytics) | 1 | R (adversarial) + E (10 meta specs + storm guard) | ✅ **2026-07-29** — NULL rules, irreversible-enable scoping and keyset paging all verified; no defect |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 | 8 | realtime layer | 1 | R (adversarial) + E (18 reducer + storm guard) | ✅ **2026-07-29** — all three reducer consumers verified table-driven; no defect |
 | 9 | auth / org / workspaces / members | 1 | R (adversarial) + E | ✅ **2026-07-29** — one resolver with exactly the three §18 callers; all guards FOR UPDATE; no defect |
@@ -1234,7 +1268,7 @@ CLAUDE.md §7/§12/§15/§18 + the module docblock.
 | 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
 | 4 | Range capped (`MAX_RANGE_DAYS = 366`) → `400 invalid_range` | **E** `reports-overview.spec.ts` |
 | 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
-| 6 | Internal route gated on `teamActivity:view` | **R** `@RequireCapability("teamActivity:view")` under `SessionGuard`; the web redirect is UX only, the API is authoritative |
+| 6 | broadcasts (+audience/templates/analytics) | 1 | R (adversarial) + E (10 meta specs + storm guard) | ✅ **2026-07-29** — NULL rules, irreversible-enable scoping and keyset paging all verified; no defect |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 | 8 | realtime layer | 1 | R (adversarial) + E (18 reducer + storm guard) | ✅ **2026-07-29** — all three reducer consumers verified table-driven; no defect |
 | 9 | auth / org / workspaces / members | 1 | R (adversarial) + E | ✅ **2026-07-29** — one resolver with exactly the three §18 callers; all guards FOR UPDATE; no defect |
@@ -1322,7 +1356,7 @@ unmapped.**
 | 3 | event bus / outbox | 1 | R (adversarial, registries not comments) + E | ✅ **2026-07-29** — tiers, single-critical boot assertion and the §18 broadcast exclusion all verified from both sides; no defect |
 | 4 | Auto-disable after repeated failure | **R** `worker.ts` `consecutiveFailures` increment + reset-on-success |
 | 5 | assignment (policies/rules/capacity) | 1 | R (adversarial) + E | ✅ **2026-07-29** — §18 enforcement verified structural (CAS, not the pre-read); no defect |
-| 6 | SSRF-safe egress | **R** `worker.ts:425` routes through `safeFetch` (DNS-pinned, private ranges + all IPv6 notations blocked) — verified in depth by the predecessor program; R-only because exercising it needs a live resolver |
+| 6 | broadcasts (+audience/templates/analytics) | 1 | R (adversarial) + E (10 meta specs + storm guard) | ✅ **2026-07-29** — NULL rules, irreversible-enable scoping and keyset paging all verified; no defect |
 | 7 | tickets (+SLA+numbering+escalation) | 1 | R (adversarial) + E (28+) + N (burnt-number pin) | ✅ **2026-07-29** — Finding #0 fixed + measured; 2 product decisions carried forward |
 | 8 | realtime layer | 1 | R (adversarial) + E (18 reducer + storm guard) | ✅ **2026-07-29** — all three reducer consumers verified table-driven; no defect |
 | 9 | auth / org / workspaces / members | 1 | R (adversarial) + E | ✅ **2026-07-29** — one resolver with exactly the three §18 callers; all guards FOR UPDATE; no defect |
