@@ -688,25 +688,45 @@ bindings**. The SQL is careful — it adopts only where the workspace has exactl
 ONE distinct real WABA, and never deletes a `''` duplicate carrying
 `variableBindings`, which is the one thing a Meta re-sync cannot give back.
 
-**RISK-4 (characterized, cannot be confirmed locally).** That preservation rule
-has a tail: a `''` row WITH bindings is kept by step 1 and then **skipped by
-step 2's unique-key guard**, so it retains `wabaId = ''` permanently — which is
-exactly the state the migration exists to eliminate, and the state in which
-`refreshTemplateAnalytics` refuses and Meta's ~7-day analytics horizon passes
-uncaptured. The workspace is also left showing two templates of the same
-name/language. The better ending is to COPY the bindings onto the real row and
-then drop the legacy one; preserving the row preserves the defect with it. Zero
-such rows exist in dev, so this is unexercised here. **Operator check for
-production:**
+**RISK-4 — I OVERSTATED IT, and then fixed the real thing (2026-07-29).**
 
-```sql
-SELECT count(*) FROM "MessageTemplate"
-WHERE "wabaId" = '' AND "variableBindings" IS NOT NULL
-  AND "variableBindings"::text NOT IN ('{}', 'null');
-```
+What I originally wrote: a `''` row WITH bindings is kept by step 1 and skipped
+by step 2's unique-key guard, so it keeps `wabaId = ''` permanently — *"which is
+exactly the state in which `refreshTemplateAnalytics` refuses and Meta's ~7-day
+analytics horizon passes uncaptured"* — and I asked the maintainer to run SQL
+against production.
 
-Non-zero means those templates' analytics are permanently dark and want a
-follow-up migration.
+**That analytics claim was wrong.** `refreshTemplateAnalytics` only throws
+`template_waba_unresolved` when the workspace has **more than one distinct
+WABA**. A stranded row can only exist in a workspace that had exactly ONE WABA
+when `20260728120000` ran — that was its adoption condition — and in a
+single-WABA workspace the resolver falls through to `active.length === 1` and
+works fine. So analytics are NOT dark today; they would only go dark if that
+workspace later connects a second number.
+
+**The real harm is different, immediate, and was worth fixing:** the stranded row
+holds the ONLY copy of `variableBindings` — the one thing a Meta re-sync cannot
+give back — while the LIVE row under the real WABA, the one the catalog sync
+maintains and the composer sends from, has none. The workspace also shows the
+template twice. *Preserving the row preserved the defect with it.*
+
+**FIXED** by migration `20260729120000_merge_stranded_template_bindings`: copy
+the bindings onto the live row (only where the live row has none, so a mapping
+someone configured since is never clobbered), then drop the orphan. A `''` row
+with no live counterpart is LEFT ALONE — it still IS the template, and adopts
+its `wabaId` on the next catalog sync.
+
+**No SQL for the maintainer to run.** The migration is idempotent and a no-op
+where the state doesn't exist (dev: 0 matching rows), so it is safe to ship
+regardless of what production holds.
+
+**Verified by constructing the state**, since no reachable database contains it:
+`apps/api/test/stranded-template-bindings.spec.ts` (5) builds the stranded pair
+and runs **the migration's own SQL, read from the file** rather than retyped —
+so a passing spec cannot be testing a different statement from the one that
+ships. NEGATIVE-TESTED twice: dropping the "live row has none" guard fails the
+no-clobber case; making the DELETE unconditional fails four of the five,
+including the sole-copy case it would destroy.
 
 ### `lib/analytics/reports.ts` — VERIFIED CORRECT on its highest-risk detail
 
