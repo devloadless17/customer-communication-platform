@@ -76,6 +76,15 @@ What that means for this ledger, stated plainly:
    different stack) and `CALLS_SKIP_PREFLIGHT=0`
 6. Canary intact after 3–5 (automatic — the run fails if not)
 
+> **On a memory-constrained box, step 5 cannot run in one pass.** Measured
+> 2026-07-29 on 5.9 GB: the kernel OOM-kills the web dev server mid-run
+> (`exit 137`), which also truncates `.next` and makes routes that EXIST answer
+> 404. A full run reported **91 failures, every one environmental**. Use
+> `pnpm test:e2e:batched` — it caps the dev heaps, runs in chunks, restarts the
+> stack between them, and warms the routes first (`/reports` alone takes 24.5 s
+> to compile cold, against sub-1.2 s for every other route). Prefer plain
+> `pnpm test:e2e` on a machine with headroom.
+
 ---
 
 ## Phase 0 — Baseline (2026-07-29, HEAD `44d538e0`)
