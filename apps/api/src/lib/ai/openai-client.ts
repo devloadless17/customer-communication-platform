@@ -159,6 +159,8 @@ export async function transcribe(opts: {
    * pick a model that returns them (see `callSttModel`).
    */
   segments?: boolean;
+  /** Decoding temperature; used to break a repetition loop on a re-decode. */
+  temperature?: number;
 }): Promise<{ text: string; language?: string; segments?: TranscriptionSegment[] }> {
   const { client, toFile } = await getClient();
   const file = await toFile(Buffer.from(opts.bytes), opts.filename, { type: opts.mimeType });
@@ -166,6 +168,7 @@ export async function transcribe(opts: {
     model: opts.model,
     file,
     ...(opts.language ? { language: opts.language } : {}),
+    ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
     ...(opts.segments
       ? { response_format: "verbose_json", timestamp_granularities: ["segment"] }
       : {}),

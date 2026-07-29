@@ -9,7 +9,7 @@ import {
   transcodeCallRecordingToOgg,
   type CallChannelAudio,
 } from "@/lib/media/audio-transcode";
-import { transcribeCallChannel, transcribeInboundAudio } from "@/lib/ai/voice";
+import { transcribeCallChannel } from "@/lib/ai/voice";
 import { configEnabled, loadAiConfig } from "@/lib/ai/runtime-config";
 
 /**
@@ -478,6 +478,109 @@ function isSubstantive(text: string): boolean {
   return /\p{L}|\p{N}/u.test(text);
 }
 
+/**
+ * Detect a REPETITION LOOP — one phrase emitted over and over until the audio
+ * runs out. Seen live: a 50-second Lebanese Arabic call transcribed as "I want
+ * to ask you something." repeated some twenty-five times.
+ *
+ * Why per-segment `compression_ratio` doesn't catch it: the loop is spread
+ * ACROSS segments, and each individual segment holds one clean, unrepeated
+ * sentence with a perfectly ordinary ratio. The repetition is only visible in
+ * the assembled text, which is where this looks.
+ *
+ * Two independent signals, because a loop can repeat a sentence (caught by the
+ * first) or a couple of words with no punctuation at all (caught by the second).
+ */
+function looksLikeRepetitionLoop(text: string): boolean {
+  const normalised = text.trim().replace(/\s+/g, " ");
+  if (normalised.length < 60) return false; // too short to judge
+
+  // 1. One sentence dominating the transcript.
+  const parts = normalised
+    .split(/(?<=[.!?؟…])\s+/)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  if (parts.length >= 4) {
+    const counts = new Map<string, number>();
+    for (const p of parts) counts.set(p, (counts.get(p) ?? 0) + 1);
+    const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]!;
+    if (top[1] >= 4 && top[1] / parts.length >= 0.5) return true;
+    // Or one phrase accounting for most of the CHARACTERS, which catches a
+    // long repeated clause that only recurs a handful of times.
+    if (top[1] >= 3 && (top[0].length * top[1]) / normalised.length >= 0.6) return true;
+  }
+
+  // 2. Vocabulary collapse — the same few words cycling with no sentence
+  //    boundaries to split on.
+  const words = normalised.split(" ").filter(Boolean);
+  if (words.length >= 40) {
+    const unique = new Set(words.map((w) => w.toLowerCase())).size;
+    if (unique / words.length < 0.15) return true;
+  }
+  return false;
+}
+
+/**
+ * What the workspace has already declared it speaks (AI Assistant → Languages
+ * & Dialect). Used to VALIDATE a detection, never to force one: a result
+ * naming a language the workspace doesn't speak is out-of-domain and gets
+ * re-decoded pinned to the default.
+ *
+ * Deliberately not a blanket pin. This workspace supports Arabic AND English
+ * with code-switching on, so hard-pinning Arabic would mistranslate a genuine
+ * English call — and pinning on non-speech is actively harmful (measured:
+ * silence + `language=ar` returns "اشتركوا في القناة", the classic
+ * subtitle-scraped hallucination).
+ */
+interface LanguagePolicy {
+  /** ISO codes the workspace says it speaks, e.g. ["ar", "en"]. */
+  supported: string[];
+  /** ISO fallback used when a detection lands outside `supported`. */
+  fallback: string | null;
+}
+
+function languagePolicyFrom(config: {
+  supportedLanguages?: unknown;
+  defaultLanguage?: string | null;
+  specificLanguage?: string | null;
+  languagePolicy?: string | null;
+}): LanguagePolicy {
+  const supported = Array.isArray(config.supportedLanguages)
+    ? config.supportedLanguages
+        .filter((v): v is string => typeof v === "string")
+        .map((v) => v.trim().toLowerCase())
+        .filter(Boolean)
+    : [];
+  const fallback =
+    (config.languagePolicy === "specific" ? config.specificLanguage : null) ??
+    config.defaultLanguage ??
+    null;
+  return {
+    supported,
+    fallback: fallback ? fallback.trim().toLowerCase().slice(0, 5) : null,
+  };
+}
+
+/**
+ * True when a detected language is one the workspace actually speaks.
+ *
+ * An empty `supported` list means "the operator declared nothing", which
+ * accepts everything — never invent a restriction nobody configured.
+ *
+ * A name that maps to NO ISO code is treated as IMPLAUSIBLE, not as unknown.
+ * That direction is the whole point: `supported` can only ever hold codes from
+ * the settings picker, so a detection the map has never heard of — "bashkir",
+ * the language behind the Cyrillic gibberish — is by construction not one of
+ * them. Defaulting the unmappable case to "plausible" silently disabled this
+ * guard for exactly the exotic detections it exists to catch, which is what
+ * the spec caught.
+ */
+function isPlausibleLanguage(detected: string | undefined, policy: LanguagePolicy): boolean {
+  if (!detected || policy.supported.length === 0) return true;
+  const iso = languageToIso(detected);
+  return iso !== null && policy.supported.includes(iso);
+}
+
 interface ChannelResult {
   speaker: "Business" | "Customer";
   label: string;
@@ -498,6 +601,7 @@ interface ChannelResult {
 async function transcribePerSpeaker(
   bytes: Uint8Array,
   callId: string,
+  policy: LanguagePolicy,
 ): Promise<{ text: string; language?: string; segments: TranscriptSegment[] } | null> {
   let channels: Awaited<ReturnType<typeof extractCallChannels>>;
   try {
@@ -518,7 +622,7 @@ async function transcribePerSpeaker(
   ];
 
   const results = await Promise.all(
-    sides.map((side) => transcribeOneChannel(side, callId)),
+    sides.map((side) => transcribeOneChannel(side, callId, policy)),
   );
 
   // ── Cross-channel language consensus ────────────────────────────────────
@@ -547,7 +651,7 @@ async function transcribePerSpeaker(
       );
       if (pin) {
         const side = sides.find((s) => s.speaker === doubted.speaker)!;
-        const retry = await transcribeOneChannel(side, callId, pin);
+        const retry = await transcribeOneChannel(side, callId, policy, pin);
         // Keep the retry only if it actually produced something; a pinned
         // decode that comes back empty must not erase what we already had.
         if (retry.segments.length > 0) Object.assign(doubted, retry);
@@ -586,12 +690,37 @@ async function transcribePerSpeaker(
   };
 }
 
-/** One channel → filtered segments. Returns an empty result rather than
- *  throwing, so one side failing never costs the other side's words. */
+/**
+ * One channel → filtered segments, with a retry ladder.
+ *
+ * Attempt 1 decodes at temperature 0 and lets the model detect the language.
+ * A result is REJECTED and retried when it is a repetition loop, when every
+ * segment fails the quality gates, or when the detected language is one the
+ * workspace doesn't speak. Each retry raises the temperature (the documented
+ * escape from a loop) and, once the detection has proven untrustworthy, pins
+ * the workspace's default language.
+ *
+ * If the ladder runs out, this returns EMPTY. That is the point: no transcript
+ * is a better answer than a confident wrong one, and every earlier version of
+ * this code stored whatever came back.
+ *
+ * Returns an empty result rather than throwing, so one side failing never
+ * costs the other side's words.
+ */
 async function transcribeOneChannel(
-  side: { speaker: "Business" | "Customer"; label: string; audio: CallChannelAudio },
+  side: {
+    speaker: "Business" | "Customer";
+    label: string;
+    audio: CallChannelAudio;
+    /** Wire type of `audio.bytes`. Isolated channels are mono WAV (the
+     *  default); the whole-file fallback passes the recording's own
+     *  container, and it MUST be declared honestly — the API picks its
+     *  decoder from it. */
+    mimeType?: string;
+  },
   callId: string,
-  language?: string,
+  policy: LanguagePolicy,
+  pinnedLanguage?: string,
 ): Promise<ChannelResult> {
   const empty: ChannelResult = {
     speaker: side.speaker,
@@ -604,45 +733,100 @@ async function transcribeOneChannel(
   // silence invents text, and nothing in its answer says so.
   if (side.audio.speechSeconds < MIN_SPEECH_SECONDS) return empty;
 
-  let res;
-  try {
-    res = await transcribeCallChannel({
-      bytes: side.audio.bytes,
-      filename: `call-${callId}-${side.label}.wav`,
-      ...(language ? { language } : {}),
-    });
-  } catch (err) {
-    console.warn(
-      `[call-transcript] ${side.label} channel failed for call=${callId}: ${
-        err instanceof Error ? err.message : err
-      }`,
-    );
-    return empty;
-  }
+  // Temperature 0 first — correct for the overwhelming majority of audio. The
+  // higher rungs exist only to break a loop.
+  const ladder = [0, 0.4, 0.8];
+  let language = pinnedLanguage;
 
-  const kept = res.segments.filter(
-    (s) =>
-      s.no_speech_prob <= MAX_NO_SPEECH_PROB &&
-      s.avg_logprob >= MIN_AVG_LOGPROB &&
-      s.compression_ratio <= MAX_COMPRESSION_RATIO &&
-      isSubstantive(s.text),
-  );
-  if (res.segments.length > 0 && kept.length === 0) {
-    console.warn(
-      `[call-transcript] call=${callId} ${side.label}: all ${res.segments.length} ` +
-        `segment(s) rejected as non-speech — dropping the channel`,
-    );
-  }
-  if (kept.length === 0) return empty;
+  for (let attempt = 0; attempt < ladder.length; attempt++) {
+    let res;
+    try {
+      const mime = side.mimeType ?? "audio/wav";
+      res = await transcribeCallChannel({
+        bytes: side.audio.bytes,
+        // Extension follows the real container: the API reads BOTH it and the
+        // content type to choose a decoder, so a `.wav` name on OGG bytes is
+        // a decode failure waiting to happen.
+        filename: `call-${callId}-${side.label}.${extensionForAudio(mime)}`,
+        mimeType: mime,
+        temperature: ladder[attempt],
+        ...(language ? { language } : {}),
+      });
+    } catch (err) {
+      console.warn(
+        `[call-transcript] ${side.label} channel failed for call=${callId}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+      return empty;
+    }
 
-  return {
-    speaker: side.speaker,
-    label: side.label,
-    segments: kept.map((s) => ({ start: s.start, text: s.text.trim() })),
-    language: res.language,
-    confidence: kept.reduce((a, s) => a + s.avg_logprob, 0) / kept.length,
-    speechSeconds: side.audio.speechSeconds,
-  };
+    const kept = res.segments.filter(
+      (s) =>
+        s.no_speech_prob <= MAX_NO_SPEECH_PROB &&
+        s.avg_logprob >= MIN_AVG_LOGPROB &&
+        s.compression_ratio <= MAX_COMPRESSION_RATIO &&
+        isSubstantive(s.text),
+    );
+    const assembled = kept.map((s) => s.text.trim()).join(" ");
+    const looped = looksLikeRepetitionLoop(assembled);
+    const wrongLanguage = !isPlausibleLanguage(res.language, policy);
+
+    if (kept.length > 0 && !looped && !wrongLanguage) {
+      return {
+        speaker: side.speaker,
+        label: side.label,
+        segments: kept.map((s) => ({ start: s.start, text: s.text.trim() })),
+        language: res.language,
+        confidence: kept.reduce((a, s) => a + s.avg_logprob, 0) / kept.length,
+        speechSeconds: side.audio.speechSeconds,
+      };
+    }
+
+    const why = looped
+      ? "repetition loop"
+      : wrongLanguage
+        ? `detected ${res.language}, which this workspace doesn't speak`
+        : `all ${res.segments.length} segment(s) rejected as non-speech`;
+    const isLast = attempt === ladder.length - 1;
+    console.warn(
+      `[call-transcript] call=${callId} ${side.label}: ${why} at temperature ` +
+        `${ladder[attempt]}${language ? ` (language=${language})` : ""}` +
+        (isLast ? " — discarding the channel" : " — retrying"),
+    );
+    // Once the model's own language choice has proven wrong, stop trusting it
+    // and pin what the workspace says it speaks.
+    if ((wrongLanguage || looped) && !language && policy.fallback) {
+      language = policy.fallback;
+    }
+  }
+  return empty;
+}
+
+/**
+ * Pure decision functions, exported for the guard spec. These encode three
+ * live incidents (Cyrillic gibberish, an English repetition loop over an
+ * Arabic call, punctuation-only output for silence) and their thresholds are
+ * measured, not guessed — so they are tested directly rather than through a
+ * network round-trip that can't reproduce a hallucination on demand.
+ */
+export const __testing__ = {
+  looksLikeRepetitionLoop,
+  isPlausibleLanguage,
+  languagePolicyFrom,
+  isSubstantive,
+};
+
+/** File extension matching an audio wire type. The transcription API accepts
+ *  a fixed set of containers and reads the FILENAME as well as the content
+ *  type, so the two must agree. */
+function extensionForAudio(mimeType: string): string {
+  const m = mimeType.toLowerCase();
+  if (m.includes("ogg") || m.includes("opus")) return "ogg";
+  if (m.includes("webm")) return "webm";
+  if (m.includes("mp4") || m.includes("m4a") || m.includes("aac")) return "mp4";
+  if (m.includes("mpeg") || m.includes("mp3")) return "mp3";
+  return "wav";
 }
 
 /**
@@ -652,25 +836,59 @@ async function transcribeOneChannel(
  * is the safe outcome.
  */
 function languageToIso(name: string): string | null {
-  const map: Record<string, string> = {
-    arabic: "ar",
-    english: "en",
-    french: "fr",
-    spanish: "es",
-    turkish: "tr",
-    urdu: "ur",
-    hindi: "hi",
-    persian: "fa",
-    russian: "ru",
-    german: "de",
-    italian: "it",
-    portuguese: "pt",
-  };
   const key = name.trim().toLowerCase();
-  if (map[key]) return map[key];
+  if (LANGUAGE_ISO[key]) return LANGUAGE_ISO[key];
   // Already an ISO code (some models answer that way).
   return /^[a-z]{2}$/.test(key) ? key : null;
 }
+
+/**
+ * Language name → ISO-639-1, covering EVERY option the AI Assistant →
+ * Languages & Dialect picker offers.
+ *
+ * Completeness is load-bearing, not cosmetic: `isPlausibleLanguage` treats an
+ * unmappable name as out-of-domain, so a language the operator legitimately
+ * selected but this map omits would have its transcripts rejected and
+ * discarded. Adding a language to that picker means adding it here.
+ */
+const LANGUAGE_ISO: Record<string, string> = {
+  arabic: "ar",
+  english: "en",
+  french: "fr",
+  spanish: "es",
+  german: "de",
+  italian: "it",
+  portuguese: "pt",
+  dutch: "nl",
+  russian: "ru",
+  turkish: "tr",
+  persian: "fa",
+  farsi: "fa",
+  urdu: "ur",
+  hindi: "hi",
+  bengali: "bn",
+  chinese: "zh",
+  japanese: "ja",
+  korean: "ko",
+  indonesian: "id",
+  malay: "ms",
+  thai: "th",
+  vietnamese: "vi",
+  greek: "el",
+  polish: "pl",
+  ukrainian: "uk",
+  romanian: "ro",
+  swedish: "sv",
+  danish: "da",
+  finnish: "fi",
+  norwegian: "no",
+  czech: "cs",
+  hungarian: "hu",
+  swahili: "sw",
+  hausa: "ha",
+  amharic: "am",
+  tagalog: "tl",
+};
 
 /**
  * Transcribe an in-app recording through the SAME Whisper pipeline that
@@ -730,17 +948,52 @@ export async function transcribeInAppCallRecording(
     return false;
   }
 
-  const perSpeaker = await transcribePerSpeaker(bytes, call.id);
-  let result = perSpeaker;
+  const policy = languagePolicyFrom(aiConfig);
+  let result = await transcribePerSpeaker(bytes, call.id, policy);
+
   if (!result) {
-    // Not stereo / no ffmpeg / both channels came back empty — transcribe the
-    // file as it stands. A mix transcript beats no transcript.
-    const mixed = await transcribeInboundAudio({
-      bytes,
-      filename: `call-${call.id}.ogg`,
-      mimeType: mimeType ?? "audio/ogg",
-    });
-    result = { text: mixed.text, language: mixed.language, segments: [] };
+    // Not stereo, no ffmpeg, or every channel was discarded. Transcribe the
+    // file whole — but through the SAME gated path, never a raw one.
+    //
+    // THIS IS WHERE THE GIBBERISH CAME FROM. The fallback used to call the
+    // voice-note transcriber directly: a different model, no segment
+    // metadata, and therefore no quality gate of any kind — so a 50-second
+    // Lebanese Arabic call came back as one English sentence repeated
+    // twenty-five times and was stored verbatim. An unguarded fallback behind
+    // a guarded path just relocates the failure.
+    const mixed = await transcribeOneChannel(
+      {
+        speaker: "Business",
+        label: "mixed",
+        // The whole file as one "channel". `speechSeconds` is asserted rather
+        // than measured: the split already failed, and a recording that
+        // reached this function has audio in it — the segment gates below are
+        // what protect this path.
+        audio: { bytes, meanVolumeDb: 0, speechSeconds: Number.POSITIVE_INFINITY },
+        mimeType: mimeType ?? "audio/ogg",
+      },
+      call.id,
+      policy,
+    );
+    if (mixed.segments.length > 0) {
+      result = {
+        text: mixed.segments.map((s) => s.text).join(" "),
+        language: mixed.language,
+        // No speaker attribution is possible from a mix — say so by leaving
+        // segments empty rather than labelling every word "Agent".
+        segments: [],
+      };
+    }
+  }
+
+  if (!result) {
+    // Nothing survived. STORE NOTHING. An absent transcript is an honest
+    // answer; a hallucinated one is worse than useless because it reads as
+    // fact — the agent has no way to tell it apart from a real one.
+    console.warn(
+      `[call-transcript] call=${call.id}: no usable speech after all retries — storing no transcript`,
+    );
+    return false;
   }
 
   const doc = {

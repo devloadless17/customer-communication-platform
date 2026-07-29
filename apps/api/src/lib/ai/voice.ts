@@ -54,15 +54,27 @@ export interface CallChannelTranscription {
 export async function transcribeCallChannel(opts: {
   bytes: Uint8Array;
   filename: string;
+  /** Wire type of `bytes`. Isolated channels are always mono WAV; the
+   *  whole-file fallback passes the recording's own container. Must match the
+   *  bytes — the API reads it to pick a decoder. */
+  mimeType?: string;
   language?: string;
+  /**
+   * Decoding temperature. 0 is the right default, but it is also what makes a
+   * model fall into a REPETITION LOOP on hard audio — emitting one phrase over
+   * and over. Re-decoding the same audio at a higher temperature is the
+   * documented escape, so the caller retries up the ladder when it detects one.
+   */
+  temperature?: number;
 }): Promise<CallChannelTranscription> {
   const model = callSttModel();
   const res = await transcribe({
     model,
     bytes: opts.bytes,
     filename: opts.filename,
-    mimeType: "audio/wav",
+    mimeType: opts.mimeType ?? "audio/wav",
     language: opts.language,
+    temperature: opts.temperature,
     segments: true,
   });
   return {
