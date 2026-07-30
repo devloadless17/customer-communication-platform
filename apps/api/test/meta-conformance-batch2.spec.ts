@@ -24,6 +24,7 @@ import {
   failureBucket,
 } from "@/lib/providers/meta-send-error";
 import { resolveContactChannel } from "@/lib/providers/channel";
+import { mergePricingSlices } from "@/lib/analytics/waba-analytics";
 import { SendInteractiveSchema } from "@/messages/messages.schemas";
 
 describe("W13-01 · 131051 is an unsupported MESSAGE, not a bad recipient", () => {
@@ -138,5 +139,57 @@ describe("W2-03 · list row ids cap at 200, button ids at 256", () => {
       options: [opt("x".repeat(256))],
     });
     expect(res.success, JSON.stringify(res.error?.issues)).toBe(true);
+  });
+});
+
+describe("W6-07 · pricing slices are AGGREGATED, not one row per time bucket", () => {
+  const pt = (over: Partial<Parameters<typeof mergePricingSlices>[0][number]> = {}) => ({
+    category: "MARKETING",
+    type: "REGULAR",
+    country: "US",
+    phoneNumber: "15550001111",
+    volume: 10,
+    cost: 1.5,
+    ...over,
+  });
+
+  it("collapses identical dimension combinations across buckets", () => {
+    // Meta emits one point per TIME BUCKET per combination. Un-merged, a 30-day
+    // window rendered twelve rows all reading "Marketing · Billed · US" with no
+    // date column to tell them apart, so the per-category breakdown — the table's
+    // whole purpose — was never visible.
+    const out = mergePricingSlices([pt(), pt(), pt()]);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.volume).toBe(30);
+    expect(out[0]!.cost).toBeCloseTo(4.5);
+  });
+
+  it("keeps genuinely different slices apart, including by phone number", () => {
+    const out = mergePricingSlices([
+      pt(),
+      pt({ category: "UTILITY" }),
+      pt({ country: "GB" }),
+      pt({ phoneNumber: "15550002222" }),
+    ]);
+    expect(out).toHaveLength(4);
+  });
+
+  it("keeps cost NULL when every contributing point withheld it", () => {
+    // "Meta didn't report the cost" and "it cost nothing" are different facts, and
+    // `costWithheld` (the Solution-Partner case) depends on telling them apart.
+    const out = mergePricingSlices([pt({ cost: null }), pt({ cost: null })]);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.cost).toBeNull();
+    expect(out[0]!.volume).toBe(20);
+  });
+
+  it("sums the reported costs when only SOME points withheld", () => {
+    const out = mergePricingSlices([pt({ cost: null }), pt({ cost: 2 })]);
+    expect(out[0]!.cost).toBe(2);
+  });
+
+  it("treats a null volume as zero rather than NaN-ing the total", () => {
+    const out = mergePricingSlices([pt({ volume: null }), pt({ volume: 5 })]);
+    expect(out[0]!.volume).toBe(5);
   });
 });

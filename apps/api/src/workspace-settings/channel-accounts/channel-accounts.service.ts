@@ -7,6 +7,7 @@ import {
 import type { Prisma } from "@prisma/client";
 
 import { invalidateProviderConfig } from "@/lib/providers/config";
+import { invalidateWabaAnalytics } from "@/lib/analytics/waba-analytics";
 import { decryptSecret } from "@/lib/crypto/envelope";
 import { releaseWabaSubscription } from "@/lib/providers/meta-waba-subscription";
 import { releasePageSubscription } from "@/lib/providers/meta-page-subscription";
@@ -639,8 +640,14 @@ export class ChannelAccountsService {
 
   /** Credentials are cached per account; every channel keeps its own cache. */
   private bustCache(workspaceId: string, channel: AccountChannel): void {
-    if (channel === "whatsapp") invalidateProviderConfig(workspaceId);
-    else if (channel === "messenger") invalidateMessengerConfig(workspaceId);
+    if (channel === "whatsapp") {
+      invalidateProviderConfig(workspaceId);
+      // The account SET just changed, which is exactly what the analytics cache is
+      // keyed on. Paired with the config bust so the two cannot drift: connecting a
+      // WABA used to leave it missing from /reports for the full 10-minute TTL, and
+      // an operator reads that as onboarding having failed.
+      invalidateWabaAnalytics(workspaceId);
+    } else if (channel === "messenger") invalidateMessengerConfig(workspaceId);
     else invalidateInstagramConfig(workspaceId);
   }
 }

@@ -250,6 +250,22 @@ export async function getWabaAnalytics(
     wabaAccountId: query.wabaAccountId ?? null,
   };
 
+  // Validate a NAMED account before doing anything else. Tenant isolation was
+  // never at risk — `workspaceId` is in the where clause below, so a foreign id can
+  // never match — but an unknown, foreign or typo'd id returned `accounts: []` with
+  // HTTP 200, and the panel renders nothing for an empty array. On /v1 a partner
+  // polling a stale wabaAccountId got a permanently silent empty result.
+  // `reports.ts` rejects the identical input class with a named error, for the
+  // reason written there: an unknown id silently returning an empty report reads as
+  // "this account did nothing", which is worse than an error.
+  if (resolved.wabaAccountId) {
+    const owned = await db.whatsappBusinessAccount.findFirst({
+      where: { id: resolved.wabaAccountId, workspaceId },
+      select: { id: true },
+    });
+    if (!owned) throw new BadRequestException({ error: "unknown_waba_account" });
+  }
+
   const key = cacheKey(workspaceId, resolved);
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value;
@@ -402,7 +418,15 @@ async function loadAccount(
           // TIER is the reason this surface is worth a request. COUNTRY and
           // PRICING_CATEGORY come with it because a tier bound is only meaningful
           // for the market–category pair it belongs to.
-          dimensions: ["PRICING_CATEGORY", "PRICING_TYPE", "COUNTRY", "TIER"],
+          // PHONE included so `PricingSlice.phoneNumber` can actually be
+          // populated. It was modelled, mapped from `pt.phone_number` and
+          // surfaced in the API shape, but never REQUESTED — so in the
+          // two-numbers-under-one-WABA topology every cost row reported
+          // `phoneNumber: null` and an operator could see WABA-level spend with no
+          // way to attribute it to a number, while the response advertised a field
+          // it could never fill. `mergePricingSlices` keys on it, so the added
+          // cardinality collapses back down instead of multiplying rows.
+          dimensions: ["PRICING_CATEGORY", "PRICING_TYPE", "COUNTRY", "TIER", "PHONE"],
         },
         config,
       ),
@@ -441,14 +465,14 @@ async function loadAccount(
     return { ...base, unavailable: "Meta returned no analytics for this account." };
   }
 
-  const pricingSlices = (pricing ?? []).map((r) => ({
-    category: r.category,
-    type: r.type,
-    country: r.country,
-    phoneNumber: r.phoneNumber,
-    volume: r.volume ?? 0,
-    cost: r.cost,
-  }));
+  // MERGED, not a 1:1 map of raw data points. Meta returns one point per TIME
+  // BUCKET per dimension combination, so at granularity=day over 30 days the panel
+  // sorted by cost and took the top 12 — and got twelve rows all reading
+  // "Marketing · Billed · US" with no date column to tell them apart. The
+  // per-category breakdown, which is the whole purpose of that table, was never
+  // visible. `tierStandings` and `callSlices` both already collapse by key; this
+  // was the odd one out.
+  const pricingSlices = mergePricingSlices(pricing ?? []);
 
   const messagingCost = sumNullable(pricingSlices.map((s) => s.cost));
   const callCost = sumNullable((calls ?? []).map((c) => c.cost));
@@ -558,6 +582,49 @@ export function tierStandings(rows: Array<{
  * count is the only honest merge — a plain mean would let a single 1-call bucket
  * count as much as a 500-call one and quietly halve the reported duration.
  */
+/**
+ * Collapse pricing data points to one row per (category, type, country, number).
+ *
+ * Meta emits one point per TIME BUCKET per dimension combination, so this is the
+ * difference between "Marketing · Billed · US — $412 over the window" and twelve
+ * indistinguishable daily rows. Volume and cost sum; cost stays NULL when every
+ * contributing point withheld it, because "Meta didn't report the cost" and "it
+ * cost nothing" are different facts and `costWithheld` depends on telling them
+ * apart.
+ */
+export function mergePricingSlices(
+  rows: Array<{
+    category: string | null;
+    type: string | null;
+    country: string | null;
+    phoneNumber: string | null;
+    volume: number | null;
+    cost: number | null;
+  }>,
+): PricingSlice[] {
+  const byKey = new Map<string, PricingSlice>();
+  for (const r of rows) {
+    // Escaped NUL as the separator, never a raw byte — a raw NUL makes grep/rg
+    // treat the whole file as binary and skip it (this repo has a CI guard for it).
+    const key = [r.category ?? "", r.type ?? "", r.country ?? "", r.phoneNumber ?? ""].join("\u0000");
+    const entry = byKey.get(key);
+    if (!entry) {
+      byKey.set(key, {
+        category: r.category,
+        type: r.type,
+        country: r.country,
+        phoneNumber: r.phoneNumber,
+        volume: r.volume ?? 0,
+        cost: r.cost,
+      });
+      continue;
+    }
+    entry.volume += r.volume ?? 0;
+    if (r.cost !== null) entry.cost = (entry.cost ?? 0) + r.cost;
+  }
+  return [...byKey.values()];
+}
+
 export function callSlices(rows: Array<{
   direction: string | null;
   country: string | null;

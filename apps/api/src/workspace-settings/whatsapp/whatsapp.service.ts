@@ -25,6 +25,7 @@ import {
   invalidateProviderConfig,
   ProviderNotConfiguredError,
 } from "@/lib/providers/config";
+import { invalidateWabaAnalytics } from "@/lib/analytics/waba-analytics";
 import { getMetaConnection } from "@/lib/providers/meta-connection";
 import {
   fetchWhatsappHealthFromGraph,
@@ -644,6 +645,7 @@ export class WhatsappService {
     await normalizeDefaultAccount(workspaceId, META_PROVIDER, phoneNumberId);
 
     invalidateProviderConfig(workspaceId);
+    invalidateWabaAnalytics(workspaceId);
 
     // A reconnect can mint a brand-new ChannelConnection row (new id/createdAt).
     // Publish catalog_changed so the outbound-webhooks subscriber flushes its
@@ -1213,6 +1215,7 @@ export class WhatsappService {
     // container.
     await gcOrphanWhatsappPortfolios(workspaceId);
     invalidateProviderConfig(workspaceId);
+    invalidateWabaAnalytics(workspaceId);
 
     // Deleting the row leaves a stale id in the outbound-webhooks subscriber's
     // channelCache; catalog_changed flushes it (see updateConfig for the same
