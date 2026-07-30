@@ -29,15 +29,28 @@
  *
  * ## Never guess
  *
- * Every resolution path is an exact indexed lookup, and an ambiguous payload is
+ * Every attribution path is an exact indexed lookup, and an ambiguous ENTRY is
  * dropped with a warn. `WhatsappBusinessAccount.externalWabaId` is globally unique
- * precisely so this is a single `findUnique` — that index is the tenancy guard.
+ * precisely so a WABA id resolves to at most one workspace — that index is the
+ * tenancy guard.
+ *
+ * ## Per ENTRY, not per body
+ *
+ * Attribution is `groupEntriesByWorkspace`, which partitions a batch into one
+ * group per workspace. It replaced a per-BODY resolver that collapsed the whole
+ * POST to a single answer: because Meta batches "changes from different objects
+ * that are of the same type", one body can carry two customers' WABAs, and that
+ * resolver called such a body ambiguous and dropped every entry in it — including
+ * the ones it could attribute cleanly. A drop answers 200, so they were gone for
+ * good. Same bug class as the per-event phone-number attribution already fixed in
+ * `inbound-accounts.ts`, one level up at the tenant.
  */
 
 import { db } from "@/lib/db";
 import type { Channel } from "@ccp/shared/types";
 
-export type AppLevelResolution =
+/** Outcome of attributing ONE entry. Internal to the grouping below. */
+type AppLevelResolution =
   | { kind: "ok"; workspaceId: string; via: "waba_info" | "waba_id" | "portfolio_id" | "account_id" }
   | { kind: "none" }
   | { kind: "ambiguous"; detail: string };
@@ -61,132 +74,221 @@ export function appLevelWebhookEnabled(): boolean {
   return Boolean(process.env.META_APP_ID) && platformAppSecrets().length > 0;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-ENTRY grouping
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** One workspace's slice of an app-level batch. */
+export interface WorkspaceEntryGroup {
+  workspaceId: string;
+  /** An envelope carrying ONLY this workspace's entries, safe to ingest as-is. */
+  payload: unknown;
+  entryCount: number;
+}
+
+/** Entries that could not be attributed, kept so the caller can log per entry. */
+export interface UnattributedEntry {
+  entryId: string | null;
+  reason: "none" | "ambiguous";
+  detail?: string;
+}
+
+export interface AppLevelGrouping {
+  groups: WorkspaceEntryGroup[];
+  unattributed: UnattributedEntry[];
+}
+
 /**
- * `value.waba_info.waba_id` anywhere in the batch.
+ * Collect this ONE entry's candidate ids, most specific first.
  *
- * The most specific hint, and the one that covers `account_update` /
- * `PARTNER_ADDED` — the webhook Meta fires when a customer completes Embedded
- * Signup. THAT event is a trap worth naming: its `entry[].id` is the customer's
- * BUSINESS PORTFOLIO id, not a WABA id, with the WABA nested at
- * `value.waba_info.waba_id`. Code that assumes `entry[].id` is always a WABA
- * resolves the wrong thing (or nothing) for exactly the onboarding event.
+ * `value.waba_info.waba_id` is the most specific hint and the one that covers
+ * `account_update` / `PARTNER_ADDED` — the webhook Meta fires when a customer
+ * completes Embedded Signup.
+ *
+ * On `entry[].id`: the current `account_update` reference documents it as the
+ * WhatsApp Business Account id, and both 2026 example payloads show a WABA id
+ * there; the portfolio appears only at `value.waba_info.owner_business_id`. An
+ * older note in this file claimed the opposite. `resolveEntry` below therefore
+ * tries waba_info → `entry[].id` as a WABA → `entry[].id` as a portfolio, so both
+ * readings are tolerated and nothing depends on which is right. Do NOT narrow it to
+ * one: several `account_update` events carry no `waba_info` block at all, and
+ * attribution for exactly those would land nowhere.
  */
-function wabaInfoIds(payload: unknown): string[] {
-  const p = payload as {
-    entry?: Array<{
-      changes?: Array<{ value?: { waba_info?: { waba_id?: string } } }>;
-    }>;
+function entryCandidateIds(entry: unknown): { wabaInfo: string[]; entryId: string | null } {
+  const e = entry as {
+    id?: string;
+    changes?: Array<{ value?: { waba_info?: { waba_id?: string } } }>;
   };
-  const out: string[] = [];
-  for (const entry of Array.isArray(p?.entry) ? p.entry : []) {
-    for (const change of Array.isArray(entry?.changes) ? entry.changes : []) {
-      const id = change?.value?.waba_info?.waba_id;
-      if (typeof id === "string" && id.length > 0 && !out.includes(id)) out.push(id);
-    }
+  const wabaInfo: string[] = [];
+  for (const change of Array.isArray(e?.changes) ? e.changes : []) {
+    const id = change?.value?.waba_info?.waba_id;
+    if (typeof id === "string" && id.length > 0 && !wabaInfo.includes(id)) wabaInfo.push(id);
   }
-  return out;
+  const entryId = typeof e?.id === "string" && e.id.length > 0 ? e.id : null;
+  return { wabaInfo, entryId };
 }
 
-/** Distinct `entry[].id` values. WABA id, portfolio id, Page id or IG id
- *  depending on the `object` and the field — hence the ordered attempts below. */
-function entryIds(payload: unknown): string[] {
-  const p = payload as { entry?: Array<{ id?: string }> };
-  const out: string[] = [];
-  for (const entry of Array.isArray(p?.entry) ? p.entry : []) {
-    const id = entry?.id;
-    if (typeof id === "string" && id.length > 0 && !out.includes(id)) out.push(id);
-  }
-  return out;
-}
-
-/** Collapse a set of candidate workspace ids to one answer. */
-function single(ids: string[], what: string): AppLevelResolution | null {
-  const distinct = [...new Set(ids)];
-  if (distinct.length === 0) return null;
-  if (distinct.length > 1) {
-    return {
-      kind: "ambiguous",
-      detail: `${what} maps to ${distinct.length} workspaces`,
-    };
-  }
-  return { kind: "ok", workspaceId: distinct[0]!, via: "waba_id" };
+function addTo(map: Map<string, Set<string>>, key: string, workspaceId: string): void {
+  const set = map.get(key);
+  if (set) set.add(workspaceId);
+  else map.set(key, new Set([workspaceId]));
 }
 
 /**
- * Resolve the owning workspace from a VERIFIED app-level payload.
+ * Partition an app-level batch into one group PER WORKSPACE.
  *
- * WhatsApp attempts, most specific first:
- *   1. `value.waba_info.waba_id` — the `PARTNER_ADDED` / account_update case.
- *   2. `entry[].id` read as a WABA id — every ordinary WABA-scoped topic.
- *   3. `entry[].id` read as a business-PORTFOLIO id — the account_update shape.
- *      Genuinely ambiguous in principle (`WhatsappPortfolio` is unique per
- *      workspace, so one Meta portfolio can map to two of OUR workspaces for the
- *      same customer), which is exactly why the WABA hints are tried first and why
- *      several matches drop rather than pick.
+ * ## Why this exists, and why `resolveAppLevelWorkspace` was not enough
  *
- * Social attempts: `entry[].id` is the Page (Messenger) or IG account id, matched
- * against `ChannelConnection.externalAccountId` across workspaces. That column is
- * NOT globally unique yet — cross-workspace uniqueness for social accounts is
- * enforced only in application code — so several matches drop with a warn. Making
- * it a DB constraint is the deferred follow-up, triggered by shipping app-level
- * SOCIAL ingest for real.
+ * Meta batches webhooks: "POST requests are aggregated and sent in a batch with a
+ * maximum of 1000 updates. However, batching cannot be guaranteed so be sure to
+ * adjust your servers to handle each POST request individually." And the platform
+ * webhook reference is explicit that a batch spans OBJECTS, not just events:
+ * "Multiple changes from different objects that are of the same type may be
+ * batched together." For `object: "whatsapp_business_account"` those objects are
+ * different WABAs — i.e. under a Tech Provider app serving many customers, ONE
+ * POST can legitimately carry two tenants' entries.
+ *
+ * `resolveAppLevelWorkspace` collapses the WHOLE body to a single answer, so that
+ * body resolved `ambiguous` and the controller dropped **every** entry in it,
+ * including the ones it could attribute perfectly well. Meta retries a non-200,
+ * but we answer 200 on a drop (deliberately — see the route), so those webhooks
+ * were gone for good. This is the same per-body-vs-per-event bug class already
+ * fixed one level down for phone numbers in `inbound-accounts.ts`, recurring at
+ * the tenant level.
+ *
+ * ## Contract (mirrors `groupEventsByInboundAccount`)
+ *
+ *  - **Strict partition.** Every entry lands in exactly one group or in
+ *    `unattributed`; none is duplicated, so ingesting each group in turn processes
+ *    each entry exactly once.
+ *  - **Never guess.** An entry whose ids map to more than one workspace is
+ *    `ambiguous` and dropped — attributing it to one of two candidates is a
+ *    cross-tenant leak, strictly worse than a visible drop. Only that ENTRY is
+ *    dropped now, not its batch-mates.
+ *  - **Order preserved** within each group.
+ *  - **Bounded queries.** Three `findMany`s over the union of candidate ids,
+ *    regardless of how many entries the batch holds — a 1000-update POST does not
+ *    become 1000 round trips.
  */
-export async function resolveAppLevelWorkspace(
+export async function groupEntriesByWorkspace(
   channel: Channel,
   payload: unknown,
-): Promise<AppLevelResolution> {
+): Promise<AppLevelGrouping> {
+  const p = payload as { object?: unknown; entry?: unknown[] };
+  const entries = Array.isArray(p?.entry) ? p.entry : [];
+  if (entries.length === 0) return { groups: [], unattributed: [] };
+
+  const perEntry = entries.map((e) => entryCandidateIds(e));
+  const allIds = [
+    ...new Set(perEntry.flatMap((c) => [...c.wabaInfo, ...(c.entryId ? [c.entryId] : [])])),
+  ];
+  if (allIds.length === 0) {
+    return {
+      groups: [],
+      unattributed: entries.map(() => ({ entryId: null, reason: "none" as const })),
+    };
+  }
+
+  // One lookup per id-space. `externalWabaId` is GLOBALLY unique so its sets are
+  // singletons by construction; a portfolio id is unique only per workspace and a
+  // social `externalAccountId` is not globally unique at all, so those genuinely
+  // can resolve to several workspaces — which is exactly what `ambiguous` is for.
+  const byWaba = new Map<string, Set<string>>();
+  const byPortfolio = new Map<string, Set<string>>();
+  const byAccount = new Map<string, Set<string>>();
+
   if (channel === "whatsapp") {
-    const infoIds = wabaInfoIds(payload);
-    if (infoIds.length > 0) {
-      const rows = await db.whatsappBusinessAccount.findMany({
-        where: { externalWabaId: { in: infoIds } },
-        select: { workspaceId: true },
-      });
-      const hit = single(
-        rows.map((r) => r.workspaceId),
-        "waba_info.waba_id",
-      );
-      if (hit) return hit.kind === "ok" ? { ...hit, via: "waba_info" } : hit;
+    const [wabas, portfolios] = await Promise.all([
+      db.whatsappBusinessAccount.findMany({
+        where: { externalWabaId: { in: allIds } },
+        select: { externalWabaId: true, workspaceId: true },
+      }),
+      db.whatsappPortfolio.findMany({
+        where: { externalPortfolioId: { in: allIds } },
+        select: { externalPortfolioId: true, workspaceId: true },
+      }),
+    ]);
+    for (const w of wabas) {
+      if (w.externalWabaId) addTo(byWaba, w.externalWabaId, w.workspaceId);
     }
-
-    const ids = entryIds(payload);
-    if (ids.length === 0) return { kind: "none" };
-
-    const byWaba = await db.whatsappBusinessAccount.findMany({
-      where: { externalWabaId: { in: ids } },
-      select: { workspaceId: true },
+    for (const f of portfolios) {
+      // `externalPortfolioId` is nullable — a portfolio row can exist before its
+      // Meta id is known. A null can never match an inbound id, so skip it rather
+      // than keying the map on "".
+      if (f.externalPortfolioId) addTo(byPortfolio, f.externalPortfolioId, f.workspaceId);
+    }
+  } else {
+    const conns = await db.channelConnection.findMany({
+      where: { channel, externalAccountId: { in: allIds } },
+      select: { externalAccountId: true, workspaceId: true },
     });
-    const wabaHit = single(
-      byWaba.map((r) => r.workspaceId),
-      "entry[].id as WABA id",
-    );
-    if (wabaHit) return wabaHit;
+    for (const c of conns) addTo(byAccount, c.externalAccountId, c.workspaceId);
+  }
 
-    // `account_update` puts the PORTFOLIO id in `entry[].id`.
-    const byPortfolio = await db.whatsappPortfolio.findMany({
-      where: { externalPortfolioId: { in: ids } },
-      select: { workspaceId: true },
-    });
-    const portfolioHit = single(
-      byPortfolio.map((r) => r.workspaceId),
-      "entry[].id as portfolio id",
-    );
-    if (portfolioHit) {
-      return portfolioHit.kind === "ok" ? { ...portfolioHit, via: "portfolio_id" } : portfolioHit;
+  /** Resolve ONE entry using the prefetched maps, in the documented order. */
+  function resolveEntry(cand: { wabaInfo: string[]; entryId: string | null }): AppLevelResolution {
+    const attempts: Array<{ ids: string[]; map: Map<string, Set<string>>; what: string }> =
+      channel === "whatsapp"
+        ? [
+            { ids: cand.wabaInfo, map: byWaba, what: "waba_info.waba_id" },
+            { ids: cand.entryId ? [cand.entryId] : [], map: byWaba, what: "entry[].id as WABA id" },
+            {
+              ids: cand.entryId ? [cand.entryId] : [],
+              map: byPortfolio,
+              what: "entry[].id as portfolio id",
+            },
+          ]
+        : [
+            {
+              ids: cand.entryId ? [cand.entryId] : [],
+              map: byAccount,
+              what: `entry[].id as ${channel} account id`,
+            },
+          ];
+
+    for (const attempt of attempts) {
+      const hits = new Set<string>();
+      for (const id of attempt.ids) for (const ws of attempt.map.get(id) ?? []) hits.add(ws);
+      if (hits.size === 1) {
+        return { kind: "ok", workspaceId: [...hits][0]!, via: "waba_id" };
+      }
+      if (hits.size > 1) {
+        return {
+          kind: "ambiguous",
+          detail: `${attempt.what} maps to ${hits.size} workspaces`,
+        };
+      }
     }
     return { kind: "none" };
   }
 
-  const ids = entryIds(payload);
-  if (ids.length === 0) return { kind: "none" };
-  const rows = await db.channelConnection.findMany({
-    where: { channel, externalAccountId: { in: ids } },
-    select: { workspaceId: true },
-  });
-  const hit = single(
-    rows.map((r) => r.workspaceId),
-    `entry[].id as ${channel} account id`,
-  );
-  if (!hit) return { kind: "none" };
-  return hit.kind === "ok" ? { ...hit, via: "account_id" } : hit;
+  const byWorkspace = new Map<string, unknown[]>();
+  const unattributed: UnattributedEntry[] = [];
+
+  for (let i = 0; i < entries.length; i++) {
+    const cand = perEntry[i]!;
+    const res = resolveEntry(cand);
+    if (res.kind !== "ok") {
+      unattributed.push({
+        entryId: cand.entryId,
+        reason: res.kind,
+        ...(res.kind === "ambiguous" ? { detail: res.detail } : {}),
+      });
+      continue;
+    }
+    const bucket = byWorkspace.get(res.workspaceId);
+    if (bucket) bucket.push(entries[i]);
+    else byWorkspace.set(res.workspaceId, [entries[i]]);
+  }
+
+  return {
+    groups: [...byWorkspace].map(([workspaceId, own]) => ({
+      workspaceId,
+      // Rebuild a real envelope so each group is ingestable by the SAME code path
+      // that handles a single-tenant body — the parsers read `object` off it.
+      payload: { ...(payload as Record<string, unknown>), entry: own },
+      entryCount: own.length,
+    })),
+    unattributed,
+  };
 }

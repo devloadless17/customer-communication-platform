@@ -36,7 +36,7 @@ import {
   appLevelWebhookEnabled,
   platformAppSecrets,
   platformVerifyToken,
-  resolveAppLevelWorkspace,
+  groupEntriesByWorkspace,
 } from "@/lib/providers/app-level-webhook";
 import {
   groupEventsByInboundAccount,
@@ -296,32 +296,72 @@ export class MetaWebhookController implements OnModuleDestroy {
     wireIn(channel, rawBody.toString("utf8"));
     const payload = req.body as unknown;
 
-    // ── The payload is now trusted; resolve the tenant from it. ──────────────
-    const resolved = await resolveAppLevelWorkspace(channel, payload);
-    if (resolved.kind !== "ok") {
-      // Never guess. An ambiguous payload silently attributed to one of two
-      // candidate workspaces is a cross-tenant leak, which is strictly worse than
-      // a dropped webhook we can see in the logs.
+    // ── The payload is now trusted; attribute each ENTRY to its own tenant. ──
+    //
+    // PER-ENTRY, not per-body. Meta batches up to 1000 updates per POST and the
+    // reference is explicit that "Multiple changes from different objects that are
+    // of the same type may be batched together" — for `whatsapp_business_account`
+    // those objects are different WABAs, so under a Tech Provider app one POST can
+    // carry two customers. Collapsing the body to a single workspace made such a
+    // body `ambiguous` and dropped ALL of it, including the entries that resolved
+    // cleanly — and because a drop answers 200 (deliberate, see below), Meta never
+    // redelivered them.
+    const grouping = await groupEntriesByWorkspace(channel, payload);
+
+    // Never guess: an entry whose ids map to several workspaces is dropped rather
+    // than attributed to one of the candidates, which would be a cross-tenant
+    // leak. Only that entry is lost now — not its batch-mates.
+    for (const miss of grouping.unattributed) {
       this.logger.warn(
-        `[app-level] dropped ${channel} payload: ` +
-          (resolved.kind === "ambiguous" ? resolved.detail : "no matching workspace"),
+        `[app-level] dropped ${channel} entry ${miss.entryId ?? "<no id>"}: ` +
+          (miss.reason === "ambiguous" ? (miss.detail ?? "ambiguous") : "no matching workspace"),
       );
+    }
+
+    if (grouping.groups.length === 0) {
+      const anyAmbiguous = grouping.unattributed.some((m) => m.reason === "ambiguous");
       return {
         ok: true,
         ingested: 0,
-        dropped: resolved.kind === "ambiguous" ? "workspace_ambiguous" : "unknown_workspace",
+        dropped: anyAmbiguous ? "workspace_ambiguous" : "unknown_workspace",
       };
     }
-    const { workspaceId } = resolved;
 
-    // PER-WORKSPACE rate limiting, consumed HERE rather than in the guard. The
-    // guard keys on the `workspaceId` path param and falls back to the client IP —
-    // and on this route every tenant shares Meta's IP set, so that fallback would
-    // collapse every workspace into ONE global bucket: a cross-tenant self-DoS
-    // where one busy customer throttles everybody. The tenant isn't knowable until
-    // now, so the fair bucket has to be consumed after resolution.
-    const rate = appLevelWorkspaceBucket.consume(`team:${workspaceId}`);
-    if (!rate.ok) {
+    let ingested = 0;
+    let rateLimited = 0;
+    for (const group of grouping.groups) {
+      // PER-WORKSPACE rate limiting, consumed HERE rather than in the guard. The
+      // guard keys on the `workspaceId` path param and falls back to the client IP —
+      // and on this route every tenant shares Meta's IP set, so that fallback would
+      // collapse every workspace into ONE global bucket: a cross-tenant self-DoS
+      // where one busy customer throttles everybody. The tenant isn't knowable
+      // until now, so the fair bucket has to be consumed after resolution.
+      //
+      // Now consumed per GROUP: one tenant exhausting its bucket must not throttle
+      // a co-batched tenant, so a 429 here skips that group instead of failing the
+      // whole request.
+      const rate = appLevelWorkspaceBucket.consume(`team:${group.workspaceId}`);
+      if (!rate.ok) {
+        rateLimited += 1;
+        this.logger.warn(
+          `[app-level] rate-limited ${channel} group for workspace ${group.workspaceId} ` +
+            `(${group.entryCount} entr${group.entryCount === 1 ? "y" : "ies"})`,
+        );
+        continue;
+      }
+      // Sequential, like `groupEventsByInboundAccount`'s consumers: ingest
+      // serialises per contact internally, and a 1000-update batch fanned out
+      // concurrently would multiply DB load for no latency benefit on a single VPS.
+      const res =
+        channel === "whatsapp"
+          ? await this.ingestWhatsappPayload(group.workspaceId, group.payload)
+          : await this.ingestSocialPayload(group.workspaceId, channel, group.payload);
+      ingested += res.ingested ?? 0;
+    }
+
+    // Every group throttled and nothing ingested — say so with a 429 so Meta
+    // retries, rather than reporting a silent success.
+    if (ingested === 0 && rateLimited > 0) {
       throw new HttpException(
         {
           error: "rate_limited",
@@ -331,9 +371,7 @@ export class MetaWebhookController implements OnModuleDestroy {
       );
     }
 
-    return channel === "whatsapp"
-      ? this.ingestWhatsappPayload(workspaceId, payload)
-      : this.ingestSocialPayload(workspaceId, channel, payload);
+    return { ok: true, ingested };
   }
 
   @Get(":workspaceId")

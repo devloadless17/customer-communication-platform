@@ -1,5 +1,5 @@
 /**
- * App-level webhook → workspace resolution.
+ * App-level webhook → PER-ENTRY workspace attribution.
  *
  * Under Embedded Signup every onboarded customer's webhooks land on the APP's
  * callback URL, and Meta's docs are explicit that `override_callback_uri` cannot
@@ -21,6 +21,13 @@
  *      `WhatsappPortfolio` is unique per workspace, so one Meta portfolio can map
  *      to two of ours. Several matches must DROP, never pick.
  *   4. An unknown id resolves to nothing rather than to a default.
+ *   5. **A batch spanning two tenants is PARTITIONED, not dropped.** Meta sends up
+ *      to 1000 updates per POST and "Multiple changes from different objects that
+ *      are of the same type may be batched together" — for
+ *      `whatsapp_business_account` those objects are different WABAs. Collapsing
+ *      the body to one workspace made such a body ambiguous and dropped ALL of it,
+ *      including the entries that resolved cleanly; and a drop answers 200, so Meta
+ *      never redelivered them. Each entry now lands in its own group.
  *
  *   pnpm --filter @ccp/api exec vitest run test/app-level-webhook.spec.ts
  */
@@ -32,7 +39,7 @@ import { seedWabaAccount } from "./_waba";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { setSharedDb } from "@/lib/db";
-import { resolveAppLevelWorkspace } from "@/lib/providers/app-level-webhook";
+import { groupEntriesByWorkspace } from "@/lib/providers/app-level-webhook";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
 if (existsSync("../../.env")) process.loadEnvFile("../../.env");
@@ -42,6 +49,7 @@ setSharedDb(prisma as unknown as PrismaClient);
 
 const S = `alw${Date.now().toString().slice(-8)}`;
 const WABA = `${S}_waba`;
+const WABA_B = `${S}_waba_b`;
 const PORTFOLIO = `${S}_portfolio`;
 const SHARED_PORTFOLIO = `${S}_shared_portfolio`;
 const PAGE = `${S}_page`;
@@ -77,6 +85,8 @@ beforeAll(async () => {
     select: { id: true },
   });
   await seedWabaAccount(prisma, wsA, WABA, { portfolioId: portfolio.id });
+  // A SECOND tenant with its own WABA, so a cross-tenant batch is testable.
+  await seedWabaAccount(prisma, wsB, WABA_B);
 
   await prisma.channelConnection.create({
     data: {
@@ -109,23 +119,30 @@ afterAll(async () => {
   await prisma.$disconnect();
 });
 
-describe("WhatsApp resolution", () => {
-  it("resolves entry[].id read as a WABA id", async () => {
-    const out = await resolveAppLevelWorkspace(
+/** Convenience: the single group's workspace, or null when nothing attributed. */
+function soleWorkspace(g: { groups: Array<{ workspaceId: string }> }): string | null {
+  return g.groups.length === 1 ? g.groups[0]!.workspaceId : null;
+}
+
+describe("WhatsApp attribution", () => {
+  it("attributes entry[].id read as a WABA id", async () => {
+    const g = await groupEntriesByWorkspace(
       "whatsapp",
       waEnvelope(WABA, {
         field: "message_template_status_update",
         value: { message_template_name: "promo", event: "APPROVED" },
       }),
     );
-    expect(out).toEqual({ kind: "ok", workspaceId: wsA, via: "waba_id" });
+    expect(soleWorkspace(g)).toBe(wsA);
+    expect(g.groups[0]!.entryCount).toBe(1);
+    expect(g.unattributed).toEqual([]);
   });
 
   it("prefers value.waba_info.waba_id — the PARTNER_ADDED shape", async () => {
-    // Note `entry[].id` here is the BUSINESS PORTFOLIO id, exactly as Meta sends
-    // it for `account_update`. Resolving off `entry[].id` alone would land on the
-    // portfolio arm (or miss); the nested WABA hint is the specific answer.
-    const out = await resolveAppLevelWorkspace("whatsapp", {
+    // `entry[].id` here is the PORTFOLIO id, which also resolves (to the same
+    // workspace) via the portfolio arm — so this pins the PRIORITY, not just the
+    // outcome: the nested WABA hint is the specific answer and is tried first.
+    const g = await groupEntriesByWorkspace("whatsapp", {
       object: "whatsapp_business_account",
       entry: [
         {
@@ -142,59 +159,128 @@ describe("WhatsApp resolution", () => {
         },
       ],
     });
-    expect(out).toEqual({ kind: "ok", workspaceId: wsA, via: "waba_info" });
+    expect(soleWorkspace(g)).toBe(wsA);
   });
 
   it("falls back to entry[].id as a portfolio id when no WABA matches", async () => {
-    const out = await resolveAppLevelWorkspace(
+    const g = await groupEntriesByWorkspace(
       "whatsapp",
       waEnvelope(PORTFOLIO, { field: "account_update", value: { event: "VERIFIED_ACCOUNT" } }),
     );
-    expect(out).toEqual({ kind: "ok", workspaceId: wsA, via: "portfolio_id" });
+    expect(soleWorkspace(g)).toBe(wsA);
   });
 
   it("DROPS rather than picks when a portfolio id maps to two workspaces", async () => {
-    const out = await resolveAppLevelWorkspace(
+    const g = await groupEntriesByWorkspace(
       "whatsapp",
       waEnvelope(SHARED_PORTFOLIO, {
         field: "account_update",
         value: { event: "VERIFIED_ACCOUNT" },
       }),
     );
-    expect(out.kind).toBe("ambiguous");
+    expect(g.groups).toEqual([]);
+    expect(g.unattributed).toHaveLength(1);
+    expect(g.unattributed[0]!.reason).toBe("ambiguous");
   });
 
-  it("resolves to nothing for an id we do not hold", async () => {
-    const out = await resolveAppLevelWorkspace(
+  it("attributes nothing for an id we do not hold", async () => {
+    const g = await groupEntriesByWorkspace(
       "whatsapp",
       waEnvelope(`${S}_someone_else`, { field: "account_alerts", value: {} }),
     );
-    expect(out).toEqual({ kind: "none" });
+    expect(g.groups).toEqual([]);
+    expect(g.unattributed[0]!.reason).toBe("none");
   });
 
-  it("resolves to nothing for a payload naming no ids at all", async () => {
-    const out = await resolveAppLevelWorkspace("whatsapp", {
+  it("attributes nothing for a payload naming no ids at all", async () => {
+    const g = await groupEntriesByWorkspace("whatsapp", {
       object: "whatsapp_business_account",
       entry: [],
     });
-    expect(out).toEqual({ kind: "none" });
+    expect(g).toEqual({ groups: [], unattributed: [] });
   });
 });
 
-describe("social resolution", () => {
-  it("resolves a Page id to its workspace", async () => {
-    const out = await resolveAppLevelWorkspace("messenger", {
+describe("batched across tenants — the bug this replaced", () => {
+  it("PARTITIONS one POST carrying two workspaces' WABAs", async () => {
+    // The whole point. Before this, `single()` saw two candidate workspaces for the
+    // body, returned `ambiguous`, and the route dropped BOTH entries with a 200.
+    const g = await groupEntriesByWorkspace("whatsapp", {
+      object: "whatsapp_business_account",
+      entry: [
+        { id: WABA, changes: [{ field: "account_alerts", value: { a: 1 } }] },
+        { id: WABA_B, changes: [{ field: "account_alerts", value: { b: 2 } }] },
+      ],
+    });
+    expect(g.unattributed).toEqual([]);
+    expect(g.groups).toHaveLength(2);
+    expect(new Set(g.groups.map((x) => x.workspaceId))).toEqual(new Set([wsA, wsB]));
+    // Strict partition: each group carries ONLY its own entry, so ingesting every
+    // group in turn processes each entry exactly once.
+    for (const grp of g.groups) {
+      expect(grp.entryCount).toBe(1);
+      const own = (grp.payload as { entry: Array<{ id: string }> }).entry;
+      expect(own).toHaveLength(1);
+      expect(own[0]!.id).toBe(grp.workspaceId === wsA ? WABA : WABA_B);
+    }
+  });
+
+  it("rebuilds a real envelope per group so the normal ingest path can read it", async () => {
+    const g = await groupEntriesByWorkspace("whatsapp", {
+      object: "whatsapp_business_account",
+      entry: [{ id: WABA, changes: [{ field: "account_alerts", value: {} }] }],
+    });
+    // `object` must survive — every parser gates on it.
+    expect((g.groups[0]!.payload as { object: string }).object).toBe(
+      "whatsapp_business_account",
+    );
+  });
+
+  it("one unattributable entry does not cost its batch-mates", async () => {
+    // The regression that matters most: a co-batched ambiguous entry used to take
+    // the resolvable one down with it.
+    const g = await groupEntriesByWorkspace("whatsapp", {
+      object: "whatsapp_business_account",
+      entry: [
+        { id: WABA, changes: [{ field: "account_alerts", value: {} }] },
+        { id: SHARED_PORTFOLIO, changes: [{ field: "account_update", value: {} }] },
+        { id: `${S}_someone_else`, changes: [{ field: "account_alerts", value: {} }] },
+      ],
+    });
+    expect(soleWorkspace(g)).toBe(wsA);
+    expect(g.groups[0]!.entryCount).toBe(1);
+    expect(g.unattributed.map((u) => u.reason).sort()).toEqual(["ambiguous", "none"]);
+  });
+
+  it("groups several entries of the SAME workspace together", async () => {
+    const g = await groupEntriesByWorkspace("whatsapp", {
+      object: "whatsapp_business_account",
+      entry: [
+        { id: WABA, changes: [{ field: "account_alerts", value: { n: 1 } }] },
+        { id: PORTFOLIO, changes: [{ field: "account_update", value: { n: 2 } }] },
+      ],
+    });
+    expect(g.groups).toHaveLength(1);
+    expect(g.groups[0]!.workspaceId).toBe(wsA);
+    expect(g.groups[0]!.entryCount).toBe(2);
+  });
+});
+
+describe("social attribution", () => {
+  it("attributes a Page id to its workspace", async () => {
+    const g = await groupEntriesByWorkspace("messenger", {
       object: "page",
       entry: [{ id: PAGE, time: 1, messaging: [] }],
     });
-    expect(out).toEqual({ kind: "ok", workspaceId: wsA, via: "account_id" });
+    expect(soleWorkspace(g)).toBe(wsA);
   });
 
-  it("does not cross channels — an IG payload naming a Page id resolves to nothing", async () => {
-    const out = await resolveAppLevelWorkspace("instagram", {
+  it("does not cross channels — an IG payload naming a Page id attributes to nothing", async () => {
+    const g = await groupEntriesByWorkspace("instagram", {
       object: "instagram",
       entry: [{ id: PAGE, time: 1, messaging: [] }],
     });
-    expect(out).toEqual({ kind: "none" });
+    expect(g.groups).toEqual([]);
+    expect(g.unattributed[0]!.reason).toBe("none");
   });
 });
