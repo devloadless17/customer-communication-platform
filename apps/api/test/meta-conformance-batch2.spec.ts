@@ -199,11 +199,16 @@ describe("W6-07 · pricing slices are AGGREGATED, not one row per time bucket", 
 });
 
 describe("MACC-03 · social broadcasts pace off Meta's PAGE limits, not WhatsApp's ladder", () => {
-  it("keeps the social rate strictly UNDER Meta's ~40/s Page-inbox ceiling", () => {
+  // The channel argument became REQUIRED once Instagram got its own ceilings:
+  // the ~40/s Page-inbox limit these cases are about is Messenger's, and
+  // Instagram has no equivalent (its binding figure is 100/s, with a separate
+  // cumulative 72,000-message ceiling). Naming the channel here keeps each
+  // assertion about the limit it was actually written for.
+  it("keeps the MESSENGER rate strictly UNDER Meta's ~40/s Page-inbox ceiling", () => {
     // That ceiling is the binding one — 300/s is the text limit, but past ~40 msg/s
     // the Page silently stops sending, which is worse than an error. Sitting AT 40
     // means the first burst is what discovers it.
-    const rate = resolveSocialSendRate();
+    const rate = resolveSocialSendRate("messenger");
     expect(rate).toBeLessThan(40);
     expect(rate).toBeGreaterThan(0);
   });
@@ -212,11 +217,11 @@ describe("MACC-03 · social broadcasts pace off Meta's PAGE limits, not WhatsApp
     // Social carries no `throughput.level`, so routing it through resolveSendRate
     // landed on the WhatsApp BASELINE — the right ballpark by accident, for the
     // wrong reason, and exactly on the ceiling.
-    expect(resolveSocialSendRate()).not.toBe(resolveSendRate(null, false));
+    expect(resolveSocialSendRate("messenger")).not.toBe(resolveSendRate(null, false));
   });
 
   it("still paces WhatsApp off the throughput ladder and the Coexistence cap", () => {
-    expect(resolveSendRate("HIGH", false)).toBeGreaterThan(resolveSocialSendRate());
+    expect(resolveSendRate("HIGH", false)).toBeGreaterThan(resolveSocialSendRate("messenger"));
     // Coexistence is a FIXED cap outside the ladder, and must win over the level.
     expect(resolveSendRate("HIGH", true)).toBeLessThanOrEqual(20);
   });
