@@ -1036,6 +1036,14 @@ export class CallsService {
    * lifecycle webhook ever arrives — calls ring into a void with nothing in the
    * logs to explain it. Checking up front turns each of these into a sentence
    * an admin can act on.
+   *
+   * That webhook item was named here from the start and was the one item with no
+   * check behind it, because Meta exposes no API to read an app's WhatsApp
+   * webhook fields (see the `calls_webhook` block). It is now evidence-based
+   * instead: proven subscribed, or not yet proven, with the dashboard path to
+   * fix it. Two of these items therefore report a state rather than a pass/fail
+   * — `quality_warning` is `ok: true` with a detail for the same reason — so
+   * read `ready` as "nothing we can prove is broken", not "everything verified".
    */
   async getCallingReadiness(
     session: ApiSession,
@@ -1068,6 +1076,8 @@ export class CallsService {
         ? { id: accountId, workspaceId: session.workspaceId }
         : { workspaceId: session.workspaceId, channel, isDefault: true },
       select: {
+        // Needed to scope the webhook-evidence counts below to THIS account.
+        id: true,
         // Messaging limit is portfolio-scoped (Meta, 2025-10-07), reached through
         // the WABA — Meta records portfolio ownership on the WABA node.
         wabaAccount: {
@@ -1125,6 +1135,59 @@ export class CallsService {
           "SIP is enabled on this number, which disables the calling API this platform uses. Turn SIP off in WhatsApp Manager (Phone numbers → Calls) to place or receive calls here.",
       });
     }
+    // THE `calls` WEBHOOK FIELD — the prerequisite this docblock has always
+    // named as the worst one, and the only one that had no check.
+    //
+    // Meta: "To receive Calling API webhooks, subscribe to the 'calls' webhook
+    // field." Without it, `POST /{phone}/calls` succeeds and the Call Connect
+    // webhook carrying the SDP answer never arrives, so no call can ever be
+    // established — the void this list exists to explain.
+    //
+    // It cannot be asserted against Graph. WhatsApp webhook FIELDS are app-wide
+    // dashboard config, and `GET /{app-id}/subscriptions` — the only edge that
+    // reads an app's subscriptions — takes `object` in
+    // `enum{user, page, permissions, payments}` and states outright: "Webhooks
+    // for WhatsApp is not supported. WhatsApp webhooks must be configured using
+    // the App Dashboard." So there is no API answer to fetch, and inventing one
+    // (reading `subscribed_apps`, which answers a per-WABA question) would
+    // report a different fact under this label.
+    //
+    // What we DO have is evidence. `Call.answeredAt` is written in exactly one
+    // place — `ingest-call.ts`, from a `calls` webhook — so a single non-null
+    // value anywhere on this account is PROOF the field is subscribed. Nothing
+    // else in the codebase can set it (`calls.service` only ever writes null,
+    // and `stale-calls.ts` terminalizes without it).
+    //
+    // The absence of proof is NOT a failure, and this check deliberately never
+    // fails the checklist: "we placed calls and none connected" is also what a
+    // week of customers not picking up looks like, and a false "not ready" on a
+    // working setup is the flapping alarm that trains admins to ignore the real
+    // one. So it reports one of three states and leaves `ready` alone.
+    const callScope = connection
+      ? {
+          workspaceId: session.workspaceId,
+          channel,
+          conversation: { channelConnectionId: connection.id },
+        }
+      : null;
+    if (callScope) {
+      const [confirmed, attempts] = await Promise.all([
+        this.db.call.count({ where: { ...callScope, answeredAt: { not: null } } }),
+        this.db.call.count({ where: callScope }),
+      ]);
+      checks.push({
+        key: "calls_webhook",
+        ok: true,
+        label: "Call webhooks arriving from WhatsApp",
+        detail:
+          confirmed > 0
+            ? null
+            : attempts > 0
+              ? `${attempts} call(s) on this number and not one has ever reported as answered, which is what a missing webhook subscription looks like. In the Meta App Dashboard → Webhooks → whatsapp_business_account, tick the \`calls\` field. SIP also suppresses these webhooks — see the SIP check if it appears above.`
+              : "Not confirmed yet. Meta gives no API to read your app's webhook field list, so this confirms itself on your first answered call. If `calls` isn't ticked in the App Dashboard → Webhooks → whatsapp_business_account, calls will place successfully and then ring into a void.",
+      });
+    }
+
     // Same class of silent breakage: browser WebRTC only speaks DTLS-SRTP.
     // SDES set out-of-band makes every media negotiation fail while the
     // signaling still looks healthy. A warning, not a hard failure — the read
