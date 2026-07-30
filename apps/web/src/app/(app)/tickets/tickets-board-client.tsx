@@ -471,13 +471,14 @@ function Card({
       </Link>
       <p className="mt-0.5 truncate text-2xs text-muted-foreground">
         {ticket.contactName}
-        {/* One glance tells the triager this card involves another workspace. */}
-        {ticket.escalation ? (
+        {/* One glance tells the triager this card is shared with another
+            department — and, when it isn't ours, whose customer it is. */}
+        {ticket.sharing ? (
           <span className="ml-1.5 inline-flex items-center gap-0.5 rounded bg-primary/10 px-1 py-px text-3xs font-medium text-primary">
             <ArrowUpRight aria-hidden className="size-2.5" />
-            {ticket.escalation.role === "target"
-              ? `From ${ticket.escalation.otherWorkspaceName}`
-              : `To ${ticket.escalation.otherWorkspaceName}`}
+            {ticket.sharing.role === "guest"
+              ? `From ${ticket.sharing.ownerWorkspaceName}`
+              : `Shared · ${ticket.sharing.guests.length}`}
           </span>
         ) : null}
       </p>

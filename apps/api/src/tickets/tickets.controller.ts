@@ -1,4 +1,23 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from "@nestjs/common";
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
+  Res,
+  UploadedFiles,
+  UseGuards,
+  UseInterceptors,
+} from "@nestjs/common";
+import { FilesInterceptor } from "@nestjs/platform-express";
+import { memoryStorage } from "multer";
+import type { Response } from "express";
+
+import { streamBlob } from "../media/stream-blob";
+import type { UploadedFile } from "./tickets.service";
 
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
@@ -8,6 +27,8 @@ import { RequireRole } from "../auth/role.guard";
 import { RoleGuard } from "../auth/role.guard";
 import {
   AddEscalationCommentSchema,
+  MAX_FILES_PER_REQUEST,
+  TICKET_ATTACHMENT_MAX_BYTES,
   CreateTicketFieldSchema,
   CreateTicketSchema,
   EscalateTicketSchema,
@@ -44,9 +65,13 @@ import { TicketsService } from "./tickets.service";
  *   GET    /api/tickets/:id          — one ticket + its timeline
  *   POST   /api/tickets              — open one manually
  *   POST   /api/tickets/:id/notes    — internal note (this workspace only)
- *   POST   /api/tickets/:id/escalate — refer to a sibling workspace
- *   POST   /api/tickets/:id/escalation-comments — comment BOTH workspaces see
- *   POST   /api/tickets/:id/escalation/message-customer — start own chat + bind
+ *   POST   /api/tickets/:id/escalate — grant a sibling workspace access
+ *   DELETE /api/tickets/:id/shares/:wsId — revoke that access
+ *   POST   /api/tickets/:id/escalation-comments — comment everyone with access sees (+files)
+ *   POST   /api/tickets/:id/attachments — attach files to the ticket
+ *   GET    /api/tickets/:id/attachments/:aid — stream one file (same-origin)
+ *   DELETE /api/tickets/:id/attachments/:aid — remove one
+ *   POST   /api/tickets/:id/escalation/message-customer — a guest starts its own chat
  *   PATCH  /api/tickets/:id          — status / priority / assignee / tags / fields
  */
 @Controller("api/tickets")
@@ -121,9 +146,9 @@ export class TicketsController {
   }
 
   /**
-   * Escalate to a sibling workspace in the organization: creates the twin
-   * ticket over there (with the contact snapshot) and links the pair. Session
-   * tier — escalating is everyday work, same as raising a ticket.
+   * Escalate: grant a sibling workspace in the organization access to THIS
+   * ticket (one ticket, two departments — nothing is copied). Session tier —
+   * escalating is everyday work, same as raising a ticket.
    */
   @Post(":id/escalate")
   async escalate(
@@ -135,21 +160,115 @@ export class TicketsController {
   }
 
   /**
-   * A comment BOTH workspaces of the escalation pair see — distinct from
-   * `/notes`, which stays private to this workspace. Like a note, it is not a
-   * ticket update: no `version` bump, no SLA movement.
+   * Comment on the ticket. On a SHARED ticket every workspace with access sees
+   * it — that is the conversation between the departments; an internal `/notes`
+   * entry stays in this workspace. Like a note it is not a ticket update: no
+   * `version` bump, no SLA movement.
+   *
+   * Accepts multipart so a reply can carry its evidence: the files are filed
+   * against the comment and render with it. `FilesInterceptor` + memoryStorage
+   * (see UploadedFile) — small, capped, few.
    */
   @Post(":id/escalation-comments")
+  @UseInterceptors(
+    FilesInterceptor("files", MAX_FILES_PER_REQUEST, {
+      storage: memoryStorage(),
+      limits: { fileSize: TICKET_ATTACHMENT_MAX_BYTES },
+    }),
+  )
   async addEscalationComment(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
     @Body(zBody(AddEscalationCommentSchema)) body: AddEscalationCommentInput,
+    @UploadedFiles() files?: UploadedFile[],
   ) {
-    return this.tickets.addEscalationComment(
+    return this.tickets.addComment(
       session.workspaceId,
       { userId: session.userId },
       id,
       body.body,
+      files ?? [],
+      session,
+    );
+  }
+
+  /**
+   * Attach files to a ticket directly (the raise dialog posts here right after
+   * creating the ticket, so a picked file survives even if the ticket's own
+   * create is what fails).
+   */
+  @Post(":id/attachments")
+  @UseInterceptors(
+    FilesInterceptor("files", MAX_FILES_PER_REQUEST, {
+      storage: memoryStorage(),
+      limits: { fileSize: TICKET_ATTACHMENT_MAX_BYTES },
+    }),
+  )
+  async addAttachments(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @UploadedFiles() files?: UploadedFile[],
+  ) {
+    const attachments = await this.tickets.attachFiles(
+      session.workspaceId,
+      { userId: session.userId },
+      id,
+      files ?? [],
+    );
+    return { attachments };
+  }
+
+  /**
+   * Stream one attachment. Same-origin (never a presigned storage URL handed to
+   * the browser) so the ticket's access gate applies to every byte — which is
+   * also what lets a GUEST department read the owner's files and vice versa.
+   */
+  @Get(":id/attachments/:attachmentId")
+  async getAttachment(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Param("attachmentId") attachmentId: string,
+    @Query("download") download: string | undefined,
+    @Res() res: Response,
+  ) {
+    const { blobKey, filename } = await this.tickets.attachmentBlobKey(
+      session.workspaceId,
+      id,
+      attachmentId,
+      session,
+    );
+    await streamBlob(res, blobKey, undefined, {
+      ...(download === "1" ? { downloadFilename: filename } : {}),
+    });
+  }
+
+  @Delete(":id/attachments/:attachmentId")
+  async removeAttachment(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Param("attachmentId") attachmentId: string,
+  ) {
+    return this.tickets.removeAttachment(
+      session.workspaceId,
+      { userId: session.userId },
+      id,
+      attachmentId,
+      session,
+    );
+  }
+
+  /** Revoke a workspace's access to this ticket. */
+  @Delete(":id/shares/:guestWorkspaceId")
+  async revokeShare(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Param("guestWorkspaceId") guestWorkspaceId: string,
+  ) {
+    return this.tickets.revokeShare(
+      session.workspaceId,
+      { userId: session.userId },
+      id,
+      guestWorkspaceId,
       session,
     );
   }

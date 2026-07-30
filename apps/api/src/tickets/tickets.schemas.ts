@@ -165,6 +165,16 @@ export const AddTicketNoteSchema = z.object({
 export type AddTicketNoteInput = z.infer<typeof AddTicketNoteSchema>;
 
 /**
+ * Attachment limits. Deliberately far below the 100 MiB message-media ceiling:
+ * a ticket file is evidence (a screenshot, an invoice, a form), the buffer is
+ * held in memory, and the per-ticket count is capped too — see
+ * MAX_TICKET_ATTACHMENTS.
+ */
+export const TICKET_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+/** Per REQUEST, not per ticket — one comment carries a few files at most. */
+export const MAX_FILES_PER_REQUEST = 5;
+
+/**
  * Escalate a ticket to a sibling workspace in the organization. The cause is
  * REQUIRED — it becomes the twin ticket's description and is the whole point
  * of the referral: the receiving workspace must understand the issue without
@@ -173,12 +183,12 @@ export type AddTicketNoteInput = z.infer<typeof AddTicketNoteSchema>;
 export const EscalateTicketSchema = z.object({
   targetWorkspaceId: z.string().min(1),
   cause: z.string().trim().min(1).max(5000),
-  subject: z.string().trim().max(200).optional(),
 });
 export type EscalateTicketInput = z.infer<typeof EscalateTicketSchema>;
 
-/** A comment shared across the escalation pair — BOTH workspaces see it,
- *  unlike an internal note. */
+/** A comment on the ticket — every workspace with access sees it, unlike an
+ *  internal note. Sent as multipart when it carries files, so the body arrives
+ *  as a form field. */
 export const AddEscalationCommentSchema = z.object({
   body: z.string().trim().min(1).max(5000),
 });

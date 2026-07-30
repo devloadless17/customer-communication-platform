@@ -748,6 +748,18 @@ export interface TicketChangedEvent {
    * transaction — the inbox row badge keys off it.
    */
   openTicketCount: number;
+  /**
+   * Sibling workspaces this ticket is SHARED with (escalated to). Carried on
+   * the event rather than re-read by the fanout rule, for the same reason as
+   * `openTicketCount`: the publisher read it inside the transaction, and a
+   * subscriber re-reading could see a state the transaction already moved past
+   * (a revoke deletes the share row, and the workspace losing access is exactly
+   * the one that still needs the frame).
+   *
+   * `workspaceId` remains the OWNING workspace — the ticket belongs to it, and
+   * these workspaces merely hold a key.
+   */
+  sharedWithWorkspaceIds?: string[];
   /** Who made the change. null for automation / SLA sweeper actions. */
   changedByUserId: string | null;
   /** Set on /v1 mutations for audit attribution. */

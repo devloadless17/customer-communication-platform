@@ -8,6 +8,7 @@ import {
 
 import type {
   Ticket,
+  TicketAttachment as TicketAttachmentView,
   TicketCounts,
   TicketEvent,
   TicketFieldDefinition,
@@ -27,11 +28,19 @@ import {
   type TicketOutcome,
 } from "@/lib/tickets/mutations";
 import {
-  addEscalationComment,
-  bindEscalatedTicketConversation,
-  escalateTicket,
-  getEscalationSnapshot,
-} from "@/lib/tickets/escalations";
+  addTicketComment,
+  bindGuestConversation,
+  getGuestSnapshot,
+  revokeTicketShare,
+  shareTicket,
+} from "@/lib/tickets/shares";
+import {
+  addTicketAttachment,
+  getTicketAttachmentForRead,
+  MAX_TICKET_ATTACHMENTS,
+  removeTicketAttachment,
+} from "@/lib/tickets/attachments";
+import { ticketByIdWhere } from "@/lib/tickets/access";
 import type { Role } from "@ccp/shared/types";
 import {
   getTicket,
@@ -54,6 +63,18 @@ import type {
   UpdateTicketInput,
   UpsertSlaPolicyInput,
 } from "./tickets.schemas";
+
+/**
+ * One uploaded file, as multer hands it over. `memoryStorage` is correct HERE
+ * (unlike the 100 MiB message-media path, which streams to a temp file): ticket
+ * attachments are capped small and arrive a few at a time, so the buffer never
+ * approaches the per-request ceilings that motivated diskStorage there.
+ */
+export interface UploadedFile {
+  originalname: string;
+  mimetype: string;
+  buffer: Buffer;
+}
 
 /**
  * Thin seam over lib/tickets — the domain layer owns every rule; this class
@@ -96,7 +117,11 @@ export class TicketsService {
     const restriction = this.restriction(viewer);
     if (!restriction) return;
     const ok = await this.db.ticket.findFirst({
-      where: { AND: [{ id: ticketId, workspaceId: viewer!.workspaceId }, restriction] },
+      // Through the ACCESS gate (mine OR shared with me), then AND the agent
+      // visibility restriction. A bare `workspaceId` here 404'd every ticket a
+      // guest department had been escalated INTO — the exact shape this gate
+      // exists to stop being hand-written.
+      where: { AND: [ticketByIdWhere(viewer!.workspaceId, ticketId), restriction] },
       select: { id: true },
     });
     // 404, never 403 — a 403 confirms the row exists to someone not allowed to
@@ -352,6 +377,11 @@ export class TicketsService {
    * escalate — same tier as raising a ticket; the visibility boundary applies
    * to the SOURCE ticket like every other write.
    */
+  /**
+   * Escalate: grant a sibling workspace access to THIS ticket. One ticket, two
+   * departments — nothing is copied. Any agent may do it (same tier as raising
+   * a ticket), and any workspace that already has access may loop in another.
+   */
   async escalate(
     workspaceId: string,
     actor: TicketActor,
@@ -360,25 +390,21 @@ export class TicketsService {
     viewer?: ConversationViewer,
   ): Promise<{ ticket: Ticket }> {
     await this.assertVisible(viewer, id);
-    const outcome = await escalateTicket(this.db, {
+    const outcome = await shareTicket(this.db, {
       workspaceId,
       ticketId: id,
-      actor,
+      actor: { ...actor, workspaceId },
       targetWorkspaceId: body.targetWorkspaceId,
       cause: body.cause,
-      ...(body.subject !== undefined ? { subject: body.subject } : {}),
     });
-    if (outcome.ok) return { ticket: outcome.sourceTicket };
+    if (outcome.ok) return { ticket: outcome.ticket };
     switch (outcome.reason) {
-      case "already_escalated":
-        // 409: the state, not the input, is what refused this — a concurrent
-        // escalate may have just landed, so a re-read shows the existing link.
-        throw new ConflictException({ error: "already_escalated" });
-      case "cannot_escalate_escalated_ticket":
-        throw new BadRequestException({
-          error: "cannot_escalate_escalated_ticket",
-          detail:
-            "This ticket IS an escalation — answer it here or on its source; chains are not allowed.",
+      case "already_shared":
+        // 409: the STATE refused this, not the input — that workspace already
+        // has the key, so a re-read shows it in the participant list.
+        throw new ConflictException({
+          error: "already_shared",
+          detail: "That workspace already has access to this ticket.",
         });
       case "ticket_terminal":
         throw new BadRequestException({ error: "ticket_terminal" });
@@ -391,43 +417,151 @@ export class TicketsService {
     }
   }
 
-  /** Post a comment BOTH sides of the escalation pair see. */
-  async addEscalationComment(
+  /** Revoke a workspace's access. Owner-only, or a guest removing itself. */
+  async revokeShare(
+    workspaceId: string,
+    actor: TicketActor,
+    id: string,
+    guestWorkspaceId: string,
+    viewer?: ConversationViewer,
+  ): Promise<{ ok: true }> {
+    await this.assertVisible(viewer, id);
+    const outcome = await revokeTicketShare(this.db, {
+      workspaceId,
+      ticketId: id,
+      guestWorkspaceId,
+      actor: { ...actor, workspaceId },
+    });
+    if (outcome.ok) return { ok: true };
+    if (outcome.reason === "forbidden") {
+      throw new ForbiddenException({
+        error: "forbidden",
+        detail:
+          "Only the workspace that owns this ticket can remove another workspace's access.",
+      });
+    }
+    throw new NotFoundException({ error: outcome.reason });
+  }
+
+  /**
+   * Post a comment on the ticket. On a SHARED ticket every workspace with
+   * access sees it — that is the conversation between the departments.
+   * Optionally carries files, which are filed against the comment so they
+   * render with it.
+   */
+  async addComment(
     workspaceId: string,
     actor: TicketActor,
     id: string,
     body: string,
+    files: UploadedFile[] = [],
     viewer?: ConversationViewer,
-  ): Promise<{ ok: true }> {
+  ): Promise<{ ok: true; attachments: TicketAttachmentView[] }> {
     await this.assertVisible(viewer, id);
-    const outcome = await addEscalationComment(this.db, {
+    const outcome = await addTicketComment(this.db, {
       workspaceId,
       ticketId: id,
-      actor,
+      actor: { ...actor, workspaceId },
       body,
     });
-    if (outcome.ok) return { ok: true };
-    switch (outcome.reason) {
-      case "empty_comment":
+    if (!outcome.ok) {
+      if (outcome.reason === "empty_comment") {
         throw new BadRequestException({ error: "empty_comment" });
-      case "not_escalated":
-        throw new BadRequestException({ error: "not_escalated" });
-      case "escalation_severed":
-        throw new BadRequestException({
-          error: "escalation_severed",
-          detail: "The linked ticket was deleted — there is nobody on the other end.",
-        });
-      default:
-        throw new NotFoundException({ error: outcome.reason });
+      }
+      throw new NotFoundException({ error: outcome.reason });
     }
+    const attachments = await this.attachFiles(workspaceId, actor, id, files, outcome.eventId);
+    return { ok: true, attachments };
   }
 
   /**
-   * Start this workspace's OWN conversation with the escalated customer, from
-   * the snapshot's phone, and bind it to the ticket. Goes through the canonical
+   * Attach files to a ticket (at raise time, or to a comment).
+   *
+   * Partial success is deliberate and reported: a ticket raised with three
+   * screenshots where one is a rejected type must not lose the other two, and
+   * must not silently pretend all three landed.
+   */
+  async attachFiles(
+    workspaceId: string,
+    actor: TicketActor,
+    ticketId: string,
+    files: UploadedFile[],
+    eventId?: string | null,
+  ): Promise<TicketAttachmentView[]> {
+    const out: TicketAttachmentView[] = [];
+    for (const file of files) {
+      const outcome = await addTicketAttachment(this.db, {
+        workspaceId,
+        ticketId,
+        actor: { ...actor, workspaceId },
+        ...(eventId ? { eventId } : {}),
+        bytes: file.buffer,
+        filename: file.originalname,
+        mimeType: file.mimetype,
+      });
+      if (outcome.ok) {
+        out.push(outcome.attachment);
+        continue;
+      }
+      if (outcome.reason === "ticket_not_found") {
+        throw new NotFoundException({ error: "ticket_not_found" });
+      }
+      if (outcome.reason === "too_many_attachments") {
+        throw new BadRequestException({
+          error: "too_many_attachments",
+          detail: `A ticket holds at most ${MAX_TICKET_ATTACHMENTS} files.`,
+        });
+      }
+      throw new BadRequestException({
+        error: "unsupported_type",
+        detail: `${file.originalname} isn't a file type we can store.`,
+      });
+    }
+    return out;
+  }
+
+  /** Resolve an attachment's blob key for streaming. Access-gated. */
+  async attachmentBlobKey(
+    workspaceId: string,
+    ticketId: string,
+    attachmentId: string,
+    viewer?: ConversationViewer,
+  ): Promise<{ blobKey: string; filename: string }> {
+    await this.assertVisible(viewer, ticketId);
+    const found = await getTicketAttachmentForRead(this.db, workspaceId, ticketId, attachmentId);
+    if (!found.ok) throw new NotFoundException({ error: "attachment_not_found" });
+    return { blobKey: found.blobKey, filename: found.filename };
+  }
+
+  async removeAttachment(
+    workspaceId: string,
+    actor: TicketActor,
+    ticketId: string,
+    attachmentId: string,
+    viewer?: ConversationViewer,
+  ): Promise<{ ok: true }> {
+    await this.assertVisible(viewer, ticketId);
+    const outcome = await removeTicketAttachment(this.db, {
+      workspaceId,
+      ticketId,
+      attachmentId,
+      actor: { ...actor, workspaceId },
+    });
+    if (outcome.ok) return { ok: true };
+    if (outcome.reason === "forbidden") {
+      throw new ForbiddenException({
+        error: "forbidden",
+        detail: "Only the workspace that added a file, or the ticket's owner, can remove it.",
+      });
+    }
+    throw new NotFoundException({ error: "attachment_not_found" });
+  }
+
+  /**
+   * Start THIS workspace's own conversation with the customer on a ticket
+   * shared with it, and bind it to the share. Goes through the canonical
    * `startConversation` path (find-or-create contact with stage seeding +
-   * soft-delete revive, reopen-not-fragment) — from then on the ticket is a
-   * completely normal ticket.
+   * soft-delete revive, reopen-not-fragment).
    */
   async messageEscalatedCustomer(
     workspaceId: string,
@@ -437,21 +571,25 @@ export class TicketsService {
     viewer?: ConversationViewer,
   ): Promise<{ ticket: Ticket; conversationId: string }> {
     await this.assertVisible(viewer, id);
-    const snapshot = await getEscalationSnapshot(this.db, workspaceId, id);
+    const snapshot = await getGuestSnapshot(this.db, workspaceId, id);
     if (!snapshot) {
-      // Distinguish "no such ticket" from "not an escalated-in ticket".
+      // Distinguish "no such ticket" from "you are the OWNER of it" — the owner
+      // already has the customer thread in their own inbox.
       const exists = await this.db.ticket.findFirst({
-        where: { id, workspaceId },
+        where: ticketByIdWhere(workspaceId, id),
         select: { id: true },
       });
       if (!exists) throw new NotFoundException({ error: "ticket_not_found" });
-      throw new BadRequestException({ error: "not_escalated_in" });
+      throw new BadRequestException({
+        error: "not_a_guest",
+        detail: "This ticket is yours — its conversation is already in your inbox.",
+      });
     }
     if (!snapshot.phoneNumber) {
       throw new BadRequestException({
         error: "no_phone_in_snapshot",
         detail:
-          "The customer's identity on the source channel has no phone number, so this workspace cannot start a chat. Answer through the shared comments instead.",
+          "The customer's identity on the original channel has no phone number, so this workspace cannot start a chat. Answer with a comment instead.",
       });
     }
     const started = await this.conversations.startConversation(workspaceId, actor.userId ?? null, {
@@ -459,16 +597,16 @@ export class TicketsService {
       ...(snapshot.name ? { name: snapshot.name } : {}),
       ...(input.channelConnectionId ? { channelConnectionId: input.channelConnectionId } : {}),
     });
-    const outcome = await bindEscalatedTicketConversation(this.db, {
+    const outcome = await bindGuestConversation(this.db, {
       workspaceId,
       ticketId: id,
-      actor,
+      actor: { ...actor, workspaceId },
       conversationId: started.conversationId,
     });
     if (outcome.ok) return { ticket: outcome.ticket, conversationId: started.conversationId };
     if (outcome.reason === "already_bound") {
-      // A double-click raced us — the conversation exists and the ticket is
-      // bound; hand back the current state instead of an error.
+      // A double-click raced us — the thread exists and the share is bound;
+      // hand back the current state instead of an error.
       const ticket = await getTicket(this.db, workspaceId, id);
       if (ticket?.conversationId) {
         return { ticket, conversationId: ticket.conversationId };
@@ -478,8 +616,8 @@ export class TicketsService {
     if (outcome.reason === "conversation_not_found") {
       throw new NotFoundException({ error: "conversation_not_found" });
     }
-    if (outcome.reason === "not_escalated_in") {
-      throw new BadRequestException({ error: "not_escalated_in" });
+    if (outcome.reason === "not_a_guest") {
+      throw new BadRequestException({ error: "not_a_guest" });
     }
     throw new NotFoundException({ error: "ticket_not_found" });
   }

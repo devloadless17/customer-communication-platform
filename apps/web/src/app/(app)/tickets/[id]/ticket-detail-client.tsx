@@ -10,7 +10,10 @@ import {
   Clock,
   Loader2,
   MessageSquare,
+  Paperclip,
   Trash2,
+  Users,
+  X,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -29,6 +32,7 @@ import {
   TICKET_PRIORITIES,
   TICKET_STATUSES,
   type Ticket,
+  type TicketAttachment,
   type TicketEvent,
   type TicketPriority,
   type TicketStatus,
@@ -83,11 +87,15 @@ const EVENT_LABELS: Record<string, string> = {
   merged: "merged it",
   team_changed: "handed it to another team",
   note: "left a note",
-  escalated: "escalated it to another workspace",
-  escalation_received: "sent this escalation",
-  escalation_note: "shared a comment",
-  escalation_status: "changed their status",
-  escalation_severed: "deleted the linked ticket",
+  escalated: "gave another workspace access",
+  escalation_revoked: "removed a workspace's access",
+  escalation_note: "commented",
+  attachment_added: "attached a file",
+  attachment_removed: "removed a file",
+  // Retired with the twin-pair design (2026-07-30) — old rows still render.
+  escalation_received: "received this escalation",
+  escalation_status: "changed the status in the other workspace",
+  escalation_severed: "the linked ticket was deleted",
 };
 
 /** A string field off an event's before/after JSON, or null. */
@@ -136,6 +144,8 @@ export function TicketDetailClient({
   const [escTargetId, setEscTargetId] = useState<string>("");
   const [escCause, setEscCause] = useState("");
   const [escComment, setEscComment] = useState("");
+  // Files picked for the next comment, and for direct ticket attachment.
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const { confirm, confirmDialog } = useConfirm();
 
   async function removeTicket() {
@@ -270,7 +280,7 @@ export function TicketDetailClient({
       const data = (await res.json()) as { ticket: Ticket };
       setTicket(data.ticket);
       await reload({ eventsOnly: true });
-      toast.success("Escalated — the other workspace now has it on their board");
+      toast.success("Escalated — that workspace now has this ticket on their board");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Couldn't escalate this ticket");
       await reload();
@@ -279,55 +289,103 @@ export function TicketDetailClient({
     }
   };
 
-  /** A comment BOTH workspaces see — same non-update posture as a note. */
-  const addEscalationComment = async (body: string) => {
+  /**
+   * Comment on the ticket. On a shared ticket everyone with access sees it.
+   * Sent as multipart so a reply can carry its evidence — the files are filed
+   * against the comment and render with it.
+   */
+  const addComment = async (body: string, files: File[]) => {
     setBusy(true);
     try {
+      const form = new FormData();
+      form.append("body", body);
+      for (const f of files) form.append("files", f);
+      // No content-type header: the browser must set the multipart boundary.
       const res = await apiFetch(`/api/tickets/${ticket.id}/escalation-comments`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ body }),
+        body: form,
       });
       if (!res.ok) {
         const d = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
-        throw new Error(d.detail || d.error || "Couldn't share the comment");
+        throw new Error(d.detail || d.error || "Couldn't post the comment");
       }
-      await reload({ eventsOnly: true });
+      await reload();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Couldn't share the comment");
+      toast.error(err instanceof Error ? err.message : "Couldn't post the comment");
     } finally {
       setBusy(false);
     }
   };
 
-  /**
-   * Jump to the OTHER side of the escalation pair. A ticket only exists inside
-   * its own workspace, so this switches this DEVICE's active workspace first
-   * and then hard-navigates to the twin (full navigation, never a soft route —
-   * the socket must leave the old `ws:` room). Fails with a toast for agents
-   * who have no seat in the other workspace.
-   */
-  const openTwin = async (workspaceId: string, ticketId: string) => {
+  /** Attach files to the ticket itself (no comment). */
+  const attachFiles = async (files: File[]) => {
+    if (files.length === 0) return;
     setBusy(true);
     try {
-      const res = await apiFetch("/api/workspaces/active", {
+      const form = new FormData();
+      for (const f of files) form.append("files", f);
+      const res = await apiFetch(`/api/tickets/${ticket.id}/attachments`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ workspaceId }),
+        body: form,
       });
       if (!res.ok) {
-        toast.error("You don't have access to that workspace — ask its admin for a seat.");
-        setBusy(false);
-        return;
+        const d = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
+        throw new Error(d.detail || d.error || "Couldn't attach the files");
       }
-      window.location.assign(`/tickets/${ticketId}`);
-    } catch {
-      toast.error("Couldn't switch workspace. Please try again.");
+      await reload();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't attach the files");
+    } finally {
       setBusy(false);
     }
   };
 
-  /** Start OUR chat with the escalated customer and jump into it. */
+  const removeAttachment = async (attachmentId: string) => {
+    setBusy(true);
+    try {
+      const res = await apiFetch(`/api/tickets/${ticket.id}/attachments/${attachmentId}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
+        throw new Error(d.detail || d.error || "Couldn't remove the file");
+      }
+      await reload();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't remove the file");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Hand a workspace's access back. */
+  const revokeShare = async (guestWorkspaceId: string, name: string) => {
+    const ok = await confirm({
+      title: `Remove ${name}'s access?`,
+      description:
+        "They'll lose this ticket from their board. The history of what they did stays on it, and you can escalate to them again later.",
+      confirmLabel: "Remove access",
+      destructive: true,
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const res = await apiFetch(`/api/tickets/${ticket.id}/shares/${guestWorkspaceId}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
+        throw new Error(d.detail || d.error || "Couldn't remove access");
+      }
+      await reload();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't remove access");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Start THIS workspace's own chat with the customer, and jump into it. */
   const messageCustomer = async () => {
     setBusy(true);
     try {
@@ -605,138 +663,184 @@ export function TicketDetailClient({
         )}
       </section>
 
-      {/* Cross-workspace escalation. One escalation per ticket lifetime; the
-          pair shares comments and status changes through mirrored timeline
-          rows — everything else stays inside each workspace. */}
-      {ticket.escalation ? (
+      {/* Cross-workspace sharing. ONE ticket, several departments: escalating
+          grants a sibling workspace access to THIS ticket — nothing is copied,
+          so every change either side makes is the change, and the log says who
+          made it. */}
+      {ticket.sharing ? (
         <section className="rounded-xl border bg-card p-4">
           <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold">
-            <ArrowUpRight aria-hidden className="size-4" />
-            {ticket.escalation.role === "source"
-              ? `Escalated to ${ticket.escalation.otherWorkspaceName}`
-              : `Escalated from ${ticket.escalation.otherWorkspaceName}`}
+            <Users aria-hidden className="size-4" />
+            Shared ticket
           </h2>
-          <p className="mb-3 text-2xs text-muted-foreground">
-            {ticket.escalation.severed ? (
-              "The linked ticket was deleted — the history below is all that remains."
-            ) : (
-              <>
-                Their ticket #{ticket.escalation.otherTicketNumber} ·{" "}
-                {ticket.escalation.otherTicketStatus
-                  ? STATUS_LABELS[ticket.escalation.otherTicketStatus]
-                  : "unknown"}
-                {ticket.escalation.role === "source"
-                  ? " — one ticket, two workspaces: status and priority stay in sync, and their comments land in the history below. Relay answers to the customer here."
-                  : " — one ticket, two workspaces: status and priority stay in sync. Answer with a shared comment, or start your own chat with the customer."}
-              </>
-            )}
+          <p className="mb-3 text-2xs leading-relaxed text-muted-foreground">
+            {ticket.sharing.role === "owner"
+              ? "This ticket is yours and is shared with the workspaces below. They see the same status, priority, history and files — anything they change here is the change."
+              : `${ticket.sharing.ownerWorkspaceName} escalated this to you. You're working the same ticket they are: your changes, comments and files are theirs too. Their inbox conversation stays private.`}
           </p>
 
-          {!ticket.escalation.severed && ticket.escalation.otherTicketId ? (
-            <div className="mb-3">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={busy}
-                onClick={() => {
-                  const esc = ticket.escalation;
-                  if (esc?.otherTicketId) void openTwin(esc.otherWorkspaceId, esc.otherTicketId);
-                }}
-                className="h-8 gap-1.5 text-xs"
-              >
-                <ArrowUpRight aria-hidden className="size-3.5" />
-                Open ticket #{ticket.escalation.otherTicketNumber} in{" "}
-                {ticket.escalation.otherWorkspaceName}
-              </Button>
-              <p className="mt-1 text-3xs text-muted-foreground">
-                Switches this tab to {ticket.escalation.otherWorkspaceName} — tickets never
-                leave their workspace.
-              </p>
-            </div>
-          ) : null}
+          {/* The participant list. Not a secret from the participants. */}
+          <ul className="mb-3 flex flex-col gap-1.5">
+            <li className="flex items-center gap-2 text-2xs">
+              <span className="rounded bg-muted px-1.5 py-0.5 font-medium">
+                {ticket.sharing.ownerWorkspaceName}
+              </span>
+              <span className="text-muted-foreground">raised it</span>
+            </li>
+            {ticket.sharing.guests.map((g) => (
+              <li key={g.workspaceId} className="flex items-center gap-2 text-2xs">
+                <span className="rounded bg-primary/10 px-1.5 py-0.5 font-medium text-primary">
+                  {g.workspaceName}
+                </span>
+                <span className="text-muted-foreground">
+                  added <LocalTime iso={g.sharedAt} format="listTime" />
+                </span>
+                {/* The owner may remove anyone; a guest may only remove itself. */}
+                {ticket.sharing?.role === "owner" || g.workspaceId === ticket.sharing?.ownerWorkspaceId ? (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void revokeShare(g.workspaceId, g.workspaceName)}
+                    className="ml-auto cursor-pointer text-3xs text-muted-foreground underline-offset-2 hover:text-destructive hover:underline disabled:opacity-50"
+                  >
+                    Remove access
+                  </button>
+                ) : null}
+              </li>
+            ))}
+          </ul>
 
-          {/* The customer as the source workspace handed them over — a snapshot,
-              not a live profile; edits over there don't change this. */}
-          {ticket.escalation.role === "target" && ticket.escalation.contactSnapshot ? (
+          {/* The customer as the owner handed them over — a snapshot, not a live
+              profile; edits over there don't change this. */}
+          {ticket.sharing.contactSnapshot ? (
             <div className="mb-3 rounded-lg border bg-muted/30 p-3">
               <p className="mb-1.5 text-3xs font-medium uppercase tracking-wider text-muted-foreground">
-                Customer snapshot (at escalation)
+                Customer details (as shared with you)
               </p>
               <dl className="grid gap-x-4 gap-y-1 text-2xs sm:grid-cols-2">
-                {ticket.escalation.contactSnapshot.name && (
-                  <SnapshotRow label="Name" value={ticket.escalation.contactSnapshot.name} />
+                {ticket.sharing.contactSnapshot.name && (
+                  <SnapshotRow label="Name" value={ticket.sharing.contactSnapshot.name} />
                 )}
-                {ticket.escalation.contactSnapshot.phoneNumber && (
-                  <SnapshotRow label="Phone" value={ticket.escalation.contactSnapshot.phoneNumber} />
+                {ticket.sharing.contactSnapshot.phoneNumber && (
+                  <SnapshotRow label="Phone" value={ticket.sharing.contactSnapshot.phoneNumber} />
                 )}
-                {ticket.escalation.contactSnapshot.email && (
-                  <SnapshotRow label="Email" value={ticket.escalation.contactSnapshot.email} />
+                {ticket.sharing.contactSnapshot.email && (
+                  <SnapshotRow label="Email" value={ticket.sharing.contactSnapshot.email} />
                 )}
                 <SnapshotRow
                   label="Channel"
-                  value={ticket.escalation.contactSnapshot.identityChannel}
+                  value={ticket.sharing.contactSnapshot.identityChannel}
                 />
-                {Object.entries(ticket.escalation.contactSnapshot.customFields).map(([k, v]) => (
+                {Object.entries(ticket.sharing.contactSnapshot.customFields).map(([k, v]) => (
                   <SnapshotRow key={k} label={k} value={v} />
                 ))}
               </dl>
-              {!ticket.conversationId && ticket.escalation.contactSnapshot.phoneNumber ? (
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={busy}
-                  onClick={() => void messageCustomer()}
-                  className="mt-2.5 h-8 gap-1.5 text-xs"
-                >
-                  <MessageSquare aria-hidden className="size-3.5" />
-                  Message the customer
-                </Button>
+              {!ticket.conversationId && ticket.sharing.contactSnapshot.phoneNumber ? (
+                <>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => void messageCustomer()}
+                    className="mt-2.5 h-8 gap-1.5 text-xs"
+                  >
+                    <MessageSquare aria-hidden className="size-3.5" />
+                    Message the customer
+                  </Button>
+                  <p className="mt-1 text-3xs text-muted-foreground">
+                    Starts your own conversation with them, from your own number.
+                  </p>
+                </>
               ) : null}
-              {!ticket.conversationId && !ticket.escalation.contactSnapshot.phoneNumber ? (
+              {!ticket.conversationId && !ticket.sharing.contactSnapshot.phoneNumber ? (
                 <p className="mt-2 text-2xs text-muted-foreground">
-                  No phone number on this channel identity — answer through the shared
-                  comments and the source workspace will relay it.
+                  No phone number on this channel identity — reply with a comment and{" "}
+                  {ticket.sharing.ownerWorkspaceName} will relay it.
                 </p>
               ) : null}
             </div>
           ) : null}
 
-          {!ticket.escalation.severed && (
-            <div className="flex flex-col gap-2">
-              <textarea
-                value={escComment}
-                disabled={busy}
-                onChange={(e) => setEscComment(e.target.value)}
-                rows={2}
-                maxLength={5000}
-                placeholder={
-                  ticket.escalation.role === "source"
-                    ? "Add context for the other workspace…"
-                    : "e.g. Refund approved — tell them it lands in 3–5 business days."
-                }
-                className="w-full rounded-md border bg-background px-2 py-1.5 text-xs"
-                aria-label="Shared escalation comment"
-              />
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  disabled={busy || escComment.trim().length === 0}
-                  onClick={() => {
-                    const body = escComment.trim();
-                    setEscComment("");
-                    void addEscalationComment(body);
-                  }}
-                  className="h-8 cursor-pointer rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-50"
+          {/* Escalate onward: any participant may loop in another department. */}
+          {escalationTargets.filter(
+            (w) =>
+              w.id !== ticket.sharing?.ownerWorkspaceId &&
+              !ticket.sharing?.guests.some((g) => g.workspaceId === w.id),
+          ).length > 0 ? (
+            <details className="mb-3 rounded-lg border px-3 py-2">
+              <summary className="cursor-pointer text-2xs font-medium">
+                Bring in another workspace
+              </summary>
+              <div className="mt-2 flex flex-col gap-2">
+                <select
+                  value={escTargetId}
+                  disabled={busy}
+                  onChange={(e) => setEscTargetId(e.target.value)}
+                  className="h-8 w-full rounded-md border bg-background px-2 text-xs"
+                  aria-label="Workspace to bring in"
                 >
-                  Share comment
-                </button>
-                <span className="text-3xs text-muted-foreground">
-                  Visible to {ticket.escalation.otherWorkspaceName} — unlike an internal note.
-                </span>
+                  <option value="">Choose a workspace…</option>
+                  {escalationTargets
+                    .filter(
+                      (w) =>
+                        w.id !== ticket.sharing?.ownerWorkspaceId &&
+                        !ticket.sharing?.guests.some((g) => g.workspaceId === w.id),
+                    )
+                    .map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.name}
+                      </option>
+                    ))}
+                </select>
+                <textarea
+                  value={escCause}
+                  disabled={busy}
+                  onChange={(e) => setEscCause(e.target.value)}
+                  rows={2}
+                  maxLength={5000}
+                  placeholder="What do you need from them?"
+                  className="w-full rounded-md border bg-background px-2 py-1.5 text-xs"
+                  aria-label="Why this workspace is being brought in"
+                />
+                <div>
+                  <button
+                    type="button"
+                    disabled={busy || !escTargetId || escCause.trim().length === 0}
+                    onClick={() => {
+                      const target = escTargetId;
+                      const cause = escCause.trim();
+                      setEscTargetId("");
+                      setEscCause("");
+                      void escalate(target, cause);
+                    }}
+                    className="h-8 cursor-pointer rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-50"
+                  >
+                    Give them access
+                  </button>
+                </div>
               </div>
-            </div>
-          )}
+            </details>
+          ) : null}
+
+          <CommentComposer
+            busy={busy}
+            audience={
+              ticket.sharing.role === "owner"
+                ? ticket.sharing.guests.map((g) => g.workspaceName).join(", ")
+                : ticket.sharing.ownerWorkspaceName
+            }
+            value={escComment}
+            onChange={setEscComment}
+            files={pendingFiles}
+            onFiles={setPendingFiles}
+            onSubmit={() => {
+              const body = escComment.trim();
+              const files = pendingFiles;
+              setEscComment("");
+              setPendingFiles([]);
+              void addComment(body, files);
+            }}
+          />
         </section>
       ) : escalationTargets.length > 0 ? (
         <section className="rounded-xl border bg-card p-4">
@@ -744,11 +848,11 @@ export function TicketDetailClient({
             <ArrowUpRight aria-hidden className="size-4" />
             Escalate to another workspace
           </h2>
-          <p className="mb-3 text-2xs text-muted-foreground">
-            When nobody here can answer, refer this to another workspace in your
-            organization. They get the customer's profile and your reason — never this
-            inbox's messages — and can answer back here or contact the customer from
-            their own channels.
+          <p className="mb-3 text-2xs leading-relaxed text-muted-foreground">
+            When nobody here can answer, hand this ticket to another workspace in your
+            organization. They work the <strong className="font-medium">same ticket</strong>{" "}
+            — same status, same history, same files — and get the customer&rsquo;s details
+            plus your reason. Your inbox conversation stays private.
           </p>
           <div className="flex flex-col gap-2">
             <select
@@ -771,7 +875,7 @@ export function TicketDetailClient({
               onChange={(e) => setEscCause(e.target.value)}
               rows={3}
               maxLength={5000}
-              placeholder="Describe the issue for them — this is everything they'll see. e.g. Customer 123 was double-charged on invoice #88; needs a refund approval we can't give here."
+              placeholder="What do you need from them? e.g. Customer 123 was double-charged on invoice #88 and needs a refund approval we can't give here."
               className="w-full rounded-md border bg-background px-2 py-1.5 text-xs"
               aria-label="Reason for the escalation"
             />
@@ -794,6 +898,37 @@ export function TicketDetailClient({
           </div>
         </section>
       ) : null}
+
+      {/* Files. Ticket-level attachments (a comment's files render with the
+          comment, in the history). Every party to a shared ticket sees them —
+          the ticket is meant to carry the whole issue. */}
+      <section className="rounded-xl border bg-card p-4">
+        <h2 className="mb-1 text-sm font-semibold">Files</h2>
+        <p className="mb-2 text-2xs text-muted-foreground">
+          {ticket.sharing
+            ? "Visible to every workspace working this ticket."
+            : "Screenshots, invoices, forms — whatever the issue needs."}
+        </p>
+        {ticket.attachments.filter((a) => !a.eventId).length > 0 ? (
+          <ul className="mb-2 flex flex-col gap-1.5">
+            {ticket.attachments
+              .filter((a) => !a.eventId)
+              .map((a) => (
+                <AttachmentRow
+                  key={a.id}
+                  attachment={a}
+                  busy={busy}
+                  onRemove={() => void removeAttachment(a.id)}
+                />
+              ))}
+          </ul>
+        ) : null}
+        <FilePicker
+          busy={busy}
+          label="Add files"
+          onPick={(files) => void attachFiles(files)}
+        />
+      </section>
 
       <section className="rounded-xl border bg-card p-4">
         <h2 className="mb-2 text-sm font-semibold">Tags</h2>
@@ -844,8 +979,9 @@ export function TicketDetailClient({
       <section className="rounded-xl border bg-card p-4">
         <h2 className="mb-1 text-sm font-semibold">Internal note</h2>
         <p className="mb-2 text-2xs text-muted-foreground">
-          Only your team sees this — the customer never does. Use it to answer a
-          handoff without messaging them yourself.
+          {ticket.sharing
+            ? "Private to your workspace — neither the customer nor the other workspaces on this ticket see it. Use the comment box above to talk to them."
+            : "Only your workspace sees this — the customer never does."}
         </p>
         <textarea
           value={note}
@@ -901,41 +1037,29 @@ export function TicketDetailClient({
                 ) : null}
                 {/* Escalation rows carry snapshotted workspace names so they
                     keep reading correctly after a rename or a severed link. */}
-                {e.kind === "escalated" && eventStr(e.after, "targetWorkspaceName") ? (
+                {(e.kind === "escalated" || e.kind === "escalation_revoked") &&
+                eventStr(e.after, "guestWorkspaceName") ? (
                   <>
-                    {" "}
-                    to <strong className="font-medium">{eventStr(e.after, "targetWorkspaceName")}</strong>
-                    {typeof e.after?.targetTicketNumber === "number" ? (
-                      <> (their #{e.after.targetTicketNumber})</>
-                    ) : null}
+                    {e.kind === "escalated" ? " — " : " — "}
+                    <strong className="font-medium">
+                      {eventStr(e.after, "guestWorkspaceName")}
+                    </strong>
                   </>
                 ) : null}
-                {e.kind === "escalation_received" && eventStr(e.after, "sourceWorkspaceName") ? (
+                {(e.kind === "attachment_added" || e.kind === "attachment_removed") &&
+                eventStr(e.after, "filename") ? (
                   <>
                     {" "}
-                    from <strong className="font-medium">{eventStr(e.after, "sourceWorkspaceName")}</strong>
+                    <strong className="font-medium">{eventStr(e.after, "filename")}</strong>
                   </>
                 ) : null}
-                {e.kind === "escalation_status" ? (
-                  <>
-                    {" "}
-                    in <strong className="font-medium">{eventStr(e.after, "fromWorkspaceName") ?? "the other workspace"}</strong>
-                    {eventStr(e.after, "status") ? (
-                      <> to {STATUS_LABELS[e.after?.status as TicketStatus] ?? String(e.after?.status)}</>
-                    ) : null}
-                  </>
-                ) : null}
-                {e.kind === "escalation_severed" && typeof e.after?.deletedTicketNumber === "number" ? (
-                  <> (their #{e.after.deletedTicketNumber})</>
+                {/* WHICH department acted — the whole point of a shared log. */}
+                {e.actorWorkspaceName ? (
+                  <span className="ml-1 rounded bg-muted px-1 py-px text-3xs text-muted-foreground">
+                    {e.actorWorkspaceName}
+                  </span>
                 ) : null}
               </span>
-              {/* "They solved it" is only half the answer — surface the outcome
-                  the other side recorded. */}
-              {e.kind === "escalation_status" && eventStr(e.after, "resolutionNote") ? (
-                <p className="mt-0.5 basis-full whitespace-pre-wrap rounded-md border-l-2 border-primary/30 bg-muted/40 px-2 py-1 text-2xs text-foreground">
-                  {eventStr(e.after, "resolutionNote")}
-                </p>
-              ) : null}
               {e.body ? (
                 <p
                   className={cn(
@@ -945,13 +1069,16 @@ export function TicketDetailClient({
                       : "border-primary/30 bg-muted/40",
                   )}
                 >
-                  {e.kind === "escalation_note" && eventStr(e.after, "fromWorkspaceName") ? (
-                    <span className="mb-0.5 block text-3xs font-medium uppercase tracking-wider text-muted-foreground">
-                      Shared · from {eventStr(e.after, "fromWorkspaceName")}
-                    </span>
-                  ) : null}
                   {e.body}
                 </p>
+              ) : null}
+              {/* Files that came in WITH this entry render under it. */}
+              {e.attachments && e.attachments.length > 0 ? (
+                <ul className="mt-1 flex basis-full flex-col gap-1">
+                  {e.attachments.map((a) => (
+                    <AttachmentRow key={a.id} attachment={a} busy={busy} />
+                  ))}
+                </ul>
               ) : null}
             </li>
           ))}
@@ -970,6 +1097,171 @@ export function TicketDetailClient({
         </p>
       )}
       {confirmDialog}
+    </div>
+  );
+}
+
+/** One attachment row: open it, or (when removable) drop it. */
+function AttachmentRow({
+  attachment,
+  busy,
+  onRemove,
+}: {
+  attachment: TicketAttachment;
+  busy: boolean;
+  onRemove?: () => void;
+}) {
+  return (
+    <li className="flex items-center gap-2 rounded-md border bg-background px-2 py-1 text-2xs">
+      <Paperclip aria-hidden className="size-3 shrink-0 text-muted-foreground" />
+      <a
+        href={attachment.url}
+        target="_blank"
+        rel="noreferrer"
+        className="min-w-0 flex-1 truncate hover:underline"
+      >
+        {attachment.filename}
+      </a>
+      <span className="shrink-0 text-3xs text-muted-foreground">
+        {formatBytes(attachment.sizeBytes)}
+        {attachment.workspaceName ? ` · ${attachment.workspaceName}` : ""}
+      </span>
+      <a
+        href={`${attachment.url}?download=1`}
+        className="shrink-0 text-3xs text-muted-foreground hover:text-foreground"
+      >
+        Download
+      </a>
+      {onRemove ? (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onRemove}
+          aria-label={`Remove ${attachment.filename}`}
+          className="shrink-0 cursor-pointer text-muted-foreground hover:text-destructive disabled:opacity-50"
+        >
+          <X aria-hidden className="size-3" />
+        </button>
+      ) : null}
+    </li>
+  );
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * A file input styled as a button. Resets its value after picking so choosing
+ * the SAME file twice still fires a change event.
+ */
+function FilePicker({
+  busy,
+  label,
+  onPick,
+}: {
+  busy: boolean;
+  label: string;
+  onPick: (files: File[]) => void;
+}) {
+  return (
+    <label
+      className={cn(
+        "inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border px-3 text-xs font-medium",
+        busy && "pointer-events-none opacity-50",
+      )}
+    >
+      <Paperclip aria-hidden className="size-3.5" />
+      {label}
+      <input
+        type="file"
+        multiple
+        disabled={busy}
+        className="hidden"
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []);
+          e.target.value = "";
+          if (files.length > 0) onPick(files);
+        }}
+      />
+    </label>
+  );
+}
+
+/** The cross-department comment box: text plus the files it refers to. */
+function CommentComposer({
+  busy,
+  audience,
+  value,
+  onChange,
+  files,
+  onFiles,
+  onSubmit,
+}: {
+  busy: boolean;
+  audience: string;
+  value: string;
+  onChange: (v: string) => void;
+  files: File[];
+  onFiles: (f: File[]) => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      <textarea
+        value={value}
+        disabled={busy}
+        onChange={(e) => onChange(e.target.value)}
+        rows={2}
+        maxLength={5000}
+        placeholder="Reply on this ticket… e.g. Refund approved — tell them it lands in 3–5 business days."
+        className="w-full rounded-md border bg-background px-2 py-1.5 text-xs"
+        aria-label="Comment on this ticket"
+      />
+      {files.length > 0 ? (
+        <ul className="flex flex-col gap-1">
+          {files.map((f, i) => (
+            <li
+              key={`${f.name}-${i}`}
+              className="flex items-center gap-2 rounded-md border bg-background px-2 py-1 text-2xs"
+            >
+              <Paperclip aria-hidden className="size-3 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 flex-1 truncate">{f.name}</span>
+              <span className="shrink-0 text-3xs text-muted-foreground">
+                {formatBytes(f.size)}
+              </span>
+              <button
+                type="button"
+                onClick={() => onFiles(files.filter((_, j) => j !== i))}
+                aria-label={`Remove ${f.name}`}
+                className="shrink-0 cursor-pointer text-muted-foreground hover:text-destructive"
+              >
+                <X aria-hidden className="size-3" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          disabled={busy || (value.trim().length === 0 && files.length === 0)}
+          onClick={onSubmit}
+          className="h-8 cursor-pointer rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-50"
+        >
+          Post comment
+        </button>
+        <FilePicker
+          busy={busy}
+          label="Attach"
+          onPick={(picked) => onFiles([...files, ...picked])}
+        />
+        {audience ? (
+          <span className="text-3xs text-muted-foreground">Visible to {audience}</span>
+        ) : null}
+      </div>
     </div>
   );
 }

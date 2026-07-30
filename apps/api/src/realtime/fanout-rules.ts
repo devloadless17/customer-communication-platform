@@ -180,8 +180,21 @@ export const FANOUT_RULES: FanoutRuleMap = {
   // Ticket board + inbox badge. WORKSPACE-scoped on purpose — see the
   // `ticket:changed` contract comment: the board is a workspace-wide view of
   // work across threads whose conversation rooms nobody has joined.
+  //
+  // A SHARED ticket (escalated to a sibling department) is ONE ticket several
+  // workspaces work, so the frame goes to the owner AND to every workspace
+  // holding a key — otherwise the department that was asked for help watches a
+  // stale card until it refetches. The audience is read off the event
+  // (`sharedWithWorkspaceIds`), never re-queried here: a revoke has already
+  // deleted the share row by the time this runs, and the workspace losing
+  // access is precisely the one that must be told to drop the card.
+  //
+  // The payload's `conversationId` is the OWNER's thread, so it is stripped for
+  // guests — they have their own (on the ticket they receive via
+  // `sharing.guests`), and handing over an id from another workspace would
+  // invite a request that must 404 anyway.
   "ticket.changed": (e, emitter) => {
-    emitter.emitToWorkspace(e.workspaceId, "ticket:changed", {
+    const frame = {
       workspaceId: e.workspaceId,
       ticketId: e.ticketId,
       conversationId: e.conversationId,
@@ -190,7 +203,18 @@ export const FANOUT_RULES: FanoutRuleMap = {
       previousStatus: e.previousStatus,
       ...(e.breachedLeg ? { breachedLeg: e.breachedLeg } : {}),
       openTicketCount: e.openTicketCount,
-    });
+    };
+    emitter.emitToWorkspace(e.workspaceId, "ticket:changed", frame);
+    for (const guestWorkspaceId of new Set(e.sharedWithWorkspaceIds ?? [])) {
+      if (guestWorkspaceId === e.workspaceId) continue;
+      emitter.emitToWorkspace(guestWorkspaceId, "ticket:changed", {
+        ...frame,
+        // Named for the RECEIVING workspace: the client filters frames by its
+        // own active workspace, and the board it patches is theirs.
+        workspaceId: guestWorkspaceId,
+        conversationId: null,
+      });
+    }
   },
 
   "message.flag_changed": (e, emitter) => {

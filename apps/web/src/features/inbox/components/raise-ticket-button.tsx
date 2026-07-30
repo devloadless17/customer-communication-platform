@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { TicketPlus, Loader2, Check } from "lucide-react";
+import { TicketPlus, Loader2, Check, Paperclip, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { Dialog, DialogContent } from "@/components/ui/dialog";
@@ -93,6 +93,7 @@ function RaiseTicketDialog({
   const [sendTo, setSendTo] = useState("");
   const [teams, setTeams] = useState<Team[] | null>(null);
   const [workspaces, setWorkspaces] = useState<EscalationTarget[] | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
   const [busy, setBusy] = useState(false);
   const [createdId, setCreatedId] = useState<string | null>(null);
 
@@ -154,6 +155,23 @@ function RaiseTicketDialog({
       const body = (await res.json()) as { ticket: { id: string; number: number } };
       setCreatedId(body.ticket.id);
 
+      // Files go up AFTER the ticket exists — a second request rather than one
+      // multipart create, so a rejected file can never cost the agent the whole
+      // form (the ticket is already raised, and the error names the file).
+      if (files.length > 0) {
+        const form = new FormData();
+        for (const f of files) form.append("files", f);
+        const up = await apiFetch(`/api/tickets/${body.ticket.id}/attachments`, {
+          method: "POST",
+          body: form,
+        });
+        if (!up.ok) {
+          toast.error(
+            await apiErrorMessage(up, "The ticket was raised, but the files didn't attach."),
+          );
+        }
+      }
+
       if (toWorkspaceId) {
         // Second step of the one-click flow: the ticket exists either way, so
         // an escalate failure leaves a normal ticket the agent can escalate
@@ -211,7 +229,7 @@ function RaiseTicketDialog({
             <div className="flex items-center gap-2.5 rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2.5 text-xs text-emerald-700 dark:text-emerald-400">
               <Check aria-hidden className="size-4 shrink-0" />
               {toWorkspaceId
-                ? `The ticket is open on this thread and escalated to ${toWorkspaceName} — their answers land on its history.`
+                ? `The ticket is open on this thread and ${toWorkspaceName} now has access — their replies land on its history.`
                 : "The ticket is open on this thread."}
             </div>
             <div className="flex justify-end gap-2">
@@ -316,13 +334,63 @@ function RaiseTicketDialog({
                 </div>
               </div>
 
+              <div className="flex flex-col gap-1.5">
+                <span className="text-xs font-medium text-foreground">
+                  Files <span className="font-normal text-muted-foreground">(optional)</span>
+                </span>
+                {files.length > 0 ? (
+                  <ul className="flex flex-col gap-1">
+                    {files.map((f, i) => (
+                      <li
+                        key={`${f.name}-${i}`}
+                        className="flex items-center gap-2 rounded-md border bg-background px-2 py-1 text-2xs"
+                      >
+                        <Paperclip aria-hidden className="size-3 shrink-0 text-muted-foreground" />
+                        <span className="min-w-0 flex-1 truncate">{f.name}</span>
+                        <button
+                          type="button"
+                          onClick={() => setFiles(files.filter((_, j) => j !== i))}
+                          aria-label={`Remove ${f.name}`}
+                          className="shrink-0 cursor-pointer text-muted-foreground hover:text-destructive"
+                        >
+                          <X aria-hidden className="size-3" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                <label
+                  className={`inline-flex h-8 w-fit cursor-pointer items-center gap-1.5 rounded-md border px-3 text-xs font-medium ${
+                    busy ? "pointer-events-none opacity-50" : ""
+                  }`}
+                >
+                  <Paperclip aria-hidden className="size-3.5" />
+                  Attach files
+                  <input
+                    type="file"
+                    multiple
+                    disabled={busy}
+                    className="hidden"
+                    onChange={(e) => {
+                      const picked = Array.from(e.target.files ?? []);
+                      // Reset so picking the SAME file again still fires change.
+                      e.target.value = "";
+                      if (picked.length > 0) setFiles((prev) => [...prev, ...picked]);
+                    }}
+                  />
+                </label>
+                <p className="text-3xs text-muted-foreground">
+                  Screenshots or documents the team picking this up will need.
+                </p>
+              </div>
+
               {toWorkspaceId ? (
                 <p className="rounded-md border border-primary/25 bg-primary/5 px-3 py-2 text-2xs leading-relaxed text-muted-foreground">
-                  This raises the ticket here <em>and</em> creates a linked one in{" "}
-                  <strong className="font-medium text-foreground">{toWorkspaceName}</strong>. They
-                  get the customer&rsquo;s profile and your cause — never this inbox&rsquo;s
-                  messages — so the <strong className="font-medium text-foreground">cause is
-                  required</strong>.
+                  This raises the ticket and gives{" "}
+                  <strong className="font-medium text-foreground">{toWorkspaceName}</strong>{" "}
+                  access to it — one ticket, both workspaces. They get the customer&rsquo;s
+                  details, your cause and any files, but never this inbox&rsquo;s messages, so
+                  the <strong className="font-medium text-foreground">cause is required</strong>.
                 </p>
               ) : null}
             </div>

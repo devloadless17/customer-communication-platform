@@ -232,7 +232,7 @@ async function sweepOnce(): Promise<void> {
       // check Message.mediaThumbnailKey — video poster frames are stored on a
       // separate key there, not in `mediaKey`, so without this a referenced
       // poster thumbnail would be classified an orphan and deleted.
-      const [msgHits, thumbHits, chatHits, recordingHits, transcriptHits] =
+      const [msgHits, thumbHits, chatHits, recordingHits, transcriptHits, ticketHits] =
         await Promise.all([
           db.message.findMany({
             where: { mediaKey: { in: eligibleKeyList } },
@@ -269,6 +269,16 @@ async function sweepOnce(): Promise<void> {
             where: { transcriptKey: { in: eligibleKeyList } },
             select: { transcriptKey: true },
           }),
+          // TICKET ATTACHMENTS. `media/{ws}/…-tkt-…` keys are referenced ONLY
+          // by TicketAttachment.blobKey. Registered here the moment the table
+          // was added, for the reason the block above documents four times: a
+          // new blob-owning table that skips this cross-check has its LIVE
+          // files deleted 24h later, and a customer's uploaded evidence is not
+          // recoverable from anywhere else.
+          db.ticketAttachment.findMany({
+            where: { blobKey: { in: eligibleKeyList } },
+            select: { blobKey: true },
+          }),
         ]);
       const referenced = new Set<string>([
         ...msgHits.map((m) => m.mediaKey!).filter(Boolean),
@@ -276,6 +286,7 @@ async function sweepOnce(): Promise<void> {
         ...chatHits.map((m) => m.mediaKey!).filter(Boolean),
         ...recordingHits.map((c) => c.recordingKey!).filter(Boolean),
         ...transcriptHits.map((c) => c.transcriptKey!).filter(Boolean),
+        ...ticketHits.map((a) => a.blobKey).filter(Boolean),
       ]);
       for (const k of eligible) {
         if (!referenced.has(k.key)) orphanKeys.push(k.key);

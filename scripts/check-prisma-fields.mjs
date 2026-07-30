@@ -112,10 +112,11 @@ const TENANTLESS_ALLOWLIST = new Set([
   "BroadcastRecipient", "OutboundWebhookDelivery",
   "TeamChannelMember", "TeamChannelMention", "TeamChannelReaction",
   "TeamChannelPin", "TeamChannelReadReceipt",
-  // Cross-workspace bridge: deliberately spans TWO workspaces (source+target
-  // columns, no single workspaceId); reached only through a workspace-scoped
-  // query on one of its two tickets (see its TENANCY EXCEPTION note)
-  "TicketEscalation",
+  // Cross-workspace bridge: a TicketShare deliberately spans two workspaces
+  // (owner + guest columns, no single workspaceId). Reached ONLY through
+  // `ticketAccessWhere()` on the parent ticket — the one place the
+  // "mine OR shared with me" predicate lives (see its TENANCY EXCEPTION note)
+  "TicketShare",
 ]);
 {
   const missing = [];

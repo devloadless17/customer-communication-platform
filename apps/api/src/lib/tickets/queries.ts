@@ -1,11 +1,14 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 
+import { ticketAccessWhere, ticketByIdWhere } from "./access";
+
 import type {
   ContactSnapshot,
   Ticket,
+  TicketAttachment,
   TicketCounts,
-  TicketEscalationInfo,
   TicketEvent,
+  TicketSharingInfo,
   TicketPriority,
   TicketSource,
   TicketStatus,
@@ -25,6 +28,55 @@ type Db = Pick<PrismaClient, "ticket" | "ticketEvent">;
 
 /** Board/list page size. Keyset-paginated, so this is a hard per-request bound. */
 export const TICKET_PAGE = 50;
+
+/**
+ * Attachment columns every read needs. Declared as a bare field object (not a
+ * `satisfies Prisma.TicketAttachmentSelect`) so it can be embedded in both the
+ * ticket select and the event select without re-listing it.
+ */
+export const ATTACHMENT_SELECT_FIELDS = {
+  id: true,
+  filename: true,
+  mimeType: true,
+  kind: true,
+  sizeBytes: true,
+  eventId: true,
+  uploadedById: true,
+  createdAt: true,
+  uploadedBy: { select: { name: true } },
+  workspace: { select: { name: true } },
+} as const;
+
+type AttachmentRow = {
+  id: string;
+  filename: string;
+  mimeType: string;
+  kind: string;
+  sizeBytes: number;
+  eventId: string | null;
+  uploadedById: string | null;
+  createdAt: Date;
+  uploadedBy: { name: string } | null;
+  workspace: { name: string } | null;
+};
+
+/** Bytes are NEVER handed out as a storage URL — the browser fetches them
+ *  same-origin so the workspace/share gate applies to every byte. */
+export function mapAttachment(a: AttachmentRow, ticketId: string): TicketAttachment {
+  return {
+    id: a.id,
+    filename: a.filename,
+    mimeType: a.mimeType,
+    kind: a.kind,
+    sizeBytes: a.sizeBytes,
+    url: `/api/tickets/${ticketId}/attachments/${a.id}`,
+    eventId: a.eventId,
+    uploadedById: a.uploadedById,
+    uploadedByName: a.uploadedBy?.name ?? null,
+    workspaceName: a.workspace?.name ?? null,
+    createdAt: a.createdAt.toISOString(),
+  };
+}
 
 /**
  * The ticket as every read path returns it.
@@ -67,28 +119,29 @@ export const TICKET_SELECT = {
   assignedUser: { select: { name: true } },
   resolvedBy: { select: { name: true } },
   tags: { select: { id: true, name: true, color: true } },
-  // The escalation pair, from whichever side this ticket is. The only
-  // cross-workspace data a read ever surfaces: a sibling workspace's NAME and
-  // the twin's number/status — deliberate, minimal, and exactly the feature.
-  escalationOut: {
+  // Which workspace OWNS the ticket. Needed on every read because the viewer
+  // may be a guest — the owner/guest split decides which conversation the
+  // viewer may open and whether they see the live contact or the snapshot.
+  workspaceId: true,
+  workspace: { select: { name: true } },
+  // Everyone this ticket has been escalated to. Empty for the overwhelming
+  // majority. The snapshot + guest conversation are per-share, so a guest's
+  // own row supplies both.
+  shares: {
     select: {
       id: true,
-      sourceTicketId: true,
-      targetTicketId: true,
-      targetWorkspaceId: true,
-      targetTicket: { select: { number: true, status: true } },
-      targetWorkspace: { select: { name: true } },
-    },
-  },
-  escalationIn: {
-    select: {
-      id: true,
-      sourceTicketId: true,
-      sourceWorkspaceId: true,
+      guestWorkspaceId: true,
+      guestWorkspace: { select: { name: true } },
       contactSnapshot: true,
-      sourceTicket: { select: { number: true, status: true } },
-      sourceWorkspace: { select: { name: true } },
+      guestConversationId: true,
+      createdAt: true,
     },
+    orderBy: { createdAt: "asc" },
+  },
+  // Ticket-level files (an event's files are joined on the timeline read).
+  attachments: {
+    select: ATTACHMENT_SELECT_FIELDS,
+    orderBy: { createdAt: "asc" },
   },
 } satisfies Prisma.TicketSelect;
 
@@ -124,50 +177,59 @@ export function asContactSnapshot(v: unknown): ContactSnapshot {
   };
 }
 
-function mapEscalation(t: TicketRow): TicketEscalationInfo | undefined {
-  if (t.escalationOut) {
-    const e = t.escalationOut;
-    return {
-      id: e.id,
-      role: "source",
-      otherWorkspaceId: e.targetWorkspaceId,
-      otherWorkspaceName: e.targetWorkspace.name,
-      otherTicketId: e.targetTicketId,
-      otherTicketNumber: e.targetTicket.number,
-      otherTicketStatus: e.targetTicket.status,
-      // The target FK is Cascade — from the source side the row existing means
-      // the twin exists.
-      severed: false,
-    };
-  }
-  if (t.escalationIn) {
-    const e = t.escalationIn;
-    return {
-      id: e.id,
-      role: "target",
-      otherWorkspaceId: e.sourceWorkspaceId,
-      otherWorkspaceName: e.sourceWorkspace.name,
-      otherTicketId: e.sourceTicketId,
-      otherTicketNumber: e.sourceTicket?.number ?? null,
-      otherTicketStatus: e.sourceTicket?.status ?? null,
-      severed: e.sourceTicketId === null,
-      contactSnapshot: asContactSnapshot(e.contactSnapshot),
-    };
-  }
-  return undefined;
+/**
+ * The sharing block, from the VIEWING workspace's point of view.
+ *
+ * `viewerWorkspaceId` is REQUIRED, not optional: which conversation a caller
+ * may open and whether they get the live contact or a frozen snapshot both
+ * depend on it, and an optional viewer parameter that callers forget is exactly
+ * how this codebase has killed a security control before (see
+ * lib/conversations/visibility.ts).
+ */
+function mapSharing(t: TicketRow, viewerWorkspaceId: string): TicketSharingInfo | undefined {
+  if (t.shares.length === 0) return undefined;
+  const role = t.workspaceId === viewerWorkspaceId ? "owner" : "guest";
+  const mine = t.shares.find((s) => s.guestWorkspaceId === viewerWorkspaceId);
+  return {
+    role,
+    ownerWorkspaceId: t.workspaceId,
+    ownerWorkspaceName: t.workspace.name,
+    guests: t.shares.map((s) => ({
+      workspaceId: s.guestWorkspaceId,
+      workspaceName: s.guestWorkspace.name,
+      sharedAt: s.createdAt.toISOString(),
+    })),
+    // Only a guest gets a snapshot — the owner reads the live contact.
+    ...(role === "guest" && mine
+      ? { contactSnapshot: asContactSnapshot(mine.contactSnapshot) }
+      : {}),
+  };
 }
 
-export function mapTicket(t: TicketRow): Ticket {
+/**
+ * Row → wire, from the VIEWING workspace's point of view.
+ *
+ * The viewer decides two things on a SHARED ticket, and both are boundaries
+ * rather than preferences:
+ *   - `conversationId` — the owner sees the customer thread the ticket was
+ *     raised on; a guest sees only THEIR OWN thread with that customer (null
+ *     until they start one). A guest must never receive an id that would let
+ *     them request another workspace's conversation.
+ *   - `contactId`/`contactName` — a guest gets the frozen snapshot's name, not
+ *     a live pointer into the owner's directory.
+ */
+export function mapTicket(t: TicketRow, viewerWorkspaceId: string): Ticket {
+  const isOwner = t.workspaceId === viewerWorkspaceId;
+  const myShare = isOwner
+    ? undefined
+    : t.shares.find((s) => s.guestWorkspaceId === viewerWorkspaceId);
+  const snapshot = myShare ? asContactSnapshot(myShare.contactSnapshot) : null;
   return {
     id: t.id,
     number: t.number,
-    conversationId: t.conversationId,
-    contactId: t.contactId,
-    // An escalated-in ticket has no Contact row until "Message customer" binds
-    // one — the board and list keep rendering a name from the snapshot.
-    contactName:
-      t.contact?.name ??
-      (t.escalationIn ? (asContactSnapshot(t.escalationIn.contactSnapshot).name ?? "Unknown") : "Unknown"),
+    conversationId: isOwner ? t.conversationId : (myShare?.guestConversationId ?? null),
+    contactId: isOwner ? t.contactId : null,
+    contactName: (isOwner ? t.contact?.name : snapshot?.name) ?? "Unknown",
     channel: t.channel,
     subject: t.subject,
     description: t.description,
@@ -198,7 +260,8 @@ export function mapTicket(t: TicketRow): Ticket {
     source: asSource(t.source),
     customFields: asCustomFields(t.customFields),
     version: t.version,
-    escalation: mapEscalation(t),
+    sharing: mapSharing(t, viewerWorkspaceId),
+    attachments: t.attachments.map((a) => mapAttachment(a, t.id)),
     createdAt: t.createdAt.toISOString(),
     updatedAt: t.updatedAt.toISOString(),
   };
@@ -213,6 +276,9 @@ export const TICKET_EVENT_SELECT = {
   actorUserId: true,
   createdAt: true,
   actorUser: { select: { name: true } },
+  // WHICH workspace acted — what makes a shared ticket's log readable.
+  actorWorkspace: { select: { name: true } },
+  attachments: { select: ATTACHMENT_SELECT_FIELDS, orderBy: { createdAt: "asc" } },
 } satisfies Prisma.TicketEventSelect;
 
 type TicketEventRow = Prisma.TicketEventGetPayload<{ select: typeof TICKET_EVENT_SELECT }>;
@@ -221,10 +287,12 @@ function asJsonObject(v: unknown): Record<string, unknown> | null {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
 }
 
-export function mapTicketEvent(e: TicketEventRow): TicketEvent {
+export function mapTicketEvent(e: TicketEventRow, ticketId: string): TicketEvent {
   return {
     id: e.id,
     kind: e.kind,
+    actorWorkspaceName: e.actorWorkspace?.name ?? null,
+    attachments: e.attachments.map((a) => mapAttachment(a, ticketId)),
     before: asJsonObject(e.before),
     after: asJsonObject(e.after),
     body: e.body,
@@ -347,10 +415,10 @@ export async function listTickets(
   }
 
   const rows = await db.ticket.findMany({
-    // The tenant key is a SIBLING of the AND array, never spread into it — a
-    // spread would let a later filter object silently overwrite `workspaceId`
-    // and cross the tenant boundary.
-    where: { workspaceId, AND: and },
+    // The ACCESS predicate ("mine OR shared with me", lib/tickets/access.ts) is
+    // pushed as the first AND element, never spread into a sibling position
+    // where a later filter object could overwrite it and cross the boundary.
+    where: { AND: [ticketAccessWhere(workspaceId), ...and] },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: limit + 1,
     select: TICKET_SELECT,
@@ -360,7 +428,7 @@ export async function listTickets(
   const page = hasMore ? rows.slice(0, limit) : rows;
   const last = hasMore ? page[page.length - 1] : undefined;
   return {
-    tickets: page.map(mapTicket),
+    tickets: page.map((row) => mapTicket(row, workspaceId)),
     nextCursor: last ? { createdAt: last.createdAt.toISOString(), id: last.id } : null,
   };
 }
@@ -370,8 +438,11 @@ export async function getTicket(
   workspaceId: string,
   id: string,
 ): Promise<Ticket | null> {
-  const row = await db.ticket.findFirst({ where: { id, workspaceId }, select: TICKET_SELECT });
-  return row ? mapTicket(row) : null;
+  const row = await db.ticket.findFirst({
+    where: ticketByIdWhere(workspaceId, id),
+    select: TICKET_SELECT,
+  });
+  return row ? mapTicket(row, workspaceId) : null;
 }
 
 /** A ticket's own timeline, oldest first (served by `(ticketId, createdAt)`). */
@@ -384,12 +455,16 @@ export async function listTicketEvents(
   // entire history on every detail open. 500 covers any realistic timeline;
   // newest-first fetch + reverse keeps the LATEST events when it doesn't.
   const rows = await db.ticketEvent.findMany({
-    where: { workspaceId, ticketId },
+    // Scoped through the PARENT ticket's access gate, not `workspaceId`: on a
+    // shared ticket every row carries the OWNER's workspaceId, so filtering by
+    // the viewer's would hand a guest an empty history for a ticket they can
+    // legitimately work.
+    where: { ticketId, ticket: ticketAccessWhere(workspaceId) },
     orderBy: { createdAt: "desc" },
     take: 500,
     select: TICKET_EVENT_SELECT,
   });
-  return rows.reverse().map(mapTicketEvent);
+  return rows.reverse().map((e) => mapTicketEvent(e, ticketId));
 }
 
 /**
@@ -408,21 +483,25 @@ export async function getTicketCounts(
   restrictToConversationsAssignedTo?: string,
 ): Promise<TicketCounts> {
   const active = { in: TICKET_ACTIVE_STATUSES as TicketStatus[] };
-  const scope: Prisma.TicketWhereInput[] = restrictToConversationsAssignedTo
-    ? [ticketVisibilityWhere(restrictToConversationsAssignedTo)]
-    : [];
+  // Every count is scoped by the same access gate as the board it labels —
+  // a badge that counts tickets the agent can't open is worse than no badge.
+  const scope: Prisma.TicketWhereInput[] = [
+    ticketAccessWhere(workspaceId),
+    ...(restrictToConversationsAssignedTo
+      ? [ticketVisibilityWhere(restrictToConversationsAssignedTo)]
+      : []),
+  ];
   const [byStatusRows, mineActive, breached] = await Promise.all([
     db.ticket.groupBy({
       by: ["status"],
-      where: { workspaceId, AND: scope },
+      where: { AND: scope },
       _count: { _all: true },
     }),
     db.ticket.count({
-      where: { workspaceId, assignedUserId: viewerUserId, status: active, AND: scope },
+      where: { assignedUserId: viewerUserId, status: active, AND: scope },
     }),
     db.ticket.count({
       where: {
-        workspaceId,
         status: active,
         AND: [
           ...scope,

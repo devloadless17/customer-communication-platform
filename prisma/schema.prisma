@@ -563,7 +563,7 @@ model Organization {
 
   workspaces        Workspace[]
   users             User[]
-  ticketEscalations TicketEscalation[]
+  ticketShares      TicketShare[]
 }
 
 // A Workspace is the data-ISOLATION boundary (formerly `Workspace`): every one of
@@ -701,8 +701,10 @@ model Workspace {
   ticketSlaPolicies       TicketSlaPolicy[]
   ticketFieldDefinitions  TicketFieldDefinition[]
   ticketNumberCounter     TicketNumberCounter?
-  ticketEscalationsOut    TicketEscalation[]       @relation("TicketEscalationsOut")
-  ticketEscalationsIn     TicketEscalation[]       @relation("TicketEscalationsIn")
+  ticketSharesOut         TicketShare[]            @relation("TicketSharesOut")
+  ticketSharesIn          TicketShare[]            @relation("TicketSharesIn")
+  ticketAttachments       TicketAttachment[]
+  ticketEventsActedIn     TicketEvent[]            @relation("TicketEventActorWorkspace")
   audienceGroups          AudienceGroup[]
   workflows               Workflow[]
   workflowRuns            WorkflowRun[]
@@ -1258,7 +1260,8 @@ model User {
   assignedTickets         Ticket[]                 @relation("AssignedTickets")
   resolvedTickets         Ticket[]                 @relation("ResolvedTickets")
   ticketEvents            TicketEvent[]
-  ticketEscalations       TicketEscalation[]
+  ticketShares            TicketShare[]
+  ticketAttachments       TicketAttachment[]
   assignedConvos          Conversation[]           @relation("AssignedConversations")
   createdInvites          Invite[]                 @relation("InvitedBy")
   createdBroadcasts       Broadcast[]              @relation("CreatedBroadcasts")
@@ -2038,6 +2041,9 @@ model Conversation {
   messageFlags      MessageFlag[]
   // Every piece of work raised on this thread, oldest to newest.
   tickets           Ticket[]            @relation("ConversationTickets")
+  // Back-reference for TicketShare.guestConversationId — a guest workspace's
+  // own thread with a customer whose ticket was shared with them.
+  ticketSharesAsGuestConversation TicketShare[] @relation("TicketShareGuestConversation")
   activeTicket      Ticket?             @relation("ConversationActiveTicket", fields: [activeTicketId], references: [id], onDelete: SetNull)
   // NO trgm GIN on lastMessagePreview. The inbox-list search ORs a
   // `lastMessagePreview contains` arm with two Contact RELATION filters
@@ -3355,22 +3361,27 @@ enum TicketEventKind {
   sla_breached
   reopened
   merged
-  // ---- Cross-workspace escalation (see TicketEscalation) ----
-  // The source ticket was escalated to another workspace. `body` carries the
-  // cause the escalating agent wrote; `after` snapshots the target workspace's
-  // name and the twin ticket's number.
+  // ---- Cross-workspace sharing (see TicketShare) ----
+  // This ticket was shared with another workspace — escalated to a department
+  // that can now work it. `body` carries the cause; `after` names the guest.
   escalated
-  // The target ticket's birth event — replaces `created` on an escalated-in
-  // ticket so the timeline opens with WHERE it came from, not just that it exists.
-  escalation_received
-  // A comment shared across the pair. Written MIRRORED — one row per side, each
-  // scoped to its own ticket — so both workspaces read it without any
-  // cross-workspace query. Distinct from `note`, which the other side never sees.
+  // Access was revoked; the guest workspace can no longer see the ticket. The
+  // row stays as history — who had the key, and until when.
+  escalation_revoked
+  // A comment on the ticket. On a SHARED ticket everyone with access sees it —
+  // that is the conversation between the departments. Distinct from `note`,
+  // which stays inside the workspace that wrote it.
   escalation_note
-  // The twin ticket's status changed in the other workspace ("they solved it").
+  // Retired (2026-07-30, the twin-pair design): a shared ticket has ONE status,
+  // so a status change is a plain `status_changed` row on it. Kept because
+  // Postgres enum values cannot be dropped, and old rows still render.
+  escalation_received
   escalation_status
-  // The twin ticket was deleted; the link is gone and stays readable as history.
   escalation_severed
+  // A file was attached to the ticket (see TicketAttachment). `after` snapshots
+  // the filename + size so the log still reads after the file is deleted.
+  attachment_added
+  attachment_removed
 }
 
 model Ticket {
@@ -3516,11 +3527,11 @@ model Ticket {
   messages      Message[]
   // Back-reference for Conversation.activeTicketId.
   activeOn      Conversation[]    @relation("ConversationActiveTicket")
-  // The escalation pair, from either side. At most one each — a ticket is
-  // escalated once in its lifetime, and an escalation TARGET is never
-  // escalated onward (chains banned; see TicketEscalation).
-  escalationOut TicketEscalation? @relation("TicketEscalationOut")
-  escalationIn  TicketEscalation? @relation("TicketEscalationIn")
+  // Which sibling workspaces have been granted access to THIS ticket (see
+  // TicketShare). Empty for the overwhelming majority — a ticket only becomes
+  // cross-workspace when someone deliberately escalates it.
+  shares      TicketShare[]
+  attachments TicketAttachment[]
   // The SLA breach sweeper scans ACROSS workspaces for tickets whose clock has
   // run out and that aren't already flagged. That is a tiny fraction of rows,
   // so it is served by two PARTIAL indexes Prisma cannot express (raw SQL in
@@ -3563,9 +3574,18 @@ model Ticket {
 }
 
 model TicketEvent {
-  id            String          @id @default(cuid())
+  id String @id @default(cuid())
+  // The OWNING workspace of the ticket (denormalized from Ticket.workspaceId),
+  // not the actor's. A shared ticket has ONE history, so every row on it
+  // carries the same workspaceId regardless of which department wrote it — and
+  // reads reach it through `ticketAccessWhere()` on the parent ticket, never by
+  // a bare workspaceId filter. Who DID it is `actorWorkspaceId` below.
   workspaceId   String
   ticketId      String
+  // Which workspace the actor was acting in. Null for pre-share history and
+  // for system/sweeper writes. This is what makes a shared log readable:
+  // "Billing changed the status" instead of an unattributed change.
+  actorWorkspaceId String?
   kind          TicketEventKind
   // Same before/after shape as ConversationEvent so one renderer covers both
   // timelines. Names (assignee, tag, field label) are SNAPSHOTTED at write time
@@ -3588,11 +3608,71 @@ model TicketEvent {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   ticket    Ticket    @relation(fields: [ticketId], references: [id], onDelete: Cascade)
   actorUser User?     @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  // SetNull, not Cascade: a shared ticket's history must outlive the guest
+  // workspace being deleted — the entry stays, unattributed.
+  actorWorkspace Workspace? @relation("TicketEventActorWorkspace", fields: [actorWorkspaceId], references: [id], onDelete: SetNull)
+  // Files attached to THIS timeline entry (a comment with its evidence). A
+  // ticket-level attachment has no event; see TicketAttachment.
+  attachments TicketAttachment[]
 
   // The detail page reads one ticket's timeline oldest-first.
   @@index([ticketId, createdAt])
   @@index([workspaceId, createdAt(sort: Desc)])
   @@index([actorUserId])
+}
+
+// A file on a ticket — the screenshot of the error, the invoice PDF, the
+// signed form. Attached when the ticket is raised, or with any later comment.
+//
+// A SEPARATE table rather than media columns on Ticket (the shape Message and
+// TeamChannelMessage use) because a ticket legitimately accumulates MANY files
+// over its life and from BOTH departments, while a message carries at most one.
+//
+// Every attachment on a shared ticket is visible to every workspace the ticket
+// is shared with — that is the point: the ticket carries all the information
+// the issue needs. `workspaceId` records who UPLOADED it (attribution + quota),
+// and reads go through `ticketAccessWhere()` on the parent ticket, never a bare
+// workspaceId filter.
+model TicketAttachment {
+  id          String @id @default(cuid())
+  // The UPLOADER's workspace, for attribution ("added by Billing"). NOT the
+  // read scope — see the note above.
+  workspaceId String
+  ticketId    String
+  // The timeline entry this file came in with (a comment or note), or null for
+  // a file attached at raise time / directly to the ticket. Cascade: deleting
+  // the event that carried it deletes the file record with it.
+  eventId     String?
+
+  // Canonical R2 key — the authority, same rule as Message.mediaKey. Registered
+  // in the blob-orphan sweeper's cross-check (four historical incidents of
+  // exactly this omission silently deleting live files 24h later).
+  blobKey  String
+  // Stable (non-fetchable) object URL. Bytes reach the browser through
+  // GET /api/tickets/:id/attachments/:attachmentId, same-origin streamed.
+  blobUrl  String
+  filename String
+  mimeType String
+  // MediaKind ("image" | "video" | "audio" | "document" | "sticker") — a plain
+  // string for the same reason as Message.mediaKind's neighbours: provenance
+  // for rendering, not behaviour.
+  kind      String
+  sizeBytes Int
+
+  uploadedById String?
+  createdAt    DateTime @default(now())
+
+  workspace  Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ticket     Ticket       @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  event      TicketEvent? @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  uploadedBy User?        @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+
+  // The detail page reads a ticket's files oldest-first; the timeline joins by
+  // event.
+  @@index([ticketId, createdAt])
+  @@index([eventId])
+  @@index([workspaceId])
+  @@index([uploadedById])
 }
 
 // One SLA commitment per priority. Modelled per-priority rather than as a
@@ -3675,45 +3755,70 @@ model TicketNumberCounter {
 // reached through a workspace-scoped query on one of its two tickets (or its
 // source/target workspace columns) — never by a bare id from request input.
 // Allowlisted in scripts/check-prisma-fields.mjs.
-model TicketEscalation {
+// A ticket SHARE — the grant that lets a sibling workspace work the SAME
+// ticket. A ticket is the way two departments talk about one customer's issue,
+// so there is exactly ONE ticket row: one number, one status, one priority, one
+// history. Escalating does not copy it; it hands a second workspace the key.
+//
+// (Superseded the twin-pair design of 2026-07-28 the same week: two rows kept
+// in sync were two truths that could drift, two numbers to quote, and two
+// histories to read. One row with an access grant is the simpler model — and
+// it is what "one identity in the organization" actually means.)
+//
+// What the guest workspace may see is bounded by this row, NOT by the ticket:
+// the `contactSnapshot` (a frozen profile, never a live join into the owner's
+// directory) and `guestConversationId` (their OWN thread with the customer, if
+// they started one). The owner's conversation and messages stay private.
+//
+// TENANCY EXCEPTION: deliberately the only table spanning two workspaces, so
+// it carries no single workspaceId. It is READ only through
+// `ticketAccessWhere()` (lib/tickets/access.ts) — the one place the
+// "my workspace OR shared with my workspace" predicate exists. Never reach a
+// share by bare id from request input. Allowlisted in
+// scripts/check-prisma-fields.mjs.
+model TicketShare {
   id             String @id @default(cuid())
   organizationId String
 
-  sourceWorkspaceId String
-  // Nullable + SetNull: the target must keep the snapshot and its provenance
-  // when the source ticket is deleted. Null = "severed" (the origin is gone).
-  // @unique = one escalation per source ticket, for its lifetime — a second
-  // question is a second ticket. Deleting the twin frees the slot (row cascades).
-  sourceTicketId    String? @unique
+  // The ONE ticket. Cascade: the grant is meaningless without it.
+  ticketId String
+  // Denormalized from `Ticket.workspaceId` for the "everything we shared out"
+  // read. The ticket is the authority; this cannot drift because a ticket never
+  // changes workspace.
+  ownerWorkspaceId String
+  // The workspace being granted access — the department being asked.
+  guestWorkspaceId String
 
-  targetWorkspaceId String
-  // Cascade: the escalation dies with its target ticket. deleteTicket writes
-  // the `escalation_severed` mirror on the source BEFORE the delete commits.
-  targetTicketId    String @unique
-
-  // The customer's profile AT ESCALATION — name, phoneNumber, email,
+  // The customer's profile AT SHARE TIME — name, phoneNumber, email,
   // identityChannel, customFields (shape: ContactSnapshot in @ccp/shared).
-  // A snapshot, not a live join: the source directory stays private, and later
-  // edits/deletes there must not mutate what the target was handed.
+  // A snapshot, not a live join: the owner's directory stays private, and later
+  // edits or deletes there must not mutate what the guest was handed.
   contactSnapshot Json
+
+  // The GUEST's own conversation with this customer, once they start one
+  // ("Message the customer" mints a contact + thread in THEIR workspace on
+  // THEIR channel). Null until then. The owner's thread is never exposed here.
+  guestConversationId String?
 
   createdById String?
   createdAt   DateTime @default(now())
 
-  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  sourceWorkspace Workspace    @relation("TicketEscalationsOut", fields: [sourceWorkspaceId], references: [id], onDelete: Cascade)
-  targetWorkspace Workspace    @relation("TicketEscalationsIn", fields: [targetWorkspaceId], references: [id], onDelete: Cascade)
-  sourceTicket    Ticket?      @relation("TicketEscalationOut", fields: [sourceTicketId], references: [id], onDelete: SetNull)
-  targetTicket    Ticket       @relation("TicketEscalationIn", fields: [targetTicketId], references: [id], onDelete: Cascade)
-  createdBy       User?        @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  organization    Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  ticket          Ticket        @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  ownerWorkspace  Workspace     @relation("TicketSharesOut", fields: [ownerWorkspaceId], references: [id], onDelete: Cascade)
+  guestWorkspace  Workspace     @relation("TicketSharesIn", fields: [guestWorkspaceId], references: [id], onDelete: Cascade)
+  guestConversation Conversation? @relation("TicketShareGuestConversation", fields: [guestConversationId], references: [id], onDelete: SetNull)
+  createdBy       User?         @relation(fields: [createdById], references: [id], onDelete: SetNull)
 
-  // FK indexes for the SetNull/Cascade relations (the ticket FKs are covered
-  // by their @unique). Workspace columns double as "everything escalated
-  // in/out of this workspace" for a future reporting read.
+  // One grant per (ticket, workspace) — re-escalating to the same department is
+  // a no-op, not a second key. A ticket CAN be shared with several departments.
+  @@unique([ticketId, guestWorkspaceId])
+  // The guest board's query: every ticket shared INTO this workspace.
+  @@index([guestWorkspaceId])
+  @@index([ownerWorkspaceId])
   @@index([organizationId])
-  @@index([sourceWorkspaceId])
-  @@index([targetWorkspaceId])
   @@index([createdById])
+  @@index([guestConversationId])
 }
 
 // ---------------------------------------------------------------------------

@@ -1387,15 +1387,16 @@ export default function ApiDocsPage() {
             cause: "Customer was double-charged on invoice #88; needs a refund approval we can't give here.",
           }}
         >
-          <strong>Escalate a ticket to a sibling workspace</strong> in your organization. A
-          TWIN ticket is created over there (its own number, board card and assignee)
-          carrying a frozen <em>snapshot</em> of the customer&apos;s profile — the
-          conversation history stays private. The pair is ONE identity: status, priority,
-          subject and the resolution stay in sync across both workspaces (each side keeps
-          its own assignee, team, tags and SLA clock). <code>cause</code> is required: it
-          becomes the twin&apos;s description, is everything the receiving workspace sees,
-          and — like every ticket cause — is <strong>written once</strong> (later writes
-          return <code>400 cause_immutable</code>; use comments instead).
+          <strong>Escalate: give a sibling workspace access to THIS ticket.</strong> Nothing
+          is copied — it stays ONE ticket with one number, one status and one history, and
+          both departments work it. The receiving workspace gets a frozen{" "}
+          <em>snapshot</em> of the customer&apos;s profile (never a live join) and can start
+          its own conversation with them; the owner&apos;s inbox thread and messages stay
+          private. Any workspace with access may escalate onward to a third.{" "}
+          <code>cause</code> is required — it fills the ticket&apos;s cause when it has none
+          yet, and the cause is <strong>written once</strong> (later writes return{" "}
+          <code>400 cause_immutable</code>; use comments instead).{" "}
+          <code>409 already_shared</code> when that workspace already has access.
           Optional <code>subject</code> overrides the twin&apos;s title. One escalation per
           ticket lifetime (<code>409 already_escalated</code>); an escalation target cannot
           be escalated onward (<code>400 cannot_escalate_escalated_ticket</code>). Fires{" "}
@@ -1407,25 +1408,40 @@ export default function ApiDocsPage() {
           path="/api/external/v1/tickets/:id/escalation-comments"
           body={{ body: "Refund approved — tell them it lands in 3–5 business days." }}
         >
-          A comment <strong>both workspaces of the escalation pair see</strong> — unlike{" "}
-          <code>/notes</code>, which stays private. Works from either side&apos;s ticket id.
-          Like a note, it is not a ticket update: no <code>version</code> bump, no SLA
-          movement. <code>400 escalation_severed</code> once the linked ticket was deleted.
-          Scope <code>write:tickets</code>.
+          A comment <strong>every workspace with access to the ticket sees</strong> — the
+          conversation between the departments, unlike <code>/notes</code>, which stays
+          private to one workspace. Like a note it is not a ticket update: no{" "}
+          <code>version</code> bump, no SLA movement. In-app this route also accepts
+          multipart with a <code>files</code> field so a reply can carry its evidence; over{" "}
+          <code>/v1</code> it is JSON-only. Scope <code>write:tickets</code>.
         </Endpoint>
         <Endpoint
           method="POST"
           path="/api/external/v1/tickets/:id/escalation/message-customer"
           body={{ channelConnectionId: "optional — which of your accounts to start from" }}
         >
-          On an escalated-<em>in</em> ticket: <strong>start this workspace&apos;s own
+          On a ticket shared WITH you: <strong>start this workspace&apos;s own
           conversation</strong> with the customer from the snapshot&apos;s phone
-          (find-or-create contact, reopen-not-fragment) and bind it to the ticket — from
-          then on it behaves like any other ticket (replies attach, first response stamps).
+          (find-or-create contact, reopen-not-fragment) and bind it to your share — you
+          message them from your own number, and the owner&apos;s thread is untouched.
           Returns <code>{"{ ticket, conversationId }"}</code>.{" "}
-          <code>400 no_phone_in_snapshot</code> when the customer&apos;s source-channel
-          identity has no phone — answer through shared comments instead. Scope{" "}
+          <code>400 no_phone_in_snapshot</code> when the customer&apos;s original channel
+          identity has no phone (answer with a comment instead);{" "}
+          <code>400 not_a_guest</code> when the ticket is already yours. Scope{" "}
           <code>write:tickets</code>.
+        </Endpoint>
+        <Endpoint method="DELETE" path="/api/external/v1/tickets/:id/shares/:guestWorkspaceId">
+          <strong>Revoke a workspace&apos;s access</strong> to a shared ticket. The owning
+          workspace may remove anyone; a guest may only remove itself. The ticket and the
+          record of what that workspace did both stay — only the access goes. Scope{" "}
+          <code>write:tickets</code>.
+        </Endpoint>
+        <Endpoint method="DELETE" path="/api/external/v1/tickets/:id/attachments/:attachmentId">
+          <strong>Remove one file</strong> from a ticket. The workspace that added it, or
+          the ticket&apos;s owner, may remove it. Files are read through the in-app
+          same-origin stream (<code>GET /api/tickets/:id/attachments/:aid</code>) rather
+          than a storage URL, so every byte passes the ticket&apos;s access check; uploads
+          are in-app multipart only. Scope <code>write:tickets</code>.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/tickets-settings">
           <code>ticketReopenWindowHours</code>,{" "}

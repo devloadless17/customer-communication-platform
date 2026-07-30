@@ -101,13 +101,17 @@ export type TicketEventKind =
   | "merged"
   /** This ticket was escalated to another workspace (source side). */
   | "escalated"
-  /** This ticket WAS the escalation — its birth event on the target side. */
-  | "escalation_received"
-  /** A comment shared across the escalation pair — BOTH workspaces see it. */
+  /** Access was revoked — that workspace can no longer see the ticket. */
+  | "escalation_revoked"
+  /** A comment every workspace with access sees — the conversation BETWEEN the
+   *  departments, as opposed to `note`, which stays in one workspace. */
   | "escalation_note"
-  /** The twin ticket's status changed in the other workspace. */
+  /** A file was attached / removed. */
+  | "attachment_added"
+  | "attachment_removed"
+  /** Retired with the twin-pair design (2026-07-30). Old rows still render. */
+  | "escalation_received"
   | "escalation_status"
-  /** The twin ticket was deleted — the link is gone. */
   | "escalation_severed";
 
 /** A tag as it renders on a ticket. Shared vocabulary with contact tags. */
@@ -154,9 +158,11 @@ export interface Ticket {
   /** Human-facing sequential id — what people quote to each other ("#1042"). */
   number: number;
   /**
-   * Null ONLY on an escalated-in ticket (source `escalation`) before the target
-   * workspace binds its own conversation via "Message customer". Every other
-   * ticket is born bound to a thread.
+   * The conversation THIS workspace can open. For the owner, the customer
+   * thread the ticket was raised on. For a GUEST workspace on a shared ticket,
+   * their OWN thread with that customer — null until they start one, because
+   * the owner's conversation and messages are never exposed across the
+   * workspace boundary.
    */
   conversationId: string | null;
   contactId: string | null;
@@ -196,8 +202,11 @@ export interface Ticket {
   customFields: Record<string, string>;
   /** Optimistic-concurrency token; send it back on a write to detect a stale edit. */
   version: number;
-  /** Present when this ticket is one side of a cross-workspace escalation pair. */
-  escalation?: TicketEscalationInfo;
+  /** Present only when the ticket has been escalated to another workspace. */
+  sharing?: TicketSharingInfo;
+  /** Files on the ticket, oldest first. Every party to a shared ticket sees
+   *  all of them — the ticket is meant to carry the whole issue. */
+  attachments: TicketAttachment[];
   /** ISO. */
   createdAt: string;
   /** ISO. */
@@ -219,32 +228,60 @@ export interface ContactSnapshot {
 }
 
 /**
- * One side's view of a cross-workspace escalation pair. The two tickets stay
- * workspace-scoped; this is the only cross-workspace data either side sees —
- * a sibling workspace's NAME plus the twin's number and status.
+ * The cross-workspace sharing state of ONE ticket.
+ *
+ * A ticket is how two departments talk about one customer's issue, so there is
+ * exactly one ticket — one number, one status, one history. Escalating grants a
+ * sibling workspace access to it; it never copies it. This block says who has
+ * access and, when the viewer is a guest, what they were handed of the customer.
  */
-export interface TicketEscalationInfo {
-  id: string;
-  /** Which side of the pair THIS ticket is. */
-  role: "source" | "target";
-  /** The sibling workspace — id + name so "Open it there" can switch this
-   *  device's active workspace and deep-link the twin. */
-  otherWorkspaceId: string;
-  otherWorkspaceName: string;
-  /** Null when severed (the twin was deleted). */
-  otherTicketId: string | null;
-  otherTicketNumber: number | null;
-  otherTicketStatus: TicketStatus | null;
-  /** True when the twin ticket no longer exists. */
-  severed: boolean;
-  /** Only on the TARGET side — the customer profile handed over at escalation. */
+export interface TicketSharingInfo {
+  /** What the VIEWING workspace is: the workspace that raised it, or one it
+   *  was escalated to. */
+  role: "owner" | "guest";
+  /** The workspace that owns the ticket (and the customer conversation). */
+  ownerWorkspaceId: string;
+  ownerWorkspaceName: string;
+  /** Every workspace this ticket has been escalated to. Visible to all parties
+   *  — a shared ticket's participant list is not a secret from its participants. */
+  guests: Array<{ workspaceId: string; workspaceName: string; sharedAt: string }>;
+  /**
+   * The customer profile the viewer was handed, frozen at share time. Present
+   * only for a GUEST — the owner reads the live contact instead. The owner's
+   * conversation and messages are never exposed to a guest.
+   */
   contactSnapshot?: ContactSnapshot;
+}
+
+/** A file on a ticket — attached at raise time, or with a later comment. */
+export interface TicketAttachment {
+  id: string;
+  filename: string;
+  mimeType: string;
+  /** "image" | "video" | "audio" | "document" | "sticker". */
+  kind: string;
+  sizeBytes: number;
+  /** Same-origin streaming URL — `/api/tickets/:ticketId/attachments/:id`. */
+  url: string;
+  /** The timeline entry it came in with, or null for a ticket-level file. */
+  eventId: string | null;
+  uploadedById: string | null;
+  uploadedByName: string | null;
+  /** Which workspace added it — a shared ticket's files come from both. */
+  workspaceName: string | null;
+  /** ISO. */
+  createdAt: string;
 }
 
 /** One timeline row on the ticket detail page. */
 export interface TicketEvent {
   id: string;
   kind: TicketEventKind;
+  /** Which workspace the actor was acting in — what makes a SHARED ticket's log
+   *  readable ("Billing changed the status"). Null for older or system rows. */
+  actorWorkspaceName?: string | null;
+  /** Files that came in with this entry. */
+  attachments?: TicketAttachment[];
   /** Note text, or the "why" on a handoff. Null on every other kind. */
   body?: string | null;
   before: Record<string, unknown> | null;
