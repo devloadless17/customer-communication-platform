@@ -172,6 +172,13 @@ interface MessagingEvent {
   // has `messaging_handovers`/`messaging_referrals` where `instagram` has
   // `messaging_handover`/`messaging_referral`.
   message_edit?: { mid?: string; text?: string; num_edit?: number };
+  /**
+   * `messaging_optins`. `ref` is the pass-through payload from an m.me link or the
+   * checkbox plugin; `user_ref` identifies a checkbox-plugin user who has NO PSID
+   * yet; `one_time_notif_token` is a single-use send permission. Typed for wire
+   * completeness — see the explicit not-ingested branch in the parser.
+   */
+  optin?: { ref?: string; user_ref?: string; one_time_notif_token?: string };
   delivery?: { mids?: string[]; watermark?: number };
   // Messenger sends a `watermark` (all outbound up to it are read); Instagram
   // sends a per-message `mid` (the specific message the customer read).
@@ -962,8 +969,40 @@ export function parseSocialMessaging(
           }
         }
       }
-      // Observability: a messaging event we don't handle yet (optin,
-      // account_linking, game_plays, …). Logged — not dropped silently — so a
+      // `messaging_optins` — an EXPLICIT, reviewed drop rather than a generic
+      // unknown.
+      //
+      // It sits in PAGE_MESSAGING_FIELDS, i.e. we actively ASK Meta for it, and it
+      // then fell into the catch-all below at `severity: "info"` — the one severity
+      // nobody alerts on. That combination is the worst of both: we pay for the
+      // subscription and discard the result invisibly.
+      //
+      // Not ingested, deliberately: an opt-in is a CONSENT record (checkbox plugin,
+      // an m.me link's `ref`, or a one-time-notification token), and this platform
+      // models no consent entity and does not implement one-time notifications —
+      // there is nothing to write it to. Logged at `warning` with the payload keys
+      // so it is visible and countable, because two things about it are live
+      // questions rather than settled ones: whether an opt-in opens a messaging
+      // window we should honour in the composer, and whether `optin.user_ref`
+      // (checkbox plugin, which arrives BEFORE a PSID exists) needs an identity
+      // path. Both are product decisions, not parse bugs — recorded here so the
+      // next person sees a decision instead of a silence.
+      if (m.optin) {
+        console.warn(
+          JSON.stringify({
+            event: "meta.webhook.optin_not_ingested",
+            severity: "warning",
+            object: expectedObject,
+            hasRef: Boolean(m.optin.ref),
+            hasUserRef: Boolean(m.optin.user_ref),
+            hasOneTimeToken: Boolean(m.optin.one_time_notif_token),
+            note: "subscribed field with no consent model to store it — see comment",
+          }),
+        );
+        continue;
+      }
+      // Observability: a messaging event we don't handle yet (account_linking,
+      // game_plays, …). Logged — not dropped silently — so a
       // new Meta event type surfaces in ops instead of vanishing. Fail-soft
       // (still a 200). Echoes, unsends and edits are all handled above.
       if (

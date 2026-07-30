@@ -517,6 +517,16 @@ interface MetaChangeValue {
     expiration?: number;
   }>;
   violation_info?: { violation_type?: string };
+  /**
+   * WHY the customer disconnected. Added 2026-04-03 with `reason` ∈
+   * BUSINESS_DOWNGRADE | PRIMARY_INACTIVITY | COMPANION_INACTIVITY and
+   * `initiated_by` ∈ USER | SYSTEM; 2026-04-20 added ACCOUNT_DISCONNECTED
+   * (enforcement, or the client deleted their WhatsApp account), CHANGE_NUMBER and
+   * USER_RE_REGISTERED. Both changelogs note a GRADUAL rollout, so absence today is
+   * not evidence the field is gone. Read verbatim, never mapped — a reason Meta adds
+   * later still has to reach the operator.
+   */
+  disconnection_info?: { reason?: string; initiated_by?: string };
   // `account_update` → DISABLED_UPDATE: the account-lock / disable leg of the
   // policy-enforcement ladder. `waba_ban_state` is SCHEDULE_FOR_DISABLE |
   // DISABLE | REINSTATE; `waba_ban_date` is Meta's display date, kept verbatim
@@ -2199,14 +2209,79 @@ function parseChannelHealthUpdate(
         rawPayload,
       };
     }
-    // Any OTHER `account_update` event.
+    // ── The integration going DARK, and coming back ────────────────────────
     //
-    // This used to be a bare `return null` — invisible, which is how a wire
-    // change goes unnoticed for months (see the messaging-limit fields Meta
-    // removed in Feb 2026 while we kept reading them). It matters more from
-    // here on: Meta's account-model evolution says an `account_update` fires
-    // when an app is REMOVED from a WhatsApp Business Account — the event that
-    // makes an integration go dark — and publishes no name or shape for it.
+    // Meta DOES name these now, and publishes their shapes — the comment below
+    // used to say it didn't, which is why they all fell through to the anonymous
+    // alert blob. Two distinct classes, and conflating them would be wrong:
+    //
+    // PERMANENT: the customer or Meta severed the link. `PARTNER_REMOVED` (the
+    //   WABA was unshared), `PARTNER_APP_UNINSTALLED` (they deauthenticated or
+    //   uninstalled the app), `ACCOUNT_DELETED`. Nothing we do resumes these — the
+    //   customer has to re-onboard — so they set the restriction pair with NO
+    //   expiry and are surfaced for an operator to act on.
+    //
+    // TRANSIENT: `ACCOUNT_OFFBOARDED` — a Coexistence client changed device or
+    //   re-registered its number. Meta is explicit about the required behaviour:
+    //   "Cloud API messaging | Suspended — messages cannot be sent or received via
+    //   Cloud API while reonboarding is in progress", and under Detect offboarding,
+    //   "Pause any pending Cloud API message sends for this client, as they fail
+    //   while reonboarding is in progress." Reonboarding completes automatically in
+    //   minutes and `ACCOUNT_RECONNECTED` announces it — and webhooks keep flowing
+    //   throughout, so we DO get the recovery signal. Previously neither event was
+    //   modelled, so an in-flight broadcast kept firing into guaranteed failure,
+    //   burning recipient rows as failed and spending the rolling-24h budget.
+    //
+    // Reusing the messaging pair rather than inventing a column: it is exactly what
+    // `DISABLED_UPDATE` does above, for the same reason — both directions blocked,
+    // no expiry — which keeps the composer, banner and broadcast-pause surfaces on
+    // one code path instead of three.
+    const DARK_EVENTS: Record<string, string> = {
+      PARTNER_REMOVED: "PARTNER_REMOVED",
+      PARTNER_APP_UNINSTALLED: "PARTNER_APP_UNINSTALLED",
+      ACCOUNT_DELETED: "ACCOUNT_DELETED",
+      ACCOUNT_OFFBOARDED: "COEXISTENCE_REONBOARDING",
+    };
+    const darkEvent = value.event ? DARK_EVENTS[value.event.toUpperCase()] : undefined;
+    if (darkEvent) {
+      // `disconnection_info` (added 2026-04-03, three more reasons 2026-04-20) says
+      // WHY, which is the difference between "they churned" and "their device
+      // restarted". Carried verbatim into the alert rather than mapped, so a reason
+      // Meta adds later still reaches the operator.
+      const why = value.disconnection_info;
+      const suffix = why?.reason ? `:${why.reason}` : "";
+      return {
+        kind: "channel_health",
+        bizMessagingRestrictionType: darkEvent,
+        bizMessagingRestrictedUntil: null,
+        customerMessagingRestrictionType: darkEvent,
+        customerMessagingRestrictedUntil: null,
+        accountAlert: {
+          source: "account_update",
+          event: `${value.event}${suffix}`,
+          detail: JSON.stringify(value).slice(0, 500),
+        },
+        rawPayload,
+      };
+    }
+    if ((value.event ?? "").toUpperCase() === "ACCOUNT_RECONNECTED") {
+      // Reonboarding finished. Clear the suspension so sends resume; the existing
+      // paused-broadcast recovery path picks them up from here.
+      return {
+        kind: "channel_health",
+        bizMessagingRestrictionType: null,
+        bizMessagingRestrictedUntil: null,
+        customerMessagingRestrictionType: null,
+        customerMessagingRestrictedUntil: null,
+        accountAlert: {
+          source: "account_update",
+          event: "ACCOUNT_RECONNECTED",
+          detail: JSON.stringify(value).slice(0, 500),
+        },
+        rawPayload,
+      };
+    }
+    // Any OTHER `account_update` event.
     //
     // So the rule is: parse what Meta has documented, and persist everything
     // else as the last-alert slot rather than guessing at a payload. When that
