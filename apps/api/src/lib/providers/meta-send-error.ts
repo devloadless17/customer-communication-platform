@@ -63,6 +63,7 @@ export type MetaErrorCode =
   | "billing_issue"        // WA 131042 — payment method / credit line problem on the WABA
   | "number_not_registered" // WA 131045/133010 — number not registered with Cloud API
   | "marketing_disabled"   // WA 131063 — marketing templates disabled on Cloud API (WhatsApp Manager flag)
+  | "bsuid_needs_phone"    // WA 131062 — this message type needs a PHONE, not a BSUID address
   | "provider_rejected";   // catch-all for anything else MetaSendError-shaped
 
 /**
@@ -87,6 +88,7 @@ export const ALL_META_ERROR_CODES = [
   "recipient_unavailable",
   "message_unavailable",
   "unsupported_message",
+  "bsuid_needs_phone",
   "duplicate_button_title",
   "call_permission_required",
   "account_restricted",
@@ -411,6 +413,20 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
       httpStatus,
     };
   }
+  // 131062 — the ADDRESS shape is wrong for this message type, not the person.
+  // "You can only send authentication messages to recipients' phone numbers, not
+  // their business-scoped user IDs." Also returned when a marketing template
+  // carries `bid_spec` and the recipient is a BSUID. The remedy is specific
+  // enough to deserve its own code: get a phone for this contact.
+  if (numericCode === 131062) {
+    return {
+      code: "bsuid_needs_phone",
+      message:
+        "This message type needs the contact's phone number — we only have their WhatsApp username.",
+      detail,
+      httpStatus,
+    };
+  }
   // 131051 is documented as "Unsupported message type" — the MESSAGE is wrong,
   // not the customer. It used to sit in `invalid_recipient`, the one bucket that
   // means "delete this contact", so a perfectly reachable customer was reported
@@ -538,6 +554,8 @@ export function classifyMetaStatusError(code: number | null | undefined): MetaEr
     case 10900:
     case 9000001:
       return "message_unavailable";
+    case 131062:
+      return "bsuid_needs_phone";
     case 131009:
     // 131051 "Unsupported message type" — moved out of `invalid_recipient`,
     // which is the only bucket that tells the operator to delete the contact.
@@ -620,6 +638,10 @@ export function failureBucket(code: MetaErrorCode | string | null): FailureBucke
     case "unsupported_message":
     case "duplicate_button_title":
     case "message_unavailable":
+    // 131062 — the message type needs a phone and we addressed a BSUID. Every
+    // BSUID-only recipient fails identically until the template changes or we
+    // obtain a phone, so it is content, not a bad contact.
+    case "bsuid_needs_phone":
     // A WhatsApp Manager configuration refusing MARKETING templates — every
     // recipient fails identically until the flag or the template changes.
     case "marketing_disabled":

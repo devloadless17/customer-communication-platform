@@ -41,6 +41,23 @@ export interface ResolvedChannel {
   channel: Channel;
   /** Provider-side destination — WhatsApp phone number, IG/Telegram id, etc. */
   to: string;
+  /**
+   * True when `to` is a WhatsApp BSUID rather than a phone number.
+   *
+   * The BSUID belongs in `to` — verified 2026-07-30: for
+   * `POST /{PHONE_NUMBER_ID}/messages` the doc states "to — Supports both
+   * WhatsApp user phone numbers and user BSUIDs". (The separate `recipient`
+   * body param belongs to `/marketing_messages`, the Marketing Messages Lite
+   * API, which this platform does not use — do not "fix" the send path toward
+   * it.) So this flag changes no wire bytes.
+   *
+   * It exists because a BSUID address is not universally sendable: "BSUIDs can
+   * be used to send any type of message except for one-tap, zero-tap, and copy
+   * code authentication templates, which require user phone numbers." Attempting
+   * one returns error 131062 AFTER the request is made, so send paths check this
+   * to refuse locally instead of burning a billed call on a guaranteed failure.
+   */
+  viaBsuid?: boolean;
 }
 
 /**
@@ -68,11 +85,21 @@ export function resolveContactChannel(contact: ChannelResolvable): ResolvedChann
   if (contact.phoneNumber) {
     return { channel: contact.identityChannel ?? "whatsapp", to: contact.phoneNumber };
   }
-  // BSUID forward-compat: a phone-keyed contact Meta identified only by its
-  // business-scoped id (2026 rollout) still sends — the BSUID rides the same
-  // `to` field. Null today, so this never fires yet.
+  // A phone-keyed contact Meta identified only by its business-scoped id. The
+  // BSUID rides the same `to` field — confirmed for
+  // `POST /{PHONE_NUMBER_ID}/messages`, whose `to` "Supports both WhatsApp user
+  // phone numbers and user BSUIDs". This DOES fire now: username adoption went
+  // live 2026-06-29 and Meta empties `wa_id` for an adopter we have not messaged
+  // by phone in 30 days.
+  //
+  // `viaBsuid` is flagged so send paths can refuse the message types a BSUID
+  // address cannot receive (see ResolvedChannel).
   if (contact.bsuid) {
-    return { channel: contact.identityChannel ?? "whatsapp", to: contact.bsuid };
+    return {
+      channel: contact.identityChannel ?? "whatsapp",
+      to: contact.bsuid,
+      viaBsuid: true,
+    };
   }
   throw new NoChannelDestinationError();
 }

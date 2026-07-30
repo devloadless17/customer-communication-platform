@@ -3432,6 +3432,10 @@ const TEMPLATE_ERROR_STATUS: Record<SendTemplateValidationError["code"], number>
   // The workspace blocked this contact — every provider send would be
   // rejected. Same shape as the other pre-flight refusals: actionable 400.
   contact_blocked: 400,
+  // We hold only a BSUID for this contact and Meta requires a phone number for
+  // authentication templates (131062). Actionable pre-flight refusal, so 400 —
+  // the fix is to obtain a phone, not to retry.
+  auth_template_requires_phone: 400,
   provider_not_configured: 409,
   provider_no_template_support: 501,
 };

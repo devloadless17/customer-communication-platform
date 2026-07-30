@@ -187,6 +187,10 @@ export const ERROR_LABELS: Record<string, string> = {
   billing_issue: "WhatsApp billing problem",
   number_not_registered: "Number not registered with Cloud API",
   marketing_disabled: "Marketing templates disabled on this account",
+  // Meta 131062 — we addressed a WhatsApp username (BSUID) and this message type
+  // requires a phone number. Phrased as the action, not the error: the operator's
+  // remedy is to get a number for these contacts, not to prune them.
+  bsuid_needs_phone: "Needs a phone number (we only have their WhatsApp username)",
   provider_rejected: "Rejected by Meta",
 };
 

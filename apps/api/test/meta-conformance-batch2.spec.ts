@@ -1,14 +1,18 @@
 /**
- * Regressions for three doc-conformance fixes (audit 2026-07-30, batch 2).
+ * Regressions for the doc-conformance fixes of 2026-07-30, batches 2-3.
  *
- *  - W1-04 `messaging_account_id` belongs on CALLING endpoints too, not only
- *    /messages. Changelog 2026-06-16 names "messaging **and calling** endpoints".
+ *  - W13-01 `131051` is "Unsupported message type", but sat in `invalid_recipient`
+ *    — the ONE bucket that tells the operator to delete the contact.
  *  - W2-03 Meta caps LIST row ids at 200 while BUTTON reply ids allow 256. The
  *    provider declines to truncate a list id on the stated grounds that the
  *    request schemas reject >200 at authoring time — they did not.
  *  - W11-01 `UNTIERED` is a documented `whatsapp_business_manager_messaging_limit`
  *    value that normalized to null, making it indistinguishable from
  *    TIER_UNLIMITED (which also has a null cap).
+ *  - BSUID addressing: the BSUID belongs in `to` for /messages (a finding that
+ *    claimed otherwise was REFUTED — the `recipient` param is /marketing_messages
+ *    only), but a BSUID address cannot receive authentication templates (131062).
+ *    The `to`-field test exists to stop a well-meaning "fix" toward `recipient`.
  *
  *   pnpm --filter @ccp/api exec vitest run test/meta-conformance-batch2.spec.ts
  */
@@ -19,6 +23,7 @@ import {
   classifyMetaStatusError,
   failureBucket,
 } from "@/lib/providers/meta-send-error";
+import { resolveContactChannel } from "@/lib/providers/channel";
 import { SendInteractiveSchema } from "@/messages/messages.schemas";
 
 describe("W13-01 · 131051 is an unsupported MESSAGE, not a bad recipient", () => {
@@ -38,6 +43,44 @@ describe("W13-01 · 131051 is an unsupported MESSAGE, not a bad recipient", () =
   it("leaves 131026 — a genuinely unreachable number — as invalid_recipient", () => {
     expect(classifyMetaStatusError(131026)).toBe("invalid_recipient");
     expect(failureBucket("invalid_recipient")).toBe("permanent");
+  });
+});
+
+describe("BSUID addressing · to-field is correct, auth templates are not", () => {
+  const phoneContact = {
+    phoneNumber: "15551234567",
+    identityChannel: "whatsapp" as const,
+    externalContactId: null,
+    bsuid: null,
+  };
+  const bsuidOnly = {
+    phoneNumber: null,
+    identityChannel: "whatsapp" as const,
+    externalContactId: null,
+    bsuid: "LB.946402411360800",
+  };
+
+  it("puts the BSUID in `to` — /messages accepts both phone and BSUID there", () => {
+    // Meta, for POST /{PHONE_NUMBER_ID}/messages: "to — Supports both WhatsApp
+    // user phone numbers and user BSUIDs." The separate `recipient` body param
+    // belongs to /marketing_messages, which this platform does not use — so the
+    // send path must NOT be "fixed" toward it.
+    expect(resolveContactChannel(bsuidOnly).to).toBe("LB.946402411360800");
+  });
+
+  it("flags a BSUID destination so send paths can refuse what it can't receive", () => {
+    expect(resolveContactChannel(bsuidOnly).viaBsuid).toBe(true);
+    expect(resolveContactChannel(phoneContact).viaBsuid).toBeUndefined();
+    expect(resolveContactChannel(phoneContact).to).toBe("15551234567");
+  });
+
+  it("classifies 131062 as a content problem, never as a bad contact", () => {
+    // "You can only send authentication messages to recipients' phone numbers,
+    // not their business-scoped user IDs." Every BSUID-only recipient fails the
+    // same way, so pointing the operator at their contact list is wrong.
+    expect(classifyMetaStatusError(131062)).toBe("bsuid_needs_phone");
+    expect(failureBucket("bsuid_needs_phone")).toBe("content");
+    expect(failureBucket("bsuid_needs_phone")).not.toBe("permanent");
   });
 });
 

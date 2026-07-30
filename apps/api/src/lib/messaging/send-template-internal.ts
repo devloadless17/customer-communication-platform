@@ -124,6 +124,7 @@ export class SendTemplateValidationError extends Error {
     // rejects every send to them, so refuse up front with the reason.
     | "contact_blocked"
     | "provider_not_configured"
+    | "auth_template_requires_phone"
     | "provider_no_template_support";
   detail?: string;
 
@@ -565,6 +566,25 @@ export async function sendTemplateInternal(
       );
     }
     throw err;
+  }
+  // An AUTHENTICATION template cannot be delivered to a BSUID address. Meta:
+  // "BSUIDs can be used to send any type of message except for one-tap,
+  // zero-tap, and copy code authentication templates, which require user phone
+  // numbers." Attempting it returns 131062 — "You can only send authentication
+  // messages to recipients' phone numbers, not their business-scoped user IDs."
+  //
+  // Refuse locally rather than let the send go out: the request is billed and
+  // guaranteed to fail, and the operator needs to be told the actionable thing
+  // (we hold no phone for this contact — get one via the contact-share flow),
+  // not handed a raw provider rejection. Reachable since username adoption went
+  // live 2026-06-29.
+  if (channel.viaBsuid && template.category === "authentication") {
+    throw new SendTemplateValidationError(
+      "auth_template_requires_phone",
+      "auth_template_requires_phone",
+      "Authentication templates can only be sent to a phone number, and we only " +
+        "have this contact's WhatsApp username. Ask them to share their number first.",
+    );
   }
   // Channel is conversation-owned — bind + stamp from the conversation row;
   // resolveContactChannel above only supplies the destination address.
