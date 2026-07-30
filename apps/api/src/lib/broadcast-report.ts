@@ -268,7 +268,29 @@ export async function getBroadcastReport(
         count(*) FILTER (WHERE "repliedAt" IS NOT NULL)             AS replied,
         count(*) FILTER (WHERE "clickedAt" IS NOT NULL)             AS clicked,
         count(*) FILTER (WHERE "optedOutAt" IS NOT NULL)            AS opted_out,
-        count(*) FILTER (WHERE "pricingBillable")                   AS billable
+        -- Billable AND actually DELIVERED. Meta: "You are only charged when a
+        -- template message is delivered", and the Groups pricing page puts it
+        -- arithmetically — "If the message was delivered to only 4 of the 5 users,
+        -- you would only be charged for the 4 delivered messages."
+        --
+        -- NOTE: no backticks anywhere in this comment. It lives inside a tagged
+        -- template literal, so a backtick here TERMINATES the SQL string — which is
+        -- exactly what happened on the first attempt at this edit.
+        --
+        -- pricingBillable is captured from the 'sent' status, and the terminal
+        -- 'undelivered' write spreads an empty pricing object, so it is never
+        -- cleared. Without a delivery predicate a marketing recipient that
+        -- hard-failed — 131049 frequency cap, 131026 undeliverable, both routine on
+        -- campaigns — was still counted as billed. The operator saw N billable and
+        -- Meta charged for fewer.
+        --
+        -- 'read' implies delivered (Meta will not report read without at least
+        -- delivered), so both count. 'sent' deliberately does NOT: that is the
+        -- provisional marker, and pricing arrives again on delivered/read, which is
+        -- the occurrence tied to the actual charge.
+        count(*) FILTER (
+          WHERE "pricingBillable" AND "deliveryState" IN ('delivered', 'read')
+        )                                                           AS billable
       FROM "BroadcastRecipient"
       WHERE "broadcastId" = ${broadcastId}
     `,
@@ -283,9 +305,18 @@ export async function getBroadcastReport(
     // Billable conversations grouped by Meta's pricing category (marketing /
     // utility / authentication / service). Counts only — see the `cost` field's
     // note on why no currency amount is stored.
+    //
+    // Gated on DELIVERY for the same reason as the `billable` total above, and it
+    // has to be gated in lockstep with it: fixing one and not the other would put
+    // two numbers on the same panel that disagree, which reads as a bug in the
+    // report rather than the over-count it actually was.
     db.broadcastRecipient.groupBy({
       by: ["pricingCategory"],
-      where: { broadcastId, pricingCategory: { not: null } },
+      where: {
+        broadcastId,
+        pricingCategory: { not: null },
+        deliveryState: { in: ["delivered", "read"] },
+      },
       _count: { _all: true },
     }),
   ]);
