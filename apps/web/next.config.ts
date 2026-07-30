@@ -228,8 +228,9 @@ const nextConfig: NextConfig = {
         // routing-order subtlety that is easy to get wrong: `afterFiles`
         // rewrites are evaluated AFTER static filesystem routes but BEFORE
         // DYNAMIC ones. So `/api/health/web` (static) correctly beat this
-        // rewrite, while `/api/auth/[...all]` and `/api/webhooks/meta/[teamId]`
-        // (both dynamic) did NOT — every Better Auth endpoint was silently
+        // rewrite, while `/api/auth/[...all]` (dynamic, as was the since-deleted
+        // `/api/webhooks/meta/[workspaceId]` proxy) did NOT — every Better Auth
+        // endpoint was silently
         // proxied to NestJS, which answered `404 Cannot GET
         // /api/auth/callback/google`. That made Google sign-in impossible and
         // would have done the same to any future Better Auth flow.
@@ -242,7 +243,7 @@ const nextConfig: NextConfig = {
         // would ALSO shadow `/api/auth/change-password` above, which genuinely
         // does live on NestJS.
         {
-          source: "/api/:path((?!auth/|auth$|webhooks/meta/).*)",
+          source: "/api/:path((?!auth/|auth$).*)",
           destination: `${apiUpstream}/api/:path`,
         },
         // Canonical post-migration webhook path. NestJS owns it; this lets

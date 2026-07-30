@@ -45,12 +45,6 @@
 #   ever flip these two blocks, change-password will silently 404 because
 #   Next.js has no handler for that path anymore.
 #
-#   `/api/webhooks/meta/*` reaches the web upstream where a small proxy
-#   handler in apps/web/src/app/api/webhooks/meta/[workspaceId]/route.ts forwards
-#   raw bytes verbatim to NestJS. This is insurance for Meta subscriptions
-#   still pointing at the old URL; delete that file (and this handle block)
-#   once every subscription has been re-pointed at /webhooks/meta/{workspaceId}.
-#
 # -----------------------------------------------------------------------------
 # HTTP/3 (QUIC) — operational note
 # -----------------------------------------------------------------------------
@@ -195,16 +189,7 @@ __DOMAIN__ {
 		}
 	}
 
-	# (4) /api/webhooks/meta/* → web (Next.js proxy). The Next.js handler
-	#     forwards raw bytes to api:4000/webhooks/meta/{workspaceId} so the HMAC
-	#     computed over the unmodified body still verifies.
-	handle /api/webhooks/meta/* {
-		reverse_proxy 127.0.0.1:3000 {
-			header_up X-Real-IP {remote_host}
-		}
-	}
-
-	# (5a) /api/internal/* — REFUSED at the edge. These routes are designed
+	# (4) /api/internal/* — REFUSED at the edge. These routes are designed
 	#      for internal-only callers (Next.js → NestJS over the private
 	#      docker network, INTERNAL_API_URL=http://api:4000); exposing them
 	#      publicly means a leaked INTERNAL_BUS_SECRET becomes a remote

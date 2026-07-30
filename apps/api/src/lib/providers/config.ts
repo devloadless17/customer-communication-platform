@@ -503,8 +503,9 @@ export async function getActiveWhatsappCountries(
 }
 
 /**
- * Loads the webhook-side config. Used by /api/webhooks/meta/[workspaceId] for
- * both the GET verify dance and POST HMAC verification.
+ * Loads the webhook-side config. Used by the NestJS webhook controller
+ * (`POST|GET /webhooks/meta/:workspaceId`) for both the GET verify dance and
+ * POST HMAC verification.
  *
  * Returns null on missing-config OR on decrypt failure (corrupted ciphertext,
  * rotated ENCRYPTION_KEY) — the dispatcher maps that to 403 silently, which

@@ -11,6 +11,11 @@
  * `const { workspaceId } = await ctx.params` silently yielded `undefined` and
  * every legacy Meta webhook forwarded to `/webhooks/meta/undefined`.
  *
+ * That route has since been DELETED (2026-07-30 — it was a migration-era proxy
+ * for subscriptions on the pre-NestJS URL, and there were none). The checker
+ * stays: the bug is a property of the App Router, not of that one file, and it
+ * still guards every remaining dynamic handler.
+ *
  * TypeScript cannot catch this: the route's own `RouteContext` interface
  * declares whatever the author typed, so the lie is self-consistent. Only the
  * directory name is ground truth — hence this checker.

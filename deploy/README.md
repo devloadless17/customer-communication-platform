@@ -49,7 +49,7 @@ Caddy splits traffic by path between the two app containers — see
 - `/api/auth/change-password*` and `/api/*`, `/webhooks/*` → api (NestJS). The
   Socket.io client connects on `/api/socket/*` (caught by the `/api/*` matcher —
   there is no separate `/socket.io/*` rule).
-- everything else (`/`, `/_next/*`, `/api/auth/*`, `/api/health`, `/api/webhooks/meta/*`) → web (Next.js)
+- everything else (`/`, `/_next/*`, `/api/auth/*`, `/api/health`) → web (Next.js)
 
 ## What lives on the VPS
 
