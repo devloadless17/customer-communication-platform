@@ -44,8 +44,8 @@ import { getProviderBinding } from "@/lib/providers";
  * docblock previously asserted "the tier ladders are independent", which is the
  * opposite. Meta stamps the portfolio-derived tier onto each WABA's rows, so
  * PRESENTING it per WABA is still right — but any future change that ROLLS UP or
- * derives a tier per WABA would double-count a portfolio-wide counter. See the
- * `toNextTier` caveat on TierStanding.
+ * derives a tier per WABA would double-count a portfolio-wide counter. The full
+ * reasoning, and why the old `toNextTier` figure was removed, is on TierStanding.
  */
 
 /** Meta cut messaging/conversation/pricing analytics to a one-year lookback on
@@ -104,13 +104,38 @@ export interface TierStanding {
   country: string | null;
   category: string | null;
   tier: string;
-  /** Messages counted so far in this window against this pair. */
-  volume: number;
   /** Inclusive upper bound, or null when the tier is unbounded (`MAX`). */
   upper: number | null;
-  /** `upper - volume`, or null when unbounded. How many more messages buy the
-   *  cheaper rate — the only actionable number on this whole surface. */
-  toNextTier: number | null;
+  /**
+   * Messages counted in the REQUESTED WINDOW — deliberately not presented as
+   * progress toward the next tier.
+   *
+   * There used to be a `toNextTier` here, computed as `upper - volume`, and the
+   * docstring called it "the only actionable number on this whole surface". It was
+   * wrong in two independent ways and removed 2026-07-30:
+   *
+   *   1. WRONG SCOPE. Meta counts toward a tier at the BUSINESS PORTFOLIO level —
+   *      "Messages are aggregated at the business portfolio level, across all
+   *      WhatsApp Business accounts (WABAs) owned by the portfolio" — while this
+   *      figure sums ONE WABA. In a two-WABA portfolio both blocks under-reported
+   *      progress, each counting only its own half.
+   *   2. WRONG PERIOD. Tiers "reset monthly — At the start of the next month (12am
+   *      WABA timezone), message count resets to 0". The volume here spans whatever
+   *      window the operator picked, so a "last 90 days" view summed three months of
+   *      accrual against a MONTHLY ceiling: volume exceeded `upper`, `Math.max(0,…)`
+   *      clamped it, and the panel rendered "0 to next tier" as a confident fact. A
+   *      7-day view mid-month showed headroom several times too large.
+   *
+   * (It was also off by one — `upper` is INCLUSIVE, so the message that crosses is
+   * `upper + 1` — but that is noise beside the scope and period errors.)
+   *
+   * Computing it correctly needs a calendar-month-to-date window in the WABA's own
+   * `timezone_id`, summed across every WABA in the portfolio — independent of the
+   * report's date range. That is a real feature, not a one-line fix, so the honest
+   * move is to show Meta's own answer (the tier BAND, which Meta stamps on these rows
+   * already) and not a distance we cannot derive.
+   */
+  volumeInWindow: number;
 }
 
 export interface ConversationSlice {
@@ -552,7 +577,7 @@ export function tierStandings(rows: Array<{
     const key = `${r.country ?? ""}\u0000${r.category ?? ""}`;
     const prev = byPair.get(key);
     if (prev) {
-      prev.volume += r.volume ?? 0;
+      prev.volumeInWindow += r.volume ?? 0;
       if (r.tierUpper !== null && (prev.upper === null || r.tierUpper > prev.upper)) {
         prev.upper = r.tierUpper;
         prev.tier = r.tier;
@@ -562,15 +587,10 @@ export function tierStandings(rows: Array<{
         country: r.country,
         category: r.category,
         tier: r.tier,
-        volume: r.volume ?? 0,
+        volumeInWindow: r.volume ?? 0,
         upper: r.tierUpper,
-        toNextTier: null,
       });
     }
-  }
-  for (const standing of byPair.values()) {
-    standing.toNextTier =
-      standing.upper === null ? null : Math.max(0, standing.upper - standing.volume);
   }
   return [...byPair.values()];
 }

@@ -119,14 +119,23 @@ describe("tierStandings", () => {
     ...over,
   });
 
-  it("SUMS volume across the window's buckets but keeps the bound as-is", () => {
+  it("SUMS window volume across buckets but keeps the bound as-is", () => {
     // Meta repeats the tier bound on every daily point. Volume accumulates;
     // the ceiling is a property of the (country, category) pair, not the day —
     // summing the bound too would report a ceiling of 750k × days.
     const [standing] = tierStandings([row(), row(), row()]);
-    expect(standing!.volume).toBe(300);
+    expect(standing!.volumeInWindow).toBe(300);
     expect(standing!.upper).toBe(750_000);
-    expect(standing!.toNextTier).toBe(749_700);
+  });
+
+  it("does NOT derive a distance-to-next-tier — that figure was unsound", () => {
+    // It used to report `upper - volume`. Two independent errors: Meta accrues
+    // toward a tier across the whole business PORTFOLIO (this sums ONE WABA), and
+    // tiers reset MONTHLY (this sums the operator's arbitrary window). A 90-day
+    // view counted three months against a monthly ceiling, clamped at zero, and the
+    // panel stated "0 to next tier" as fact.
+    const [standing] = tierStandings([row()]);
+    expect("toNextTier" in standing!).toBe(false);
   });
 
   it("keeps the WIDEST bound when the account is promoted mid-window", () => {
@@ -155,15 +164,19 @@ describe("tierStandings", () => {
     expect(tierStandings([row({ tier: null, tierUpper: null })])).toEqual([]);
   });
 
-  it("reports no target on an unbounded tier rather than a fake one", () => {
+  it("reports an unbounded tier as unbounded rather than inventing a ceiling", () => {
     const [standing] = tierStandings([row({ tier: "0:MAX", tierUpper: null })]);
     expect(standing!.upper).toBeNull();
-    expect(standing!.toNextTier).toBeNull();
   });
 
-  it("never reports a NEGATIVE distance once the ceiling is passed", () => {
+  it("reports window volume ABOVE the band without clamping it", () => {
+    // Volume exceeding `upper` is normal and expected once the window spans more
+    // than one monthly reset — it is NOT evidence the account crossed the band.
+    // The old code clamped this to a zero distance, which is what made a 90-day
+    // view claim the next tier was already reached.
     const [standing] = tierStandings([row({ volume: 800_000 })]);
-    expect(standing!.toNextTier).toBe(0);
+    expect(standing!.volumeInWindow).toBe(800_000);
+    expect(standing!.upper).toBe(750_000);
   });
 });
 

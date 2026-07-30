@@ -17,19 +17,29 @@ import { LocalTime } from "@/components/local-time";
  * CHARGED FOR. The two legitimately differ — a message we sent and Meta never
  * delivered is in one and not the other — so they sit apart and are never summed.
  *
- * Per WhatsApp Business Account, never pooled: currency and Meta's volume-tier
- * ladders are per-WABA, so adding two accounts' spend would produce a figure in
- * no currency, and one account's outage would read as a company-wide drop.
+ * Per WhatsApp Business Account, never pooled: CURRENCY is per-WABA, so adding two
+ * accounts' spend could produce a figure in no currency, and one account's outage
+ * would otherwise read as a company-wide drop.
+ *
+ * Note the volume TIER is the exception — it accrues per business PORTFOLIO across
+ * every WABA it owns, and resets monthly. Meta stamps the portfolio-derived band onto
+ * each WABA's rows, so showing the band per account is right; deriving progress
+ * toward it from one account's windowed volume is not, which is why that figure was
+ * removed rather than approximated.
  */
 
 interface TierStanding {
   country: string | null;
   category: string | null;
   tier: string;
-  volume: number;
+  /** Inclusive upper bound of the band, or null when unbounded (`MAX`). */
   upper: number | null;
-  /** How many more messages buy the cheaper rate. Null = unbounded tier. */
-  toNextTier: number | null;
+  /**
+   * Volume that fell inside the SELECTED RANGE. NOT progress toward `upper` —
+   * Meta accrues per business PORTFOLIO and resets monthly, so those are
+   * different quantities. See TierStanding in waba-analytics.ts.
+   */
+  volumeInWindow: number;
 }
 
 interface PricingSlice {
@@ -273,11 +283,21 @@ function AccountBlock({ account }: { account: WabaAccount }) {
               <h5 className="text-2xs font-medium text-muted-foreground">
                 Volume tiers
               </h5>
-              {/* The only actionable number Meta gives on pricing: how many more
-                  messages to the cheaper rate. Marketing is pinned at 0:MAX
-                  (tiers don't apply) and free messages carry no tier at all, so
-                  an unbounded row says so rather than drawing an empty bar to a
-                  target that doesn't exist. */}
+              {/* Meta's OWN answer — which rate band this market–category pair is
+                  currently billed at — plus how much volume fell inside the window
+                  you're looking at. Those are two different things and the copy says
+                  so.
+
+                  This used to render "N to next tier", and that number was wrong:
+                  Meta accrues toward a tier across the whole business PORTFOLIO and
+                  resets MONTHLY, while the figure here sums one WABA over whatever
+                  range the operator picked. A 90-day view therefore counted three
+                  months against a monthly ceiling and clamped to "0 to next tier" —
+                  stated as fact. Removed rather than approximated; see TierStanding
+                  in waba-analytics.ts for what computing it properly would take.
+
+                  Free messages carry no tier at all, and an unbounded band says so
+                  rather than drawing a bar to a target that doesn't exist. */}
               <ul className="mt-1.5 space-y-1">
                 {account.tiers.map((t) => (
                   <li
@@ -291,17 +311,17 @@ function AccountBlock({ account }: { account: WabaAccount }) {
                       )}
                     </span>
                     <span className="shrink-0 tabular-nums text-muted-foreground">
-                      {t.volume.toLocaleString()}
-                      {t.upper === null ? (
-                        <span className="ml-1 font-normal">· no tier ceiling</span>
-                      ) : (
-                        <span className="ml-1 font-normal">
-                          / {t.upper.toLocaleString()} ·{" "}
-                          <strong className="font-medium text-foreground">
-                            {(t.toNextTier ?? 0).toLocaleString()} to next tier
-                          </strong>
-                        </span>
-                      )}
+                      {/* The BAND is Meta's answer and is safe to state plainly. */}
+                      <strong className="font-medium text-foreground">
+                        {t.upper === null
+                          ? "no tier ceiling"
+                          : `up to ${t.upper.toLocaleString()}`}
+                      </strong>
+                      {/* The window volume is OURS, and is only what fell inside the
+                          selected range — never progress toward the band above. */}
+                      <span className="ml-1 font-normal">
+                        · {t.volumeInWindow.toLocaleString()} in range
+                      </span>
                     </span>
                   </li>
                 ))}
