@@ -362,15 +362,17 @@ describe("cause / description", () => {
     expect(events.length).toBe(1);
   });
 
-  it("clears the cause when set to null", async () => {
+  it("refuses to clear or rewrite a cause once set — it is written once", async () => {
     const conversationId = await makeConversation();
     const opened = await createTicket(db, {
       workspaceId,
       conversationId,
       actor: { userId },
-      description: "temporary",
+      description: "the founding context",
     });
     const ticketId = opened.ok ? opened.ticket.id : "";
+    // Clearing IS a rewrite: everything after the cause (comments, notes,
+    // status moves) reasons against it, so it can never be blanked either.
     const cleared = await updateTicket(db, {
       workspaceId,
       ticketId,
@@ -378,8 +380,15 @@ describe("cause / description", () => {
       expectedVersion: opened.ok ? opened.ticket.version : 0,
       description: null,
     });
-    expect(cleared.ok).toBe(true);
-    if (cleared.ok) expect(cleared.ticket.description).toBeNull();
+    expect(cleared).toEqual({ ok: false, reason: "cause_immutable" });
+    // A same-value write is a no-op, not a violation (idempotent PATCH).
+    const same = await updateTicket(db, {
+      workspaceId,
+      ticketId,
+      actor: { userId },
+      description: "the founding context",
+    });
+    expect(same.ok).toBe(true);
   });
 });
 

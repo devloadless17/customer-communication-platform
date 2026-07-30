@@ -322,8 +322,8 @@ describe("mirroring", () => {
     );
   });
 
-  it("mirrors a status move ('they solved it') with the resolution onto the twin", async () => {
-    const { ticket } = await makeSourceTicket();
+  it("ONE IDENTITY: solving the twin solves the source too, with the resolution and an attributed log", async () => {
+    const { ticket, conversationId } = await makeSourceTicket();
     const esc = await escalateTicket(db, {
       workspaceId: wsA,
       ticketId: ticket.id,
@@ -342,15 +342,23 @@ describe("mirroring", () => {
     });
     expect(solved.ok).toBe(true);
 
-    // The SOURCE ticket stayed active — notify, never auto-solve. (It was
-    // never assigned, so it is still `new`.)
+    // The pair is ONE piece of work — the source converged to solved with the
+    // same resolution, and its conversation's counter/pointer released.
     const source = await prisma.ticket.findUniqueOrThrow({
       where: { id: ticket.id },
-      select: { status: true, resolvedAt: true },
+      select: { status: true, resolvedAt: true, resolutionNote: true, version: true },
     });
-    expect(source.status).toBe("new");
-    expect(source.resolvedAt).toBeNull();
+    expect(source.status).toBe("solved");
+    expect(source.resolvedAt).not.toBeNull();
+    expect(source.resolutionNote).toBe("Told them Tuesday.");
+    const convo = await prisma.conversation.findUniqueOrThrow({
+      where: { id: conversationId },
+      select: { openTicketCount: true, activeTicketId: true },
+    });
+    expect(convo.openTicketCount).toBe(0);
+    expect(convo.activeTicketId).toBeNull();
 
+    // The source's timeline says WHERE the change came from.
     const mirrored = (await eventsOf(wsA, ticket.id)).filter((e) => e.kind === "escalation_status");
     expect(mirrored).toHaveLength(1);
     const after = mirrored[0].after as Record<string, unknown>;
@@ -358,13 +366,87 @@ describe("mirroring", () => {
     expect(after.resolutionNote).toBe("Told them Tuesday.");
     expect(after.fromWorkspaceName).toBe(`ESC B ${S}`);
 
-    // And the source workspace got a realtime-bound outbox event about it.
+    // The source workspace got a real lifecycle frame, not just a ping.
     const frame = await prisma.outboundEvent.findFirst({
       where: { type: "ticket.changed", workspaceId: wsA },
       orderBy: { createdAt: "desc" },
       select: { payload: true },
     });
-    expect((frame?.payload as { action?: string }).action).toBe("escalation_update");
+    expect((frame?.payload as { action?: string }).action).toBe("solved");
+
+    // And converging works the OTHER way too: the source reopening reopens
+    // the twin (a synced write must not sync back and loop — one event each).
+    const reopened = await updateTicket(mdb, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId },
+      status: "open",
+    });
+    expect(reopened.ok).toBe(true);
+    const twinAfter = await prisma.ticket.findUniqueOrThrow({
+      where: { id: esc.targetTicket.id },
+      select: { status: true, reopenCount: true },
+    });
+    expect(twinAfter.status).toBe("open");
+    expect(twinAfter.reopenCount).toBe(1);
+  });
+
+  it("syncs priority + subject across the pair; each side keeps its own SLA policies", async () => {
+    const { ticket } = await makeSourceTicket();
+    const esc = await escalateTicket(db, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId },
+      targetWorkspaceId: wsB,
+      cause: "root",
+    });
+    if (!esc.ok) throw new Error("escalate failed");
+
+    const bumped = await updateTicket(mdb, {
+      workspaceId: wsB,
+      ticketId: esc.targetTicket.id,
+      actor: { userId },
+      priority: "urgent",
+      subject: "Renamed by the target side",
+    });
+    expect(bumped.ok).toBe(true);
+
+    const source = await prisma.ticket.findUniqueOrThrow({
+      where: { id: ticket.id },
+      select: { priority: true, subject: true },
+    });
+    expect(source.priority).toBe("urgent");
+    expect(source.subject).toBe("Renamed by the target side");
+  });
+
+  it("the cause is WRITTEN ONCE — a rewrite is refused everywhere, filling an empty one is allowed", async () => {
+    const { ticket } = await makeSourceTicket(); // seeded with a cause
+    const rewrite = await updateTicket(mdb, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId },
+      description: "a different story",
+    });
+    expect(rewrite).toEqual({ ok: false, reason: "cause_immutable" });
+
+    // A ticket raised WITHOUT a cause can still have it filled in once.
+    const { conversationId } = await makeConversation(wsA);
+    const bare = await createTicket(mdb, { workspaceId: wsA, conversationId, actor: { userId } });
+    if (!bare.ok) throw new Error("seed failed");
+    const fill = await updateTicket(mdb, {
+      workspaceId: wsA,
+      ticketId: bare.ticket.id,
+      actor: { userId },
+      description: "the late-arriving cause",
+    });
+    expect(fill.ok).toBe(true);
+    const locked = await updateTicket(mdb, {
+      workspaceId: wsA,
+      ticketId: bare.ticket.id,
+      actor: { userId },
+      description: "rewrite attempt",
+    });
+    expect(locked).toEqual({ ok: false, reason: "cause_immutable" });
   });
 
   it("severs on delete, in both directions", async () => {

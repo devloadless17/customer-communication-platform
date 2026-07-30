@@ -242,6 +242,15 @@ export async function getTicket(
   return api<{ ticket: TicketView; events: TicketEventView[] }>(`/api/tickets/${id}`);
 }
 
+/** Which workspace of the caller's org holds this ticket id (access-gated). */
+export async function locateTicket(
+  id: string,
+): Promise<{ workspaceId: string; workspaceName: string; number: number }> {
+  return api<{ workspaceId: string; workspaceName: string; number: number }>(
+    `/api/tickets/${id}/locate`,
+  );
+}
+
 /** Sibling workspaces a ticket can be escalated to (id + name only). */
 export async function listEscalationTargets(): Promise<Array<{ id: string; name: string }>> {
   const { workspaces } = await api<{ workspaces: Array<{ id: string; name: string }> }>(
@@ -572,6 +581,15 @@ export interface ChannelAccountView {
    *  DECLINED/EXPIRED/NONE name voids the certificate → blocks registration. */
   nameStatus: string | null;
   createdAt: string;
+  /**
+   * Which Meta app this account runs on — `shared_app` (the workspace's shared
+   * one, so a rotation there reaches it), `own_app` (a different app's
+   * credentials, untouched by a shared rotation), or `unset` (no stored secret).
+   * Admin-only; the app ID is public, the secret never leaves the server.
+   */
+  appBinding: "shared_app" | "own_app" | "unset";
+  /** The Meta app id when known — this account's own, else the shared app's. */
+  appId: string | null;
   /** WhatsApp only — per-number quality/throughput + the shared portfolio. */
   health: ChannelAccountHealth | null;
 }

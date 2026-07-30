@@ -6,11 +6,13 @@ import {
   listEscalationTargets,
   listTags,
   listTeamMembers,
+  locateTicket,
 } from "@/lib/api/queries";
 import { soft } from "@/lib/api/soft";
 import { getSession } from "@/lib/auth/current-user";
 
 import { TicketDetailClient } from "./ticket-detail-client";
+import { TicketElsewhere } from "./ticket-elsewhere";
 
 /**
  * One ticket: what it is, who owns it, what it promised, and everything that
@@ -28,7 +30,22 @@ export default async function TicketDetailPage({
 }) {
   const { id } = await params;
   const [detail, session] = await Promise.all([getTicket(id).catch(() => null), getSession()]);
-  if (!detail) notFound();
+  if (!detail) {
+    // Not in THIS workspace — but maybe in a sibling the viewer can open
+    // (an escalation pair followed across a switch, a colleague's link, the
+    // back button). Offer the one-click switch instead of a dead 404.
+    const elsewhere = await locateTicket(id).catch(() => null);
+    if (elsewhere) {
+      return (
+        <TicketElsewhere
+          workspaceId={elsewhere.workspaceId}
+          workspaceName={elsewhere.workspaceName}
+          number={elsewhere.number}
+        />
+      );
+    }
+    notFound();
+  }
   const [users, tags, teams, escalationTargets] = await Promise.all([
     listTeamMembers(),
     listTags(),

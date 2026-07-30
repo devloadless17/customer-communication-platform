@@ -1357,10 +1357,14 @@ export default function ApiDocsPage() {
           }}
         >
           <strong>Escalate a ticket to a sibling workspace</strong> in your organization. A
-          TWIN ticket is created over there (its own number, board card, assignee and SLA)
+          TWIN ticket is created over there (its own number, board card and assignee)
           carrying a frozen <em>snapshot</em> of the customer&apos;s profile — the
-          conversation history stays private. <code>cause</code> is required: it becomes
-          the twin&apos;s description and is everything the receiving workspace sees.
+          conversation history stays private. The pair is ONE identity: status, priority,
+          subject and the resolution stay in sync across both workspaces (each side keeps
+          its own assignee, team, tags and SLA clock). <code>cause</code> is required: it
+          becomes the twin&apos;s description, is everything the receiving workspace sees,
+          and — like every ticket cause — is <strong>written once</strong> (later writes
+          return <code>400 cause_immutable</code>; use comments instead).
           Optional <code>subject</code> overrides the twin&apos;s title. One escalation per
           ticket lifetime (<code>409 already_escalated</code>); an escalation target cannot
           be escalated onward (<code>400 cannot_escalate_escalated_ticket</code>). Fires{" "}

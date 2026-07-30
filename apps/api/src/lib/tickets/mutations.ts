@@ -85,7 +85,10 @@ export type TicketOutcome =
   | { ok: false; reason: "assignee_not_found" }
   | { ok: false; reason: "version_conflict" }
   | { ok: false; reason: "team_not_found" }
-  | { ok: false; reason: "ticket_terminal" };
+  | { ok: false; reason: "ticket_terminal" }
+  /** The cause is WRITTEN ONCE — it can be filled in while empty, never
+   *  rewritten. History moves forward through comments and notes instead. */
+  | { ok: false; reason: "cause_immutable" };
 
 // ---------------------------------------------------------------------------
 // Create.
@@ -459,6 +462,8 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
       status: true,
       priority: true,
       conversationId: true,
+      // The cause's write-once gate reads the current value.
+      description: true,
       // Snapshotted onto the team_changed event so the timeline reads
       // "Support → Sales" even after a rename.
       assignedTeamId: true,
@@ -472,6 +477,18 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
   if (!existing) return { ok: false, reason: "ticket_not_found" };
   if (args.expectedVersion !== undefined && args.expectedVersion !== existing.version) {
     return { ok: false, reason: "version_conflict" };
+  }
+  // The CAUSE is written once. It is the ticket's founding context — what the
+  // receiving team (or workspace) was told the issue IS — and everything after
+  // it (comments, notes, status moves) reasons against it. Rewriting it would
+  // silently change what the whole history was about. Filling it in while
+  // empty is allowed; a same-value write is a no-op, not a violation.
+  if (
+    args.description !== undefined &&
+    existing.description &&
+    args.description !== existing.description
+  ) {
+    return { ok: false, reason: "cause_immutable" };
   }
   // Same tenancy check as create — the UPDATE path is the one a handoff
   // actually goes through, so omitting it here would leave the hole open on the
@@ -763,13 +780,17 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
       action,
       previousStatus: existing.status,
     });
-    // A lifecycle move mirrors onto the escalation twin ("they solved it"), so
-    // the other workspace's timeline and board learn without any cross-
-    // workspace read. The mirrored row + frame are each scoped to the TWIN's
-    // own workspace. Non-status edits deliberately do not mirror — the shared
-    // comment thread is the channel for words.
-    if (statusMoves) {
-      await mirrorStatusToTwin(tx, existing.id, ticket, args.actor);
+    // ONE IDENTITY across the escalation pair: shared state (status, priority,
+    // subject, resolution) applies to the twin in the same transaction — see
+    // syncEscalationTwin for what stays per-side and why.
+    if (
+      statusMoves ||
+      args.priority !== undefined ||
+      args.subject !== undefined ||
+      args.resolutionCode !== undefined ||
+      args.resolutionNote !== undefined
+    ) {
+      await syncEscalationTwin(tx, existing.id, ticket, args.actor);
     }
     return { conflict: false as const, ticket, openTicketCount, action };
   });
@@ -891,6 +912,8 @@ async function reopenTicketInTx(
     action: "reopened",
     previousStatus: "solved",
   });
+  // One identity: a customer reply reopening this side reopens the twin too.
+  await syncEscalationTwin(tx, args.ticketId, ticket, args.actor);
   return { ok: true, ticket, openTicketCount, action: "reopened" };
 }
 
@@ -1451,24 +1474,197 @@ async function publishTwinUpdate(tx: TxClient, twinWorkspaceId: string, twinId: 
   });
 }
 
-/** Mirror a lifecycle move onto the escalation twin's timeline. */
-async function mirrorStatusToTwin(
+/**
+ * ONE IDENTITY: apply the primary side's shared state onto the escalation
+ * twin, inside the same transaction.
+ *
+ * The pair is one piece of work seen from two workspaces, so status,
+ * priority, subject and the resolution converge — solving in the target
+ * solves the source too. What deliberately stays PER SIDE: assignee and team
+ * (different rosters), tags and custom fields (workspace vocabularies), the
+ * SLA clock (each side keeps its own promise — the twin's due dates are
+ * recomputed under ITS workspace's policies), and the conversation binding.
+ * The cause is immutable everywhere, so it never needs syncing.
+ *
+ * Concurrency: the write CASes on the twin status we read. Losing the race
+ * means the twin moved concurrently — that write's own sync re-converges the
+ * pair, so we skip rather than fight. Loop safety: this writes the twin ROW
+ * directly (never through updateTicket), so a sync can't trigger a sync.
+ */
+async function syncEscalationTwin(
   tx: TxClient,
   ticketId: string,
-  ticket: Ticket,
+  /** The PRIMARY ticket, mapped AFTER its change landed. */
+  primary: Ticket,
   actor: TicketActor,
 ): Promise<void> {
-  const twin = await findEscalationTwin(tx, ticketId);
-  if (!twin) return;
-  await writeTicketEvent(tx, twin.twinWorkspaceId, twin.twinId, "escalation_status", actor, null, {
-    status: ticket.status,
-    fromWorkspaceName: twin.fromWorkspaceName,
-    // "They solved it" is only half the answer — carry the outcome so the
-    // source agent can relay it without asking.
-    resolutionCode: ticket.resolutionCode,
-    resolutionNote: ticket.resolutionNote,
+  const link = await findEscalationTwin(tx, ticketId);
+  if (!link) return;
+  const twin = await tx.ticket.findUnique({
+    where: { id: link.twinId },
+    select: {
+      id: true,
+      workspaceId: true,
+      status: true,
+      priority: true,
+      subject: true,
+      conversationId: true,
+      resolutionCode: true,
+      resolutionNote: true,
+      slaPausedAt: true,
+      firstResponseDueAt: true,
+      resolutionDueAt: true,
+    },
   });
-  await publishTwinUpdate(tx, twin.twinWorkspaceId, twin.twinId, actor);
+  if (!twin) return;
+
+  const statusMoves = twin.status !== primary.status;
+  const priorityMoves = twin.priority !== primary.priority;
+  const subjectMoves = twin.subject !== primary.subject;
+  const resolutionMoves =
+    twin.resolutionCode !== primary.resolutionCode ||
+    twin.resolutionNote !== primary.resolutionNote;
+  if (!statusMoves && !priorityMoves && !subjectMoves && !resolutionMoves) return;
+
+  const now = Date.now();
+  const data: Prisma.TicketUncheckedUpdateInput = { version: { increment: 1 } };
+  if (subjectMoves) data.subject = primary.subject;
+  if (resolutionMoves) {
+    data.resolutionCode = primary.resolutionCode;
+    data.resolutionNote = primary.resolutionNote;
+  }
+  if (priorityMoves) data.priority = primary.priority;
+
+  // The twin's SLA runs under ITS OWN workspace's policies — same pause/shift
+  // rules as updateTicket, evaluated against the twin's clock.
+  const policy = await loadPolicyForPriority(tx, twin.workspaceId, primary.priority);
+  const finalStatus = primary.status;
+  const wasPaused = twin.slaPausedAt !== null;
+  const shouldPause = isSlaPaused(finalStatus, policy) && isTicketActive(finalStatus);
+  if (wasPaused && !shouldPause) {
+    const pausedMsDelta = Math.max(0, now - twin.slaPausedAt!.getTime());
+    data.slaPausedAt = null;
+    data.slaPausedMs = { increment: pausedMsDelta };
+    const shifted = shiftDueDates(
+      { firstResponseDueAt: twin.firstResponseDueAt, resolutionDueAt: twin.resolutionDueAt },
+      pausedMsDelta,
+    );
+    data.firstResponseDueAt = shifted.firstResponseDueAt;
+    data.resolutionDueAt = shifted.resolutionDueAt;
+  } else if (!wasPaused && shouldPause) {
+    data.slaPausedAt = new Date(now);
+  }
+  if (priorityMoves && isTicketActive(finalStatus)) {
+    const schedule = await loadSchedule(tx, twin.workspaceId);
+    const recomputed = computeDueDates(now, policy, schedule);
+    data.slaPolicyId = policy?.id ?? null;
+    data.firstResponseDueAt = recomputed.firstResponseDueAt;
+    data.resolutionDueAt = recomputed.resolutionDueAt;
+    if (wasPaused && shouldPause) data.slaPausedAt = new Date(now);
+  }
+
+  if (statusMoves) {
+    data.status = finalStatus;
+    if (finalStatus === "solved") {
+      data.resolvedAt = new Date(now);
+      data.lastSolvedAt = new Date(now);
+      data.resolvedById = actor.userId ?? null;
+      if (twin.status === "closed") data.closedAt = null;
+    } else if (finalStatus === "closed") {
+      data.closedAt = new Date(now);
+      if (twin.status !== "solved") {
+        data.resolvedAt = new Date(now);
+        data.resolvedById = actor.userId ?? null;
+      }
+    } else if (!isTicketActive(twin.status)) {
+      data.resolvedAt = null;
+      data.closedAt = null;
+      data.resolvedById = null;
+      data.reopenCount = { increment: 1 };
+      const schedule = await loadSchedule(tx, twin.workspaceId);
+      const recomputed = computeDueDates(now, policy, schedule);
+      data.firstResponseDueAt = recomputed.firstResponseDueAt;
+      data.resolutionDueAt = recomputed.resolutionDueAt;
+    }
+  }
+
+  const written = await tx.ticket.updateMany({
+    where: { id: twin.id, status: twin.status },
+    data: data as Prisma.TicketUncheckedUpdateManyInput,
+  });
+  if (written.count === 0) return;
+
+  const wasActive = isTicketActive(twin.status);
+  const nowActive = isTicketActive(finalStatus);
+  const delta = statusMoves && wasActive !== nowActive ? (nowActive ? 1 : -1) : 0;
+  const openTicketCount = twin.conversationId
+    ? await bumpOpenTicketCount(tx, twin.conversationId, delta)
+    : 0;
+  if (statusMoves && twin.conversationId) {
+    if (nowActive) {
+      await tx.conversation.update({
+        where: { id: twin.conversationId },
+        data: { activeTicketId: twin.id },
+      });
+    } else {
+      await tx.conversation.updateMany({
+        where: { id: twin.conversationId, activeTicketId: twin.id },
+        data: { activeTicketId: null },
+      });
+    }
+  }
+
+  const mapped = await readTicket(tx, twin.id);
+  // The audit row says where the change CAME from — the twin's own timeline
+  // must read "the other workspace solved it", not appear self-inflicted.
+  await writeTicketEvent(
+    tx,
+    twin.workspaceId,
+    twin.id,
+    "escalation_status",
+    actor,
+    { status: twin.status, priority: twin.priority },
+    {
+      status: mapped.status,
+      priority: mapped.priority,
+      fromWorkspaceName: link.fromWorkspaceName,
+      resolutionCode: mapped.resolutionCode,
+      resolutionNote: mapped.resolutionNote,
+    },
+  );
+  const pill = statusMoves ? conversationPillFor(twin.status, finalStatus) : null;
+  if (pill && twin.conversationId) {
+    await writeConversationPill(tx, twin.workspaceId, twin.conversationId, pill, actor, mapped);
+  }
+  const action: TicketAction = statusMoves
+    ? finalStatus === "solved"
+      ? "solved"
+      : finalStatus === "closed"
+        ? "closed"
+        : !isTicketActive(twin.status)
+          ? "reopened"
+          : "status_changed"
+    : priorityMoves
+      ? "priority_changed"
+      : "updated";
+  await publishInTx(tx, {
+    type: "ticket.changed",
+    workspaceId: twin.workspaceId,
+    ticketId: twin.id,
+    conversationId: mapped.conversationId,
+    contactId: mapped.contactId,
+    action,
+    ticket: mapped,
+    previousStatus: twin.status,
+    openTicketCount,
+    changedByUserId: actor.userId ?? null,
+    changedByApiKeyId: actor.apiKeyId ?? null,
+    // Silent: never chain a workflow off a synced change (a cross-workspace
+    // loop would be two engines answering each other). Webhooks DO fire —
+    // this workspace's ticket genuinely changed state.
+    silent: true,
+    skipOutboundWebhook: false,
+  });
 }
 
 /** Record on the twin that its counterpart is being deleted. */

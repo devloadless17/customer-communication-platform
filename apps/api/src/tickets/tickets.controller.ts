@@ -80,6 +80,17 @@ export class TicketsController {
     return this.tickets.get(session.workspaceId, id, session);
   }
 
+  /**
+   * Which workspace holds this ticket id — the recovery for a ticket URL
+   * opened under the wrong active workspace (following an escalation pair
+   * across a switch, a shared link, the back button). Org-scoped +
+   * access-gated in the service.
+   */
+  @Get(":id/locate")
+  async locate(@CurrentSession() session: ApiSession, @Param("id") id: string) {
+    return this.tickets.locate(session, id);
+  }
+
   @Post()
   async create(
     @CurrentSession() session: ApiSession,

@@ -425,7 +425,10 @@ export function TicketDetailClient({
 
         {/* The cause. What a team receiving the handoff reads first — kept right
             under the title so it's the first thing on the ticket, not buried in
-            the timeline. Saved on blur when it actually changed. */}
+            the timeline. WRITTEN ONCE: once set it is the ticket's founding
+            context and everything after it (comments, notes, status moves)
+            reasons against it — updates travel as comments, never as a rewrite.
+            Still fillable while empty. */}
         <div className="mt-3">
           <label
             htmlFor="ticket-cause"
@@ -433,21 +436,33 @@ export function TicketDetailClient({
           >
             Cause
           </label>
-          <textarea
-            id="ticket-cause"
-            value={description}
-            disabled={busy}
-            onChange={(e) => setDescription(e.target.value)}
-            onBlur={() => {
-              const next = description.trim();
-              if (next === (ticket.description ?? "")) return;
-              void patch({ description: next || null });
-            }}
-            rows={3}
-            maxLength={5000}
-            placeholder="Why does this need work? What should the team that picks it up know?"
-            className="mt-1 w-full resize-y rounded-md border bg-background px-2.5 py-1.5 text-xs leading-relaxed shadow-none focus-visible:border-input focus-visible:outline-none"
-          />
+          {ticket.description ? (
+            <>
+              <p className="mt-1 w-full whitespace-pre-wrap rounded-md border bg-muted/30 px-2.5 py-1.5 text-xs leading-relaxed">
+                {ticket.description}
+              </p>
+              <p className="mt-0.5 text-3xs text-muted-foreground">
+                Set once, when the ticket was raised — add a note or a shared comment for
+                anything new.
+              </p>
+            </>
+          ) : (
+            <textarea
+              id="ticket-cause"
+              value={description}
+              disabled={busy}
+              onChange={(e) => setDescription(e.target.value)}
+              onBlur={() => {
+                const next = description.trim();
+                if (next === (ticket.description ?? "")) return;
+                void patch({ description: next || null });
+              }}
+              rows={3}
+              maxLength={5000}
+              placeholder="Why does this need work? What should the team that picks it up know? Written once — it can't be edited later."
+              className="mt-1 w-full resize-y rounded-md border bg-background px-2.5 py-1.5 text-xs leading-relaxed shadow-none focus-visible:border-input focus-visible:outline-none"
+            />
+          )}
         </div>
       </div>
 
@@ -604,8 +619,8 @@ export function TicketDetailClient({
                   ? STATUS_LABELS[ticket.escalation.otherTicketStatus]
                   : "unknown"}
                 {ticket.escalation.role === "source"
-                  ? " — you'll see their comments and status changes in the history below. Relay the answer to the customer, then solve this ticket yourself."
-                  : " — answer with a shared comment, or start your own chat with the customer."}
+                  ? " — one ticket, two workspaces: status and priority stay in sync, and their comments land in the history below. Relay answers to the customer here."
+                  : " — one ticket, two workspaces: status and priority stay in sync. Answer with a shared comment, or start your own chat with the customer."}
               </>
             )}
           </p>

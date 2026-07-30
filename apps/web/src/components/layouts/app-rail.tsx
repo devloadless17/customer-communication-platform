@@ -103,6 +103,48 @@ function useInboxUnread(): number {
 }
 
 /**
+ * Untriaged (`new`) ticket count for the Tickets rail badge — how a workspace
+ * NOTICES work landing on its board, most importantly a ticket escalated in
+ * from a sibling workspace (it arrives unassigned and `new`, and nobody was
+ * looking at the board when it did). Same authoritative-seed + debounce-refetch
+ * + reconnect-reseed shape as useInboxUnread, listening on the one frame that
+ * can change the number.
+ */
+function useNewTickets(): number {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const refetch = async () => {
+      try {
+        const res = await apiFetch("/api/tickets/counts");
+        if (!res.ok) return;
+        const json = (await res.json()) as { counts?: { byStatus?: { new?: unknown } } };
+        const n = json.counts?.byStatus?.new;
+        if (alive && (typeof n === "number" || n === undefined)) setCount(n ?? 0);
+      } catch {
+        // nav badge is best-effort — ignore transient fetch failures
+      }
+    };
+    const debounced = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => void refetch(), 400);
+    };
+    void refetch();
+    const socket = getClientSocket();
+    socket.on("ticket:changed", debounced);
+    socket.on("connect", debounced);
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+      socket.off("ticket:changed", debounced);
+      socket.off("connect", debounced);
+    };
+  }, []);
+  return count;
+}
+
+/**
  * Authoritative unread-@mention count for the team-chat rail badge.
  *
  * Same shape as useInboxUnread, for the same reason: a count derived purely
@@ -259,6 +301,7 @@ export function AppRail({
   const pathname = usePathname() ?? "";
   const inboxUnread = useInboxUnread();
   const teamMentions = useTeamMentions(currentUser.id);
+  const newTickets = useNewTickets();
   const isOnline = onlineUserIds?.has(currentUser.id) ?? false;
   const hasPresence = onlineUserIds !== undefined;
   // Live mirror of THIS user's availability. Seeded from the session payload
@@ -433,7 +476,9 @@ export function AppRail({
                 ? inboxUnread
                 : item.href === "/team"
                   ? teamMentions
-                  : 0
+                  : item.href === "/tickets"
+                    ? newTickets
+                    : 0
             }
           />
         ))}

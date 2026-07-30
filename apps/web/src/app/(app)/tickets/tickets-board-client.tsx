@@ -232,6 +232,14 @@ export function TicketsBoardClient({
     return map;
   }, [tickets, columns]);
 
+  /** A card dropped on a column — same path as the quick-action buttons, so
+   *  the CAS/409 handling and the socket-frame reconciliation are identical. */
+  const dropTicket = (ticketId: string, status: TicketStatus) => {
+    const t = tickets.find((x) => x.id === ticketId);
+    if (!t || t.status === status) return;
+    void move(t, status);
+  };
+
   return (
     <div className="flex h-full min-h-0 flex-col px-4 py-6 sm:px-6 md:px-8">
       <PageHeader
@@ -303,6 +311,7 @@ export function TicketsBoardClient({
               busyId={busyId}
               users={users}
               onMove={move}
+              onDropTicket={dropTicket}
             />
           ))}
         </div>
@@ -343,12 +352,16 @@ function EmptyBoard() {
       <TicketIcon aria-hidden className="size-8 text-muted-foreground/50" />
       <p className="text-sm font-medium">No open tickets</p>
       <p className="max-w-sm text-2xs text-muted-foreground">
-        Tickets open by themselves when a customer messages. Nothing here means every
-        conversation is settled — or your filters are hiding the rest.
+        Tickets are raised deliberately — from a conversation&rsquo;s &ldquo;Raise a
+        ticket&rdquo; button, a workflow, or an escalation from another workspace. Nothing
+        here means every raised issue is settled — or your filters are hiding the rest.
       </p>
     </div>
   );
 }
+
+/** The dataTransfer key a dragged ticket card travels under. */
+const DND_MIME = "application/x-ccp-ticket";
 
 function Column({
   status,
@@ -356,15 +369,47 @@ function Column({
   busyId,
   users,
   onMove,
+  onDropTicket,
 }: {
   status: TicketStatus;
   tickets: Ticket[];
   busyId: string | null;
   users: User[];
   onMove: (ticket: Ticket, status: TicketStatus) => void;
+  onDropTicket: (ticketId: string, status: TicketStatus) => void;
 }) {
+  // Plain HTML5 drag-and-drop — no library (per the no-heavy-deps rule); a
+  // depth counter because dragenter/leave fire for every child the cursor
+  // crosses, and a naive boolean flickers the highlight off mid-column.
+  const [dragDepth, setDragDepth] = useState(0);
+  const isOver = dragDepth > 0;
   return (
-    <section className="flex w-72 shrink-0 flex-col rounded-xl bg-muted/40">
+    <section
+      className={cn(
+        "flex w-72 shrink-0 flex-col rounded-xl bg-muted/40 transition-colors",
+        isOver && "bg-primary/5 ring-1 ring-inset ring-primary/30",
+      )}
+      onDragEnter={(e) => {
+        if (!e.dataTransfer.types.includes(DND_MIME)) return;
+        setDragDepth((d) => d + 1);
+      }}
+      onDragLeave={(e) => {
+        if (!e.dataTransfer.types.includes(DND_MIME)) return;
+        setDragDepth((d) => Math.max(0, d - 1));
+      }}
+      onDragOver={(e) => {
+        if (!e.dataTransfer.types.includes(DND_MIME)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+      }}
+      onDrop={(e) => {
+        const id = e.dataTransfer.getData(DND_MIME);
+        setDragDepth(0);
+        if (!id) return;
+        e.preventDefault();
+        onDropTicket(id, status);
+      }}
+    >
       <header className="flex items-center justify-between px-3 py-2">
         <h2 className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
           {STATUS_LABELS[status]}
@@ -375,6 +420,8 @@ function Column({
         {tickets.map((t) => (
           <Card key={t.id} ticket={t} busy={busyId === t.id} users={users} onMove={onMove} />
         ))}
+        {/* An empty column still needs a drop surface taller than its header. */}
+        {tickets.length === 0 && <div className="min-h-24 flex-1" aria-hidden />}
       </div>
     </section>
   );
@@ -392,8 +439,22 @@ function Card({
   onMove: (ticket: Ticket, status: TicketStatus) => void;
 }) {
   const assignee = users.find((u) => u.id === ticket.assignedUserId);
+  const [dragging, setDragging] = useState(false);
   return (
-    <article className="rounded-lg border bg-card p-2.5 shadow-xs">
+    <article
+      draggable={!busy}
+      onDragStart={(e) => {
+        e.dataTransfer.setData(DND_MIME, ticket.id);
+        e.dataTransfer.effectAllowed = "move";
+        setDragging(true);
+      }}
+      onDragEnd={() => setDragging(false)}
+      className={cn(
+        "rounded-lg border bg-card p-2.5 shadow-xs transition-opacity",
+        !busy && "cursor-grab active:cursor-grabbing",
+        dragging && "opacity-40",
+      )}
+    >
       <div className="mb-1 flex items-center gap-1.5">
         <span className="text-3xs tabular-nums text-muted-foreground">#{ticket.number}</span>
         <ChannelBadge channel={ticket.channel as Channel} />

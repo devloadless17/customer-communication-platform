@@ -41,6 +41,7 @@ import {
   ticketVisibilityWhere,
 } from "@/lib/tickets/queries";
 
+import type { ApiSession } from "../auth/session.guard";
 import { ConversationsService } from "../conversations/conversations.service";
 import { DbService } from "../db/db.service";
 import type {
@@ -292,6 +293,42 @@ export class TicketsService {
   // ---- Cross-workspace escalation ----
 
   /**
+   * Where does this ticket id live? Deliberately NOT scoped to the active
+   * workspace — that's the point: it recovers a ticket URL opened under the
+   * WRONG active workspace (the normal way is following the escalation pair
+   * across a switch). The disclosure is bounded twice: the query is scoped to
+   * the caller's ORGANIZATION, and the answer is returned only when the
+   * caller can actually open that workspace (a membership, or org-wide
+   * authority) — same access rule as the workspace switcher itself. 404
+   * otherwise, never a hint.
+   */
+  async locate(
+    session: Pick<
+      ApiSession,
+      "organizationId" | "workspaceId" | "workspaceMemberships" | "orgRole" | "isSuperAdmin"
+    >,
+    ticketId: string,
+  ): Promise<{ workspaceId: string; workspaceName: string; number: number }> {
+    const row = await this.db.ticket.findFirst({
+      where: { id: ticketId, workspace: { organizationId: session.organizationId } },
+      select: { number: true, workspaceId: true, workspace: { select: { name: true } } },
+    });
+    const canAccess =
+      row !== null &&
+      (row.workspaceId === session.workspaceId ||
+        session.workspaceMemberships.some((m) => m.workspaceId === row.workspaceId) ||
+        session.orgRole === "owner" ||
+        session.orgRole === "admin" ||
+        session.isSuperAdmin);
+    if (!row || !canAccess) throw new NotFoundException({ error: "ticket_not_found" });
+    return {
+      workspaceId: row.workspaceId,
+      workspaceName: row.workspace.name,
+      number: row.number,
+    };
+  }
+
+  /**
    * The escalation target picker: every OTHER workspace in the caller's org,
    * id + name ONLY. Deliberately not the workspace switcher list — that
    * returns memberships (with roles), and an agent refers a ticket to a
@@ -464,6 +501,12 @@ export class TicketsService {
         throw new BadRequestException({ error: "team_not_found" });
       case "ticket_terminal":
         throw new BadRequestException({ error: "ticket_terminal" });
+      case "cause_immutable":
+        throw new BadRequestException({
+          error: "cause_immutable",
+          detail:
+            "The cause is written once, when the ticket is raised. Add a note or a shared comment instead of rewriting it.",
+        });
       default:
         throw new NotFoundException({ error: outcome.reason });
     }
