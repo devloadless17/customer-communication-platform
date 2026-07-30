@@ -72,6 +72,9 @@ export const ListTicketsQuerySchema = z.object({
     .enum(["true", "false"])
     .optional()
     .transform((v) => v === "true"),
+  /** Free-text search: `#47`, a subject, a cause, a customer name, or any
+   *  comment on the ticket. */
+  q: z.string().trim().max(200).optional(),
   /** Only tickets another workspace escalated to us. */
   shared: z
     .enum(["true", "false"])

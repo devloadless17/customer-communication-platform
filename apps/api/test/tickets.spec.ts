@@ -26,6 +26,7 @@ import { createTestPrismaClient } from "./_prisma";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
+  addTicketNote,
   allocateNumber,
   createTicket,
   deleteTicket,
@@ -34,6 +35,7 @@ import {
   routeMessageToTicket,
   updateTicket,
 } from "@/lib/tickets/mutations";
+import { listTickets } from "@/lib/tickets/queries";
 import { setSharedDb } from "@/lib/db";
 import { computeDueDates, dueAt } from "@/lib/tickets/sla";
 
@@ -760,6 +762,71 @@ describe("ticket tag workspace scoping", () => {
     expect((added[0].after as { color?: string }).color).toBe("rose");
     // A tags-only write earns no generic row — the per-tag rows ARE the record.
     expect(events.filter((e) => e.kind === "field_changed")).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SEARCH. A board past a few hundred tickets is unnavigable by filters alone —
+// "#47" and "the refund thing" are how people actually look for one.
+// ---------------------------------------------------------------------------
+
+describe("ticket search", () => {
+  it("finds a ticket by number, subject, cause, customer name and comment", async () => {
+    const conversationId = await makeConversation();
+    const marker = `zebracorn${S}`;
+    const opened = await createTicket(db, {
+      workspaceId,
+      conversationId,
+      actor: { userId },
+      subject: `Refund for ${marker}`,
+      description: "customer paid twice on the 3rd",
+    });
+    if (!opened.ok) throw new Error("setup failed");
+    const ticketId = opened.ticket.id;
+    await addTicketNote(db, {
+      workspaceId,
+      ticketId,
+      actor: { userId },
+      body: `escalating to billing, ref ${marker}QQ`,
+    });
+
+    const hits = async (q: string) =>
+      (await listTickets(db, workspaceId, { query: q })).tickets.map((t) => t.id);
+
+    // The NUMBER, with and without the # people actually type.
+    expect(await hits(`#${opened.ticket.number}`)).toContain(ticketId);
+    expect(await hits(String(opened.ticket.number))).toContain(ticketId);
+    // The subject, case-insensitively.
+    expect(await hits(marker.toUpperCase())).toContain(ticketId);
+    // The CAUSE.
+    expect(await hits("paid twice")).toContain(ticketId);
+    // A note / comment on the timeline — where the discussion actually is.
+    expect(await hits(`${marker}QQ`)).toContain(ticketId);
+    // The customer's name.
+    const contactName = opened.ticket.contactName;
+    expect(await hits(contactName)).toContain(ticketId);
+    // And a term that matches nothing finds nothing.
+    expect(await hits(`nothing-matches-${S}`)).toEqual([]);
+  });
+
+  it("composes with the other filters instead of replacing them", async () => {
+    const conversationId = await makeConversation();
+    const marker = `griffin${S}`;
+    const opened = await createTicket(db, {
+      workspaceId,
+      conversationId,
+      actor: { userId },
+      subject: `Case ${marker}`,
+      priority: "low",
+    });
+    if (!opened.ok) throw new Error("setup failed");
+
+    // Matching text but the WRONG priority → excluded. A search that ignored
+    // the active filters would quietly widen the board the user narrowed.
+    const wrong = await listTickets(db, workspaceId, { query: marker, priority: ["urgent"] });
+    expect(wrong.tickets.map((t) => t.id)).not.toContain(opened.ticket.id);
+    const right = await listTickets(db, workspaceId, { query: marker, priority: ["low"] });
+    expect(right.tickets.map((t) => t.id)).toContain(opened.ticket.id);
   });
 });
 

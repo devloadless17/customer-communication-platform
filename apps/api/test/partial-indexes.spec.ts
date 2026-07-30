@@ -40,6 +40,25 @@ afterAll(async () => {
 /** Every raw partial index the product depends on, and what it protects. */
 const REQUIRED_PARTIAL_INDEXES: { name: string; unique: boolean; protects: string }[] = [
   {
+    name: "Ticket_subject_trgm_idx",
+    unique: false,
+    protects:
+      "ticket search by subject — ILIKE '%term%' cannot use a btree index, so " +
+      "without the trigram GIN every search sequential-scans Ticket",
+  },
+  {
+    name: "Ticket_description_trgm_idx",
+    unique: false,
+    protects: "ticket search by CAUSE, the same scan for the ticket's founding text",
+  },
+  {
+    name: "TicketEvent_body_trgm_idx",
+    unique: false,
+    protects:
+      "ticket search across the comment / note thread — the timeline is the " +
+      "largest ticket-side table and the one people search hardest",
+  },
+  {
     name: "Message_template_send_budget_idx",
     unique: false,
     protects:

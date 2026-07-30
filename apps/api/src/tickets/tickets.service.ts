@@ -174,6 +174,7 @@ export class TicketsService {
       ...(query.accountId ? { accountId: query.accountId } : {}),
       ...(query.tagIds ? { tagIds: query.tagIds } : {}),
       ...(query.breached ? { breachedOnly: true } : {}),
+      ...(query.q ? { query: query.q } : {}),
       ...(query.shared ? { sharedWithUsOnly: true } : {}),
       ...(query.untriaged ? { untriagedOnly: true } : {}),
       ...(query.cursorCreatedAt && query.cursorId

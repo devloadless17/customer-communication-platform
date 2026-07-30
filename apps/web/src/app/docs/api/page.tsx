@@ -1292,7 +1292,13 @@ export default function ApiDocsPage() {
           <code>channel</code>, <code>breached=true</code>,{" "}
           <code>cursorCreatedAt</code> + <code>cursorId</code>, <code>limit</code> (max
           50). An unknown enum value is a <code>400</code> that names it — a filter is
-          never silently ignored. Scope <code>read:tickets</code>.
+          never silently ignored. <code>q=</code> searches the ticket NUMBER
+          (<code>#47</code> or <code>47</code>), the subject, the cause, the customer&apos;s
+          name and every comment/note on the timeline — trigram-indexed, and it composes
+          with the other filters rather than replacing them. <code>shared=true</code>
+          returns only tickets another workspace escalated to you;{" "}
+          <code>untriaged=true</code> only work nobody in your workspace has claimed.
+          Scope <code>read:tickets</code>.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/tickets/counts">
           Header badges: <code>totalActive</code>, <code>mineActive</code>,{" "}

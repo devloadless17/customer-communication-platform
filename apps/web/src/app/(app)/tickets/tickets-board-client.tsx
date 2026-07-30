@@ -3,7 +3,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { AlertTriangle, ArrowUpRight, Clock, Loader2, Ticket as TicketIcon } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowUpRight,
+  Clock,
+  Loader2,
+  Search,
+  Ticket as TicketIcon,
+} from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -82,6 +89,14 @@ export function TicketsBoardClient({
   // queue AND still unclaimed.
   const [teamFilter, setTeamFilter] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // Search. `search` is what the user is typing; the query below picks up only
+  // the DEBOUNCED value, so the board doesn't refetch per keystroke.
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  // Multi-select triage. A Set so the header shows a count and each card tests
+  // membership in O(1).
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const view = params.get("view");
   const statusParam = params.get("status") as TicketStatus | null;
@@ -109,8 +124,9 @@ export function TicketsBoardClient({
     if (priority) p.set("priority", priority);
     if (breachedOnly) p.set("breached", "true");
     if (sharedOnly) p.set("shared", "true");
+    if (debouncedSearch) p.set("q", debouncedSearch);
     return p;
-  }, [assignee, teamFilter, priority, breachedOnly, sharedOnly, columns]);
+  }, [assignee, teamFilter, priority, breachedOnly, sharedOnly, debouncedSearch, columns]);
 
   const load = useCallback(async () => {
     const token = ++requestToken.current;
@@ -138,6 +154,13 @@ export function TicketsBoardClient({
       // Non-fatal: the header badges just keep their last value.
     }
   }, []);
+
+  // 300ms: long enough that typing "refund" is one request, short enough that
+  // the board feels like it is answering you.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => clearTimeout(t);
+  }, [search]);
 
   useEffect(() => {
     void load();
@@ -235,6 +258,58 @@ export function TicketsBoardClient({
     return map;
   }, [tickets, columns]);
 
+  /**
+   * Apply one change to every SELECTED ticket.
+   *
+   * Sequential, not `Promise.all`: each PATCH carries its own `expectedVersion`
+   * and the socket frames come back per ticket, so firing 40 at once buries the
+   * API in a burst for no wall-clock win a triager would notice — and a partial
+   * failure stays legible ("12 of 15 updated") instead of interleaving.
+   */
+  const bulkApply = async (body: Record<string, unknown>, label: string) => {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    setBulkBusy(true);
+    let done = 0;
+    let conflicted = 0;
+    try {
+      for (const id of ids) {
+        const t = tickets.find((x) => x.id === id);
+        if (!t) continue;
+        const res = await apiFetch(`/api/tickets/${id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          // Version-pinned like every other write: a stale card in a bulk
+          // selection must not silently overwrite a colleague's change.
+          body: JSON.stringify({ ...body, expectedVersion: t.version }),
+        });
+        if (res.ok) done += 1;
+        else if (res.status === 409) conflicted += 1;
+      }
+      if (conflicted > 0) {
+        toast.error(
+          `${label}: ${done} updated, ${conflicted} changed by someone else — refreshing`,
+        );
+      } else if (done > 0) {
+        toast.success(`${label}: ${done} ticket${done === 1 ? "" : "s"} updated`);
+      }
+      setSelected(new Set());
+      await load();
+      await loadCounts();
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const toggleSelected = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
   /** A card dropped on a column — same path as the quick-action buttons, so
    *  the CAS/409 handling and the socket-frame reconciliation are identical. */
   const dropTicket = (ticketId: string, status: TicketStatus) => {
@@ -255,6 +330,125 @@ export function TicketsBoardClient({
             : "Work items across every conversation"
         }
       />
+
+      {/* Search. A board past a few hundred tickets is unnavigable by filters
+          alone — "#47" and "the refund thing" are how people actually look. */}
+      <div className="mb-3 flex items-center gap-2">
+        <div className="relative w-full max-w-sm">
+          <Search
+            aria-hidden
+            className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
+          />
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search #number, subject, cause, customer or comments…"
+            aria-label="Search tickets"
+            className="h-9 w-full rounded-md border bg-background pl-8 pr-2 text-xs"
+          />
+        </div>
+        {debouncedSearch ? (
+          <button
+            type="button"
+            onClick={() => setSearch("")}
+            className="cursor-pointer text-2xs text-muted-foreground hover:text-foreground"
+          >
+            Clear
+          </button>
+        ) : null}
+      </div>
+
+      {/* Bulk triage. Appears only with a selection — an always-present toolbar
+          on a board nobody has selected in is chrome. */}
+      {selected.size > 0 ? (
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2">
+          <span className="text-2xs font-medium">
+            {selected.size} selected
+          </span>
+          <select
+            value=""
+            disabled={bulkBusy}
+            onChange={(e) => {
+              const v = e.target.value as TicketStatus | "";
+              if (v) void bulkApply({ status: v }, "Status");
+            }}
+            className="h-8 rounded-md border bg-background px-2 text-xs"
+            aria-label="Set status for selected tickets"
+          >
+            <option value="">Set status…</option>
+            {TICKET_STATUSES.map((st) => (
+              <option key={st} value={st}>
+                {STATUS_LABELS[st]}
+              </option>
+            ))}
+          </select>
+          <select
+            value=""
+            disabled={bulkBusy}
+            onChange={(e) => {
+              const v = e.target.value as TicketPriority | "";
+              if (v) void bulkApply({ priority: v }, "Priority");
+            }}
+            className="h-8 rounded-md border bg-background px-2 text-xs capitalize"
+            aria-label="Set priority for selected tickets"
+          >
+            <option value="">Set priority…</option>
+            {TICKET_PRIORITIES.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
+          <select
+            value=""
+            disabled={bulkBusy}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v) void bulkApply({ assignedUserId: v === "none" ? null : v }, "Assignee");
+            }}
+            className="h-8 rounded-md border bg-background px-2 text-xs"
+            aria-label="Assign selected tickets"
+          >
+            <option value="">Assign to…</option>
+            <option value="none">Unassigned</option>
+            {users.map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.name}
+              </option>
+            ))}
+          </select>
+          {teams.length > 0 && (
+            <select
+              value=""
+              disabled={bulkBusy}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v) void bulkApply({ assignedTeamId: v === "none" ? null : v }, "Team");
+              }}
+              className="h-8 rounded-md border bg-background px-2 text-xs"
+              aria-label="Hand selected tickets to a team"
+            >
+              <option value="">Hand to team…</option>
+              <option value="none">No team</option>
+              {teams.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          )}
+          <button
+            type="button"
+            disabled={bulkBusy}
+            onClick={() => setSelected(new Set())}
+            className="ml-auto cursor-pointer text-2xs text-muted-foreground hover:text-foreground"
+          >
+            Clear selection
+          </button>
+          {bulkBusy && <Loader2 aria-hidden className="size-3.5 animate-spin" />}
+        </div>
+      ) : null}
 
       {/* Only PRIORITY lives here now. Mine / Unassigned / Past due moved to the
           sidebar, where they are linkable URL views — keeping duplicates here
@@ -315,6 +509,8 @@ export function TicketsBoardClient({
               users={users}
               onMove={move}
               onDropTicket={dropTicket}
+              selected={selected}
+              onToggleSelected={toggleSelected}
             />
           ))}
         </div>
@@ -373,6 +569,8 @@ function Column({
   users,
   onMove,
   onDropTicket,
+  selected,
+  onToggleSelected,
 }: {
   status: TicketStatus;
   tickets: Ticket[];
@@ -380,6 +578,8 @@ function Column({
   users: User[];
   onMove: (ticket: Ticket, status: TicketStatus) => void;
   onDropTicket: (ticketId: string, status: TicketStatus) => void;
+  selected: Set<string>;
+  onToggleSelected: (id: string) => void;
 }) {
   // Plain HTML5 drag-and-drop — no library (per the no-heavy-deps rule); a
   // depth counter because dragenter/leave fire for every child the cursor
@@ -421,7 +621,15 @@ function Column({
       </header>
       <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
         {tickets.map((t) => (
-          <Card key={t.id} ticket={t} busy={busyId === t.id} users={users} onMove={onMove} />
+          <Card
+            key={t.id}
+            ticket={t}
+            busy={busyId === t.id}
+            users={users}
+            onMove={onMove}
+            selected={selected.has(t.id)}
+            onToggleSelected={onToggleSelected}
+          />
         ))}
         {/* An empty column still needs a drop surface taller than its header. */}
         {tickets.length === 0 && <div className="min-h-24 flex-1" aria-hidden />}
@@ -435,11 +643,15 @@ function Card({
   busy,
   users,
   onMove,
+  selected,
+  onToggleSelected,
 }: {
   ticket: Ticket;
   busy: boolean;
   users: User[];
   onMove: (ticket: Ticket, status: TicketStatus) => void;
+  selected: boolean;
+  onToggleSelected: (id: string) => void;
 }) {
   const assignee = users.find((u) => u.id === ticket.assignedUserId);
   const [dragging, setDragging] = useState(false);
@@ -456,9 +668,21 @@ function Card({
         "rounded-lg border bg-card p-2.5 shadow-xs transition-opacity",
         !busy && "cursor-grab active:cursor-grabbing",
         dragging && "opacity-40",
+        selected && "border-primary ring-1 ring-inset ring-primary/40",
       )}
     >
       <div className="mb-1 flex items-center gap-1.5">
+        {/* Bulk-select. Stops propagation so ticking a card can never start a
+            drag or follow the title link. */}
+        <input
+          type="checkbox"
+          checked={selected}
+          disabled={busy}
+          onClick={(e) => e.stopPropagation()}
+          onChange={() => onToggleSelected(ticket.id)}
+          aria-label={`Select ticket #${ticket.number}`}
+          className="size-3 cursor-pointer"
+        />
         <span className="text-3xs tabular-nums text-muted-foreground">#{ticket.number}</span>
         <ChannelBadge channel={ticket.channel as Channel} />
         <span className={cn("ml-auto text-3xs capitalize", PRIORITY_CLASSES[ticket.priority])}>

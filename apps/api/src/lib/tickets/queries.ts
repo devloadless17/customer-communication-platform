@@ -376,6 +376,13 @@ export interface ListTicketsFilters {
   tagIds?: string[];
   /** Only tickets that missed a promise — the board's "at risk" view. */
   breachedOnly?: boolean;
+  /**
+   * Free-text search. `#47` / `47` matches the NUMBER exactly; anything else
+   * matches the subject, the cause, the customer's name, or any comment/note on
+   * the timeline — the three places a ticket's words actually live plus who it
+   * is about. Backed by trigram GIN indexes (20260730170000).
+   */
+  query?: string;
   /** Only tickets another workspace escalated to us — the guest department's
    *  "what did we get asked to do" view. */
   sharedWithUsOnly?: boolean;
@@ -451,6 +458,32 @@ export async function listTickets(
   if (filters.tagIds?.length) and.push({ tags: { some: { id: { in: filters.tagIds } } } });
   if (filters.breachedOnly) {
     and.push({ OR: [{ firstResponseBreached: true }, { resolutionBreached: true }] });
+  }
+  if (filters.query) {
+    const q = filters.query.trim().slice(0, 200);
+    if (q) {
+      const or: Prisma.TicketWhereInput[] = [
+        { subject: { contains: q, mode: "insensitive" } },
+        { description: { contains: q, mode: "insensitive" } },
+        // The customer's name, so "find Ali's ticket" works. Reached through the
+        // relation rather than a denormalized copy — and a GUEST workspace has
+        // no contact row, which is why the snapshot arm below exists.
+        { contact: { name: { contains: q, mode: "insensitive" } } },
+        // The comment/note thread — where the actual discussion is.
+        { events: { some: { body: { contains: q, mode: "insensitive" } } } },
+        // A shared ticket's customer name for the GUEST, who sees only the
+        // frozen snapshot. `string_contains` is case-SENSITIVE (Postgres JSONB
+        // has no case-insensitive containment), so this arm is a best-effort
+        // complement to the four above, not a replacement.
+        { shares: { some: { guestWorkspaceId: workspaceId, contactSnapshot: { path: ["name"], string_contains: q } } } },
+      ];
+      // `#47` and `47` both mean the ticket NUMBER — what people actually quote
+      // to each other. Added as an extra arm rather than a mode switch, so a
+      // subject that happens to contain digits still matches.
+      const asNumber = Number.parseInt(q.replace(/^#/, ""), 10);
+      if (Number.isSafeInteger(asNumber) && asNumber > 0) or.push({ number: asNumber });
+      and.push({ OR: or });
+    }
   }
   if (filters.sharedWithUsOnly) {
     and.push({ shares: { some: { guestWorkspaceId: workspaceId } }, workspaceId: { not: workspaceId } });
