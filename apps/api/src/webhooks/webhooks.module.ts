@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 
 import { CoexistenceWorkerService } from "../coexistence/coexistence-worker.service";
 import { MetaWebhookController } from "./meta/meta.controller";
+import { MetaDataDeletionController } from "./meta/data-deletion.controller";
 
 /**
  * All inbound webhook endpoints. Meta is the only provider today; generic
@@ -14,7 +15,7 @@ import { MetaWebhookController } from "./meta/meta.controller";
  * (the history webhook lands here and enqueues chunks it consumes).
  */
 @Module({
-  controllers: [MetaWebhookController],
+  controllers: [MetaWebhookController, MetaDataDeletionController],
   providers: [CoexistenceWorkerService],
 })
 export class WebhooksModule {}
