@@ -183,7 +183,7 @@ export async function groupEventsByInboundAccount(
 
   // Keyed by externalAccountId, with a fixed key for the unattributed bucket so
   // it can never collide with a real provider id.
-  const UNATTRIBUTED = " unattributed";
+  const UNATTRIBUTED = "\u0000unattributed";
   const byAccount = new Map<string, InboundAccountGroup>();
   const dropped = new Map<string, DroppedInboundEvents>();
 

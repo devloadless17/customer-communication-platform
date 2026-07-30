@@ -27,6 +27,7 @@
     "check:route-params": "node scripts/check-route-params.mjs",
     "check:error-keys": "node scripts/check-error-keys.mjs",
     "check:v1-docs": "node scripts/check-v1-docs.mjs",
+    "check:binary-sources": "node scripts/check-binary-sources.mjs",
     "db:migrate": "prisma migrate dev",
     "db:reset": "prisma migrate reset",
     "db:seed": "prisma db seed",

@@ -25,6 +25,7 @@ import {
   compactNumber,
 } from "@/features/charts/chart-primitives";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
+import { WhatsappSpendPanel } from "@/features/reports/whatsapp-spend-panel";
 import { useChannelAccounts } from "@/features/channels/contexts/channel-accounts-context";
 import { cn } from "@ccp/shared/utils";
 import type { Channel } from "@ccp/shared/types";
@@ -115,6 +116,14 @@ export function ReportsClient() {
     }
     return allAccounts.filter((a) => a.isActive && (perChannel.get(a.channel) ?? 0) > 1);
   }, [allAccounts]);
+  // Gate the Meta spend panel on actually HAVING WhatsApp. Letting the panel
+  // decide for itself meant rendering its header and skeleton, then removing the
+  // whole section once Meta answered with no accounts — a visible collapse on a
+  // page a Messenger-only workspace has no WhatsApp spend to show on at all.
+  const hasWhatsapp = useMemo(
+    () => allAccounts.some((a) => a.isActive && a.channel === "whatsapp"),
+    [allAccounts],
+  );
   const [report, setReport] = useState<WorkspaceReport | null>(null);
   const [error, setError] = useState(false);
   // The range is computed once per selection (not per render) so the request
@@ -467,6 +476,16 @@ export function ReportsClient() {
           </Panel>
         </>
       )}
+
+      {/* Meta's billing side, on its own request.
+          Outside the `report &&` gate deliberately: it reads Meta rather than our
+          database, so it is much slower, and holding it behind the main report
+          would make the whole page feel as slow as the slowest Graph call. It
+          also renders nothing at all when the workspace has no WhatsApp account.
+          Not account-scoped by the picker above — these figures are per WhatsApp
+          BUSINESS ACCOUNT (the WABA), which is a coarser thing than the per-number
+          scope that filters our own message rows. */}
+      {hasWhatsapp && <WhatsappSpendPanel days={days} />}
     </div>
   );
 }

@@ -78,6 +78,14 @@ import type {
   SetTemplateLinkTrackingArgs,
   TemplateButtonClicks,
   ProviderTemplateComparison,
+  MessagingAnalyticsArgs,
+  ProviderMessagingAnalyticsRow,
+  ConversationAnalyticsArgs,
+  ProviderConversationAnalyticsRow,
+  PricingAnalyticsArgs,
+  ProviderPricingAnalyticsRow,
+  CallAnalyticsArgs,
+  ProviderCallAnalyticsRow,
   TemplateVariableSet,
   TemplateAnalyticsArgs,
   TemplateComparisonArgs,
@@ -3621,6 +3629,10 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
                         : {}),
                     ...(s.pricing.category ? { category: s.pricing.category } : {}),
                     ...(s.pricing.pricing_model ? { model: s.pricing.pricing_model } : {}),
+                    // Kept as well as consumed: `type` is what explains a FREE
+                    // message ("inside the service window") rather than just
+                    // asserting it wasn't charged.
+                    ...(s.pricing.type ? { type: s.pricing.type } : {}),
                   },
                 }
               : {}),
@@ -4834,6 +4846,62 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
   },
 
   /**
+   * What META says about this WABA's analytics — not what we remember saying.
+   *
+   * `is_enabled_for_insights` is a READABLE boolean on the WABA node, so the
+   * insights switch has an authoritative source. That matters because our own
+   * `insightsEnabledAt` stamp is written only by our own enable button, while
+   * Meta documents WhatsApp Manager as an equally valid way to confirm — an
+   * account switched on there read as opted-out locally and got skipped by the
+   * capture sweeper, quietly losing read/click data that expires in ~7 days.
+   *
+   * `currency` comes back on the same request because every cost figure in every
+   * analytics surface is denominated in it and Meta does not repeat it per data
+   * point. `timezone_id` is the WABA's configured zone — the one the
+   * `use_waba_timezone` analytics parameter switches reporting into.
+   */
+  async fetchTemplateInsightsState(config: MetaSendConfig): Promise<{
+    enabled: boolean | null;
+    currency: string | null;
+    timezoneId: string | null;
+  }> {
+    if (!config.wabaId) throw new MissingWabaIdError();
+    const url = new URL(
+      `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(config.wabaId)}`,
+    );
+    url.searchParams.set("fields", "is_enabled_for_insights,currency,timezone_id");
+    const res = await metaFetch(url, {
+      method: "GET",
+      retry: true,
+      appSecret: config.appSecret,
+      headers: { authorization: `Bearer ${config.accessToken}` },
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(
+        `meta fetchTemplateInsightsState failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+    const row = (await res.json()) as {
+      is_enabled_for_insights?: unknown;
+      currency?: unknown;
+      timezone_id?: unknown;
+    };
+    return {
+      // Null, not false, when the field is absent: a token lacking
+      // `whatsapp_business_management` reads the node without it, and reporting
+      // that as "insights are off" would send an admin to flip an IRREVERSIBLE
+      // switch that is already on.
+      enabled:
+        typeof row.is_enabled_for_insights === "boolean" ? row.is_enabled_for_insights : null,
+      currency: str(row.currency),
+      timezoneId: str(row.timezone_id),
+    };
+  },
+
+  /**
    * Toggle button-click tracking on ONE template.
    *
    * `POST /{template-id}?cta_url_link_tracking_opted_out=<bool>&category=<cur>`
@@ -4953,6 +5021,219 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       url = next && next.startsWith(`${GRAPH_BASE}/`) ? new URL(next) : null;
     }
     return rows;
+  },
+
+  /**
+   * Messaging analytics — messages sent and delivered by this WABA's numbers.
+   *
+   * FIELD-EXPANSION ONLY. `analytics` is a FIELD on the WABA node, not an edge
+   * (the Graph reference lists Call/Conversation/Pricing Analytics among the
+   * account's edges; `analytics` appears only under Fields), so there is no
+   * `/analytics` path to page through and attempting one is a guaranteed 400.
+   *
+   * Granularity here is `DAY`/`MONTH` — NOT the `DAILY`/`MONTHLY` its three
+   * sibling surfaces take. The args type pins the difference; this comment
+   * exists because the two spellings are one letter apart and the wrong one is
+   * a `#100 Invalid parameter` on every request.
+   */
+  async fetchMessagingAnalytics(
+    args: MessagingAnalyticsArgs,
+    config: MetaSendConfig,
+  ): Promise<ProviderMessagingAnalyticsRow[]> {
+    if (!config.wabaId) throw new MissingWabaIdError();
+    const spec =
+      `analytics.start(${unixSeconds(args.start)}).end(${unixSeconds(args.end)})` +
+      `.granularity(${args.granularity})` +
+      graphListArg("phone_numbers", args.phoneNumbers) +
+      graphListArg("country_codes", args.countryCodes) +
+      graphListArg("product_types", args.productTypes);
+    const points = await fetchWabaAnalyticsField("analytics", spec, config);
+    return points.map((pt) => ({
+      start: new Date(numOrZero(pt.start) * 1000),
+      end: new Date(numOrZero(pt.end) * 1000),
+      sent: num(pt.sent) ?? 0,
+      delivered: num(pt.delivered) ?? 0,
+      // Groups API only. Absent is the norm — null, never 0, so "this business
+      // doesn't use groups" never renders as "its group sends all failed".
+      groupsSent: num(pt.groups_sent),
+      groupsDelivered: num(pt.groups_delivered),
+    }));
+  },
+
+  /**
+   * Conversation analytics — the CONVERSATION-based pricing view.
+   *
+   * Kept alongside `fetchPricingAnalytics` rather than replaced by it: Meta
+   * moved billing to per-message pricing, but this field still answers a
+   * question pricing analytics cannot — how many CONVERSATIONS were opened, by
+   * direction and by free-tier vs regular. The two are different units (a
+   * conversation vs a delivered message) and must never be summed together.
+   */
+  async fetchConversationAnalytics(
+    args: ConversationAnalyticsArgs,
+    config: MetaSendConfig,
+  ): Promise<ProviderConversationAnalyticsRow[]> {
+    if (!config.wabaId) throw new MissingWabaIdError();
+    const spec =
+      `conversation_analytics.start(${unixSeconds(args.start)}).end(${unixSeconds(args.end)})` +
+      `.granularity(${args.granularity})` +
+      graphListArg("phone_numbers", args.phoneNumbers) +
+      graphListArg("country_codes", args.countryCodes) +
+      graphListArg("metric_types", args.metricTypes) +
+      graphListArg("conversation_categories", args.categories) +
+      graphListArg("conversation_types", args.types) +
+      graphListArg("conversation_directions", args.directions) +
+      graphListArg("dimensions", args.dimensions);
+    const points = await fetchWabaAnalyticsEdge(
+      "conversation_analytics",
+      {
+        start: String(unixSeconds(args.start)),
+        end: String(unixSeconds(args.end)),
+        granularity: args.granularity,
+        ...graphJsonParam("phone_numbers", args.phoneNumbers),
+        ...graphJsonParam("country_codes", args.countryCodes),
+        ...graphJsonParam("metric_types", args.metricTypes),
+        ...graphJsonParam("conversation_categories", args.categories),
+        ...graphJsonParam("conversation_types", args.types),
+        ...graphJsonParam("conversation_directions", args.directions),
+        ...graphJsonParam("dimensions", args.dimensions),
+      },
+      spec,
+      config,
+    );
+    return points.map((pt) => ({
+      start: new Date(numOrZero(pt.start) * 1000),
+      end: new Date(numOrZero(pt.end) * 1000),
+      // `conversation` and `cost` are each absent when the other was the only
+      // metric requested — and cost is absent ENTIRELY for partner-billed
+      // WABAs. Null, never 0: "not reported" and "free" are different answers.
+      conversations: num(pt.conversation),
+      cost: num(pt.cost),
+      phoneNumber: str(pt.phone_number),
+      country: str(pt.country),
+      category: str(pt.conversation_category),
+      type: str(pt.conversation_type),
+      direction: str(pt.conversation_direction),
+    }));
+  },
+
+  /**
+   * Pricing analytics — volume and cost of messages DELIVERED in the window,
+   * and the ONLY surface that reports volume TIERS.
+   *
+   * The tier is what makes this worth having: `"0:750000"` on a (country,
+   * category) pair says where the account sits on Meta's utility/authentication
+   * volume ladder, and `upper - volume` is how many more messages buy the
+   * cheaper rate. Meta omits the tier for free messages (they don't count
+   * toward tiering) and pins marketing at `0:MAX`, where tiers don't apply.
+   */
+  async fetchPricingAnalytics(
+    args: PricingAnalyticsArgs,
+    config: MetaSendConfig,
+  ): Promise<ProviderPricingAnalyticsRow[]> {
+    if (!config.wabaId) throw new MissingWabaIdError();
+    const spec =
+      `pricing_analytics.start(${unixSeconds(args.start)}).end(${unixSeconds(args.end)})` +
+      `.granularity(${args.granularity})` +
+      graphListArg("phone_numbers", args.phoneNumbers) +
+      graphListArg("country_codes", args.countryCodes) +
+      graphListArg("metric_types", args.metricTypes) +
+      graphListArg("pricing_types", args.types) +
+      graphListArg("pricing_categories", args.categories) +
+      graphListArg("dimensions", args.dimensions) +
+      graphListArg("tiers", args.tiers);
+    const points = await fetchWabaAnalyticsEdge(
+      "pricing_analytics",
+      {
+        start: String(unixSeconds(args.start)),
+        end: String(unixSeconds(args.end)),
+        granularity: args.granularity,
+        ...graphJsonParam("phone_numbers", args.phoneNumbers),
+        ...graphJsonParam("country_codes", args.countryCodes),
+        ...graphJsonParam("metric_types", args.metricTypes),
+        ...graphJsonParam("pricing_types", args.types),
+        ...graphJsonParam("pricing_categories", args.categories),
+        ...graphJsonParam("dimensions", args.dimensions),
+        ...graphJsonParam("tiers", args.tiers),
+      },
+      spec,
+      config,
+    );
+    return points.map((pt) => {
+      const tier = str(pt.tier);
+      const bounds = parseTierBounds(tier);
+      return {
+        start: new Date(numOrZero(pt.start) * 1000),
+        end: new Date(numOrZero(pt.end) * 1000),
+        volume: num(pt.volume),
+        cost: num(pt.cost),
+        phoneNumber: str(pt.phone_number),
+        country: str(pt.country),
+        // Category and type pass through VERBATIM. The Graph reference and the
+        // guide page list different enum members (GROUP_*, MARKETING_LITE_DYNAMIC
+        // and AI_BOT in one; REFERRAL_CONVERSION in the other), so any
+        // allow-list here would drop a value Meta legitimately returns — and a
+        // dropped pricing row is money that silently vanishes from a cost report.
+        category: str(pt.pricing_category),
+        type: str(pt.pricing_type),
+        tier,
+        tierLower: bounds.lower,
+        tierUpper: bounds.upper,
+      };
+    });
+  },
+
+  /**
+   * Call analytics — completed-call count, average duration and cost.
+   *
+   * Billing context the numbers alone don't carry: business-initiated calls bill
+   * in SIX-SECOND pulses (a partial pulse counts whole), by the callee's country,
+   * against a tier measured in minutes per CALENDAR MONTH; a call spanning a tier
+   * boundary is priced entirely at the lower rate. User-initiated calls are always
+   * free, which is why DIRECTION is the dimension worth asking for — without it,
+   * a zero cost beside a large count looks like a reporting failure.
+   */
+  async fetchCallAnalytics(
+    args: CallAnalyticsArgs,
+    config: MetaSendConfig,
+  ): Promise<ProviderCallAnalyticsRow[]> {
+    if (!config.wabaId) throw new MissingWabaIdError();
+    const spec =
+      `call_analytics.start(${unixSeconds(args.start)}).end(${unixSeconds(args.end)})` +
+      `.granularity(${args.granularity})` +
+      graphListArg("phone_numbers", args.phoneNumbers) +
+      graphListArg("country_codes", args.countryCodes) +
+      graphListArg("metric_types", args.metricTypes) +
+      graphListArg("directions", args.directions) +
+      graphListArg("dimensions", args.dimensions) +
+      graphListArg("tiers", args.tiers);
+    const points = await fetchWabaAnalyticsEdge(
+      "call_analytics",
+      {
+        start: String(unixSeconds(args.start)),
+        end: String(unixSeconds(args.end)),
+        granularity: args.granularity,
+        ...graphJsonParam("phone_numbers", args.phoneNumbers),
+        ...graphJsonParam("country_codes", args.countryCodes),
+        ...graphJsonParam("metric_types", args.metricTypes),
+        ...graphJsonParam("directions", args.directions),
+        ...graphJsonParam("dimensions", args.dimensions),
+        ...graphJsonParam("tiers", args.tiers),
+      },
+      spec,
+      config,
+    );
+    return points.map((pt) => ({
+      start: new Date(numOrZero(pt.start) * 1000),
+      end: new Date(numOrZero(pt.end) * 1000),
+      count: num(pt.count),
+      cost: num(pt.cost),
+      averageDuration: num(pt.average_duration),
+      phoneNumber: str(pt.phone_number),
+      country: str(pt.country),
+      direction: str(pt.direction),
+      tier: str(pt.tier),
+    }));
   },
 
   /**
@@ -6937,6 +7218,184 @@ function num(v: unknown): number | null {
     if (Number.isFinite(n)) return n;
   }
   return null;
+}
+
+/** `num` with a 0 floor, for the window bounds every data point always carries. */
+function numOrZero(v: unknown): number {
+  return num(v) ?? 0;
+}
+
+/** Meta's analytics timestamps are UNIX SECONDS. Passing milliseconds returns an
+ *  EMPTY set rather than an error, which reads as "no data" forever. */
+function unixSeconds(d: Date): number {
+  return Math.floor(d.getTime() / 1000);
+}
+
+/**
+ * One filter for the field-expansion form: `.name(A,B,C)`.
+ *
+ * Meta's own guide examples write these as BARE comma lists inside the parens
+ * (`.dimensions(PRICING_CATEGORY,PRICING_TYPE,COUNTRY)`), not as JSON arrays.
+ * An empty or absent list is omitted entirely rather than sent as `()` — Meta
+ * documents an empty list as "return everything", which is what omitting does,
+ * and `()` is a parse error on some fields.
+ */
+function graphListArg(name: string, values?: Array<string | number>): string {
+  if (!values || values.length === 0) return "";
+  return `.${name}(${values.join(",")})`;
+}
+
+/** The same filter for the EDGE form, where array params are JSON-encoded. */
+function graphJsonParam(
+  name: string,
+  values?: Array<string | number>,
+): Record<string, string> {
+  if (!values || values.length === 0) return {};
+  return { [name]: JSON.stringify(values) };
+}
+
+/**
+ * Pull the `data_points` out of any shape Meta uses for an analytics response.
+ *
+ * There are four documented shapes across the seven analytics fields, and they
+ * are not interchangeable:
+ *   - `{ <field>: { data: [ { data_points: [...] } ] } }` — conversation, pricing
+ *   - `{ <field>: { data_points: [...] } }`               — messaging `analytics`
+ *   - `{ data: [ { data_points: [...] } ] }`              — the edge form
+ *   - `{ data_points: [...] }`
+ * Handling all four in one place beats picking one per call site: guessing wrong
+ * yields an empty array, which is indistinguishable from "this account sent
+ * nothing" and would be reported to the user as exactly that.
+ */
+export function analyticsDataPoints(
+  json: unknown,
+  field: string,
+): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  const visit = (node: unknown): void => {
+    if (!node || typeof node !== "object") return;
+    const obj = node as Record<string, unknown>;
+    if (Array.isArray(obj.data_points)) {
+      for (const pt of obj.data_points) {
+        if (pt && typeof pt === "object" && !Array.isArray(pt)) {
+          out.push(pt as Record<string, unknown>);
+        }
+      }
+    }
+    if (Array.isArray(obj.data)) obj.data.forEach(visit);
+  };
+  const root = json && typeof json === "object" ? (json as Record<string, unknown>) : {};
+  // The named wrapper first (field form), then the bare one (edge form).
+  visit(root[field]);
+  if (Array.isArray(root[field])) (root[field] as unknown[]).forEach(visit);
+  visit(root);
+  return out;
+}
+
+/**
+ * Split Meta's `"<LOWER>:<UPPER>"` volume-tier bound.
+ *
+ * `UPPER` is either an integer or the literal `MAX`. `MAX` becomes null rather
+ * than a sentinel number: the caller's question is "how far to the next tier",
+ * and on an unbounded tier the honest answer is "there isn't one" — a huge
+ * placeholder would render as a reachable target.
+ */
+export function parseTierBounds(tier: string | null): {
+  lower: number | null;
+  upper: number | null;
+} {
+  if (!tier) return { lower: null, upper: null };
+  const [rawLower, rawUpper] = tier.split(":");
+  const lower = num(rawLower);
+  const upper = rawUpper && rawUpper.toUpperCase() !== "MAX" ? num(rawUpper) : null;
+  return { lower, upper };
+}
+
+/**
+ * Read one analytics FIELD off the WABA node (field-expansion form).
+ *
+ * Used directly for messaging `analytics`, which has no edge, and as the
+ * fallback for the three that do — see `fetchWabaAnalyticsEdge`.
+ */
+async function fetchWabaAnalyticsField(
+  field: string,
+  spec: string,
+  config: MetaSendConfig,
+): Promise<Array<Record<string, unknown>>> {
+  const url = new URL(
+    `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(config.wabaId!)}`,
+  );
+  url.searchParams.set("fields", spec);
+  // Idempotent read — the transient-blip retry is safe.
+  const res = await metaFetch(url, {
+    method: "GET",
+    retry: true,
+    appSecret: config.appSecret,
+    headers: { authorization: `Bearer ${config.accessToken}` },
+  });
+  if (!res.ok) {
+    const text = await safeMetaText(res);
+    throw new MetaSendError(`meta ${field} failed: ${res.status} ${text}`, res.status, text);
+  }
+  return analyticsDataPoints(await res.json(), field);
+}
+
+/**
+ * Read one analytics EDGE, following pagination, falling back to the field form.
+ *
+ * The edge is primary for the same reason it is for `template_analytics`: only
+ * the edge response carries a top-level `paging` object, and a year of DAILY
+ * data broken out by country and category runs to thousands of points — whatever
+ * falls past an unfollowed cursor silently vanishes and reads as "we didn't send
+ * that month" forever.
+ *
+ * The fallback is not defensive padding. Meta documents these three surfaces in
+ * its GUIDE using only the field-expansion form while the Graph REFERENCE
+ * documents them as edges, and `template_analytics` has been observed rejecting
+ * the edge path on some accounts with an unknown-path 400. One shape
+ * disagreement must not cost the account its cost reporting.
+ */
+async function fetchWabaAnalyticsEdge(
+  field: string,
+  params: Record<string, string>,
+  fieldSpec: string,
+  config: MetaSendConfig,
+): Promise<Array<Record<string, unknown>>> {
+  const first = new URL(
+    `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(config.wabaId!)}/${field}`,
+  );
+  for (const [k, v] of Object.entries(params)) first.searchParams.set(k, v);
+
+  const points: Array<Record<string, unknown>> = [];
+  let url: URL | null = first;
+  // Bounded like the template-analytics loop: a malformed `next` must not fetch
+  // forever, and 50 pages is far past any real window.
+  for (let page = 0; url && page < 50; page++) {
+    const res = await metaFetch(url, {
+      method: "GET",
+      retry: true,
+      appSecret: config.appSecret,
+      headers: { authorization: `Bearer ${config.accessToken}` },
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      if (
+        page === 0 &&
+        res.status === 400 &&
+        /unknown path|nonexisting field|nonexistent field/i.test(text)
+      ) {
+        return fetchWabaAnalyticsField(field, fieldSpec, config);
+      }
+      throw new MetaSendError(`meta ${field} failed: ${res.status} ${text}`, res.status, text);
+    }
+    const json = (await res.json()) as { paging?: { next?: unknown } };
+    points.push(...analyticsDataPoints(json, field));
+    const next = typeof json.paging?.next === "string" ? json.paging.next : null;
+    // Follow only cursors that stay on Graph — a response-supplied URL never
+    // gets to point this token anywhere else.
+    url = next && next.startsWith(`${GRAPH_BASE}/`) ? new URL(next) : null;
+  }
+  return points;
 }
 
 function str(v: unknown): string | null {

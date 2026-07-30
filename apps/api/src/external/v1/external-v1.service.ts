@@ -2601,6 +2601,7 @@ function broadcastRecipientToExternal(r: {
   errorMessage: string | null;
   pricingCategory: string | null;
   pricingBillable: boolean | null;
+  pricingType: string | null;
   externalId: string | null;
   conversationId: string | null;
   updatedAt: Date;
@@ -2631,6 +2632,8 @@ function broadcastRecipientToExternal(r: {
     errorMessage: r.errorMessage,
     pricingCategory: r.pricingCategory,
     billable: r.pricingBillable,
+    // The reason `billable` differs between two recipients of one campaign.
+    pricingType: r.pricingType,
     messageExternalId: r.externalId,
     conversationId: r.conversationId,
     updatedAt: r.updatedAt.toISOString(),

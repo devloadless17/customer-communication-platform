@@ -1810,6 +1810,7 @@ async function applyBroadcastDeliveryStatus(
           : {}),
         ...(evt.pricing.category ? { pricingCategory: evt.pricing.category } : {}),
         ...(evt.pricing.model ? { pricingModel: evt.pricing.model } : {}),
+        ...(evt.pricing.type ? { pricingType: evt.pricing.type } : {}),
       }
     : {};
 

@@ -583,6 +583,37 @@ export default function ApiDocsPage() {
           zero seconds. Scope: <code>read:reports</code> (grants no access to
           message content).
         </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/reports/whatsapp-analytics">
+          <strong>Meta&apos;s own</strong> account-level analytics, per WhatsApp
+          Business Account: what Meta <em>delivered and charged for</em>. A
+          different SOURCE from <code>reports/overview</code>, which counts what
+          we sent from our own message rows — the two legitimately differ and
+          must not be summed. Required <code>?from=</code>/<code>?to=</code> (ISO
+          instants; Meta&apos;s lookback is <strong>one year</strong> and a wider
+          window is clamped, not rejected); optional{" "}
+          <code>?granularity=day|month</code> and <code>?wabaAccountId=</code>.
+          <br />
+          <br />
+          Each account reports its own block — never pooled, because currency and
+          volume-tier ladders are per-WABA — carrying: <code>messaging[]</code>{" "}
+          (sent/delivered per bucket), <code>pricing[]</code> (delivered volume
+          and cost per category/type/country), <code>tiers[]</code> (Meta&apos;s
+          volume ladder, with <code>toNextTier</code> = how many more messages
+          buy the cheaper rate; <code>null</code> on an unbounded tier),{" "}
+          <code>conversations[]</code> (conversation-based counts — a DIFFERENT
+          unit from pricing volume), <code>calls[]</code> (count, cost, and a
+          call-count-weighted <code>averageDurationSec</code>), plus{" "}
+          <code>totals</code> splitting <code>billableVolume</code> from{" "}
+          <code>freeVolume</code>.
+          <br />
+          <br />
+          Two fields exist so a blank number is never mistaken for a bug.{" "}
+          <code>costWithheld: true</code> means Meta returned volume but no money
+          — the documented behaviour for a WABA billed through a Solution
+          Partner. <code>unavailable</code> carries the reason an account has no
+          figures at all (no phone number connected yet, credentials
+          unreadable, Meta returned nothing). Scope: <code>read:reports</code>.
+        </Endpoint>
       </Section>
 
       <Section title="Calls">

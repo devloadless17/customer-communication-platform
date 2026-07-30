@@ -195,7 +195,18 @@ export interface NormalizedStatusUpdate extends NormalizedEventSource {
    * computed amount would freeze a wrong number into the audit trail. Campaign
    * cost reporting counts billable conversations by category.
    */
-  pricing?: { billable?: boolean; category?: string; model?: string };
+  pricing?: {
+    billable?: boolean;
+    category?: string;
+    model?: string;
+    /**
+     * WHY it was priced that way: `regular`, `free_customer_service`,
+     * `free_entry_point`, `free_group_customer_service`. Meta is deprecating the
+     * `billable` boolean in favour of this plus `category`, and it is also the
+     * only field that explains why two recipients of one campaign differ.
+     */
+    type?: string;
+  };
   /**
    * The provider's CANONICAL id for the recipient this message was actually
    * delivered to (WhatsApp `statuses[].recipient_id` — the wa_id). Normally
@@ -2318,6 +2329,198 @@ export interface ProviderTemplateAnalyticsRow {
 }
 
 /**
+ * WABA-LEVEL ANALYTICS — the four surfaces beyond `template_analytics`.
+ *
+ * Meta exposes seven analytics fields on the WhatsApp Business Account node.
+ * `template_analytics` and `template_group_analytics` are per-template and are
+ * modelled above; the four below are per-ACCOUNT and share one shape family:
+ * a required window, a granularity, optional filters, and a list of
+ * `dimensions` that decides how finely the data points are broken out.
+ *
+ * THE TRAP THAT DEFINES THIS FAMILY: the granularity enum is spelled
+ * DIFFERENTLY per field. `analytics` (messaging) takes `HALF_HOUR | DAY |
+ * MONTH`; conversation, pricing and call analytics take `HALF_HOUR | DAILY |
+ * MONTHLY`. They look interchangeable and are not — the wrong spelling is a
+ * `#100 Invalid parameter`, and passing `DAILY` to messaging analytics fails
+ * every request. Each args type therefore names its own literal union rather
+ * than sharing one, so the compiler enforces the difference.
+ *
+ * Lookback is ALSO per family: template analytics is 90 days, while messaging /
+ * conversation / pricing dropped from 10 years to ONE YEAR on 2025-12-01. Being
+ * re-fetchable within a year is why these four are read live and cached rather
+ * than captured into a rollup table the way perishable template read/click is.
+ */
+
+/** Messaging analytics: how many messages a WABA's numbers sent and delivered. */
+export interface MessagingAnalyticsArgs {
+  start: Date;
+  end: Date;
+  /** NOTE the spelling — messaging analytics is the ONLY field using DAY/MONTH. */
+  granularity: "HALF_HOUR" | "DAY" | "MONTH";
+  /** Business phone numbers to include; empty/absent = every number on the WABA. */
+  phoneNumbers?: string[];
+  /** 2-letter country codes; empty/absent = every country communicated with.
+   *  Meta does NOT support this filter for group SENT messages. */
+  countryCodes?: string[];
+  /**
+   * Meta's numeric message classes: `0` template, `2` non-template, `100`
+   * inbound — plus the Groups API set `101` group notification, `102` group
+   * customer support, `103` inbound group.
+   *
+   * INBOUND CANNOT BE COMBINED with any other value: Meta answers a mixed list
+   * with `#100` subcode 2388077 ("Unable to query this combination of product
+   * types"). Query it on its own.
+   */
+  productTypes?: number[];
+}
+
+/** One messaging-analytics data point. */
+export interface ProviderMessagingAnalyticsRow {
+  /** Window start — the bucket's identity at the requested granularity. */
+  start: Date;
+  end: Date;
+  sent: number;
+  delivered: number;
+  /** Groups API only, and only present when Meta reports it. Null = not
+   *  reported (which is the normal case for a business not using groups). */
+  groupsSent: number | null;
+  groupsDelivered: number | null;
+}
+
+/** Conversation analytics: conversation-based pricing (the pre-per-message view). */
+export interface ConversationAnalyticsArgs {
+  start: Date;
+  end: Date;
+  granularity: "HALF_HOUR" | "DAILY" | "MONTHLY";
+  phoneNumbers?: string[];
+  countryCodes?: string[];
+  /** `CONVERSATION` | `COST`. Absent = both. COST is withheld entirely for
+   *  Solution-Partner-billed WABAs — see ProviderCostWithheld. */
+  metricTypes?: Array<"CONVERSATION" | "COST">;
+  categories?: Array<
+    | "MARKETING"
+    | "UTILITY"
+    | "AUTHENTICATION"
+    | "SERVICE"
+    | "AUTHENTICATION_INTERNATIONAL"
+    | "MARKETING_LITE"
+  >;
+  types?: Array<"REGULAR" | "FREE_ENTRY_POINT" | "FREE_TIER">;
+  directions?: Array<"BUSINESS_INITIATED" | "USER_INITIATED" | "UNKNOWN">;
+  dimensions?: Array<
+    "PHONE" | "COUNTRY" | "CONVERSATION_TYPE" | "CONVERSATION_DIRECTION" | "CONVERSATION_CATEGORY"
+  >;
+}
+
+/** One conversation-analytics data point, with whichever dimensions were asked for. */
+export interface ProviderConversationAnalyticsRow {
+  start: Date;
+  end: Date;
+  /** Conversation count. Null when `COST` alone was requested. */
+  conversations: number | null;
+  /** In the WABA's currency. Null = not requested, or WITHHELD (partner-billed). */
+  cost: number | null;
+  phoneNumber: string | null;
+  country: string | null;
+  category: string | null;
+  type: string | null;
+  direction: string | null;
+}
+
+/**
+ * Pricing analytics: the CURRENT, per-message pricing view — volume and cost of
+ * messages DELIVERED in a window, and the one surface that reports VOLUME TIERS.
+ */
+export interface PricingAnalyticsArgs {
+  start: Date;
+  end: Date;
+  granularity: "HALF_HOUR" | "DAILY" | "MONTHLY";
+  phoneNumbers?: string[];
+  countryCodes?: string[];
+  metricTypes?: Array<"VOLUME" | "COST">;
+  /**
+   * Deliberately `string[]`, not a union. The Graph reference and the guide page
+   * DISAGREE on this enum: the reference lists GROUP_MARKETING, GROUP_UTILITY,
+   * GROUP_SERVICE, MARKETING_LITE_DYNAMIC, GROUP_MARKETING_LITE and AI_BOT,
+   * while the guide lists REFERRAL_CONVERSION — which the reference omits. A
+   * closed union would have to pick a side and would reject a value Meta
+   * actually accepts, so the caller passes strings and the PARSER never drops an
+   * unrecognized category.
+   */
+  categories?: string[];
+  /** `REGULAR` | `FREE_ENTRY_POINT` | `FREE_CUSTOMER_SERVICE` |
+   *  `FREE_GROUP_CUSTOMER_SERVICE`. Same open-string reasoning as `categories`. */
+  types?: string[];
+  dimensions?: Array<"PHONE" | "COUNTRY" | "PRICING_TYPE" | "PRICING_CATEGORY" | "TIER">;
+  /** Volume tiers to filter to. Meta types these as opaque strings. */
+  tiers?: string[];
+}
+
+/** One pricing-analytics data point. */
+export interface ProviderPricingAnalyticsRow {
+  start: Date;
+  end: Date;
+  /** Messages DELIVERED in the window. Null when only COST was requested. */
+  volume: number | null;
+  cost: number | null;
+  phoneNumber: string | null;
+  country: string | null;
+  /** e.g. `MARKETING`, `UTILITY`, `SERVICE`, `AUTHENTICATION_INTERNATIONAL`,
+   *  `MARKETING_LITE`, `GROUP_*`, `AI_BOT`. Passed through verbatim. */
+  category: string | null;
+  /** `REGULAR` bills; every `FREE_*` value does not. */
+  type: string | null;
+  /**
+   * Meta's `"<LOWER>:<UPPER>"` tier bound for this (country, category) pair,
+   * where UPPER is an integer or the literal `MAX`. OMITTED for free messages
+   * (they don't count toward tiering) and always `0:MAX` for marketing, where
+   * volume tiers don't apply. Parsed into `tierLower`/`tierUpper` below.
+   */
+  tier: string | null;
+  /** Inclusive lower bound of `tier`, or null when Meta omitted the tier. */
+  tierLower: number | null;
+  /** Inclusive upper bound; null when unbounded (`MAX`) or no tier reported.
+   *  `volume` subtracted from this is how far the next tier is. */
+  tierUpper: number | null;
+}
+
+/**
+ * Call analytics: cost, completed-call count and average duration.
+ *
+ * Business-initiated calls are billed in SIX-SECOND PULSES (a fractional pulse
+ * counts as a whole one), by the callee's country code, against a volume tier
+ * measured in minutes per CALENDAR MONTH. A call that crosses a tier boundary is
+ * priced entirely at the lower rate. All USER-initiated calls are free.
+ */
+export interface CallAnalyticsArgs {
+  start: Date;
+  end: Date;
+  granularity: "HALF_HOUR" | "DAILY" | "MONTHLY";
+  phoneNumbers?: string[];
+  countryCodes?: string[];
+  metricTypes?: Array<"COUNT" | "AVERAGE_DURATION" | "COST">;
+  directions?: Array<"BUSINESS_INITIATED" | "USER_INITIATED" | "UNKNOWN">;
+  dimensions?: Array<"PHONE" | "COUNTRY" | "DIRECTION" | "TIER">;
+  tiers?: string[];
+}
+
+/** One call-analytics data point. */
+export interface ProviderCallAnalyticsRow {
+  start: Date;
+  end: Date;
+  /** Completed calls. Null when not requested. */
+  count: number | null;
+  cost: number | null;
+  /** Meta reports this in SECONDS. */
+  averageDuration: number | null;
+  phoneNumber: string | null;
+  country: string | null;
+  /** `BUSINESS_INITIATED` (billable) or `USER_INITIATED` (always free). */
+  direction: string | null;
+  tier: string | null;
+}
+
+/**
  * A WhatsApp business phone number's public profile — what a customer sees when
  * they tap the business name in a chat.
  *
@@ -2608,6 +2811,19 @@ export interface MessagingProvider<SendConfig = unknown> {
    */
   enableTemplateInsights?(config: SendConfig): Promise<void>;
   /**
+   * Read the provider's OWN view of the analytics switch, plus the account
+   * currency every cost figure is denominated in.
+   *
+   * `enabled: null` means the provider did not report it (usually a token
+   * missing the management permission) — distinct from `false`, because the
+   * enable action it guards is irreversible.
+   */
+  fetchTemplateInsightsState?(config: SendConfig): Promise<{
+    enabled: boolean | null;
+    currency: string | null;
+    timezoneId: string | null;
+  }>;
+  /**
    * Toggle button-click tracking on one template (reversible, unlike
    * enableTemplateInsights). `category` must be the template's CURRENT
    * category — a different value sends the template back to review.
@@ -2625,6 +2841,31 @@ export interface MessagingProvider<SendConfig = unknown> {
     args: TemplateAnalyticsArgs,
     config: SendConfig,
   ): Promise<ProviderTemplateAnalyticsRow[]>;
+  /**
+   * The four ACCOUNT-level analytics surfaces (see the args types above for the
+   * per-field granularity-spelling trap and the one-year lookback).
+   *
+   * Separate methods rather than one `fetchAnalytics(kind)`: each takes a
+   * genuinely different filter set and returns a differently-shaped row, so a
+   * single entry point would be a discriminated union that every caller has to
+   * narrow anyway — more indirection for no less code.
+   */
+  fetchMessagingAnalytics?(
+    args: MessagingAnalyticsArgs,
+    config: SendConfig,
+  ): Promise<ProviderMessagingAnalyticsRow[]>;
+  fetchConversationAnalytics?(
+    args: ConversationAnalyticsArgs,
+    config: SendConfig,
+  ): Promise<ProviderConversationAnalyticsRow[]>;
+  fetchPricingAnalytics?(
+    args: PricingAnalyticsArgs,
+    config: SendConfig,
+  ): Promise<ProviderPricingAnalyticsRow[]>;
+  fetchCallAnalytics?(
+    args: CallAnalyticsArgs,
+    config: SendConfig,
+  ): Promise<ProviderCallAnalyticsRow[]>;
   /**
    * Upload a media file (image/video/document) for use as a template header.
    * Returns an opaque handle to embed in `example.header_handle`. Distinct

@@ -96,6 +96,11 @@ jobs:
       - run: node scripts/check-test-isolation.mjs
       # `as unknown as` may only go DOWN (scripts/check-double-assertions.mjs).
       - run: node scripts/check-double-assertions.mjs
+      # A NUL byte makes grep/git grep treat the whole source file as BINARY and
+      # skip it — the file compiles and works, but it vanishes from every
+      # repo-wide sweep. A bug once survived an audit that grepped for exactly
+      # its call site for this reason. See scripts/check-binary-sources.mjs.
+      - run: node scripts/check-binary-sources.mjs
 
       # A Next.js route handler must destructure the param names its DIRECTORY
       # declares. Typecheck cannot see this — the route's own params interface

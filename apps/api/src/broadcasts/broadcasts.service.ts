@@ -1632,6 +1632,10 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       "error_message",
       "pricing_category",
       "billable",
+      // Sits beside `billable` because it is the only thing that explains it: a
+      // single utility campaign legitimately mixes TRUE and FALSE, and
+      // `free_customer_service` is the reason why.
+      "pricing_type",
       "opted_out_at",
       "conversation_id",
       "message_external_id",
@@ -1693,6 +1697,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
             error_message: r.errorMessage ?? "",
             pricing_category: r.pricingCategory ?? "",
             billable: r.pricingBillable == null ? "" : r.pricingBillable ? "true" : "false",
+            pricing_type: r.pricingType ?? "",
             opted_out_at: iso(r.optedOutAt ?? r.contact.marketingOptOutAt),
             conversation_id: r.conversationId ?? "",
             message_external_id: r.externalId ?? "",

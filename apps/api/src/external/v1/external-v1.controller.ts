@@ -25,10 +25,13 @@ import type { Response } from "express";
 
 import { CallsService } from "@/calls/calls.service";
 import { getWorkspaceReport, ReportRangeError } from "@/lib/analytics/reports";
+import { getWabaAnalytics } from "@/lib/analytics/waba-analytics";
 import { streamBlob } from "@/media/stream-blob";
 import {
   ReportOverviewQuerySchema,
   type ReportOverviewQuery,
+  WabaAnalyticsQuerySchema,
+  type WabaAnalyticsQueryInput,
 } from "@/reports/reports.schemas";
 
 import { TRANSFER_MAX_UPLOAD_BYTES } from "@ccp/shared/contacts/transfer-columns";
@@ -2209,6 +2212,31 @@ export class ExternalV1Controller {
       }
       throw err;
     }
+  }
+
+  /**
+   * Meta's OWN account-level analytics — spend, delivered volume, volume-tier
+   * standing, conversations and call cost, per WhatsApp Business Account.
+   *
+   * Same domain function and same response shape as the internal
+   * `/api/reports/whatsapp-analytics`. A different SOURCE from
+   * `reports/overview`: that one is computed from our message rows (what we
+   * sent), this one is Meta's billing side (what it delivered and charged).
+   * Never sum them — and never sum `conversations` with `pricing` volume either,
+   * they are conversations vs delivered messages.
+   */
+  @Get("reports/whatsapp-analytics")
+  @RequireScope("read:reports")
+  async whatsappAnalytics(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query(zQuery(WabaAnalyticsQuerySchema)) query: WabaAnalyticsQueryInput,
+  ) {
+    return getWabaAnalytics(auth.workspaceId, {
+      from: new Date(query.from),
+      to: new Date(query.to),
+      granularity: query.granularity,
+      wabaAccountId: query.wabaAccountId,
+    });
   }
 
   @Get("calls")

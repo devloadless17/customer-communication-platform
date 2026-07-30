@@ -133,7 +133,28 @@ export async function enableTemplateInsights(
   return { enabledAt: enabledAt.toISOString(), alreadyEnabled: false };
 }
 
-/** Insights state for ONE number's WABA (`accountId`), or the default number's. */
+/**
+ * Insights state for ONE number's WABA (`accountId`), or the default number's.
+ *
+ * META IS THE AUTHORITY here, not our stamp. `is_enabled_for_insights` is a
+ * readable boolean on the WABA node, and Meta documents WhatsApp Manager as an
+ * equally valid way to confirm analytics — so an account switched on there is
+ * genuinely enabled while our `insightsEnabledAt` is null. Reporting that as
+ * "off" invited an admin to press an IRREVERSIBLE enable that was already done.
+ *
+ * The live read is best-effort: a Graph blip or a token without
+ * `whatsapp_business_management` falls back to the local stamp rather than
+ * failing a settings page. `currency` rides along because it is the denomination
+ * of every cost figure in every analytics surface and Meta does not repeat it
+ * per data point.
+ *
+ * What we deliberately DON'T do is backfill `insightsEnabledAt` from a live
+ * `true`. The stamp's meaning is "when Meta STARTED recording", and it is what
+ * `analyticsSince` uses to explain zeros on older campaigns. Stamping `now()`
+ * for an account enabled months ago in Manager would assert that everything
+ * before today is unexplained-zero — inventing a wrong answer to replace a
+ * missing one. Null date with `enabled: true` is the honest state.
+ */
 export async function getInsightsStatus(
   workspaceId: string,
   accountId?: string | null,
@@ -141,19 +162,47 @@ export async function getInsightsStatus(
   connected: boolean;
   enabled: boolean;
   enabledAt: string | null;
+  /** True when `enabled` came from Meta rather than our own stamp. */
+  confirmedByProvider: boolean;
+  /** The WABA's billing currency — the unit of every cost figure. */
+  currency: string | null;
 }> {
   const connection = await db.channelConnection.findFirst({
     where: accountId
       ? { id: accountId, workspaceId, channel: "whatsapp" }
       : { workspaceId, channel: "whatsapp", isDefault: true },
-    select: { wabaAccount: { select: { insightsEnabledAt: true } } },
+    select: { id: true, wabaAccount: { select: { insightsEnabledAt: true } } },
   });
   const enabledAt = connection?.wabaAccount?.insightsEnabledAt ?? null;
-  return {
+  const local = {
     connected: !!connection,
     enabled: !!enabledAt,
     enabledAt: enabledAt?.toISOString() ?? null,
+    confirmedByProvider: false,
+    currency: null as string | null,
   };
+  if (!connection) return local;
+
+  const binding = getProviderBinding("whatsapp");
+  if (!binding.provider.fetchTemplateInsightsState) return local;
+  try {
+    const config = await binding.getSendConfig(workspaceId, connection.id);
+    const state = await binding.provider.fetchTemplateInsightsState(config);
+    return {
+      ...local,
+      // `null` means Meta didn't report the field (permission gap) — keep the
+      // local answer rather than downgrading a known `true` to `false`.
+      enabled: state.enabled ?? local.enabled,
+      confirmedByProvider: state.enabled !== null,
+      currency: state.currency,
+    };
+  } catch (err) {
+    console.warn(
+      `[template-analytics] insights state unavailable for workspace=${workspaceId}:`,
+      err instanceof Error ? err.message : err,
+    );
+    return local;
+  }
 }
 
 /**
@@ -279,7 +328,7 @@ export async function refreshTemplateAnalytics(
         `[template-analytics] fetch failed for workspace=${workspaceId}:`,
         msg,
       );
-      if (/insight/i.test(msg)) {
+      if (isInsightsNotEnabledError(msg)) {
         throw new ConflictException({ error: "template_insights_not_enabled" });
       }
       // Any other Graph refusal: keep it structured and carry Meta's OWN
@@ -682,6 +731,39 @@ export async function readTemplateAnalytics(
 
 function dayOf(d: Date): Date {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+/**
+ * Meta's code for "this WABA hasn't confirmed template analytics yet".
+ *
+ * The WhatsApp Business Account reference documents it: `200005 — Template
+ * Insights are not available yet for this WhatsApp Business account`. Matching
+ * the CODE rather than the prose is the point. The previous test was
+ * `/insight/i` over the whole error string, which is both too narrow and too
+ * wide: Meta rewords error copy without notice, and the word "insights" appears
+ * in unrelated refusals — so an expired token or a permission gap could be
+ * reported to the admin as "turn on template analytics", sending them to flip an
+ * IRREVERSIBLE switch that was never the problem.
+ *
+ * The prose check is kept as a fallback for the field-expansion path, where the
+ * refusal can arrive without a machine-readable code.
+ */
+function isInsightsNotEnabledError(raw: string): boolean {
+  const jsonStart = raw.indexOf("{");
+  if (jsonStart !== -1) {
+    try {
+      const parsed = JSON.parse(raw.slice(jsonStart)) as {
+        error?: { code?: unknown; error_subcode?: unknown };
+      };
+      if (parsed.error?.code === 200005) return true;
+      // A different code is a DIFFERENT problem — don't let the prose fallback
+      // below relabel it as an insights opt-in.
+      if (typeof parsed.error?.code === "number") return false;
+    } catch {
+      // Not Graph JSON — fall through to the prose check.
+    }
+  }
+  return /template insights/i.test(raw);
 }
 
 /**

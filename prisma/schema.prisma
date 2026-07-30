@@ -2937,6 +2937,23 @@ model BroadcastRecipient {
   pricingCategory String?
   pricingBillable Boolean?
   pricingModel    String?
+  /// Meta's `pricing.type` — WHY this message was or wasn't charged:
+  /// `regular` (billed), `free_customer_service` (a utility/non-template message
+  /// inside the recipient's open 24h service window), `free_entry_point` (a
+  /// free-entry-point window), `free_group_customer_service` (the Groups
+  /// equivalent).
+  ///
+  /// This is the column that makes `pricingBillable` explicable. Two recipients
+  /// of ONE utility campaign legitimately differ — the one who had messaged in
+  /// the last 24 hours rode an open service window for free — and without the
+  /// type, a mixed billable column in a single campaign reads as a bug in our
+  /// reporting rather than as Meta pricing per recipient, which is exactly how
+  /// it was first reported to us.
+  ///
+  /// A plain String, not an enum: Meta added `free_group_customer_service` with
+  /// the Groups API and will add more, and an unrecognized value must never need
+  /// a migration before it can be stored.
+  pricingType     String?
 
   broadcast Broadcast @relation(fields: [broadcastId], references: [id], onDelete: Cascade)
   contact   Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
