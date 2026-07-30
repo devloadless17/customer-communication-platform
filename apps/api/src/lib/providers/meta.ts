@@ -7574,8 +7574,21 @@ async function fetchWabaAnalyticsEdge(
   const points: Array<Record<string, unknown>> = [];
   let url: URL | null = first;
   // Bounded like the template-analytics loop: a malformed `next` must not fetch
-  // forever, and 50 pages is far past any real window.
-  for (let page = 0; url && page < 50; page++) {
+  // forever.
+  //
+  // The ceiling was 50, with the comment "far past any real window" — which the
+  // same module's own request refutes. These surfaces are asked for FIVE dimensions
+  // (pricing category x type x country x tier x phone) per time bucket, so a
+  // business messaging 20 countries over 90 days at daily granularity multiplies
+  // into tens of thousands of points. At Graph's small default page size, 50 pages
+  // silently kept the first slice and `messagingCost` was summed over it — a cost
+  // total short by an order of magnitude, rendered as "Total cost" with no hint that
+  // anything was missing. Raised far enough that truncation is unreachable for a
+  // real window, and it now WARNS if it ever is, because a wrong money figure
+  // presented confidently is the worst outcome here.
+  const MAX_PAGES = 400;
+  let page = 0;
+  for (; url && page < MAX_PAGES; page++) {
     const res = await metaFetch(url, {
       method: "GET",
       retry: true,
@@ -7599,6 +7612,21 @@ async function fetchWabaAnalyticsEdge(
     // Follow only cursors that stay on Graph — a response-supplied URL never
     // gets to point this token anywhere else.
     url = next && next.startsWith(`${GRAPH_BASE}/`) ? new URL(next) : null;
+  }
+  if (url) {
+    // Still more pages at the ceiling. Every total derived from these points is now
+    // an UNDER-count, and cost is one of them — say so loudly rather than let a
+    // short number render as authoritative spend.
+    console.warn(
+      JSON.stringify({
+        event: "meta.analytics_truncated",
+        severity: "warning",
+        field,
+        pages: page,
+        points: points.length,
+        note: "hit the page ceiling — totals derived from this response UNDER-report",
+      }),
+    );
   }
   return points;
 }

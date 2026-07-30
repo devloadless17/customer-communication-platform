@@ -142,6 +142,28 @@ function topLevelArgs(text) {
  * ContactStage, AssignmentPolicy) are not this rule's business, and a checker
  * that cries wolf gets ignored.
  */
+/**
+ * Per-file allowance for reads whose `where` names the DEFAULT account.
+ *
+ * Compared with `!==`, not `>`, so this map must be EXACT — and that tightening is
+ * what exposed the real problem. With `>` this was a one-way ratchet: it caught a
+ * file going OVER budget but never a budget that had gone STALE, so an
+ * over-provisioned entry left a free slot where a brand-new default-scoped read
+ * could be added and the build would stay green.
+ *
+ * Tightening it surfaced several stale entries AND a counter bug that the ratchet
+ * had been hiding: `countDefaultAccountReads` isolated only the first `{...}` after
+ * `where:`, so a TERNARY where — `where: x ? { id } : { workspaceId, isDefault: true }`
+ * — was scored as having no default read at all. That is precisely the shape a
+ * default FALLBACK takes, so the checker was blind to the pattern it exists to
+ * police (`calls.service.ts` read 0 against a budget of 4). Fixed there; several
+ * counts went UP as a result, which is why some numbers here changed in both
+ * directions.
+ *
+ * So: if you legitimately add a default read, raise the number WITH the reason. If
+ * you remove one, lower it. A stale budget is now a build failure, which is the only
+ * way this guard actually guards.
+ */
 const DEFAULT_READ_BUDGET = new Map([
   [
     "apps/api/src/lib/conversations/account.ts",
@@ -149,7 +171,7 @@ const DEFAULT_READ_BUDGET = new Map([
   ],
   [
     "apps/api/src/lib/providers/normalize-default-account.ts",
-    { max: 2, why: "Placeholder repair: its whole job is to find and fix the default row." },
+    { max: 1, why: "Placeholder repair: its whole job is to find and fix the default row." },
   ],
   [
     "apps/api/src/lib/providers/config.ts",
@@ -160,16 +182,12 @@ const DEFAULT_READ_BUDGET = new Map([
     { max: 1, why: "loadSendCipher — guarded by the same active>1 refusal." },
   ],
   [
-    "apps/api/src/lib/providers/instagram-config.ts",
-    { max: 1, why: "loadSendCipher — guarded by the same active>1 refusal." },
-  ],
-  [
     "apps/api/src/lib/providers/meta-health.ts",
     { max: 1, why: "getWhatsappHealth — explicit id when the caller names one, default otherwise." },
   ],
   [
-    "apps/api/src/webhooks/meta/meta.controller.ts",
-    { max: 1, why: "Documented social fallback: a payload with no entry[].id has nothing else to attribute to." },
+    "apps/api/src/lib/providers/instagram-config.ts",
+    { max: 1, why: "loadSendCipher — guarded by the same active>1 refusal." },
   ],
   [
     "apps/api/src/calls/calls.service.ts",
@@ -181,15 +199,11 @@ const DEFAULT_READ_BUDGET = new Map([
   ],
   [
     "apps/api/src/workspace-settings/messenger/messenger.service.ts",
-    { max: 2, why: "Legacy single-account settings form." },
+    { max: 1, why: "Legacy single-account settings form." },
   ],
   [
     "apps/api/src/workspace-settings/instagram/instagram.service.ts",
-    { max: 2, why: "Legacy single-account settings form." },
-  ],
-  [
-    "apps/api/src/workspace-settings/channel-accounts/channel-accounts.service.ts",
-    { max: 1, why: "setDefault — demoting the current default is the operation." },
+    { max: 1, why: "Legacy single-account settings form." },
   ],
   [
     "apps/api/src/lib/analytics/template-analytics.ts",
@@ -215,23 +229,107 @@ function countDefaultAccountReads(code) {
       j++;
     }
     const call = code.slice(m.index + m[0].length, j - 1);
-    // Isolate the `where:` object — a `select: { isDefault: true }` is a
-    // projection, not a default-scoped read, and must not count.
+    // Isolate the `where:` VALUE — a `select: { isDefault: true }` is a projection,
+    // not a default-scoped read, and must not count.
     const w = call.indexOf("where:");
     if (w === -1) continue;
-    const braceStart = call.indexOf("{", w);
-    if (braceStart === -1) continue;
-    let d = 1;
-    let k = braceStart + 1;
-    while (k < call.length && d > 0) {
-      if (call[k] === "{") d++;
-      else if (call[k] === "}") d--;
-      k++;
+
+    // Span from `where:` to the next TOP-LEVEL key of the call object, rather than
+    // just the first `{...}` after it.
+    //
+    // The old version took `indexOf("{", w)` and matched its braces. That silently
+    // missed a TERNARY where — `where: x ? { id } : { workspaceId, isDefault: true }`
+    // isolates only the FIRST branch, so `calls.service.ts` counted 0 default reads
+    // against a budget of 4 and nobody noticed, because the comparison was `>`.
+    // A conditional where is exactly where a default fallback lives, so this was a
+    // blind spot aimed at the thing the checker exists to find. Same fix covers a
+    // default nested in an `OR: [...]` array.
+    const TOP_LEVEL_KEY = /\b(select|include|orderBy|take|skip|cursor|distinct|data|by|having|_count|_sum|_avg|_min|_max)\s*:/g;
+    let end = call.length;
+    TOP_LEVEL_KEY.lastIndex = w + "where:".length;
+    let key;
+    while ((key = TOP_LEVEL_KEY.exec(call))) {
+      // Only a key at depth 0 relative to the call object ends the where value.
+      let depth = 0;
+      for (let i = w; i < key.index; i++) {
+        const ch = call[i];
+        if (ch === "{" || ch === "[" || ch === "(") depth++;
+        else if (ch === "}" || ch === "]" || ch === ")") depth--;
+      }
+      if (depth <= 0) {
+        end = key.index;
+        break;
+      }
     }
-    if (/isDefault\s*:\s*true/.test(call.slice(braceStart, k))) count++;
+    if (/isDefault\s*:\s*true/.test(call.slice(w, end))) count++;
   }
   return count;
 }
+
+/**
+ * Self-test for `countDefaultAccountReads`, run before the scan.
+ *
+ * A checker is only worth its exit code, and this one shipped with a blind spot for
+ * two years: it isolated the first `{...}` after `where:`, so a TERNARY where —
+ * exactly how a default FALLBACK is written — scored zero. `calls.service.ts` read 0
+ * against a budget of 4 and the `>` comparison hid it.
+ *
+ * There is no spec file for this script (it runs top-level and exits), so the
+ * regression test lives here. Cheap, and it fails in CI the moment the counter stops
+ * seeing one of these shapes.
+ */
+function selfTest() {
+  const cases = [
+    ["plain where", `db.channelConnection.findFirst({ where: { workspaceId, isDefault: true } })`, 1],
+    [
+      "TERNARY where — the shape that was invisible",
+      `db.channelConnection.findFirst({ where: id ? { id, workspaceId } : { workspaceId, isDefault: true } })`,
+      1,
+    ],
+    [
+      "default nested in an OR array",
+      `db.channelConnection.findFirst({ where: { OR: [{ id }, { isDefault: true }] } })`,
+      1,
+    ],
+    [
+      "where FOLLOWED by select — the select must not extend the span",
+      `db.channelConnection.findFirst({ where: { workspaceId, isDefault: true }, select: { id: true } })`,
+      1,
+    ],
+    [
+      "isDefault only in a SELECT is a projection, not a read",
+      `db.channelConnection.findFirst({ where: { workspaceId }, select: { isDefault: true } })`,
+      0,
+    ],
+    [
+      "isDefault only in a DATA write is not a read",
+      `db.channelConnection.updateMany({ where: { workspaceId }, data: { isDefault: true } })`,
+      0,
+    ],
+    ["no isDefault anywhere", `db.channelConnection.findMany({ where: { isActive: true } })`, 0],
+    [
+      "two calls, one defaulted",
+      `db.channelConnection.findFirst({ where: { id } }); db.channelConnection.findFirst({ where: { isDefault: true } })`,
+      1,
+    ],
+  ];
+  const failures = [];
+  for (const [name, src, want] of cases) {
+    const got = countDefaultAccountReads(stripNonCode(src));
+    if (got !== want) failures.push(`  ${name}: expected ${want}, got ${got}`);
+  }
+  if (failures.length > 0) {
+    console.error("✖ channel-account check — the COUNTER itself is broken:\n");
+    console.error(failures.join("\n"));
+    console.error(
+      "\nEvery per-file budget below is measured with this function, so a wrong\n" +
+        "count silently mis-scores the whole repo. Fix the counter before trusting\n" +
+        "any budget number.",
+    );
+    process.exit(1);
+  }
+}
+selfTest();
 
 const violations = [];
 const budgetViolations = [];
@@ -249,8 +347,16 @@ for (const dir of SCAN_DIRS) {
     if (raw.includes("channelConnection")) {
       const found = countDefaultAccountReads(stripNonCode(raw));
       const budget = DEFAULT_READ_BUDGET.get(rel);
-      if (found > (budget?.max ?? 0)) {
-        budgetViolations.push({ file: rel, found, allowed: budget?.max ?? 0 });
+      const allowed = budget?.max ?? 0;
+      // `!==`, not `>`. With `>` this was a one-way ratchet: it caught a file going
+      // OVER budget but never a budget that had gone STALE. A file listed at max: 1
+      // that has since dropped to 0 real default reads left a free slot — someone
+      // could add a brand-new default-scoped read there and the build would stay
+      // green, which is exactly the regression this checker exists to prevent.
+      // Under-budget is not a failure to fix in code; it means the budget should be
+      // lowered, so the message says so.
+      if (found !== allowed) {
+        budgetViolations.push({ file: rel, found, allowed, stale: found < allowed });
       }
     }
 
