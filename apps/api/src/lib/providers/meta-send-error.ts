@@ -64,6 +64,8 @@ export type MetaErrorCode =
   | "number_not_registered" // WA 131045/133010 — number not registered with Cloud API
   | "marketing_disabled"   // WA 131063 — marketing templates disabled on Cloud API (WhatsApp Manager flag)
   | "bsuid_needs_phone"    // WA 131062 — this message type needs a PHONE, not a BSUID address
+  | "calling_not_enabled"  // WA 138000/138015/138018/131055 — calling is MISCONFIGURED on this number
+  | "calling_unavailable"  // WA 138013/138014 — calling not offered here / paused by Meta
   | "provider_rejected";   // catch-all for anything else MetaSendError-shaped
 
 /**
@@ -89,6 +91,8 @@ export const ALL_META_ERROR_CODES = [
   "message_unavailable",
   "unsupported_message",
   "bsuid_needs_phone",
+  "calling_not_enabled",
+  "calling_unavailable",
   "duplicate_button_title",
   "call_permission_required",
   "account_restricted",
@@ -413,6 +417,59 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
       httpStatus,
     };
   }
+  // ── Calling ──────────────────────────────────────────────────────────────
+  // Ten documented calling codes used to collapse into one opaque
+  // `provider_rejected`, so an agent retried a call that could never succeed and
+  // the operator got no pointer to the setup step that was missing. Four of these
+  // name a remedy this app already implements.
+  //
+  // 138000 "Calling not enabled" (401) · 138015 "Calling cannot be enabled —
+  // verify messaging limit is 2000 or higher" · 138018 "Configure SIP or ensure app
+  // subscription to `calls` webhook field" · 131055 "Method not allowed (SIP
+  // enabled numbers)". All four are CONFIGURATION: fix it and the same call works,
+  // which is why they share the fix-then-retry bucket with billing/registration.
+  if (
+    numericCode === 138000 ||
+    numericCode === 138015 ||
+    numericCode === 138018 ||
+    numericCode === 131055
+  ) {
+    return {
+      code: "calling_not_enabled",
+      message: "Calling isn't set up on this number yet — check the calling settings.",
+      detail,
+      httpStatus,
+    };
+  }
+  // 138013 "Business-initiated calling is not available" (a region Meta doesn't
+  // offer it in) · 138014 "Calling is temporarily disabled". Nothing the operator
+  // configures changes either, so these must NOT read as a setup problem.
+  if (numericCode === 138013 || numericCode === 138014) {
+    return {
+      code: "calling_unavailable",
+      message: "Calling isn't available for this number right now.",
+      detail,
+      httpStatus,
+    };
+  }
+  // 138002 concurrent-call ceiling (1000/number) · 138005 call rate limit ·
+  // 138009 permission-request limit · 138012 business-initiated cap (100 connected
+  // calls per 24h, with the reset time in the error details). All four are "wait",
+  // which is what `rate_limited` already means — a parallel calling-specific code
+  // would only add campaign-report labels that can never appear on a campaign.
+  if (
+    numericCode === 138002 ||
+    numericCode === 138005 ||
+    numericCode === 138009 ||
+    numericCode === 138012
+  ) {
+    return {
+      code: "rate_limited",
+      message: "Too many calls right now — try again shortly.",
+      detail,
+      httpStatus,
+    };
+  }
   // 131062 — the ADDRESS shape is wrong for this message type, not the person.
   // "You can only send authentication messages to recipients' phone numbers, not
   // their business-scoped user IDs." Also returned when a marketing template
@@ -556,6 +613,19 @@ export function classifyMetaStatusError(code: number | null | undefined): MetaEr
       return "message_unavailable";
     case 131062:
       return "bsuid_needs_phone";
+    case 138000:
+    case 138015:
+    case 138018:
+    case 131055:
+      return "calling_not_enabled";
+    case 138013:
+    case 138014:
+      return "calling_unavailable";
+    case 138002:
+    case 138005:
+    case 138009:
+    case 138012:
+      return "rate_limited";
     case 131009:
     // 131051 "Unsupported message type" — moved out of `invalid_recipient`,
     // which is the only bucket that tells the operator to delete the contact.
@@ -604,6 +674,9 @@ export function failureBucket(code: MetaErrorCode | string | null): FailureBucke
     case "account_restricted":
     case "billing_issue":
     case "number_not_registered":
+    // Calling misconfiguration is the same shape: the operator fixes the setting and
+    // the identical call succeeds.
+    case "calling_not_enabled":
       return "retryable";
     // The ONLY bucket that says "delete this contact" — reserved for a number
     // that genuinely isn't reachable.
@@ -631,6 +704,9 @@ export function failureBucket(code: MetaErrorCode | string | null): FailureBucke
     //                          is fine; the BUSINESS may not message there.
     case "contact_blocked":
     case "country_not_allowed":
+    // Meta does not offer calling here, or has paused it. Nothing to fix and
+    // nothing about the contact is wrong.
+    case "calling_unavailable":
       return "suppress";
     // OUR content, not their number. Every recipient fails identically until
     // the template or the message changes, so pointing the operator at their

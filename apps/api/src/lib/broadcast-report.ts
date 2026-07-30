@@ -191,6 +191,11 @@ export const ERROR_LABELS: Record<string, string> = {
   // requires a phone number. Phrased as the action, not the error: the operator's
   // remedy is to get a number for these contacts, not to prune them.
   bsuid_needs_phone: "Needs a phone number (we only have their WhatsApp username)",
+  // Calling codes cannot appear on a broadcast recipient — a campaign never places
+  // a call. They are labelled only because ALL_META_ERROR_CODES is checked for
+  // completeness, and a code with no label renders as raw snake_case.
+  calling_not_enabled: "Calling isn't set up on this number",
+  calling_unavailable: "Calling isn't available for this number",
   provider_rejected: "Rejected by Meta",
 };
 
