@@ -2000,10 +2000,18 @@ export function AssignTicketEditor({
   config,
   onChange,
   users,
+  policies,
 }: {
-  config: { mode?: "user" | "unassign"; userId?: string; overwrite?: boolean };
+  config: {
+    mode?: "user" | "team" | "unassign";
+    userId?: string;
+    policyId?: string | null;
+    overwrite?: boolean;
+  };
   onChange: (c: Record<string, unknown>) => void;
   users: BuilderCatalogs["users"];
+  /** Teams (AssignmentPolicy) available for queue routing. */
+  policies?: Array<{ id: string; name: string }>;
 }) {
   return (
     <Field label="Mode">
@@ -2048,6 +2056,52 @@ export function AssignTicketEditor({
                   away from the person doing it.
                 </span>
               </span>
+            </label>
+          </>
+        )}
+        {/* Queue routing: the SAME engine that routes conversations (weights,
+            capacity, working hours, continuity), applied to the ticket. Without
+            it a team queue was only a label — nothing ever picked a person out
+            of it. */}
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="radio"
+            name="assign-ticket-mode"
+            checked={config.mode === "team"}
+            onChange={() => onChange({ mode: "team", policyId: config.policyId ?? null })}
+          />
+          Route to a team
+        </label>
+        {config.mode === "team" && (
+          <>
+            <Select
+              value={config.policyId ?? ""}
+              onChange={(e) =>
+                onChange({ ...config, mode: "team", policyId: e.target.value || null })
+              }
+              className="h-8 px-2 pr-7"
+              wrapperClassName="ml-6"
+            >
+              <option value="">Let the routing rules decide</option>
+              {(policies ?? []).map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </Select>
+            <p className="ml-6 text-xs text-muted-foreground">
+              Picks whoever on that team is available and has capacity, using your
+              assignment settings. If nobody is eligible the ticket stays in the queue
+              rather than going to someone who is off-shift.
+            </p>
+            <label className="ml-6 flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={config.overwrite === true}
+                onChange={(e) => onChange({ ...config, overwrite: e.target.checked })}
+              />
+              <span>Reassign even if someone already owns it</span>
             </label>
           </>
         )}

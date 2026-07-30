@@ -562,6 +562,75 @@ export interface IncomingWebhookPayload {
   headers: Record<string, string>;
 }
 
+/**
+ * A ticket, as a workflow sees it. Snapshotted at trigger time like every other
+ * workflow payload: conditions and steps read the values as they were when the
+ * event fired, never a live re-read that could have moved on.
+ */
+export interface WorkflowTicketSnapshot {
+  id: string;
+  number: number;
+  subject: string | null;
+  /** The cause — written once when the ticket was raised. */
+  description: string | null;
+  status: string;
+  priority: string;
+  assignedUserId: string | null;
+  assignedTeamId: string | null;
+  channel: string;
+  tagIds: string[];
+  /** Null on a ticket a guest workspace has not bound a thread to. */
+  conversationId: string | null;
+  contactId: string | null;
+}
+
+export interface TicketCreatedPayload {
+  ticket: WorkflowTicketSnapshot;
+  /** Absent when the ticket has no contact this workspace can read. */
+  contact: WorkflowContactSnapshot | null;
+  createdByUserId: string | null;
+}
+
+export interface TicketStatusChangedPayload {
+  ticket: WorkflowTicketSnapshot;
+  contact: WorkflowContactSnapshot | null;
+  previousStatus: string;
+  newStatus: string;
+  changedByUserId: string | null;
+}
+
+export interface TicketPriorityChangedPayload {
+  ticket: WorkflowTicketSnapshot;
+  contact: WorkflowContactSnapshot | null;
+  newPriority: string;
+  changedByUserId: string | null;
+}
+
+export interface TicketAssignedPayload {
+  ticket: WorkflowTicketSnapshot;
+  contact: WorkflowContactSnapshot | null;
+  /** Null when the ticket was UNassigned. */
+  assignedUserId: string | null;
+  changedByUserId: string | null;
+}
+
+export interface TicketSlaBreachedPayload {
+  ticket: WorkflowTicketSnapshot;
+  contact: WorkflowContactSnapshot | null;
+  /** WHICH promise was missed — an automation almost always cares. */
+  breachedLeg: "first_response" | "resolution";
+}
+
+export interface TicketEscalatedPayload {
+  ticket: WorkflowTicketSnapshot;
+  contact: WorkflowContactSnapshot | null;
+  /** The workspace granted access, and the reason given. */
+  guestWorkspaceId: string;
+  guestWorkspaceName: string;
+  cause: string;
+  changedByUserId: string | null;
+}
+
 export type EventPayload =
   | MessageReceivedPayload
   | ConversationCreatedPayload
@@ -572,6 +641,12 @@ export type EventPayload =
   | ContactTagUpdatedPayload
   | ContactFieldUpdatedPayload
   | ContactLifecycleUpdatedPayload
+  | TicketCreatedPayload
+  | TicketStatusChangedPayload
+  | TicketPriorityChangedPayload
+  | TicketAssignedPayload
+  | TicketSlaBreachedPayload
+  | TicketEscalatedPayload
   | ManualTriggerPayload
   | IncomingWebhookPayload;
 
@@ -585,6 +660,12 @@ export type PayloadFor<E extends WorkflowTriggerEvent> =
   E extends "contact_tag_updated" ? ContactTagUpdatedPayload :
   E extends "contact_field_updated" ? ContactFieldUpdatedPayload :
   E extends "contact_lifecycle_updated" ? ContactLifecycleUpdatedPayload :
+  E extends "ticket_created" ? TicketCreatedPayload :
+  E extends "ticket_status_changed" ? TicketStatusChangedPayload :
+  E extends "ticket_priority_changed" ? TicketPriorityChangedPayload :
+  E extends "ticket_assigned" ? TicketAssignedPayload :
+  E extends "ticket_sla_breached" ? TicketSlaBreachedPayload :
+  E extends "ticket_escalated" ? TicketEscalatedPayload :
   E extends "manual_trigger" ? ManualTriggerPayload :
   E extends "incoming_webhook" ? IncomingWebhookPayload :
   never;

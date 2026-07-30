@@ -24,6 +24,9 @@ import {
   FIELD_VALUE_KIND,
   OP_OPTIONS,
   STATUS_VALUES,
+  TICKET_BREACHED_LEG_VALUES,
+  TICKET_PRIORITY_VALUES,
+  TICKET_STATUS_VALUES,
   SESSION_KIND_VALUES,
   TAG_CHANGE_KIND_VALUES,
   isGroup,
@@ -444,6 +447,63 @@ function ConditionValueControl({
       </Select>
     );
   }
+  // The TICKET lifecycle is its own set — see FIELD_VALUE_KIND's note on why it
+  // does not reuse the conversation's three statuses.
+  if (kind === "ticket_status") {
+    return (
+      <Select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className={selectClass}
+        wrapperClassName={selectWrapperClass}
+      >
+        <option value="">Select status…</option>
+        {TICKET_STATUS_VALUES.map((s) => (
+          <option key={s} value={s}>
+            {s === "on_hold" ? "on hold" : s}
+          </option>
+        ))}
+      </Select>
+    );
+  }
+  if (kind === "ticket_priority") {
+    return (
+      <Select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className={selectClass}
+        wrapperClassName={selectWrapperClass}
+      >
+        <option value="">Select priority…</option>
+        {TICKET_PRIORITY_VALUES.map((p) => (
+          <option key={p} value={p}>
+            {p}
+          </option>
+        ))}
+      </Select>
+    );
+  }
+  if (kind === "ticket_breached_leg") {
+    return (
+      <Select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className={selectClass}
+        wrapperClassName={selectWrapperClass}
+      >
+        <option value="">Select promise…</option>
+        {TICKET_BREACHED_LEG_VALUES.map((l) => (
+          <option key={l} value={l}>
+            {l === "first_response" ? "first response" : "resolution"}
+          </option>
+        ))}
+      </Select>
+    );
+  }
+  // Teams (AssignmentPolicy) and sibling workspaces have no catalog threaded
+  // into the builder, so they stay free-text ids rather than a dropdown that
+  // would silently offer nothing. Same treatment `channel_account_id` had
+  // before its catalog existed.
   if (kind === "direction") {
     return (
       <Select

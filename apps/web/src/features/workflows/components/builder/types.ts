@@ -54,7 +54,14 @@ export type ConditionField =
   | "channel_account_id"
   | "tag_id" | "tag_change_kind"
   | "field_key" | "field_new_value"
-  | "stage_from" | "stage_to";
+  | "stage_from" | "stage_to"
+  // TICKET fields. Prefixed and separate from the conversation's `status_*`
+  // because the two lifecycles are different sets — sharing a name would let a
+  // condition written for one silently mean the other.
+  | "ticket_status_from" | "ticket_status_to" | "ticket_priority"
+  | "ticket_subject" | "ticket_cause" | "ticket_assigned_user_id"
+  | "ticket_team_id" | "ticket_tag_id" | "ticket_breached_leg"
+  | "ticket_guest_workspace_id";
 
 export type ConditionOp =
   | "equals" | "not_equals" | "contains" | "not_contains"
@@ -118,7 +125,7 @@ export const TRIGGER_OPTIONS: Array<{
   value: Trigger;
   label: string;
   description: string;
-  group: "inbox" | "contact" | "external";
+  group: "inbox" | "contact" | "ticket" | "external";
 }> = [
   { value: "message_received", label: "Message Received", description: "Inbound message arrived.", group: "inbox" },
   { value: "conversation_created", label: "Conversation Created", description: "First-ever conversation for a contact.", group: "inbox" },
@@ -126,6 +133,12 @@ export const TRIGGER_OPTIONS: Array<{
   { value: "conversation_closed", label: "Conversation Closed", description: "Status moved to closed.", group: "inbox" },
   { value: "conversation_assigned", label: "Conversation Assigned", description: "Assignee changed.", group: "inbox" },
   { value: "conversation_status_changed", label: "Status Changed", description: "Any status transition.", group: "inbox" },
+  { value: "ticket_created", label: "Ticket Raised", description: "A ticket was opened on a conversation.", group: "ticket" },
+  { value: "ticket_status_changed", label: "Ticket Status Changed", description: "Any ticket status transition, including solved / closed / reopened.", group: "ticket" },
+  { value: "ticket_priority_changed", label: "Ticket Priority Changed", description: "Someone re-prioritized a ticket.", group: "ticket" },
+  { value: "ticket_assigned", label: "Ticket Assigned", description: "A ticket got an owner, or was handed to a team.", group: "ticket" },
+  { value: "ticket_sla_breached", label: "Ticket SLA Breached", description: "A first-response or resolution promise was missed. Fires once per leg.", group: "ticket" },
+  { value: "ticket_escalated", label: "Ticket Escalated", description: "A ticket was shared with another workspace in the organization.", group: "ticket" },
   { value: "contact_tag_updated", label: "Contact Tag Updated", description: "Tag added or removed.", group: "contact" },
   { value: "contact_field_updated", label: "Contact Field Updated", description: "A custom field changed.", group: "contact" },
   { value: "contact_lifecycle_updated", label: "Lifecycle Updated", description: "Contact moved between stages.", group: "contact" },
@@ -149,7 +162,7 @@ export const STEP_OPTIONS: Array<{
   { value: "create_ticket", label: "Open a Ticket", description: "Open a work item on this conversation.", group: "convo" },
   { value: "set_ticket_status", label: "Set Ticket Status", description: "Move the conversation's active ticket.", group: "convo" },
   { value: "set_ticket_priority", label: "Set Ticket Priority", description: "Escalate or de-escalate the active ticket.", group: "convo" },
-  { value: "assign_ticket", label: "Assign Ticket", description: "Give the active ticket an owner.", group: "convo" },
+  { value: "assign_ticket", label: "Assign Ticket", description: "Give the active ticket an owner — a named teammate, or whoever on a team is available.", group: "convo" },
   { value: "add_tag", label: "Add Tag", description: "Apply a tag to the contact.", group: "contact" },
   { value: "remove_tag", label: "Remove Tag", description: "Remove a tag from the contact.", group: "contact" },
   { value: "update_field", label: "Update Contact Field", description: "Set a custom field value.", group: "contact" },
@@ -288,6 +301,12 @@ export const FIELDS_BY_TRIGGER: Record<Trigger, ConditionField[]> = {
   conversation_closed: ["status_from", "contact_phone", "contact_name", "contact_email", "assigned_user_id", "channel_account_id"],
   conversation_assigned: ["assigned_user_id", "contact_phone", "contact_name", "contact_email", "channel_account_id"],
   conversation_status_changed: ["status_from", "status_to", "contact_phone", "contact_name", "contact_email", "channel_account_id"],
+  ticket_created: ["ticket_priority", "ticket_subject", "ticket_cause", "ticket_assigned_user_id", "ticket_team_id", "ticket_tag_id", "contact_phone", "contact_name", "contact_email", "contact_stage_id"],
+  ticket_status_changed: ["ticket_status_from", "ticket_status_to", "ticket_priority", "ticket_assigned_user_id", "ticket_team_id", "ticket_tag_id", "contact_phone", "contact_name", "contact_email"],
+  ticket_priority_changed: ["ticket_priority", "ticket_status_to", "ticket_assigned_user_id", "ticket_team_id", "ticket_tag_id", "contact_phone", "contact_name", "contact_email"],
+  ticket_assigned: ["ticket_assigned_user_id", "ticket_priority", "ticket_status_to", "ticket_team_id", "ticket_tag_id", "contact_phone", "contact_name", "contact_email"],
+  ticket_sla_breached: ["ticket_breached_leg", "ticket_priority", "ticket_status_to", "ticket_assigned_user_id", "ticket_team_id", "ticket_tag_id", "contact_phone", "contact_name", "contact_email"],
+  ticket_escalated: ["ticket_guest_workspace_id", "ticket_priority", "ticket_status_to", "ticket_team_id", "ticket_tag_id", "contact_phone", "contact_name", "contact_email"],
   contact_tag_updated: ["tag_id", "tag_change_kind", "contact_phone", "contact_name", "contact_email"],
   contact_field_updated: ["field_key", "field_new_value", "contact_phone", "contact_name", "contact_email"],
   contact_lifecycle_updated: ["stage_from", "stage_to", "contact_phone", "contact_name", "contact_email"],
@@ -316,6 +335,16 @@ export const FIELD_LABELS: Record<ConditionField, string> = {
   field_new_value: "Field new value",
   stage_from: "Previous stage",
   stage_to: "New stage",
+  ticket_status_from: "Ticket status (previous)",
+  ticket_status_to: "Ticket status",
+  ticket_priority: "Ticket priority",
+  ticket_subject: "Ticket subject",
+  ticket_cause: "Ticket cause",
+  ticket_assigned_user_id: "Ticket assignee",
+  ticket_team_id: "Ticket team",
+  ticket_tag_id: "Ticket tag",
+  ticket_breached_leg: "Which promise was missed",
+  ticket_guest_workspace_id: "Escalated to workspace",
 };
 
 /**
@@ -335,7 +364,12 @@ export type FieldValueKind =
   | "tag_change_kind"
   | "session_kind"
   | "channel_account"
-  | "field_key";
+  | "field_key"
+  | "ticket_status"
+  | "ticket_priority"
+  | "ticket_team"
+  | "ticket_breached_leg"
+  | "workspace";
 
 export const FIELD_VALUE_KIND: Record<ConditionField, FieldValueKind> = {
   body: "text",
@@ -358,9 +392,33 @@ export const FIELD_VALUE_KIND: Record<ConditionField, FieldValueKind> = {
   field_new_value: "text",
   stage_from: "stage",
   stage_to: "stage",
+  // The ticket lifecycle is its OWN enum (new/open/pending/on_hold/solved/
+  // closed) — reusing the conversation's `status` kind would offer the wrong
+  // three values.
+  ticket_status_from: "ticket_status",
+  ticket_status_to: "ticket_status",
+  ticket_priority: "ticket_priority",
+  ticket_subject: "text",
+  ticket_cause: "text",
+  ticket_assigned_user_id: "user",
+  ticket_team_id: "ticket_team",
+  ticket_tag_id: "tag",
+  ticket_breached_leg: "ticket_breached_leg",
+  ticket_guest_workspace_id: "workspace",
 };
 
 export const STATUS_VALUES = ["open", "pending", "closed"] as const;
+/** The TICKET lifecycle — a different set from the conversation's. */
+export const TICKET_STATUS_VALUES = [
+  "new",
+  "open",
+  "pending",
+  "on_hold",
+  "solved",
+  "closed",
+] as const;
+export const TICKET_PRIORITY_VALUES = ["low", "normal", "high", "urgent"] as const;
+export const TICKET_BREACHED_LEG_VALUES = ["first_response", "resolution"] as const;
 export const DIRECTION_VALUES = ["in", "out"] as const;
 export const TAG_CHANGE_KIND_VALUES = ["added", "removed"] as const;
 export const SESSION_KIND_VALUES = [

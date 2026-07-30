@@ -383,6 +383,109 @@ describe("one ticket, one truth", () => {
   });
 });
 
+describe("per-side assignee", () => {
+  it("each department owns its own side — neither clears the other", async () => {
+    const { ticket } = await makeTicket();
+    await shareWithB(ticket.id);
+
+    // A second person, a member of the GUEST workspace only.
+    const guestAgent = await prisma.user.create({
+      data: {
+        name: "SHR Guest Agent",
+        email: `shr-guest-${S}@example.test`,
+        organizationId: orgId,
+      },
+      select: { id: true },
+    });
+    await prisma.workspaceMember.create({
+      data: { userId: guestAgent.id, workspaceId: wsB, role: "agent" },
+    });
+
+    // The OWNER assigns its own member.
+    const ownerAssign = await updateTicket(mdb, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId, workspaceId: wsA },
+      assignedUserId: userId,
+    });
+    expect(ownerAssign.ok).toBe(true);
+
+    // The GUEST assigns THEIR member. This used to clear the owner's.
+    const guestAssign = await updateTicket(mdb, {
+      workspaceId: wsB,
+      ticketId: ticket.id,
+      actor: { userId: guestAgent.id, workspaceId: wsB },
+      assignedUserId: guestAgent.id,
+    });
+    expect(guestAssign.ok).toBe(true);
+
+    // The ticket's own column still holds the OWNER's person...
+    const row = await prisma.ticket.findUniqueOrThrow({
+      where: { id: ticket.id },
+      select: { assignedUserId: true },
+    });
+    expect(row.assignedUserId).toBe(userId);
+    // ...and the guest's lives on their share.
+    const share = await prisma.ticketShare.findFirstOrThrow({
+      where: { ticketId: ticket.id, guestWorkspaceId: wsB },
+      select: { assignedUserId: true, lastAssignedUserId: true },
+    });
+    expect(share.assignedUserId).toBe(guestAgent.id);
+    expect(share.lastAssignedUserId).toBe(guestAgent.id);
+
+    // Each side READS its own owner...
+    expect((await getTicket(qdb, wsA, ticket.id))?.assignedUserId).toBe(userId);
+    expect((await getTicket(qdb, wsB, ticket.id))?.assignedUserId).toBe(guestAgent.id);
+    // ...and both can see who owns the other side.
+    const asOwner = await getTicket(qdb, wsA, ticket.id);
+    expect(asOwner?.sharing?.guests[0]?.assignedUserId).toBe(guestAgent.id);
+    expect(asOwner?.sharing?.guests[0]?.assignedUserName).toBe("SHR Guest Agent");
+
+    // "Assigned to me" finds it from BOTH sides.
+    const ownerMine = await listTickets(qdb, wsA, { assignedUserId: userId });
+    expect(ownerMine.tickets.map((t) => t.id)).toContain(ticket.id);
+    const guestMine = await listTickets(qdb, wsB, { assignedUserId: guestAgent.id });
+    expect(guestMine.tickets.map((t) => t.id)).toContain(ticket.id);
+  });
+
+  it("counts NEW WORK the guest has not claimed — a shared ticket keeps its status", async () => {
+    const { ticket } = await makeTicket();
+    // Make it `open` BEFORE sharing, which is the case the old `status: new`
+    // badge missed entirely.
+    await updateTicket(mdb, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId, workspaceId: wsA },
+      status: "open",
+    });
+    const before = await getTicketCounts(qdb, wsB, userId);
+    await shareWithB(ticket.id);
+    const after = await getTicketCounts(qdb, wsB, userId);
+
+    // The guest is told there is new work even though the ticket is `open`.
+    expect(after.untriaged).toBe(before.untriaged + 1);
+    expect(after.sharedWithUs).toBe(before.sharedWithUs + 1);
+    // Claiming it on the guest's side clears it from "new work".
+    await updateTicket(mdb, {
+      workspaceId: wsB,
+      ticketId: ticket.id,
+      actor: { userId, workspaceId: wsB },
+      assignedUserId: userId,
+    });
+    const claimed = await getTicketCounts(qdb, wsB, userId);
+    expect(claimed.untriaged).toBe(before.untriaged);
+    // Still theirs to work, just no longer unclaimed.
+    expect(claimed.sharedWithUs).toBe(before.sharedWithUs + 1);
+
+    // And the "Shared with us" view finds it.
+    const shared = await listTickets(qdb, wsB, { sharedWithUsOnly: true });
+    expect(shared.tickets.map((t) => t.id)).toContain(ticket.id);
+    // The OWNER's own board does not call it "shared with us".
+    const ownerShared = await listTickets(qdb, wsA, { sharedWithUsOnly: true });
+    expect(ownerShared.tickets.map((t) => t.id)).not.toContain(ticket.id);
+  });
+});
+
 describe("revoking access", () => {
   it("removes access, keeps the history, and tells the workspace that lost it", async () => {
     const { ticket } = await makeTicket();

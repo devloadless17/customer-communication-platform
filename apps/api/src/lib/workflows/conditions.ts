@@ -53,7 +53,21 @@ export type ConditionField =
   | "field_new_value"
   // Lifecycle-update fields (contact_lifecycle_updated)
   | "stage_from"
-  | "stage_to";
+  | "stage_to"
+  // TICKET fields. `ticket_status_from/to` are deliberately distinct from the
+  // conversation's `status_from/to`: the two lifecycles are different sets
+  // (a ticket is new/open/pending/on_hold/solved/closed), and sharing one field
+  // name would let a condition written for one silently mean the other.
+  | "ticket_status_from"
+  | "ticket_status_to"
+  | "ticket_priority"
+  | "ticket_subject"
+  | "ticket_cause"
+  | "ticket_assigned_user_id"
+  | "ticket_team_id"
+  | "ticket_tag_id"
+  | "ticket_breached_leg"
+  | "ticket_guest_workspace_id";
 
 export type ConditionOp =
   | "equals"
@@ -121,6 +135,36 @@ export const FIELDS_BY_TRIGGER: Record<WorkflowTriggerEvent, ConditionField[]> =
   ],
   contact_lifecycle_updated: [
     "stage_from", "stage_to", "contact_phone", "contact_name", "contact_email",
+  ],
+  ticket_created: [
+    "ticket_priority", "ticket_subject", "ticket_cause", "ticket_assigned_user_id",
+    "ticket_team_id", "ticket_tag_id",
+    "contact_phone", "contact_name", "contact_email", "contact_stage_id",
+  ],
+  ticket_status_changed: [
+    "ticket_status_from", "ticket_status_to", "ticket_priority",
+    "ticket_assigned_user_id", "ticket_team_id", "ticket_tag_id",
+    "contact_phone", "contact_name", "contact_email",
+  ],
+  ticket_priority_changed: [
+    "ticket_priority", "ticket_status_to", "ticket_assigned_user_id",
+    "ticket_team_id", "ticket_tag_id",
+    "contact_phone", "contact_name", "contact_email",
+  ],
+  ticket_assigned: [
+    "ticket_assigned_user_id", "ticket_priority", "ticket_status_to",
+    "ticket_team_id", "ticket_tag_id",
+    "contact_phone", "contact_name", "contact_email",
+  ],
+  ticket_sla_breached: [
+    "ticket_breached_leg", "ticket_priority", "ticket_status_to",
+    "ticket_assigned_user_id", "ticket_team_id", "ticket_tag_id",
+    "contact_phone", "contact_name", "contact_email",
+  ],
+  ticket_escalated: [
+    "ticket_guest_workspace_id", "ticket_priority", "ticket_status_to",
+    "ticket_team_id", "ticket_tag_id",
+    "contact_phone", "contact_name", "contact_email",
   ],
   manual_trigger: [
     "contact_phone", "contact_name", "contact_email",
@@ -348,6 +392,19 @@ function readField(field: ConditionField, payload: EventPayload): string | null 
     previousStageId?: string | null;
     newStageId?: string | null;
     sessionKind?: string;
+    ticket?: {
+      status?: string;
+      priority?: string;
+      subject?: string | null;
+      description?: string | null;
+      assignedUserId?: string | null;
+      assignedTeamId?: string | null;
+      tagIds?: string[];
+    } | null;
+    newPriority?: string;
+    assignedUserId?: string | null;
+    breachedLeg?: string;
+    guestWorkspaceId?: string;
   };
   switch (field) {
     case "body":
@@ -390,6 +447,33 @@ function readField(field: ConditionField, payload: EventPayload): string | null 
       return p.previousStageId ?? null;
     case "stage_to":
       return p.newStageId ?? null;
+    // ---- Ticket fields ----
+    // `ticket_status_to` reads the SNAPSHOT rather than `newStatus`, so it also
+    // answers on triggers that carry no transition (created, sla_breached,
+    // escalated) — "urgent AND still on_hold" is a condition people write.
+    case "ticket_status_from":
+      return p.previousStatus ?? null;
+    case "ticket_status_to":
+      return p.newStatus ?? p.ticket?.status ?? null;
+    case "ticket_priority":
+      return p.newPriority ?? p.ticket?.priority ?? null;
+    case "ticket_subject":
+      return p.ticket?.subject ?? null;
+    case "ticket_cause":
+      return p.ticket?.description ?? null;
+    case "ticket_assigned_user_id":
+      // The assignment trigger's own field wins; otherwise the snapshot's.
+      return p.assignedUserId ?? p.ticket?.assignedUserId ?? null;
+    case "ticket_team_id":
+      return p.ticket?.assignedTeamId ?? null;
+    // Multi-valued: `equals` means "has this tag". Joined with a delimiter for
+    // the substring ops so `contains` can't match across two ids.
+    case "ticket_tag_id":
+      return p.ticket?.tagIds?.length ? p.ticket.tagIds.join(",") : null;
+    case "ticket_breached_leg":
+      return p.breachedLeg ?? null;
+    case "ticket_guest_workspace_id":
+      return p.guestWorkspaceId ?? null;
   }
 }
 

@@ -87,6 +87,8 @@ export function TicketsBoardClient({
   const statusParam = params.get("status") as TicketStatus | null;
   const assignee = view === "mine" ? "me" : view === "unassigned" ? "none" : null;
   const breachedOnly = view === "breached";
+  // Work another department escalated to us — the guest side of a shared ticket.
+  const sharedOnly = view === "shared";
   // A single-status view shows just that column; otherwise the whole board.
   const columns = useMemo(
     () => (statusParam && TICKET_STATUSES.includes(statusParam) ? [statusParam] : BOARD_COLUMNS),
@@ -106,8 +108,9 @@ export function TicketsBoardClient({
     if (teamFilter) p.set("team", teamFilter);
     if (priority) p.set("priority", priority);
     if (breachedOnly) p.set("breached", "true");
+    if (sharedOnly) p.set("shared", "true");
     return p;
-  }, [assignee, teamFilter, priority, breachedOnly, columns]);
+  }, [assignee, teamFilter, priority, breachedOnly, sharedOnly, columns]);
 
   const load = useCallback(async () => {
     const token = ++requestToken.current;

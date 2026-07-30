@@ -843,7 +843,11 @@ function describeNode(n: WorkflowNode): string | undefined {
     case "set_ticket_priority":
       return typeof c.priority === "string" ? `→ ${c.priority}` : undefined;
     case "assign_ticket":
-      return c.mode === "unassign" ? "Unassign" : "Assign ticket";
+      return c.mode === "unassign"
+        ? "Unassign"
+        : c.mode === "team"
+          ? "Route to a team"
+          : "Assign ticket";
     default:
       return undefined;
   }

@@ -9,6 +9,7 @@ import {
   PauseCircle,
   Settings2,
   User2,
+  Users,
   UserX,
 } from "lucide-react";
 
@@ -113,6 +114,18 @@ export function TicketsSubSidebar() {
           leading={<UserX className="size-4" />}
           active={isView("unassigned", null)}
         />
+        {/* Work another department asked us for. Rendered only when there IS
+            any — an empty view is clutter for the majority of workspaces that
+            never receive an escalation. */}
+        {counts?.sharedWithUs ? (
+          <SubSidebarItem
+            href="/tickets?view=shared"
+            label="Shared with us"
+            leading={<Users className="size-4" />}
+            active={isView("shared", null)}
+            trailing={badge(counts.sharedWithUs)}
+          />
+        ) : null}
         <SubSidebarItem
           href="/tickets?view=breached"
           label="Past due"

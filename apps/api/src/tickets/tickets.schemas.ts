@@ -72,6 +72,16 @@ export const ListTicketsQuerySchema = z.object({
     .enum(["true", "false"])
     .optional()
     .transform((v) => v === "true"),
+  /** Only tickets another workspace escalated to us. */
+  shared: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((v) => v === "true"),
+  /** Only work nobody in this workspace has claimed yet (either side). */
+  untriaged: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((v) => v === "true"),
   cursorCreatedAt: z.string().datetime().optional(),
   cursorId: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(50).optional(),

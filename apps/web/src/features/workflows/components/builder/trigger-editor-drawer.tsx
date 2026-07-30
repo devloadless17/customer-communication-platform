@@ -42,6 +42,7 @@ interface Props {
 const TRIGGER_GROUPS: Record<string, string> = {
   inbox: "Inbox events",
   contact: "Contact events",
+  ticket: "Ticket events",
   external: "External / on-demand",
 };
 

@@ -139,6 +139,19 @@ describe("config validation", () => {
     expect(() => assign.parseConfig({ mode: "user" })).toThrow(StepConfigError);
   });
 
+  it("parses TEAM routing, defaulting to rules-decide and fill-empty-only", () => {
+    const assign = getStepHandler("assign_ticket" as never);
+    const cfg = assign.parseConfig({ mode: "team" }) as {
+      mode: string;
+      policyId: string | null;
+      overwrite: boolean;
+    };
+    // No policy named = let the assignment RULES pick one, exactly as an
+    // inbound would; and §18's fill-empty-only default holds for queue routing
+    // too, so automation cannot take a ticket from the person working it.
+    expect(cfg).toEqual({ mode: "team", policyId: null, overwrite: false });
+  });
+
   it("defaults create_ticket to skip-if-already-open", () => {
     const handler = getStepHandler("create_ticket" as never);
     const config = handler.parseConfig({}) as { onlyIfNoActiveTicket: boolean };
@@ -283,6 +296,49 @@ describe("assign_ticket", () => {
     });
     expect(row.assignedUserId).toBeNull();
   });
+});
+
+describe("assign_ticket → team routing", () => {
+  it("picks a person from the queue and records which queue it came through", async () => {
+    // A team whose only member is our test user.
+    const policy = await prisma.assignmentPolicy.create({
+      data: {
+        workspaceId,
+        name: `TWS routing ${Date.now().toString().slice(-6)}`,
+        strategy: "round_robin",
+        members: { create: [{ workspaceId, userId, weight: 1, enabled: true }] },
+      },
+      select: { id: true },
+    });
+
+    const conversationId = await makeConversation();
+    const opened = await createTicket(db, {
+      workspaceId,
+      conversationId,
+      actor: {},
+      assignedUserId: null,
+    });
+    if (!opened.ok) throw new Error("setup failed");
+
+    await runStep("assign_ticket", { mode: "team", policyId: policy.id }, conversationId);
+
+    const row = await prisma.ticket.findUniqueOrThrow({
+      where: { id: opened.ticket.id },
+      select: { assignedUserId: true, assignedTeamId: true },
+    });
+    // The whole point: a team queue used to be a label — nothing picked a
+    // person out of it, so the ticket sat unclaimed.
+    expect(row.assignedUserId).toBe(userId);
+    expect(row.assignedTeamId).toBe(policy.id);
+  });
+
+  // NOT tested here: "nobody eligible → leave it in the queue". The branch is
+  // two lines (`if (!decision.userId) return advance({ skipped: "no_assignee" })`),
+  // and the interesting half is the ENGINE's eligibility logic, which has its
+  // own suite. An attempt to force "no candidates" from inside THIS spec's
+  // shared workspace was not deterministic — an explicit empty squad resolves
+  // to no_candidates in an isolated workspace but found a candidate here — so
+  // asserting it would have meant weakening the assertion until it passed.
 });
 
 describe("loop safety", () => {

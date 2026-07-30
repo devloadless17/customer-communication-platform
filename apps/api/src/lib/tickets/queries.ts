@@ -134,6 +134,8 @@ export const TICKET_SELECT = {
       guestWorkspace: { select: { name: true } },
       contactSnapshot: true,
       guestConversationId: true,
+      assignedUserId: true,
+      assignedUser: { select: { name: true } },
       createdAt: true,
     },
     orderBy: { createdAt: "asc" },
@@ -198,6 +200,10 @@ function mapSharing(t: TicketRow, viewerWorkspaceId: string): TicketSharingInfo 
       workspaceId: s.guestWorkspaceId,
       workspaceName: s.guestWorkspace.name,
       sharedAt: s.createdAt.toISOString(),
+      // Who owns THAT department's side. Visible to every party: "waiting on
+      // Billing" is only actionable if you can see nobody there has picked it up.
+      assignedUserId: s.assignedUserId,
+      assignedUserName: s.assignedUser?.name ?? null,
     })),
     // Only a guest gets a snapshot — the owner reads the live contact.
     ...(role === "guest" && mine
@@ -235,9 +241,16 @@ export function mapTicket(t: TicketRow, viewerWorkspaceId: string): Ticket {
     description: t.description,
     status: t.status,
     priority: t.priority,
-    assignedUserId: t.assignedUserId,
-    assignedTeamId: t.assignedTeamId,
-    assignedUserName: t.assignedUser?.name ?? null,
+    // A GUEST sees its own department's owner (off the share), never the
+    // owner workspace's — that person is not on the guest's roster, so the
+    // picker would render a blank and reassigning would clobber them.
+    assignedUserId: isOwner ? t.assignedUserId : (myShare?.assignedUserId ?? null),
+    assignedUserName: isOwner
+      ? (t.assignedUser?.name ?? null)
+      : (myShare?.assignedUser?.name ?? null),
+    // Teams are the OWNER's queues; a guest has no team dimension on a ticket
+    // it does not own.
+    assignedTeamId: isOwner ? t.assignedTeamId : null,
     tags: t.tags.map((tag) => ({ id: tag.id, name: tag.name, color: tag.color })),
     sla: {
       firstResponseDueAt: t.firstResponseDueAt?.toISOString() ?? null,
@@ -320,6 +333,26 @@ export function mapTicketEvent(e: TicketEventRow, ticketId: string): TicketEvent
  * one stays invisible, which matches what "assigned" visibility already means
  * for an unassigned conversation — an admin or manager routes it first.
  */
+/**
+ * "New work nobody in this workspace has picked up."
+ *
+ * Two arrivals, one predicate: a ticket WE raised that is still `new`, and an
+ * active ticket another workspace escalated to us that nobody here has claimed.
+ * The second arm is the one that matters — a shared ticket keeps the status it
+ * already had, so counting `status: new` alone made an escalation silent.
+ */
+export function untriagedWhere(workspaceId: string): Prisma.TicketWhereInput {
+  return {
+    OR: [
+      { workspaceId, status: "new" },
+      {
+        status: { in: TICKET_ACTIVE_STATUSES as TicketStatus[] },
+        shares: { some: { guestWorkspaceId: workspaceId, assignedUserId: null } },
+      },
+    ],
+  };
+}
+
 export function ticketVisibilityWhere(viewerUserId: string): Prisma.TicketWhereInput {
   return {
     OR: [
@@ -343,6 +376,11 @@ export interface ListTicketsFilters {
   tagIds?: string[];
   /** Only tickets that missed a promise — the board's "at risk" view. */
   breachedOnly?: boolean;
+  /** Only tickets another workspace escalated to us — the guest department's
+   *  "what did we get asked to do" view. */
+  sharedWithUsOnly?: boolean;
+  /** Only work nobody in this workspace has claimed yet (either side). */
+  untriagedOnly?: boolean;
   /**
    * Agent conversation-visibility boundary: restrict to tickets whose PARENT
    * CONVERSATION is assigned to this user.
@@ -386,7 +424,21 @@ export async function listTickets(
   }
 
   if (filters.assignedUserId !== undefined) {
-    and.push({ assignedUserId: filters.assignedUserId });
+    // "Assigned to me" must find work assigned on EITHER side: the ticket's own
+    // assignee (when this workspace owns it) or this workspace's share assignee
+    // (when it was escalated in). Without the second arm, a guest agent's
+    // "Mine" view was permanently empty for exactly the work they were asked
+    // to do.
+    and.push({
+      OR: [
+        { workspaceId, assignedUserId: filters.assignedUserId },
+        {
+          shares: {
+            some: { guestWorkspaceId: workspaceId, assignedUserId: filters.assignedUserId },
+          },
+        },
+      ],
+    });
   }
   if (filters.contactId) and.push({ contactId: filters.contactId });
   if (filters.conversationId) and.push({ conversationId: filters.conversationId });
@@ -400,6 +452,10 @@ export async function listTickets(
   if (filters.breachedOnly) {
     and.push({ OR: [{ firstResponseBreached: true }, { resolutionBreached: true }] });
   }
+  if (filters.sharedWithUsOnly) {
+    and.push({ shares: { some: { guestWorkspaceId: workspaceId } }, workspaceId: { not: workspaceId } });
+  }
+  if (filters.untriagedOnly) and.push(untriagedWhere(workspaceId));
   if (filters.restrictToConversationsAssignedTo) {
     and.push(ticketVisibilityWhere(filters.restrictToConversationsAssignedTo));
   }
@@ -491,14 +547,30 @@ export async function getTicketCounts(
       ? [ticketVisibilityWhere(restrictToConversationsAssignedTo)]
       : []),
   ];
-  const [byStatusRows, mineActive, breached] = await Promise.all([
+  const [byStatusRows, mineActive, breached, untriaged, sharedWithUs] = await Promise.all([
     db.ticket.groupBy({
       by: ["status"],
       where: { AND: scope },
       _count: { _all: true },
     }),
     db.ticket.count({
-      where: { assignedUserId: viewerUserId, status: active, AND: scope },
+      // Same two-sided rule as the board's "Mine" filter — see listTickets.
+      where: {
+        status: active,
+        AND: [
+          ...scope,
+          {
+            OR: [
+              { workspaceId, assignedUserId: viewerUserId },
+              {
+                shares: {
+                  some: { guestWorkspaceId: workspaceId, assignedUserId: viewerUserId },
+                },
+              },
+            ],
+          },
+        ],
+      },
     }),
     db.ticket.count({
       where: {
@@ -506,6 +578,16 @@ export async function getTicketCounts(
         AND: [
           ...scope,
           { OR: [{ firstResponseBreached: true }, { resolutionBreached: true }] },
+        ],
+      },
+    }),
+    db.ticket.count({ where: { AND: [...scope, untriagedWhere(workspaceId)] } }),
+    db.ticket.count({
+      where: {
+        status: active,
+        AND: [
+          ...scope,
+          { shares: { some: { guestWorkspaceId: workspaceId } }, workspaceId: { not: workspaceId } },
         ],
       },
     }),
@@ -519,5 +601,5 @@ export async function getTicketCounts(
     byStatus[row.status] = n;
     if ((TICKET_ACTIVE_STATUSES as readonly string[]).includes(row.status)) totalActive += n;
   }
-  return { totalActive, mineActive, breached, byStatus };
+  return { totalActive, mineActive, breached, untriaged, sharedWithUs, byStatus };
 }

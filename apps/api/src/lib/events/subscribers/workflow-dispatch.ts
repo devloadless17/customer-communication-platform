@@ -48,6 +48,8 @@ import type { DomainEventOf, DomainEventType } from "@ccp/shared/events/types";
 
 import { subscribe as busSubscribe, SubscriberPriority } from "@/lib/events/bus";
 import { dispatch } from "@/lib/workflows/dispatcher";
+import { workflowContactSnapshot, type WorkflowTicketSnapshot } from "@/lib/workflows/events";
+import { db } from "@/lib/db";
 
 /**
  * Built-in Contact columns that `contacts.service.update` now records as
@@ -239,6 +241,141 @@ export function registerWorkflowDispatchSubscribers(): () => void {
     // already logged inside `dispatch()` — the rejection here is just the
     // re-thrown error after that log.
     if (dispatches.length > 0) await Promise.allSettled(dispatches);
+  });
+
+  // ---- ticket.changed → the ticket trigger family ----
+  //
+  // ONE domain event fans out to the trigger that names what actually happened,
+  // for the same reason `conversation.status_changed` fans out to
+  // opened/closed: an admin builds "when a ticket is escalated…", not "when a
+  // ticket changed, and the action field equals…".
+  //
+  // The contact is LOADED here rather than carried on the event. Tickets change
+  // at human cadence (an agent triaging, or the 60s SLA sweeper in batches),
+  // not per-message, so one indexed read per change is not a hot path — and
+  // widening `ticket.changed` to carry a full contact snapshot would pay that
+  // cost on every board frame instead, where nothing reads it.
+  subscribe("ticket.changed", async (e) => {
+    if (e.silent) return; // workflow-step driven; skip chain dispatch (§9 loop safety)
+    // `updated` is the "metadata moved, lifecycle didn't" action, and
+    // escalation_update covers comments/files/access — neither is a trigger
+    // anyone builds an automation on, and firing them would make every note a
+    // workflow event.
+    if (e.action === "updated" || e.action === "escalation_update" || e.action === "deleted") {
+      return;
+    }
+
+    const ticket: WorkflowTicketSnapshot = {
+      id: e.ticket.id,
+      number: e.ticket.number,
+      subject: e.ticket.subject,
+      description: e.ticket.description,
+      status: e.ticket.status,
+      priority: e.ticket.priority,
+      assignedUserId: e.ticket.assignedUserId,
+      assignedTeamId: e.ticket.assignedTeamId,
+      channel: e.ticket.channel,
+      tagIds: e.ticket.tags.map((t) => t.id),
+      conversationId: e.ticket.conversationId,
+      contactId: e.ticket.contactId,
+    };
+
+    // Null on a shared ticket a guest has not bound a thread to — conditions on
+    // contact fields simply don't match, which is the honest answer.
+    const contactRow = e.contactId
+      ? await db.contact.findFirst({
+          where: { id: e.contactId, workspaceId: e.workspaceId },
+          select: {
+            id: true,
+            phoneNumber: true,
+            identityChannel: true,
+            externalContactId: true,
+            name: true,
+            email: true,
+            stageId: true,
+            customFields: true,
+            firstName: true,
+            lastName: true,
+            language: true,
+            countryCode: true,
+            avatarUrl: true,
+            location: true,
+            createdAt: true,
+            lastInboundAt: true,
+            tags: { select: { id: true, name: true } },
+            stage: { select: { name: true } },
+          },
+        })
+      : null;
+    const contact = contactRow ? workflowContactSnapshot(contactRow) : null;
+
+    switch (e.action) {
+      case "created":
+        await dispatch(e.workspaceId, "ticket_created", {
+          ticket,
+          contact,
+          createdByUserId: e.changedByUserId,
+        });
+        return;
+      case "status_changed":
+      case "solved":
+      case "closed":
+      case "reopened":
+        await dispatch(e.workspaceId, "ticket_status_changed", {
+          ticket,
+          contact,
+          previousStatus: e.previousStatus ?? ticket.status,
+          newStatus: ticket.status,
+          changedByUserId: e.changedByUserId,
+        });
+        return;
+      case "priority_changed":
+        await dispatch(e.workspaceId, "ticket_priority_changed", {
+          ticket,
+          contact,
+          newPriority: ticket.priority,
+          changedByUserId: e.changedByUserId,
+        });
+        return;
+      // A team handoff is an assignment event too — the ticket moved to a new
+      // owner (a queue rather than a person), and "notify the team it landed
+      // in" is the automation people want.
+      case "assigned":
+      case "team_changed":
+        await dispatch(e.workspaceId, "ticket_assigned", {
+          ticket,
+          contact,
+          assignedUserId: ticket.assignedUserId,
+          changedByUserId: e.changedByUserId,
+        });
+        return;
+      case "sla_breached":
+        await dispatch(e.workspaceId, "ticket_sla_breached", {
+          ticket,
+          contact,
+          // The event always carries the leg on this action; resolution is the
+          // safer default than inventing a first-response breach.
+          breachedLeg: e.breachedLeg ?? "resolution",
+        });
+        return;
+      case "escalated": {
+        // The guest just granted is the newest share — the escalation that
+        // caused this event.
+        const newest = e.ticket.sharing?.guests.at(-1);
+        if (!newest) return;
+        await dispatch(e.workspaceId, "ticket_escalated", {
+          ticket,
+          contact,
+          guestWorkspaceId: newest.workspaceId,
+          guestWorkspaceName: newest.workspaceName,
+          // The reason lives on the timeline entry; the payload carries the
+          // ticket's cause, which the escalation fills when it was empty.
+          cause: ticket.description ?? "",
+          changedByUserId: e.changedByUserId,
+        });
+        return;
+      }
+    }
   });
 
   return () => {

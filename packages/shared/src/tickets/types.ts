@@ -175,6 +175,12 @@ export interface Ticket {
   description: string | null;
   status: TicketStatus;
   priority: TicketPriority;
+  /**
+   * Who owns YOUR side of this ticket. For the owning workspace that is the
+   * ticket's assignee; for a workspace it was escalated to, their own — the
+   * two departments do not share one accountable person (see
+   * TicketSharingInfo.guests).
+   */
   assignedUserId: string | null;
   assignedUserName: string | null;
   /**
@@ -242,9 +248,18 @@ export interface TicketSharingInfo {
   /** The workspace that owns the ticket (and the customer conversation). */
   ownerWorkspaceId: string;
   ownerWorkspaceName: string;
-  /** Every workspace this ticket has been escalated to. Visible to all parties
-   *  — a shared ticket's participant list is not a secret from its participants. */
-  guests: Array<{ workspaceId: string; workspaceName: string; sharedAt: string }>;
+  /**
+   * Every workspace this ticket has been escalated to, and who owns each
+   * side. Visible to all parties — "waiting on Billing" is only actionable if
+   * you can see whether anyone there has picked it up.
+   */
+  guests: Array<{
+    workspaceId: string;
+    workspaceName: string;
+    sharedAt: string;
+    assignedUserId: string | null;
+    assignedUserName: string | null;
+  }>;
   /**
    * The customer profile the viewer was handed, frozen at share time. Present
    * only for a GUEST — the owner reads the live contact instead. The owner's
@@ -320,6 +335,18 @@ export interface TicketCounts {
   totalActive: number;
   /** Non-terminal tickets assigned to the requesting user. */
   mineActive: number;
+  /**
+   * NEW WORK NOBODY HERE HAS PICKED UP — the number the nav badge shows.
+   *
+   * Deliberately not `byStatus.new`: a ticket escalated INTO this workspace
+   * keeps whatever status it already had, so an `open` ticket handed to Billing
+   * incremented nothing and the department only found it by looking at the
+   * board. This counts both arrivals: our own untriaged tickets, and active
+   * tickets shared with us that no one in this workspace has claimed.
+   */
+  untriaged: number;
+  /** Active tickets another workspace escalated to us. */
+  sharedWithUs: number;
   /** Non-terminal tickets past a due date. */
   breached: number;
   /** Count keyed by status. Statuses with zero are omitted. */

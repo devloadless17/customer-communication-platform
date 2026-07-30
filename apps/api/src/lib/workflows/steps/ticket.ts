@@ -1,4 +1,6 @@
 import { db } from "@/lib/db";
+import { buildAssignmentContext } from "@/lib/assignment/apply";
+import { resolveAssignee } from "@/lib/assignment/resolve";
 import { createTicket, updateTicket } from "@/lib/tickets/mutations";
 import {
   TICKET_PRIORITIES,
@@ -182,6 +184,17 @@ export const setTicketPriorityStepHandler: StepHandler<SetTicketPriorityStepConf
 
 export type AssignTicketStepConfig =
   | { mode: "user"; userId: string; overwrite: boolean }
+  /**
+   * Route to whoever in a TEAM should take it — the same engine that routes
+   * conversations (weights, capacity, working hours, continuity), applied to a
+   * ticket. Until this existed a team queue was a label: you could hand a ticket
+   * to Sales, but nothing ever picked a person out of Sales, so it sat unclaimed
+   * until someone happened to look.
+   *
+   * `policyId` null = let the assignment RULES choose the policy from the
+   * conversation's context, exactly as an inbound would.
+   */
+  | { mode: "team"; policyId: string | null; overwrite: boolean }
   | { mode: "unassign" };
 
 export const assignTicketStepHandler: StepHandler<AssignTicketStepConfig> = {
@@ -190,6 +203,13 @@ export const assignTicketStepHandler: StepHandler<AssignTicketStepConfig> = {
   parseConfig(raw) {
     const r = (raw ?? {}) as Record<string, unknown>;
     if (r.mode === "unassign") return { mode: "unassign" };
+    if (r.mode === "team") {
+      return {
+        mode: "team",
+        policyId: typeof r.policyId === "string" && r.policyId ? r.policyId : null,
+        overwrite: r.overwrite === true,
+      };
+    }
     const userId = typeof r.userId === "string" ? r.userId : "";
     if (!userId) throw new StepConfigError("assign_ticket.userId is required");
     // Same rule as assign_to and every other automated assignment: fill an
@@ -198,13 +218,52 @@ export const assignTicketStepHandler: StepHandler<AssignTicketStepConfig> = {
     return { mode: "user", userId, overwrite: r.overwrite === true };
   },
   describeConfig(config) {
-    return config.mode === "unassign" ? "Unassign the ticket" : "Assign the ticket";
+    if (config.mode === "unassign") return "Unassign the ticket";
+    if (config.mode === "team") return "Route the ticket to a team";
+    return "Assign the ticket";
   },
   async run(envelope, config, ctx): Promise<StepResult> {
     const conv = envelopeConversation(envelope);
     if (!conv) return advanceWithError(400, "envelope missing conversation");
     const ticketId = await activeTicketId(ctx.workspaceId, conv.id);
     if (!ticketId) return advance({ skipped: "no_active_ticket" });
+
+    // TEAM routing: pick the person with the assignment engine, then assign
+    // THEM to the ticket. Deliberately routes the TICKET only — it does not
+    // touch the conversation's own assignee, because a ticket can legitimately
+    // belong to a specialist while the thread stays with the agent who knows
+    // the customer (the same reason `fillActiveTicketAssignee` is fill-only).
+    if (config.mode === "team") {
+      if (!config.overwrite) {
+        const current = await db.ticket.findFirst({
+          where: { id: ticketId, workspaceId: ctx.workspaceId },
+          select: { assignedUserId: true },
+        });
+        if (current?.assignedUserId) return advance({ skipped: "already_assigned", ticketId });
+      }
+      const built = await buildAssignmentContext(db, ctx.workspaceId, conv.id, "workflow");
+      if (!built) return advance({ skipped: "conversation_not_found" });
+      const decision = await resolveAssignee({
+        db,
+        workspaceId: ctx.workspaceId,
+        ctx: built.ctx,
+        policyId: config.policyId,
+        conversationId: conv.id,
+      });
+      if (!decision.userId) {
+        // Nobody eligible (everyone off-shift or at capacity). Leaving it in the
+        // queue is the honest outcome — inventing an assignee would hand work to
+        // someone unavailable.
+        return advance({ skipped: "no_assignee", ticketId, reason: decision.reason });
+      }
+      const applied = await applyTicketUpdate(ctx.workspaceId, ticketId, {
+        assignedUserId: decision.userId,
+        // Record WHICH queue it came through, so "how long did Sales sit on
+        // this" stays answerable.
+        ...(config.policyId ? { assignedTeamId: config.policyId } : {}),
+      });
+      return applied;
+    }
 
     if (config.mode === "user" && !config.overwrite) {
       const current = await db.ticket.findFirst({

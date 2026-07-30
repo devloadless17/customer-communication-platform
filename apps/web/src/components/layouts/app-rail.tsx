@@ -103,12 +103,14 @@ function useInboxUnread(): number {
 }
 
 /**
- * Untriaged (`new`) ticket count for the Tickets rail badge — how a workspace
- * NOTICES work landing on its board, most importantly a ticket escalated in
- * from a sibling workspace (it arrives unassigned and `new`, and nobody was
- * looking at the board when it did). Same authoritative-seed + debounce-refetch
- * + reconnect-reseed shape as useInboxUnread, listening on the one frame that
- * can change the number.
+ * NEW WORK NOBODY HERE HAS PICKED UP — the Tickets rail badge.
+ *
+ * Reads the server's `untriaged` count rather than `byStatus.new`, because a
+ * ticket escalated INTO this workspace keeps the status it already had: an
+ * `open` ticket handed to Billing incremented nothing, and the department only
+ * found it by going to look. `untriaged` counts both arrivals (see
+ * `untriagedWhere`). Same authoritative-seed + debounce-refetch +
+ * reconnect-reseed shape as useInboxUnread.
  */
 function useNewTickets(): number {
   const [count, setCount] = useState(0);
@@ -119,9 +121,9 @@ function useNewTickets(): number {
       try {
         const res = await apiFetch("/api/tickets/counts");
         if (!res.ok) return;
-        const json = (await res.json()) as { counts?: { byStatus?: { new?: unknown } } };
-        const n = json.counts?.byStatus?.new;
-        if (alive && (typeof n === "number" || n === undefined)) setCount(n ?? 0);
+        const json = (await res.json()) as { counts?: { untriaged?: unknown } };
+        const n = json.counts?.untriaged;
+        if (alive && typeof n === "number") setCount(n);
       } catch {
         // nav badge is best-effort — ignore transient fetch failures
       }

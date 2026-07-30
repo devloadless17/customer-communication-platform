@@ -262,6 +262,13 @@ function EditorForNode({
     case "set_ticket_priority":
       return <SetTicketPriorityEditor config={c} onChange={onChangeConfig} />;
     case "assign_ticket":
-      return <AssignTicketEditor config={c} onChange={onChangeConfig} users={catalogs.users} />;
+      return (
+        <AssignTicketEditor
+          config={c}
+          onChange={onChangeConfig}
+          users={catalogs.users}
+          policies={catalogs.assignmentPolicies}
+        />
+      );
   }
 }

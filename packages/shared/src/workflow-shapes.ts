@@ -113,6 +113,23 @@ const AGENT_SHAPE: FieldShape = {
  * to empty when the picker walks them, so it's safe to keep this
  * conservative.
  */
+/**
+ * The ticket a ticket-triggered run is about. Exposed to the variable picker so
+ * a step can write "#{{trigger.ticket.number}} — {{trigger.ticket.subject}}"
+ * into a message or an HTTP body.
+ */
+const TICKET_SHAPE: FieldShape = {
+  kind: "object",
+  fields: {
+    number: leafString(),
+    subject: leafString(),
+    description: leafString(),
+    status: leafString(),
+    priority: leafString(),
+    channel: leafString(),
+  },
+};
+
 export const TRIGGER_SHAPES: Record<WorkflowTriggerEvent, FieldShape> = {
   message_received: {
     kind: "object",
@@ -145,6 +162,30 @@ export const TRIGGER_SHAPES: Record<WorkflowTriggerEvent, FieldShape> = {
   conversation_status_changed: {
     kind: "object",
     fields: { contact: CONTACT_SHAPE, conversation: CONVERSATION_SHAPE },
+  },
+  ticket_created: {
+    kind: "object",
+    fields: { contact: CONTACT_SHAPE, ticket: TICKET_SHAPE },
+  },
+  ticket_status_changed: {
+    kind: "object",
+    fields: { contact: CONTACT_SHAPE, ticket: TICKET_SHAPE },
+  },
+  ticket_priority_changed: {
+    kind: "object",
+    fields: { contact: CONTACT_SHAPE, ticket: TICKET_SHAPE },
+  },
+  ticket_assigned: {
+    kind: "object",
+    fields: { contact: CONTACT_SHAPE, ticket: TICKET_SHAPE },
+  },
+  ticket_sla_breached: {
+    kind: "object",
+    fields: { contact: CONTACT_SHAPE, ticket: TICKET_SHAPE },
+  },
+  ticket_escalated: {
+    kind: "object",
+    fields: { contact: CONTACT_SHAPE, ticket: TICKET_SHAPE },
   },
   contact_tag_updated: {
     kind: "object",

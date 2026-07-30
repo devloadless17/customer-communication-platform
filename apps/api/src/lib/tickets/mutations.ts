@@ -468,6 +468,12 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
       // The OWNING workspace — every audit row and event on a shared ticket
       // carries it, whichever department acted.
       workspaceId: true,
+      // THIS workspace's share, when it is a guest: its own assignee lives
+      // there, because the ticket's belongs to the owner's roster.
+      shares: {
+        where: { guestWorkspaceId: args.workspaceId },
+        select: { id: true, assignedUserId: true },
+      },
       version: true,
       status: true,
       priority: true,
@@ -511,6 +517,10 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
   }
 
   const now = args.nowMs ?? Date.now();
+  // A department the ticket was escalated TO. Its writes are the same writes
+  // (one ticket, one truth) except for the two dimensions that are per-side:
+  // the assignee and the team queue.
+  const isGuest = existing.workspaceId !== args.workspaceId;
   const result = await db.$transaction(async (tx) => {
     const nextStatus = args.status;
     const statusMoves = nextStatus !== undefined && nextStatus !== existing.status;
@@ -526,7 +536,13 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
       version: { increment: 1 },
     };
 
-    if (args.assignedUserId !== undefined) {
+    // WHOSE assignee is being set. A GUEST department owns its own side of a
+    // shared ticket (TicketShare.assignedUserId): the ticket's column belongs
+    // to the owner's roster, so writing it from a guest cleared the owner's
+    // person and left both pickers showing a blank. Applied after the CAS, with
+    // the same "a claimed ticket is being worked" nudge.
+    const guestShare = isGuest ? existing.shares[0] : undefined;
+    if (args.assignedUserId !== undefined && !isGuest) {
       data.assignedUserId = args.assignedUserId;
       // Continuity is never cleared — unassigning must not erase who handled it.
       if (args.assignedUserId) data.lastAssignedUserId = args.assignedUserId;
@@ -536,8 +552,14 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
         data.status = "open";
       }
     }
+    if (args.assignedUserId !== undefined && isGuest && existing.status === "new" && !statusMoves) {
+      // Same nudge for the guest's claim — the work is being done, by them.
+      data.status = "open";
+    }
 
-    if (args.assignedTeamId !== undefined) {
+    // Teams are the OWNER's queues (an AssignmentPolicy belongs to one
+    // workspace), so a guest cannot move the ticket between them.
+    if (args.assignedTeamId !== undefined && !isGuest) {
       data.assignedTeamId = args.assignedTeamId;
       // Handing a ticket to another team CLEARS the current owner unless the
       // caller names one in the same breath. Keeping the old assignee would
@@ -660,7 +682,10 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
         id: existing.id,
         status: existing.status,
         ...(args.expectedVersion !== undefined ? { version: args.expectedVersion } : {}),
-        ...(args.onlyIfUnassigned ? { assignedUserId: null } : {}),
+        // Fill-empty-only applies to the column being written. A guest's claim
+        // targets its share, which the CAS below cannot express — automation
+        // never assigns across a workspace boundary, so it never gets here.
+        ...(args.onlyIfUnassigned && !isGuest ? { assignedUserId: null } : {}),
       },
       data: data as Prisma.TicketUncheckedUpdateManyInput,
     });
@@ -669,6 +694,16 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
       // against a state the caller never saw — an unconditional retry here is
       // how a "set to pending" silently overwrites a colleague's "closed".
       return { conflict: true as const };
+    }
+
+    if (guestShare && args.assignedUserId !== undefined) {
+      await tx.ticketShare.update({
+        where: { id: guestShare.id },
+        data: {
+          assignedUserId: args.assignedUserId,
+          ...(args.assignedUserId ? { lastAssignedUserId: args.assignedUserId } : {}),
+        },
+      });
     }
 
     let tagDiff: { added: TagSnapshot[]; removed: TagSnapshot[] } | null = null;

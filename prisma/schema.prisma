@@ -423,6 +423,21 @@ enum WorkflowTriggerEvent {
   contact_field_updated
   contact_tag_updated
   contact_lifecycle_updated
+  // TICKET events — the work item, not the thread. Separate from the
+  // conversation triggers because a ticket has its own lifecycle (many per
+  // thread), its own SLA promise, and its own cross-department escalation, and
+  // the automations people actually want are about THOSE: "urgent tickets go to
+  // the on-call queue", "tell a manager when a promise is missed", "when Billing
+  // is asked for help, notify their channel".
+  ticket_created
+  ticket_status_changed
+  ticket_priority_changed
+  ticket_assigned
+  // The SLA sweeper flagged a missed promise. Fires exactly once per leg (the
+  // breach write is CAS'd), so an automation here cannot spam.
+  ticket_sla_breached
+  // Escalated to another workspace in the organization.
+  ticket_escalated
   // External / on-demand triggers
   manual_trigger
   incoming_webhook
@@ -1261,6 +1276,7 @@ model User {
   resolvedTickets         Ticket[]                 @relation("ResolvedTickets")
   ticketEvents            TicketEvent[]
   ticketShares            TicketShare[]
+  assignedTicketShares    TicketShare[]            @relation("TicketShareAssignee")
   ticketAttachments       TicketAttachment[]
   assignedConvos          Conversation[]           @relation("AssignedConversations")
   createdInvites          Invite[]                 @relation("InvitedBy")
@@ -3800,6 +3816,20 @@ model TicketShare {
   // THEIR channel). Null until then. The owner's thread is never exposed here.
   guestConversationId String?
 
+  // WHO in the guest workspace owns their side of the work.
+  //
+  // Per-share and NOT on the ticket, because the ticket's single
+  // `assignedUserId` belongs to the OWNER's roster: with one column, Billing
+  // assigning Sara silently cleared Support's Ali (and each side's assignee
+  // picker rendered a blank for the other's person). Two departments working
+  // one ticket each need their own owner — the status, priority, cause,
+  // history and files stay shared; the person accountable does not.
+  //
+  // SetNull: a departure must not delete the grant. `lastAssignedUserId` keeps
+  // continuity for the same reason the ticket's does.
+  assignedUserId     String?
+  lastAssignedUserId String?
+
   createdById String?
   createdAt   DateTime @default(now())
 
@@ -3809,6 +3839,7 @@ model TicketShare {
   guestWorkspace  Workspace     @relation("TicketSharesIn", fields: [guestWorkspaceId], references: [id], onDelete: Cascade)
   guestConversation Conversation? @relation("TicketShareGuestConversation", fields: [guestConversationId], references: [id], onDelete: SetNull)
   createdBy       User?         @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  assignedUser    User?         @relation("TicketShareAssignee", fields: [assignedUserId], references: [id], onDelete: SetNull)
 
   // One grant per (ticket, workspace) — re-escalating to the same department is
   // a no-op, not a second key. A ticket CAN be shared with several departments.
@@ -3819,6 +3850,10 @@ model TicketShare {
   @@index([organizationId])
   @@index([createdById])
   @@index([guestConversationId])
+  // The guest board's "assigned to me" — the same shape as Ticket's own
+  // assignee index.
+  @@index([guestWorkspaceId, assignedUserId])
+  @@index([assignedUserId])
 }
 
 // ---------------------------------------------------------------------------
