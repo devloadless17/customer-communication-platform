@@ -343,13 +343,13 @@ export function validateEnv(label: "api" | "web" = "api"): void {
   // META_GRAPH_VERSION shape check. The Meta provider builds URLs as
   // `https://graph.facebook.com/${META_GRAPH_VERSION}/...` — a typo like
   // "v25" (no `.0`) silently 404s every send until someone notices. The
-  // default is "v25.0" if unset; only check when an operator overrides.
+  // default is "v26.0" if unset; only check when an operator overrides.
   if (label === "api" && process.env.META_GRAPH_VERSION) {
     const raw = process.env.META_GRAPH_VERSION;
     if (!/^v\d+\.\d+$/.test(raw)) {
       console.error(
         `${tag} fatal: META_GRAPH_VERSION must match v<major>.<minor> ` +
-          `(e.g. "v25.0"). Got ${JSON.stringify(raw)}.`,
+          `(e.g. "v26.0"). Got ${JSON.stringify(raw)}.`,
       );
       process.exit(1);
     }

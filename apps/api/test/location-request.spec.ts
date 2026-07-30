@@ -90,7 +90,7 @@ describe("provider wire shape", () => {
       {
         phoneNumberId: "pn_1",
         accessToken: "tok",
-        graphVersion: "v25.0",
+        graphVersion: "v26.0",
       } as Parameters<NonNullable<typeof metaProvider.sendInteractive>>[1],
     );
 

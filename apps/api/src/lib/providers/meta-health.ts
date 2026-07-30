@@ -1111,6 +1111,17 @@ export async function linkWhatsappPortfolio(
   // 6,000 verified, per WABA), so it rides along on the same node read rather
   // than costing a second round trip.
   let verificationStatus: string | null = null;
+  // Both fields on ONE node read, and reading the messaging limit on the
+  // PORTFOLIO node is documented — do not "fix" this to a phone-number read.
+  // The Messaging Limits page's "Via API" section only shows the phone-number
+  // form, which makes this look like an invalid field; the upcoming-changes
+  // page is the one that spells it out: request
+  // `whatsapp_business_manager_messaging_limit` "on the business portfolio, or
+  // a WhatsApp Business account or business phone number within the
+  // portfolio". That matters because one bad field fails the WHOLE request,
+  // and `verificationStatus` — the template limit's only input — rides along
+  // here. It would strand at null permanently, silently pinning every
+  // portfolio to the unverified 250-template figure.
   try {
     const node = await graphGetJson(
       `${GRAPH_BASE}/${graphVersion}/${encodeURIComponent(externalPortfolioId)}` +

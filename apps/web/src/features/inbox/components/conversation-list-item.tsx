@@ -5,6 +5,8 @@ import { CornerUpLeft, Flag, Loader2 } from "lucide-react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { ChannelBadge } from "./channel-badge";
+import { ViewersEye } from "./viewers-eye";
+import type { ConversationViewer } from "@/features/inbox/contexts/conversation-viewers-context";
 import { LocalTime } from "@/components/local-time";
 import { useTimezone } from "@/providers/tz-provider";
 import { AccountLabel } from "@/features/channels/components/account-label";
@@ -39,10 +41,14 @@ function ConversationListItemImpl({
   pending,
   tags,
   currentUserId,
+  viewers,
 }: {
   conversation: Conversation;
   contact: Contact;
   assignedUser: User | null;
+  /** Teammates (never you) with this chat OPEN right now — the collision cue.
+   *  Stable reference from the viewers store; undefined = nobody. */
+  viewers?: ConversationViewer[];
   /** Team tag catalog — resolves the contact's tagIds to name + color chips
    *  on row 3. Stable reference (passed straight through from the shell). */
   tags: Tag[];
@@ -250,6 +256,13 @@ function ConversationListItemImpl({
               {openFlags > 9 ? "9+" : openFlags}
             </span>
           )}
+          {/* A teammate already has this chat open. The single most useful
+              thing to know BEFORE clicking a row in a shared inbox — it is
+              what stops two agents from writing the same reply. Sits in the
+              same right-hand lane as the unread + flag badges (the row's
+              "live signals" column) and costs nothing when nobody is here,
+              which is nearly always. */}
+          {viewers && <ViewersEye viewers={viewers} />}
         </div>
 
         {/* Row 3: status chip + assignment — rendered ONLY when it carries
@@ -331,6 +344,10 @@ export const ConversationListItem = memo(
     prev.pending === next.pending &&
     prev.tags === next.tags &&
     prev.currentUserId === next.currentUserId &&
+    // Reference equality is enough: the viewers store replaces a conversation's
+    // array only when its viewer ids actually change, so an unrelated
+    // teammate opening some OTHER chat leaves this row's prop identical.
+    prev.viewers === next.viewers &&
     prev.assignedUser === next.assignedUser &&
     prev.contact === next.contact &&
     prev.conversation.id === next.conversation.id &&

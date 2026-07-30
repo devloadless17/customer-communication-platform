@@ -41,6 +41,7 @@ import { useInboxFilter } from "@/features/inbox/contexts/inbox-filter-context";
 import { conversationFilterKey } from "@/features/inbox/lib/filter-key";
 import { useInboxViews } from "@/features/inbox/contexts/inbox-views-context";
 import { ConversationListItem } from "./conversation-list-item";
+import { useConversationViewersMap } from "@/features/inbox/contexts/conversation-viewers-context";
 import { InboxSearchPanel, type SearchResultTarget } from "./inbox-search-panel";
 import type { Filter, PresetFilterId } from "./inbox-controls";
 
@@ -114,6 +115,10 @@ function ConversationListImpl({
   canDeleteConversations: boolean;
 }) {
   const { confirm, alert, confirmDialog } = useConfirm();
+  // Who is reading what, workspace-wide. One subscription for the whole list —
+  // each row reads its own (referentially stable) entry, so a teammate opening
+  // one chat re-renders exactly that row.
+  const viewersByConversation = useConversationViewersMap();
   // "selection mode": clicking a row toggles its checkbox instead of opening
   // the chat. Toggled by the toolbar button or auto-engaged when the agent
   // checks the first row. Esc / Clear exits.
@@ -743,6 +748,7 @@ function ConversationListImpl({
                           assignedUser={assignedUser}
                           tags={tags}
                           currentUserId={currentUserId}
+                          viewers={viewersByConversation.get(conversation.id)}
                           active={false}
                           pending={false}
                         />
@@ -774,6 +780,7 @@ function ConversationListImpl({
                         assignedUser={assignedUser}
                         tags={tags}
                         currentUserId={currentUserId}
+                        viewers={viewersByConversation.get(conversation.id)}
                         active={activeConversationId === conversation.id}
                         pending={pendingConversationId === conversation.id}
                       />

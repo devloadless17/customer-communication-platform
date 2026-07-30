@@ -120,6 +120,12 @@ export async function transcodeCallRecordingToOgg(
 export interface CallChannelAudio {
   /** Mono 16 kHz WAV, loudness-normalised when it carries speech. */
   bytes: Uint8Array;
+  /**
+   * The SAME audio before normalisation. Speaker attribution compares the two
+   * legs' loudness, and normalising each to a common target erases exactly
+   * that difference — so the comparison must run on these.
+   */
+  rawBytes: Uint8Array;
   /** Mean level in dBFS of the RAW channel. ≈ -91 is digital silence. */
   meanVolumeDb: number;
   /**
@@ -166,15 +172,19 @@ export async function extractCallChannels(
   agent: CallChannelAudio;
   customer: CallChannelAudio;
   /**
-   * The two legs summed — the same audio a human hears on playback.
+   * The two legs summed — the same audio a human hears on playback, and what
+   * actually gets transcribed.
    *
-   * Carried alongside the isolated channels because neither form is better in
-   * every room. Isolating channels is right when the legs are independent (a
-   * customer on a distant phone): the mix then loses a whole speaker. But when
-   * the two devices are in ONE room, both legs carry the same voice and the
-   * browser's echo canceller mangles the microphone leg, so the isolated
-   * channels are worse than the mix. The caller transcribes both and keeps
-   * whichever actually retained the words — see `transcribeCallAudio`.
+   * Transcribing the MIX rather than each leg separately is a reversal, and
+   * the measurements are why. The split existed because a mixed transcript
+   * dropped a whole speaker — but that was `gpt-4o-transcribe`; `whisper-1`
+   * transcribed BOTH speakers off the same mix at every crosstalk level
+   * tested. Meanwhile the split has a failure mode the mix does not: when the
+   * two devices share a room, the browser's echo canceller mangles the
+   * microphone leg and the isolated channel is far worse than the sum.
+   *
+   * So the mix carries the WORDS and the isolated legs carry only the
+   * ANSWER TO "who was speaking" — see `attributeSpeakers`.
    */
   mixed: CallChannelAudio;
 } | null> {
@@ -188,6 +198,82 @@ export async function extractCallChannels(
     extractOneChannel(input, "mix"),
   ]);
   return { agent, customer, mixed };
+}
+
+/**
+ * Which speaker was talking during each transcript segment, decided by
+ * comparing the two legs' loudness over that segment's time window.
+ *
+ * This is what makes an accurate transcript an ORGANISED one. The words come
+ * from the mix (most accurate — every word, both speakers), and attribution
+ * comes from the legs, which is the one thing the legs are reliably good at
+ * even when their audio is too degraded to transcribe: whoever is speaking is
+ * louder on their OWN leg.
+ *
+ * Uses the RAW legs deliberately. Loudness-normalising each channel to a
+ * common target — which is right before transcription — would erase exactly
+ * the level difference this depends on.
+ *
+ * `null` for a segment means the two legs were too close to call; the caller
+ * carries the previous speaker forward rather than guessing, because a
+ * confident wrong label is worse than an inherited right one.
+ */
+export function attributeSpeakers(
+  segments: ReadonlyArray<{ start: number; end: number }>,
+  agentRaw: Uint8Array,
+  customerRaw: Uint8Array,
+  /** dB by which one leg must beat the other to claim the segment. */
+  marginDb = 2,
+): Array<"agent" | "customer" | null> {
+  const a = pcmFromWav(agentRaw);
+  const c = pcmFromWav(customerRaw);
+  return segments.map((seg) => {
+    const agentDb = rmsDb(a, seg.start, seg.end);
+    const customerDb = rmsDb(c, seg.start, seg.end);
+    const diff = agentDb - customerDb;
+    if (Math.abs(diff) < marginDb) return null;
+    return diff > 0 ? "agent" : "customer";
+  });
+}
+
+/** 16-bit mono PCM samples out of a WAV produced by `extractCallChannels`
+ *  (always 16 kHz here). Returns an empty view for anything unparseable, which
+ *  scores as silence and yields "too close to call". */
+function pcmFromWav(wav: Uint8Array): Int16Array {
+  // Canonical PCM WAV header is 44 bytes; ffmpeg may add a LIST chunk, so find
+  // the `data` chunk rather than assuming an offset.
+  const view = new DataView(wav.buffer, wav.byteOffset, wav.byteLength);
+  let offset = 12; // past "RIFF<size>WAVE"
+  while (offset + 8 <= wav.byteLength) {
+    const id = String.fromCharCode(
+      view.getUint8(offset), view.getUint8(offset + 1),
+      view.getUint8(offset + 2), view.getUint8(offset + 3),
+    );
+    const size = view.getUint32(offset + 4, true);
+    if (id === "data") {
+      const start = offset + 8;
+      const length = Math.min(size, wav.byteLength - start);
+      return new Int16Array(wav.buffer, wav.byteOffset + start, Math.floor(length / 2));
+    }
+    offset += 8 + size + (size % 2);
+  }
+  return new Int16Array(0);
+}
+
+const SAMPLE_RATE = 16000;
+
+/** RMS level in dBFS over [startSec, endSec). -120 for an empty window. */
+function rmsDb(samples: Int16Array, startSec: number, endSec: number): number {
+  const from = Math.max(0, Math.floor(startSec * SAMPLE_RATE));
+  const to = Math.min(samples.length, Math.ceil(endSec * SAMPLE_RATE));
+  if (to <= from) return -120;
+  let sum = 0;
+  for (let i = from; i < to; i++) {
+    const v = samples[i]! / 32768;
+    sum += v * v;
+  }
+  const rms = Math.sqrt(sum / (to - from));
+  return rms > 0 ? 20 * Math.log10(rms) : -120;
 }
 
 async function extractOneChannel(
@@ -211,7 +297,7 @@ async function extractOneChannel(
   // normalisation over a silent leg would amplify its noise floor to speaking
   // level and manufacture exactly the non-speech audio the gate exists to
   // reject.
-  if (speechSeconds <= 0) return { bytes: raw, meanVolumeDb, speechSeconds };
+  if (speechSeconds <= 0) return { bytes: raw, rawBytes: raw, meanVolumeDb, speechSeconds };
 
   try {
     // The two legs arrive at wildly different levels — a browser mic against a
@@ -230,10 +316,10 @@ async function extractOneChannel(
       "-c:a", "pcm_s16le",
       "-f", "wav",
     ]);
-    return { bytes: normalised, meanVolumeDb, speechSeconds };
+    return { bytes: normalised, rawBytes: raw, meanVolumeDb, speechSeconds };
   } catch {
     // Normalisation is an improvement, never a requirement.
-    return { bytes: raw, meanVolumeDb, speechSeconds };
+    return { bytes: raw, rawBytes: raw, meanVolumeDb, speechSeconds };
   }
 }
 

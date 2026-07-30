@@ -606,6 +606,25 @@ export interface ServerToClientEvents {
   }) => void;
 
   /**
+   * Every conversation in the workspace that currently has ≥1 viewer, in one
+   * frame. The per-conversation frame above is a DELTA — it only tells you
+   * about a thread whose viewer set changed while you were listening, which is
+   * all the thread header ever needed. The inbox LIST paints the same signal on
+   * every row, so a freshly connected tab needs the standing state too, or a
+   * teammate who opened a chat before you loaded stays invisible until they
+   * close it.
+   *
+   * Sent to the socket on connect and on `viewers:request`. NOT sent to a
+   * restricted agent (they aren't in the workspace room, and the frame names
+   * conversations they may not see) — their thread header still paints from the
+   * per-conversation frame their own subscribe emits.
+   */
+  "conversation:viewers_snapshot": (payload: {
+    workspaceId: string;
+    viewers: Array<{ conversationId: string; viewerUserIds: string[] }>;
+  }) => void;
+
+  /**
    * Broadcast lifecycle: `queued` → `running` → `completed` | `failed`. Fired
    * by the broadcast runner so the detail page can update without polling
    * (polling is still in place as a fallback for clients off the socket).
@@ -1159,6 +1178,13 @@ export interface ClientToServerEvents {
    * before populating the green dots.
    */
   "presence:request": () => void;
+  /**
+   * Ask for a fresh `conversation:viewers_snapshot`. Same reason as
+   * `presence:request`: the connect-time snapshot fires before the inbox hook
+   * has mounted its listener, so a route-nav into /inbox (no reconnect) would
+   * otherwise show no eyes until a teammate next opened or closed a thread.
+   */
+  "viewers:request": () => void;
   /** Thread typing. `channelId` is required so the gateway can validate
    *  membership without a DB lookup (the socket is already in that room). */
   "typing:thread:start": (payload: { channelId: string; threadRootId: string }) => void;

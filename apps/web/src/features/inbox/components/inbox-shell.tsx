@@ -45,6 +45,7 @@ import { ConnectionBanner } from "./connection-banner";
 import { ConversationList } from "./conversation-list";
 import { SnippetsProvider } from "./snippets-context";
 import { MessageFlagsProvider } from "./message-flags-context";
+import { ConversationViewersProvider } from "@/features/inbox/contexts/conversation-viewers-context";
 import { MessageThread } from "./message-thread";
 import { ContactPanel } from "./contact-panel";
 import { Sheet } from "@/components/ui/sheet";
@@ -1264,6 +1265,14 @@ export function InboxShell({
   return (
     <SnippetsProvider snippets={snippets}>
       <MessageFlagsProvider definitions={messageFlagDefinitions}>
+      {/* One workspace-wide "who is reading what" subscription, feeding BOTH
+          the list rows' eye and the thread header's. Mounted here because it is
+          the lowest node that owns both surfaces. */}
+      <ConversationViewersProvider
+        workspaceId={team.id}
+        currentUserId={currentUser.id}
+        teamMembers={teamMembers}
+      >
       {/* AppRail + the inbox sub-sidebar + mobile chrome all live in
           /inbox/layout.tsx now (via SectionShell). This island is just the
           conversation list + thread workspace, mounted inside the layout's
@@ -1448,6 +1457,7 @@ export function InboxShell({
             CallProvider in the (app) layout) so a call rings through on every
             page, not just here. */}
       </div>
+      </ConversationViewersProvider>
       </MessageFlagsProvider>
     </SnippetsProvider>
   );
@@ -1602,6 +1612,7 @@ function ThreadWorkspace({
         initialCollapsed={initialContactPanelCollapsed}
         initialDetailsWidth={initialDetailsWidth}
         onGoToMessage={onGoToMessage}
+        canMakeCalls={canMakeCalls}
       />
     ),
     [
@@ -1615,6 +1626,7 @@ function ThreadWorkspace({
       initialContactPanelCollapsed,
       initialDetailsWidth,
       onGoToMessage,
+      canMakeCalls,
     ],
   );
   return (
@@ -1673,6 +1685,7 @@ function ThreadWorkspace({
               setDetailsOpen(false);
               onGoToMessage(id);
             }}
+            canMakeCalls={canMakeCalls}
             variant="sheet"
           />
         </Sheet>

@@ -66,6 +66,9 @@ export async function transcribeCallChannel(opts: {
    * documented escape, so the caller retries up the ladder when it detects one.
    */
   temperature?: number;
+  /** Vocabulary/style bias — dialect spellings and the business's own proper
+   *  nouns, which a speech model otherwise guesses at. */
+  prompt?: string;
 }): Promise<CallChannelTranscription> {
   const model = callSttModel();
   const res = await transcribe({
@@ -75,6 +78,7 @@ export async function transcribeCallChannel(opts: {
     mimeType: opts.mimeType ?? "audio/wav",
     language: opts.language,
     temperature: opts.temperature,
+    prompt: opts.prompt,
     segments: true,
   });
   return {

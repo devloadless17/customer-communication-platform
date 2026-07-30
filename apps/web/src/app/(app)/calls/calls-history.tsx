@@ -1,69 +1,29 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
-import {
-  AudioLines,
-  FileText,
-  Loader2,
-  MessageSquare,
-  Phone,
-  PhoneIncoming,
-  PhoneMissed,
-  PhoneOff,
-  PhoneOutgoing,
-} from "lucide-react";
+import { Loader2, Phone } from "lucide-react";
 
 import { cn } from "@ccp/shared/utils";
 import { Button } from "@/components/ui/button";
 import { Pagination } from "@/components/ui/pagination";
-import { LocalTime } from "@/components/local-time";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { getClientSocket } from "@/lib/socket-client";
 import {
-  RecordingPlayer,
-  TranscriptPanel,
-} from "@/features/calls/call-artifacts";
+  CallHistoryRow,
+  type CallHistoryRowData,
+} from "@/features/calls/components/call-history-row";
 import { toast } from "@/lib/toast";
 import { useCallApi } from "@/features/calls/call-provider";
-import { AccountLabel } from "@/features/channels/components/account-label";
-import type { Channel } from "@ccp/shared/types";
 
-/** Mirrors TeamCallRow in apps/api/src/calls/calls.service.ts. */
-interface CallRow {
-  id: string;
-  conversationId: string;
+/**
+ * Mirrors TeamCallRow in apps/api/src/calls/calls.service.ts — the shared row
+ * shape plus the contact fields only the team-wide page carries.
+ */
+type CallRow = CallHistoryRowData & {
   contactId: string | null;
   contactName: string | null;
   contactPhone: string | null;
-  direction: "in" | "out";
-  status: "ringing" | "in_progress" | "completed" | "missed" | "rejected" | "failed";
-  initiatedByName: string | null;
-  answeredByName: string | null;
-  ringingAt: string;
-  /** The call's channel — lets the row apply the standard "only show the
-   *  account when this CHANNEL has more than one" rule, instead of guessing
-   *  from whichever accounts appear in the current page. */
-  channel: Channel;
-  durationSeconds: number | null;
-  connected: boolean;
-  /** Opaque payload from the call button that produced an inbound call. */
-  ctaPayload: string | null;
-  /** Opaque payload from the wa.me/call deep link that produced it. */
-  deeplinkPayload: string | null;
-  /** True once the call's opted-in recording is stored and streamable. */
-  hasRecording: boolean;
-  /** True once the call's opted-in transcript document is stored. */
-  hasTranscript: boolean;
-  /** WHICH of our accounts on the channel this call was on (the thread's). */
-  accountId: string | null;
-  /** That account named for a human — the Settings label, else the number. */
-  accountName: string | null;
-  /** Auto-detected spoken language of the transcript (ISO 639, e.g. "ar"). */
-  transcriptLanguage: string | null;
-  /** Why a FAILED call failed, from the provider's terminate webhook. */
-  errorTitle: string | null;
-}
+};
 
 const PAGE = 25;
 
@@ -350,7 +310,7 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
           )}
         >
           {rows.map((row, i) => (
-            <CallRowItem
+            <CallHistoryRow
               key={row.id}
               row={row}
               first={i === 0}
@@ -375,241 +335,4 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
       )}
     </div>
   );
-}
-
-type Tone = "neutral" | "good" | "warn" | "danger";
-
-/** Direction + status → icon, one-line label, tone, and the attributed agent. */
-function describe(row: CallRow): {
-  Icon: typeof Phone;
-  label: string;
-  tone: Tone;
-  actor: string | null;
-} {
-  const inbound = row.direction === "in";
-  switch (row.status) {
-    case "ringing":
-    case "in_progress":
-      return {
-        Icon: inbound ? PhoneIncoming : PhoneOutgoing,
-        label: inbound ? "Incoming call" : "Outgoing call",
-        tone: "neutral",
-        actor: inbound ? null : row.initiatedByName,
-      };
-    case "rejected":
-      return {
-        Icon: PhoneOff,
-        label: inbound ? "Declined" : "Customer declined",
-        tone: "danger",
-        actor: inbound ? null : row.initiatedByName,
-      };
-    case "failed":
-      return {
-        Icon: PhoneOff,
-        label: "Couldn't connect",
-        tone: "danger",
-        actor: inbound ? null : row.initiatedByName,
-      };
-    case "missed":
-    case "completed":
-    default:
-      if (!row.connected) {
-        return {
-          Icon: inbound ? PhoneMissed : PhoneOutgoing,
-          label: inbound ? "Missed call" : "No answer",
-          tone: "warn",
-          actor: inbound ? null : row.initiatedByName,
-        };
-      }
-      return {
-        Icon: inbound ? PhoneIncoming : PhoneOutgoing,
-        label: inbound ? "Incoming call" : "Outgoing call",
-        tone: "good",
-        // Connected: outbound → who placed it; inbound → who answered.
-        actor: inbound ? row.answeredByName : row.initiatedByName,
-      };
-  }
-}
-
-const TONE_RING: Record<Tone, string> = {
-  neutral: "bg-muted text-muted-foreground",
-  good: "bg-success-bg text-success-fg",
-  warn: "bg-warning-bg text-warning-fg",
-  danger: "bg-destructive/10 text-destructive",
-};
-
-function CallRowItem({
-  row,
-  first,
-  canCall,
-  calling,
-  onCallBack,
-}: {
-  row: CallRow;
-  first: boolean;
-  canCall: boolean;
-  calling: boolean;
-  /** Does this workspace hold more than one account on the channel? Drives
-   *  whether the "via <number>" fact is worth the pixels. */
-  onCallBack: () => void;
-}) {
-  const { Icon, label, tone, actor } = describe(row);
-  const name = row.contactName?.trim() || row.contactPhone || "Unknown contact";
-  // Recording player / transcript panel, revealed on demand — nothing is
-  // fetched until the agent asks for it.
-  const [showPlayer, setShowPlayer] = useState(false);
-  const [showTranscript, setShowTranscript] = useState(false);
-
-  return (
-    <li
-      data-call-row=""
-      className={cn(
-        "flex flex-wrap items-center gap-3 px-4 py-3 transition-colors hover:bg-accent/40",
-        !first && "border-t border-border",
-      )}
-    >
-      <span
-        className={cn(
-          "flex size-9 shrink-0 items-center justify-center rounded-full",
-          TONE_RING[tone],
-        )}
-      >
-        <Icon className="size-4" />
-      </span>
-
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span className="truncate text-sm font-medium">{name}</span>
-          {row.contactPhone && row.contactName && (
-            <span className="shrink-0 font-mono text-2xs text-muted-foreground">
-              {row.contactPhone}
-            </span>
-          )}
-        </div>
-        <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
-          <span>{label}</span>
-          {actor && (
-            <>
-              <span className="opacity-50">·</span>
-              <span className="font-medium text-foreground/70">{actor}</span>
-            </>
-          )}
-          {row.durationSeconds !== null && row.durationSeconds > 0 && (
-            <>
-              <span className="opacity-50">·</span>
-              <span className="tabular-nums">{formatDuration(row.durationSeconds)}</span>
-            </>
-          )}
-          {/* WHICH of our numbers. Renders only when the CHANNEL actually has
-              more than one account — on a single-number workspace it is noise,
-              and on a multi-number one two calls from the same customer to two
-              different numbers were indistinguishable in this log.
-              `fallbackName` keeps a since-disconnected account named rather
-              than silently re-attributing the call. */}
-          <AccountLabel
-            channel={row.channel}
-            accountId={row.accountId}
-            fallbackName={row.accountName}
-            variant="inline"
-            verb="Received on"
-          />
-          {row.status === "failed" && row.errorTitle && (
-            <>
-              <span className="opacity-50">·</span>
-              <span className="min-w-0 truncate">{row.errorTitle}</span>
-            </>
-          )}
-          {/* Origin attribution: which call button / deep link produced this
-              inbound call. The payload is the campaign's own opaque tag, so
-              show it verbatim in the tooltip and keep the label generic. */}
-          {(row.ctaPayload ?? row.deeplinkPayload) && (
-            <>
-              <span className="opacity-50">·</span>
-              <span
-                className="rounded bg-muted px-1 py-px text-2xs"
-                title={row.ctaPayload ?? row.deeplinkPayload ?? undefined}
-              >
-                {row.ctaPayload ? "via call button" : "via call link"}
-              </span>
-            </>
-          )}
-        </div>
-      </div>
-
-      <LocalTime
-        iso={row.ringingAt}
-        format="listTime"
-        className="shrink-0 text-2xs tabular-nums text-muted-foreground"
-      />
-
-      <div className="flex shrink-0 items-center gap-1">
-        {row.hasRecording && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className={cn("size-8", showPlayer && "text-primary")}
-            title="Play recording"
-            aria-label="Play recording"
-            aria-pressed={showPlayer}
-            onClick={() => setShowPlayer((v) => !v)}
-          >
-            <AudioLines className="size-4" />
-          </Button>
-        )}
-        {row.hasTranscript && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className={cn("size-8", showTranscript && "text-primary")}
-            title={`Transcript${row.transcriptLanguage ? ` (${row.transcriptLanguage.toUpperCase()})` : ""}`}
-            aria-label="Show transcript"
-            aria-pressed={showTranscript}
-            onClick={() => setShowTranscript((v) => !v)}
-          >
-            <FileText className="size-4" />
-          </Button>
-        )}
-        <Button asChild variant="ghost" size="icon" title="Open chat" className="size-8">
-          <Link href={`/inbox?c=${row.conversationId}`} aria-label="Open chat">
-            <MessageSquare className="size-4" />
-          </Link>
-        </Button>
-        {canCall && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-8"
-            title="Call back"
-            aria-label="Call back"
-            disabled={calling}
-            onClick={onCallBack}
-          >
-            {calling ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <Phone className="size-4" />
-            )}
-          </Button>
-        )}
-      </div>
-
-      {showPlayer && (
-        <div className="basis-full pl-12">
-          <RecordingPlayer callId={row.id} />
-        </div>
-      )}
-
-      {showTranscript && (
-        <div className="basis-full pl-12">
-          <TranscriptPanel callId={row.id} />
-        </div>
-      )}
-    </li>
-  );
-}
-
-function formatDuration(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return `${m}:${s.toString().padStart(2, "0")}`;
 }

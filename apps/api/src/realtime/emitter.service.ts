@@ -562,11 +562,20 @@ export class RealtimeEmitter {
   // refreshed when a user's availability flips (busy/away/offline drop them
   // out, going back to available re-adds them). Kept here so fanout-rules
   // doesn't need a direct ref to PresenceService or the gateway.
+  //
+  // Returns the workspace alongside the ids because the frame goes to TWO
+  // rooms — the thread's `conv:` room and the workspace room the inbox list
+  // listens on — and the emitter has no other way to learn which workspace a
+  // conversation belongs to.
   private conversationViewersSnapshotter:
-    | ((conversationId: string) => Promise<string[]>)
+    | ((
+        conversationId: string,
+      ) => Promise<{ workspaceId: string; viewerUserIds: string[] } | null>)
     | null = null;
   bindConversationViewersSnapshotter(
-    fn: (conversationId: string) => Promise<string[]>,
+    fn: (
+      conversationId: string,
+    ) => Promise<{ workspaceId: string; viewerUserIds: string[] } | null>,
   ): void {
     this.conversationViewersSnapshotter = fn;
   }
@@ -617,11 +626,14 @@ export class RealtimeEmitter {
     if (conversationIds.length === 0) return;
     await Promise.all(
       conversationIds.map(async (conversationId) => {
-        const viewerUserIds = await viewersFor(conversationId);
-        io.to(conversationRoom(conversationId)).emit("conversation:viewers", {
-          conversationId,
-          viewerUserIds,
-        });
+        const snapshot = await viewersFor(conversationId);
+        if (!snapshot) return;
+        const payload = { conversationId, viewerUserIds: snapshot.viewerUserIds };
+        io.to(conversationRoom(conversationId)).emit("conversation:viewers", payload);
+        // The inbox list's per-row eye reads the same signal from the workspace
+        // room — an agent going busy must drop off BOTH surfaces in one frame,
+        // or the list keeps showing an eye the thread header no longer does.
+        io.to(workspaceRoom(snapshot.workspaceId)).emit("conversation:viewers", payload);
       }),
     );
   }

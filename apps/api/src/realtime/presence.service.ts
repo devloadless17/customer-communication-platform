@@ -30,6 +30,14 @@ export class PresenceService {
     Map<string, Set<string>>
   >();
 
+  // conversationId → workspaceId, for every conversation with ≥1 viewer.
+  // Exists so `viewersByWorkspace` can answer "who is looking at what in THIS
+  // workspace" from memory — the inbox list paints an eye on every row, so the
+  // question is asked once per connect and can't afford a DB read per
+  // conversation. Written by addViewer, dropped in lockstep with the
+  // conversation's viewer map so it can never outlive it.
+  private readonly conversationWorkspace = new Map<string, string>();
+
   /**
    * Returns true iff this add transitioned the user from 0 → 1 socket (i.e.
    * "came online"). Callers use it to skip a redundant team-wide presence
@@ -91,13 +99,19 @@ export class PresenceService {
    * this conversation (i.e. "started viewing"). Multiple tabs from the
    * same agent count as one viewer.
    */
-  addViewer(conversationId: string, userId: string, socketId: string): boolean {
+  addViewer(
+    conversationId: string,
+    userId: string,
+    socketId: string,
+    workspaceId: string,
+  ): boolean {
     const conv = this.byConversation.get(conversationId) ?? new Map<string, Set<string>>();
     const sockets = conv.get(userId) ?? new Set<string>();
     const wasEmpty = sockets.size === 0;
     sockets.add(socketId);
     conv.set(userId, sockets);
     this.byConversation.set(conversationId, conv);
+    this.conversationWorkspace.set(conversationId, workspaceId);
     return wasEmpty;
   }
 
@@ -110,7 +124,10 @@ export class PresenceService {
     sockets.delete(socketId);
     if (sockets.size === 0) {
       conv.delete(userId);
-      if (conv.size === 0) this.byConversation.delete(conversationId);
+      if (conv.size === 0) {
+        this.byConversation.delete(conversationId);
+        this.conversationWorkspace.delete(conversationId);
+      }
       return true;
     }
     return false;
@@ -119,6 +136,30 @@ export class PresenceService {
   snapshotViewers(conversationId: string): string[] {
     const conv = this.byConversation.get(conversationId);
     return conv ? [...conv.keys()] : [];
+  }
+
+  /**
+   * Every conversation in this workspace that currently has ≥1 viewer, with
+   * its raw viewer set. Feeds the one-shot snapshot a freshly connected inbox
+   * needs to paint the per-row "someone is here" eye — without it a row only
+   * lights up when a teammate opens or closes a thread AFTER you connected.
+   *
+   * Raw (unfiltered by availability) — the caller applies the same
+   * `availabilityStatus === "available"` filter the per-conversation frames use,
+   * from ONE cached team read rather than one per conversation.
+   *
+   * Cost is a walk of conversations-with-viewers, which is bounded by the
+   * number of connected agents (one open thread each), not by the inbox size.
+   */
+  viewersByWorkspace(
+    workspaceId: string,
+  ): Array<{ conversationId: string; viewerUserIds: string[] }> {
+    const out: Array<{ conversationId: string; viewerUserIds: string[] }> = [];
+    for (const [conversationId, byUser] of this.byConversation) {
+      if (this.conversationWorkspace.get(conversationId) !== workspaceId) continue;
+      out.push({ conversationId, viewerUserIds: [...byUser.keys()] });
+    }
+    return out;
   }
 
   /**

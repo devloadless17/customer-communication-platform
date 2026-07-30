@@ -146,7 +146,7 @@ export function useTyping(
       // every typing:update (fired on each teammate keystroke) returns a
       // fresh array reference, re-rendering MessageThread + the whole
       // timeline pipeline even when zero teammates are typing. Pattern
-      // mirrors use-conversation-viewers.ts.
+      // mirrors contexts/conversation-viewers-context.tsx.
       setTypingUserIds((prev) =>
         prev.length === others.length && prev.every((id, i) => id === others[i])
           ? prev

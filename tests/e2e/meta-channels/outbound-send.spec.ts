@@ -17,7 +17,7 @@ import { db } from "../_helpers/db";
  * Read the Graph version from the SAME env var the app resolves its default
  * from, instead of pinning a literal. These assertions exist to prove the send
  * goes to the PAGE host with the right body — not to pin a version, and a
- * hardcoded `/v25.0/` turned every future version bump into a spurious e2e
+ * hardcoded `/v26.0/` turned every future version bump into a spurious e2e
  * failure in a spec that has nothing to do with versioning.
  */
 const GRAPH_V = process.env.META_GRAPH_VERSION ?? "v26.0";

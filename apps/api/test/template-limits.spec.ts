@@ -2500,7 +2500,7 @@ describe("messaging_account_id is opt-in", () => {
   const base = {
     phoneNumberId: "pn",
     accessToken: "t",
-    graphVersion: "v25.0",
+    graphVersion: "v26.0",
   };
 
   it("adds nothing when no Messaging Account is configured", () => {

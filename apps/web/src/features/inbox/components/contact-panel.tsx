@@ -53,6 +53,7 @@ import type {
 } from "@ccp/shared/types";
 
 import { AttachmentGallery } from "./attachments/attachment-gallery";
+import { CallsPanel } from "./panel/calls-panel";
 import { FlagsPanel } from "./panel/flags-panel";
 import { NotesPanel } from "./panel/notes-panel";
 import { EditableField } from "./contact-panel/editable-field";
@@ -189,7 +190,7 @@ function ContactLocalTime({ offsetHours }: { offsetHours: number }) {
  * editable field fails at the type checker if any one of those sync points is
  * missed. See the comment over `editableRef` for the full sync-point list.
  */
-type PanelView = "details" | "files" | "notes" | "flags";
+type PanelView = "details" | "files" | "notes" | "flags" | "calls";
 
 /** One tab per record type. Order is by how often it's opened, not by how
  *  recently it shipped. Details has no icon — its label always fits. */
@@ -202,6 +203,10 @@ const PANEL_TABS: Array<{
   { id: "files", label: "Files", icon: Paperclip },
   { id: "notes", label: "Notes", icon: StickyNote },
   { id: "flags", label: "Flags", icon: Flag },
+  // Calls last: it is the newest record type and the least often opened, but
+  // it belongs HERE rather than on the global Calls page — "have we spoken to
+  // this person before?" is a question about the customer in front of you.
+  { id: "calls", label: "Calls", icon: Phone },
 ];
 
 type EditableState = {
@@ -263,6 +268,11 @@ interface PanelProps {
    *  Reuses the same `jumpTarget` state inbox-shell already drives for
    *  global search results. */
   onGoToMessage: (messageId: string) => void;
+  /** Whether this agent may PLACE a call — the same per-thread gate the header's
+   *  phone button uses (capability + the channel's calling capability + region +
+   *  no fresh revocation). False leaves the Calls tab fully readable and just
+   *  hides its call-back buttons. */
+  canMakeCalls: boolean;
   /**
    * Layout container. `"aside"` (default) = the desktop `lg:`-only right rail
    * with collapse-to-rail. `"sheet"` = render the body full-width with no
@@ -285,6 +295,7 @@ function ContactPanelImpl({
   initialCollapsed,
   initialDetailsWidth,
   onGoToMessage,
+  canMakeCalls,
   variant = "aside",
 }: PanelProps) {
   const isSheet = variant === "sheet";
@@ -1070,7 +1081,7 @@ function ContactPanelImpl({
       </div>
       )}
       {/* Panel tabs. One tab per RECORD TYPE — details, attachments, notes,
-          flags. Notes used to be a chip inside the Files gallery, which filed
+          flags, calls. Notes used to be a chip inside the Files gallery, which filed
           a non-file under "Files" and buried it two clicks deep; flags would
           have compounded that. Counts render only when non-zero so the bar
           answers "is there anything in here?" without a click, and stays quiet
@@ -1079,7 +1090,7 @@ function ContactPanelImpl({
         role="tablist"
         aria-label="Contact panel view"
         // @container so each tab drops its label for icon-only when the user
-        // drags the panel narrow — four labels stop fitting well before the
+        // drags the panel narrow — five labels stop fitting well before the
         // rail hits its minimum width. Same pattern as the reply-box toolbar.
         className="@container flex shrink-0 items-center gap-0.5 border-b border-border px-2 py-2"
       >
@@ -1103,10 +1114,12 @@ function ContactPanelImpl({
               )}
             >
               {Icon && <Icon className="size-3.5 shrink-0" />}
-              {/* The label collapses to icon-only on a narrow rail — four
-                  labels don't fit once the user drags the panel down. Details
-                  has no icon, so it keeps its (short) label always. */}
-              <span className={cn("truncate", Icon && "hidden @[15rem]:inline")}>
+              {/* The label collapses to icon-only on a narrow rail — FIVE
+                  labels stop fitting well before the rail hits its 260px
+                  minimum, so the threshold sits above the 320px default rather
+                  than at it. Details has no icon, so it keeps its (short)
+                  label always. */}
+              <span className={cn("truncate", Icon && "hidden @[21rem]:inline")}>
                 {label}
               </span>
               {count > 0 && (
@@ -1171,6 +1184,14 @@ function ContactPanelImpl({
           <FlagsPanel
             conversationId={conversation.id}
             onGoToMessage={onGoToMessage}
+          />
+        </ScrollArea>
+      ) : view === "calls" ? (
+        <ScrollArea className="flex-1">
+          <CallsPanel
+            conversationId={conversation.id}
+            contactName={contact.name}
+            canMakeCalls={canMakeCalls}
           />
         </ScrollArea>
       ) : (
@@ -1699,6 +1720,10 @@ export const ContactPanel = memo(ContactPanelImpl, (prev, next) => {
   if (prev.initialCollapsed !== next.initialCollapsed) return false;
   if (prev.initialDetailsWidth !== next.initialDetailsWidth) return false;
   if (prev.canManageFields !== next.canManageFields) return false;
+  // Without this the Calls tab keeps stale call-back buttons when the gate
+  // flips mid-thread (a call-permission revocation lands, or the thread moves
+  // to a channel that can't call) — every other compared prop is unchanged.
+  if (prev.canMakeCalls !== next.canMakeCalls) return false;
   if (prev.currentUserName !== next.currentUserName) return false;
   if (prev.onGoToMessage !== next.onGoToMessage) return false;
   if (prev.builtins !== next.builtins) return false;

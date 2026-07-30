@@ -241,8 +241,11 @@ export class RealtimeGateway
     // from teammates' "also viewing" pills in the same frame as the badge.
     this.emitter.bindConversationViewersSnapshotter(async (conversationId) => {
       const workspaceId = await this.teamIdForConversation(conversationId);
-      if (workspaceId === null) return [];
-      return this.buildVisibleViewers(conversationId, workspaceId);
+      if (workspaceId === null) return null;
+      return {
+        workspaceId,
+        viewerUserIds: await this.buildVisibleViewers(conversationId, workspaceId),
+      };
     });
     this.emitter.bindConversationsViewedByUser((userId) =>
       this.presence.conversationsViewedBy(userId),
@@ -582,6 +585,16 @@ export class RealtimeGateway
     void this.emitAvailabilitySnapshot(identity.workspaceId, client).catch((err) =>
       this.logger.error(`emitAvailabilitySnapshot (connect) failed: ${err}`),
     );
+    // Standing "who is looking at what" for the inbox list's per-row eye. Only
+    // for a socket that is in the workspace room — the frame names conversations
+    // across the whole inbox, which is exactly what a restricted agent must not
+    // receive (they see the eye on the thread they opened, from the `conv:`
+    // frame their own subscribe emits).
+    if (!restrictedViewer) {
+      void this.emitViewersSnapshot(identity.workspaceId, client).catch((err) =>
+        this.logger.error(`emitViewersSnapshot (connect) failed: ${err}`),
+      );
+    }
     // Broadcast a fresh snapshot to the rest of the team ONLY when this
     // connect transitioned the user from 0→1 sockets. Without the gate
     // every additional tab / Caddy bounce reconnect spammed a team-wide
@@ -899,6 +912,75 @@ export class RealtimeGateway
   }
 
   /**
+   * Emit a conversation's viewer set to BOTH rooms that need it:
+   *
+   *   - `conv:<id>` — the thread header of everyone with it open.
+   *   - `team:<id>` — the inbox LIST, which paints an eye on the row of every
+   *     thread a teammate is reading. The list can't subscribe to a room per
+   *     row, so the workspace room is the only place this can land.
+   *
+   * Frequency is one frame per open/close of a chat (per user, gated on the
+   * user-level 0↔1 transition), not per keystroke — the same budget the
+   * team-room presence frames already run on. Restricted agents are not in the
+   * workspace room, so they receive only the `conv:` copy for threads they
+   * actually opened.
+   *
+   * ONE emitter for all four call sites (subscribe / unsubscribe / disconnect /
+   * availability re-emit) so a fifth can't quietly ship with half the fanout.
+   */
+  private emitViewers(
+    conversationId: string,
+    workspaceId: string,
+    viewerUserIds: string[],
+  ): void {
+    const payload = { conversationId, viewerUserIds };
+    this.server.to(conversationRoom(conversationId)).emit("conversation:viewers", payload);
+    this.server.to(workspaceRoom(workspaceId)).emit("conversation:viewers", payload);
+  }
+
+  /**
+   * One-shot "who is looking at what" for a whole workspace, to THIS socket.
+   * The per-conversation frames are deltas; without this a tab that connects
+   * mid-shift shows no eyes until a teammate next opens or closes something.
+   *
+   * One cached availability read filters every conversation, so the cost is
+   * the same as a single `buildVisibleViewers` regardless of how many threads
+   * are open across the team.
+   */
+  private async emitViewersSnapshot(
+    workspaceId: string,
+    client: Socket,
+  ): Promise<void> {
+    const raw = this.presence.viewersByWorkspace(workspaceId);
+    if (raw.length === 0) {
+      client.emit("conversation:viewers_snapshot", { workspaceId, viewers: [] });
+      return;
+    }
+    let available: Set<string> | null = null;
+    try {
+      const rows = await this.teamAvailability(workspaceId);
+      available = new Set(
+        rows
+          .filter((r) => (r.availabilityStatus ?? "available") === "available")
+          .map((r) => r.id),
+      );
+    } catch (err) {
+      // Same fail-soft posture as buildVisibleViewers — an over-inclusive eye
+      // beats a blank list under transient Postgres flapping.
+      this.logger.error(`emitViewersSnapshot availability lookup failed: ${err}`);
+    }
+    const viewers = raw
+      .map((entry) => ({
+        conversationId: entry.conversationId,
+        viewerUserIds: available
+          ? entry.viewerUserIds.filter((id) => available.has(id))
+          : entry.viewerUserIds,
+      }))
+      .filter((entry) => entry.viewerUserIds.length > 0);
+    client.emit("conversation:viewers_snapshot", { workspaceId, viewers });
+  }
+
+  /**
    * Resolve the workspaceId for a conversation room. Used by the viewers
    * snapshotter so the cross-event re-emit (on availability flip) can
    * filter by the right team. Cheap indexed read; called rarely.
@@ -1041,12 +1123,7 @@ export class RealtimeGateway
         if (userLeft) {
           void this.buildVisibleViewers(conversationId, workspaceId).then(
             (viewerUserIds) => {
-              this.server
-                .to(conversationRoom(conversationId))
-                .emit("conversation:viewers", {
-                  conversationId,
-                  viewerUserIds,
-                });
+              this.emitViewers(conversationId, workspaceId, viewerUserIds);
             },
           );
         }
@@ -1099,6 +1176,24 @@ export class RealtimeGateway
     // request on every `connect`, and a reconnect after a long offline can
     // have missed availability changes that a delta can't carry.
     await this.emitAvailabilitySnapshot(workspaceId, client);
+  }
+
+  /**
+   * Pull-style viewers snapshot — the inbox list's counterpart to
+   * `presence:request`, and fired by the same hook on every `connect`. The
+   * connect-time push happens before any feature hook has mounted a listener,
+   * so a route-nav into /inbox needs to ask.
+   *
+   * Gated on workspace-room membership: a restricted agent never receives a
+   * frame naming conversations outside their own, whether pushed or pulled.
+   */
+  @SubscribeMessage("viewers:request")
+  async onViewersRequest(@ConnectedSocket() client: Socket): Promise<void> {
+    const workspaceId = client.data.workspaceId as string | undefined;
+    if (!workspaceId) return;
+    if (!client.rooms.has(workspaceRoom(workspaceId))) return;
+    if (!checkPresenceRequestBudget(client, "__viewersBucket")) return;
+    await this.emitViewersSnapshot(workspaceId, client);
   }
 
   // ---- conversation rooms -------------------------------------------------
@@ -1194,6 +1289,7 @@ export class RealtimeGateway
       body.conversationId,
       userId,
       client.id,
+      workspaceId,
     );
     // Snapshot to THIS socket immediately so the pill paints without
     // waiting for the next change — same posture as team presence. Fires
@@ -1210,10 +1306,7 @@ export class RealtimeGateway
     // user crossed 0→1 sockets. Multiple tabs from the same user must not
     // re-spam the team or the pill will flicker on every Caddy bounce.
     if (startedViewing) {
-      this.server.to(room).emit("conversation:viewers", {
-        conversationId: body.conversationId,
-        viewerUserIds: visibleViewers,
-      });
+      this.emitViewers(body.conversationId, workspaceId, visibleViewers);
     }
   }
 
@@ -1251,12 +1344,7 @@ export class RealtimeGateway
         if (!workspaceId) return;
         void this.buildVisibleViewers(body.conversationId, workspaceId).then(
           (viewerUserIds) => {
-            this.server
-              .to(conversationRoom(body.conversationId))
-              .emit("conversation:viewers", {
-                conversationId: body.conversationId,
-                viewerUserIds,
-              });
+            this.emitViewers(body.conversationId, workspaceId, viewerUserIds);
           },
         );
       }
@@ -1740,14 +1828,21 @@ function checkTypingBudget(client: Socket): boolean {
  */
 const PRESENCE_REQUEST_CAP = 8;
 const PRESENCE_REQUEST_REFILL_PER_MS = 8 / 30_000;
-function checkPresenceRequestBudget(client: Socket): boolean {
+function checkPresenceRequestBudget(
+  client: Socket,
+  // `viewers:request` runs on the same cadence (one per inbox mount /
+  // reconnect) and wants the same ceiling, but its OWN tokens — sharing one
+  // bucket would mean a reconnect flap spending the presence budget and
+  // silently dropping the viewers re-seed, or the reverse.
+  bucketKey: "__presenceBucket" | "__viewersBucket" = "__presenceBucket",
+): boolean {
   const now = Date.now();
 
   const data = client.data as any;
-  let bucket = data.__presenceBucket as { tokens: number; ts: number } | undefined;
+  let bucket = data[bucketKey] as { tokens: number; ts: number } | undefined;
   if (!bucket) {
     bucket = { tokens: PRESENCE_REQUEST_CAP, ts: now };
-    data.__presenceBucket = bucket;
+    data[bucketKey] = bucket;
   } else {
     bucket.tokens = Math.min(
       PRESENCE_REQUEST_CAP,

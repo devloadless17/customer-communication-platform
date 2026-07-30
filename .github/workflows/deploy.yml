@@ -643,7 +643,7 @@ jobs:
           MAIL_SMTP_PORT=${MAIL_SMTP_PORT:-}
           MAIL_SMTP_USER=${MAIL_SMTP_USER}
           MAIL_SMTP_PASSWORD=${MAIL_SMTP_PASSWORD}
-          META_GRAPH_VERSION=v25.0
+          META_GRAPH_VERSION=v26.0
           META_APPSECRET_PROOF=${META_APPSECRET_PROOF:-}
           NEXT_PUBLIC_API_URL=
           EOF
@@ -939,7 +939,7 @@ jobs:
             # https://${APP_DOMAIN}/api/auth/callback/google.
             GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
             GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
-            META_GRAPH_VERSION=v25.0
+            META_GRAPH_VERSION=v26.0
             # `:-` is deliberate and NOT cosmetic. This heredoc runs under
             # `set -u`, and ssh-action's `envs:` does not necessarily export a
             # variable whose value is empty — so a blanked/removed secret would

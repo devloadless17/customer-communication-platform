@@ -2345,7 +2345,7 @@ export class CallsService {
     conversationId: string,
     take: number,
     cursor: string | undefined,
-  ): Promise<{ items: SerializedCall[]; cursor: string | null }> {
+  ): Promise<{ items: ConversationCallRow[]; cursor: string | null }> {
     // Capability gate: viewing call history requires either calling capability,
     // mirroring endCall's inline make-OR-receive check. Without this the read
     // path would leak full call history (who called whom, durations, answered-by)
@@ -2420,11 +2420,35 @@ export class CallsService {
         transcriptKey: true,
         transcriptLanguage: true,
         errorTitle: true,
+        // Attribution, resolved in the same query — the customer's call history
+        // in the contact panel answers "who took this call" and "which of our
+        // numbers", exactly like the team-wide Calls page. Without these the
+        // panel would need a second round-trip per row to say anything useful.
+        initiatedBy: { select: { name: true } },
+        answeredBy: { select: { name: true } },
+        conversation: {
+          select: {
+            channelConnectionId: true,
+            channelConnection: {
+              select: { id: true, label: true, config: true, externalAccountId: true },
+            },
+          },
+        },
       },
     });
     const hasMore = rows.length > take;
     const page = hasMore ? rows.slice(0, take) : rows;
-    const items = page.map(serializeCall);
+    const items: ConversationCallRow[] = page.map((c) => ({
+      ...serializeCall(c),
+      channel: c.channel,
+      initiatedByName: c.initiatedBy?.name ?? null,
+      answeredByName: c.answeredBy?.name ?? null,
+      connected:
+        c.answeredAt !== null ||
+        (c.durationSeconds !== null && c.durationSeconds > 0),
+      accountId: c.conversation.channelConnectionId,
+      accountName: channelAccountDisplayName(c.conversation.channelConnection),
+    }));
     const last = page.at(-1);
     const nextCursor =
       hasMore && last ? `${last.ringingAt.getTime()}_${last.id}` : null;
@@ -2636,6 +2660,28 @@ export class CallsService {
     });
     return { count };
   }
+}
+
+/**
+ * Wire row for ONE conversation's call history — the contact panel's Calls tab.
+ *
+ * `SerializedCall` plus the same attribution the team-wide Calls page carries,
+ * so both surfaces render from one component and can't drift. The contact's own
+ * name/phone are deliberately absent: the panel is already scoped to them.
+ */
+export interface ConversationCallRow extends SerializedCall {
+  channel: Channel;
+  /** Agent who placed an outbound call (null for inbound). */
+  initiatedByName: string | null;
+  /** Agent who answered an inbound call (null if unanswered). */
+  answeredByName: string | null;
+  /** Did the two sides actually talk — the difference between "called" and
+   *  "missed", which neither `status` nor `durationSeconds` says alone. */
+  connected: boolean;
+  /** WHICH of the workspace's accounts on this channel the call was on. */
+  accountId: string | null;
+  /** That account named for a human — the Settings label, else the number. */
+  accountName: string | null;
 }
 
 /** Wire row for the team-wide Calls page. */

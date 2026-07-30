@@ -44,9 +44,14 @@ function stripForWire(m: Message): Message {
  *                          (panel + filter pruning), team-wide presence.
  *   - emitToConversation → use when only viewers OF this thread care.
  *                          Examples: message:status, message:media:ready,
- *                          typing:update, conversation:viewers, broadcast
- *                          recipient frames (storm prevention — a 10k-recipient
- *                          broadcast must NOT fan team-wide).
+ *                          typing:update, broadcast recipient frames (storm
+ *                          prevention — a 10k-recipient broadcast must NOT fan
+ *                          team-wide).
+ *                          NOT conversation:viewers: it goes to BOTH rooms, see
+ *                          RealtimeGateway.emitViewers — the inbox list paints
+ *                          the same "someone is reading this" eye on every row
+ *                          and cannot subscribe to a room per row. Its cadence
+ *                          is one frame per chat open/close, not per keystroke.
  *   - emitToChannel     → team-chat channel-scoped (membership-gated, default
  *                          channel auto-passes); never use for customer convos.
  *

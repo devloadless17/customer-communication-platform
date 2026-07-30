@@ -98,7 +98,7 @@ describe("provider wire shape", () => {
     );
     await metaProvider.sendInteractive!(
       args as Parameters<NonNullable<typeof metaProvider.sendInteractive>>[0],
-      { phoneNumberId: "pn_1", accessToken: "tok", graphVersion: "v25.0" } as Parameters<
+      { phoneNumberId: "pn_1", accessToken: "tok", graphVersion: "v26.0" } as Parameters<
         NonNullable<typeof metaProvider.sendInteractive>
       >[1],
     );

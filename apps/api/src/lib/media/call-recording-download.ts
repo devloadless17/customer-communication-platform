@@ -5,6 +5,7 @@ import { blobStorage } from "@/lib/blob-storage";
 import { publish } from "@/lib/events/bus";
 import { getProviderBinding } from "@/lib/providers";
 import {
+  attributeSpeakers,
   extractCallChannels,
   transcodeCallRecordingToOgg,
   type CallChannelAudio,
@@ -537,6 +538,9 @@ interface LanguagePolicy {
   supported: string[];
   /** ISO fallback used when a detection lands outside `supported`. */
   fallback: string | null;
+  /** Decoding bias for this workspace's dialect + proper nouns; see
+   *  `buildCallPrompt`. Null when the workspace isn't Arabic-default. */
+  prompt: string | null;
 }
 
 function languagePolicyFrom(config: {
@@ -544,6 +548,11 @@ function languagePolicyFrom(config: {
   defaultLanguage?: string | null;
   specificLanguage?: string | null;
   languagePolicy?: string | null;
+  lebaneseDialect?: boolean | null;
+  codeSwitching?: boolean | null;
+  companyName?: string | null;
+  products?: string | null;
+  services?: string | null;
 }): LanguagePolicy {
   const supported = Array.isArray(config.supportedLanguages)
     ? config.supportedLanguages
@@ -558,7 +567,79 @@ function languagePolicyFrom(config: {
   return {
     supported,
     fallback: fallback ? fallback.trim().toLowerCase().slice(0, 5) : null,
+    prompt: buildCallPrompt(config),
   };
+}
+
+/**
+ * Build the decoding bias for this workspace's calls.
+ *
+ * A speech model is not so much wrong on dialect as UNANCHORED: trained
+ * overwhelmingly on Modern Standard Arabic, it renders Lebanese speech as
+ * MSA-shaped words that are nearly right and read as nonsense. The live
+ * symptom was a real call transcribing with correct islands ("كيفك",
+ * "سامعني منيح", "يالله باي") and garbled patches between them. The prompt is
+ * the documented lever: it is treated as the transcript immediately PRECEDING
+ * the audio, so writing Lebanese there makes Lebanese spellings likely.
+ *
+ * The business's own nouns matter as much as the dialect — a company or
+ * product name the model has never seen is guessed at phonetically every time
+ * it is spoken, and those guesses are exactly the garbled patches.
+ *
+ * Returns null unless the workspace declares Arabic as its default, because a
+ * prompt in the wrong language biases AGAINST the audio. It stays a soft bias
+ * rather than a pin: an English call still detects and transcribes as English.
+ */
+function buildCallPrompt(config: {
+  defaultLanguage?: string | null;
+  lebaneseDialect?: boolean | null;
+  codeSwitching?: boolean | null;
+  companyName?: string | null;
+  products?: string | null;
+  services?: string | null;
+}): string | null {
+  const isArabic = (config.defaultLanguage ?? "").trim().toLowerCase().startsWith("ar");
+  if (!isArabic) return null;
+
+  // ORDER IS DELIBERATE: proper nouns first, dialect anchor LAST.
+  //
+  // The prompt window is 224 tokens and the model keeps the LAST of them —
+  // it reads the prompt as the transcript immediately preceding this audio.
+  // So anything at the front is what gets dropped when a workspace has a long
+  // product list, and the dialect anchor is the part doing most of the work
+  // (measured: with it "هلق" transcribes correctly, without it comes back as
+  // "حلّك"; "منيح" as "ميح").
+  const parts: string[] = [];
+  const nouns = [config.companyName, config.products, config.services]
+    .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+    .join("، ")
+    .slice(0, 200);
+  if (nouns) parts.push(nouns);
+  if (config.lebaneseDialect === false) {
+    parts.push("مكالمة هاتفية باللغة العربية.");
+    return parts.join(" ");
+  }
+
+  // Written AS Lebanese speech, not as a description of it — the model
+  // continues the style it is given, it does not follow instructions.
+  parts.push(
+    "مكالمة هاتفية بالعربية اللبنانية المحكية" +
+      (config.codeSwitching === false ? "." : " مع كلمات إنجليزية.") +
+      " ألو، كيفك؟ يالله، هلق بشوفلك ياها. لحظة من فضلك، عم اسمعك منيح. تكرم عينك.",
+  );
+
+  // CODE-SWITCHING. Lebanese speakers drop English words into Arabic
+  // constantly, and an Arabic-ONLY prompt makes the model transliterate them
+  // into Arabic script — measured: "order" → "أوردر", "delivery" → "الدليفري",
+  // and worst of all "price" → "البيت" ("the house"), which is a meaning error,
+  // not a spelling one. Showing the mixing in the prompt keeps English words in
+  // Latin script and fixed all three.
+  if (config.codeSwitching !== false) {
+    parts.push(
+      "أوكي، بعتلك الـ order عالـ delivery. please خليني أعرف الـ price. thank you، يالله bye.",
+    );
+  }
+  return parts.join(" ");
 }
 
 /**
@@ -584,7 +665,7 @@ function isPlausibleLanguage(detected: string | undefined, policy: LanguagePolic
 interface ChannelResult {
   speaker: "Business" | "Customer";
   label: string;
-  segments: Array<{ start: number; text: string }>;
+  segments: Array<{ start: number; end: number; text: string }>;
   language?: string;
   /** Mean confidence of the surviving segments — drives which channel's
    *  language detection is trusted when the two disagree. */
@@ -616,69 +697,47 @@ async function transcribePerSpeaker(
   }
   if (!channels) return null; // mono source — nothing to separate
 
-  const sides = [
-    { speaker: "Business" as const, label: "agent", audio: channels.agent },
-    { speaker: "Customer" as const, label: "customer", audio: channels.customer },
-  ];
+  // WORDS from the mix, SPEAKERS from the legs.
+  //
+  // The mix is transcribed because it is the most accurate rendering of what
+  // was said: it holds both speakers (measured — whisper-1 kept both at every
+  // crosstalk level, unlike gpt-4o-transcribe) and it is immune to the echo
+  // damage that ruins an isolated microphone leg when both devices share a
+  // room. Attribution then comes from comparing the legs' loudness per
+  // segment, which stays reliable even where their audio is too degraded to
+  // transcribe — whoever is talking is louder on their OWN leg.
+  const mixR = await transcribeOneChannel(
+    { speaker: "Business", label: "mixed", audio: channels.mixed },
+    callId,
+    policy,
+  );
+  if (mixR.segments.length === 0) return null;
 
-  // Transcribe the isolated legs AND the playback mix, then keep whichever
-  // actually held the conversation. See `pickBestRendering` — this is the
-  // difference between "usually better" and "never worse".
-  const [agentR, customerR, mixR] = await Promise.all([
-    transcribeOneChannel(sides[0]!, callId, policy),
-    transcribeOneChannel(sides[1]!, callId, policy),
-    transcribeOneChannel(
-      { speaker: "Business", label: "mixed", audio: channels.mixed },
-      callId,
-      policy,
-    ),
-  ]);
-  const results = [agentR, customerR];
+  const attributed = attributeSpeakers(
+    mixR.segments.map((s) => ({ start: s.start, end: s.end })),
+    channels.agent.rawBytes,
+    channels.customer.rawBytes,
+  );
 
-  // ── Cross-channel language consensus ────────────────────────────────────
-  // Both people on a call are speaking the same language essentially always,
-  // so the two channels disagreeing means one of them was mis-detected — and
-  // it is the quieter/less confident side that gets it wrong. The live bug:
-  // the agent channel resolved Arabic while the customer channel, carrying
-  // genuine Lebanese Arabic, came back as Cyrillic gibberish. Re-decode the
-  // doubted side PINNED to the trusted language rather than storing nonsense.
-  const speaking = results.filter((r) => r.segments.length > 0);
-  if (speaking.length === 2) {
-    const [a, b] = speaking as [ChannelResult, ChannelResult];
-    if (a.language && b.language && a.language !== b.language) {
-      // Trust the side with more speech to identify the language; on a tie,
-      // the more confident one.
-      const trusted =
-        Math.abs(a.speechSeconds - b.speechSeconds) > 1
-          ? (a.speechSeconds > b.speechSeconds ? a : b)
-          : (a.confidence >= b.confidence ? a : b);
-      const doubted = trusted === a ? b : a;
-      const pin = languageToIso(trusted.language!);
-      console.warn(
-        `[call-transcript] call=${callId} channel language disagreement ` +
-          `(${a.label}=${a.language} vs ${b.label}=${b.language}) — retrying ` +
-          `${doubted.label} pinned to ${pin ?? trusted.language}`,
-      );
-      if (pin) {
-        const side = sides.find((s) => s.speaker === doubted.speaker)!;
-        const retry = await transcribeOneChannel(side, callId, policy, pin);
-        // Keep the retry only if it actually produced something; a pinned
-        // decode that comes back empty must not erase what we already had.
-        if (retry.segments.length > 0) Object.assign(doubted, retry);
-      }
-    }
-  }
-
-  // ── Interleave into one conversation ────────────────────────────────────
-  const merged = results
-    .flatMap((r) => r.segments.map((s) => ({ speaker: r.speaker, ...s })))
-    .sort((x, y) => x.start - y.start);
+  // ── Assemble into an organised conversation ─────────────────────────────
+  // Each segment gets the speaker whose leg was louder while it was spoken.
+  // A segment too close to call inherits the PREVIOUS speaker rather than
+  // guessing: mid-turn the same person is almost always still talking, and a
+  // confident wrong label is worse than an inherited right one.
+  let lastSpeaker: "Business" | "Customer" = "Business";
+  const placed = mixR.segments.map((s, i) => {
+    const who = attributed[i];
+    const speaker: "Business" | "Customer" =
+      who === "agent" ? "Business" : who === "customer" ? "Customer" : lastSpeaker;
+    lastSpeaker = speaker;
+    return { speaker, start: s.start, text: s.text };
+  });
 
   // Fold consecutive segments from the same speaker into one turn. Whisper
   // splits on prosody, so a single sentence can arrive as three segments; a
   // transcript that renders those as three labelled rows reads like a stutter.
   const turns: TranscriptSegment[] = [];
-  for (const seg of merged) {
+  for (const seg of placed) {
     const last = turns[turns.length - 1];
     if (last && last.speaker === seg.speaker) {
       last.text = `${last.text} ${seg.text}`.trim();
@@ -687,83 +746,17 @@ async function transcribePerSpeaker(
     turns.push({ id: turns.length, speaker: seg.speaker, start: seg.start, text: seg.text });
   }
 
-  const dominant = [...results].sort((x, y) => y.speechSeconds - x.speechSeconds)[0];
-  const perSpeaker =
-    turns.length > 0
-      ? {
-          // Flat rendering for consumers that don't read segments (the /v1
-          // document, the viewer's own no-segments fallback).
-          text: turns
-            .map((t) => `${t.speaker === "Business" ? "Agent" : "Customer"}: ${t.text}`)
-            .join("\n"),
-          language: dominant?.language,
-          segments: turns,
-        }
-      : null;
-
-  const mixed =
-    mixR.segments.length > 0
-      ? {
-          text: mixR.segments.map((s) => s.text).join(" "),
-          language: mixR.language,
-          // A mix cannot be attributed. Leaving segments empty says so honestly
-          // rather than labelling every word with a speaker we didn't identify.
-          segments: [] as TranscriptSegment[],
-        }
-      : null;
-
-  return pickBestRendering(perSpeaker, mixed, callId);
+  return {
+    // Flat rendering for consumers that don't read segments (the /v1 document,
+    // the viewer's own no-segments fallback).
+    text: turns
+      .map((t) => `${t.speaker === "Business" ? "Agent" : "Customer"}: ${t.text}`)
+      .join("\n"),
+    language: mixR.language,
+    segments: turns,
+  };
 }
 
-/**
- * Choose between the speaker-attributed rendering and the flat mix.
- *
- * Neither is better in every room, which is the whole reason both are
- * transcribed:
- *
- *   - Legs that are independent (a customer on a distant phone) → isolating
- *     the channels is clearly right. Measured: transcribing the MIX of such a
- *     call dropped an entire speaker.
- *   - Both devices in ONE room (an agent testing against their own handset,
- *     a speakerphone right next to the laptop) → each leg carries the same
- *     voice, and the browser's echo canceller chews up the microphone leg
- *     fighting it. The isolated channels are then WORSE than the mix, which
- *     is what a human hears on playback and finds perfectly clear.
- *
- * So the split has to earn its place per call: it wins only if it retained
- * essentially all of the words the mix found. Speaker labels are worth having,
- * but never at the cost of the words themselves — losing content is the
- * complaint that started this whole thread.
- */
-function pickBestRendering(
-  perSpeaker: { text: string; language?: string; segments: TranscriptSegment[] } | null,
-  mixed: { text: string; language?: string; segments: TranscriptSegment[] } | null,
-  callId: string,
-): { text: string; language?: string; segments: TranscriptSegment[] } | null {
-  if (!perSpeaker) return mixed;
-  if (!mixed) return perSpeaker;
-
-  // Compare CONTENT, not characters: the per-speaker text carries "Agent:" /
-  // "Customer:" prefixes the mix doesn't have, and counting those would hand
-  // the split a free advantage.
-  const splitLen = perSpeaker.segments.reduce((n, s) => n + s.text.length, 0);
-  const mixLen = mixed.text.length;
-
-  // This gate exists to catch a COLLAPSE, not to police normal variance. The
-  // echo failure it was built from left the split at ~40% of the mix
-  // ("I don't...just...just..." against a clear sentence), while two healthy
-  // decodes of the same audio routinely differ by 10-20% over filler words
-  // alone. At 0.85 the split would lose its labels over an "um"; 0.7 catches
-  // the collapse and keeps attribution everywhere else.
-  if (splitLen >= mixLen * 0.7) return perSpeaker;
-
-  console.warn(
-    `[call-transcript] call=${callId}: per-speaker split kept ${splitLen} chars vs ` +
-      `${mixLen} from the mix — the legs are probably echoing each other ` +
-      `(two devices in one room); using the mix and dropping speaker labels`,
-  );
-  return mixed;
-}
 
 /**
  * One channel → filtered segments, with a retry ladder.
@@ -825,6 +818,9 @@ async function transcribeOneChannel(
         filename: `call-${callId}-${side.label}.${extensionForAudio(mime)}`,
         mimeType: mime,
         temperature: ladder[attempt],
+        // Dialect + proper-noun bias. Carried on every attempt: it is what
+        // keeps Lebanese speech from being rendered as near-miss MSA.
+        ...(policy.prompt ? { prompt: policy.prompt } : {}),
         ...(language ? { language } : {}),
       });
     } catch (err) {
@@ -851,7 +847,7 @@ async function transcribeOneChannel(
       return {
         speaker: side.speaker,
         label: side.label,
-        segments: kept.map((s) => ({ start: s.start, text: s.text.trim() })),
+        segments: kept.map((s) => ({ start: s.start, end: s.end, text: s.text.trim() })),
         language: res.language,
         confidence: kept.reduce((a, s) => a + s.avg_logprob, 0) / kept.length,
         speechSeconds: side.audio.speechSeconds,
@@ -890,7 +886,6 @@ export const __testing__ = {
   isPlausibleLanguage,
   languagePolicyFrom,
   isSubstantive,
-  pickBestRendering,
 };
 
 /** File extension matching an audio wire type. The transcription API accepts
@@ -1045,7 +1040,12 @@ export async function transcribeInAppCallRecording(
         // than measured: the split already failed, and a recording that
         // reached this function has audio in it — the segment gates below are
         // what protect this path.
-        audio: { bytes, meanVolumeDb: 0, speechSeconds: Number.POSITIVE_INFINITY },
+        audio: {
+          bytes,
+          rawBytes: bytes,
+          meanVolumeDb: 0,
+          speechSeconds: Number.POSITIVE_INFINITY,
+        },
         mimeType: mimeType ?? "audio/ogg",
       },
       call.id,

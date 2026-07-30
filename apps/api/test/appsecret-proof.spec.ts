@@ -60,7 +60,7 @@ const OWN_SECRET = "this_accounts_own_app_secret";
 const config = {
   phoneNumberId: "PHONE_1",
   accessToken: TOKEN,
-  graphVersion: "v25.0",
+  graphVersion: "v26.0",
   appSecret: OWN_SECRET,
 };
 
@@ -132,7 +132,7 @@ describe("enabled", () => {
     const provider = await loadProvider(true);
     const { withAppsecretProof } = await import("@/lib/providers/appsecret-proof");
 
-    const signed = withAppsecretProof("https://graph.facebook.com/v25.0/x?fields=a", TOKEN, OWN_SECRET);
+    const signed = withAppsecretProof("https://graph.facebook.com/v26.0/x?fields=a", TOKEN, OWN_SECRET);
 
     expect(signed).toContain("?fields=a&appsecret_proof=");
     expect(signed.match(/\?/g)).toHaveLength(1);

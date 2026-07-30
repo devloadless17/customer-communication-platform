@@ -161,6 +161,13 @@ export async function transcribe(opts: {
   segments?: boolean;
   /** Decoding temperature; used to break a repetition loop on a re-decode. */
   temperature?: number;
+  /**
+   * Vocabulary/style bias. Not an instruction — the model treats it as if it
+   * were the transcript of the moment BEFORE this audio, which is what makes
+   * it steer spelling and word choice. The documented lever for dialect and
+   * for proper nouns the model would otherwise guess at.
+   */
+  prompt?: string;
 }): Promise<{ text: string; language?: string; segments?: TranscriptionSegment[] }> {
   const { client, toFile } = await getClient();
   const file = await toFile(Buffer.from(opts.bytes), opts.filename, { type: opts.mimeType });
@@ -169,6 +176,7 @@ export async function transcribe(opts: {
     file,
     ...(opts.language ? { language: opts.language } : {}),
     ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+    ...(opts.prompt ? { prompt: opts.prompt } : {}),
     ...(opts.segments
       ? { response_format: "verbose_json", timestamp_granularities: ["segment"] }
       : {}),

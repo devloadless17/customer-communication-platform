@@ -7,6 +7,8 @@ import { AiStateControl } from "../ai/ai-state-control";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import { ViewersEye } from "../viewers-eye";
+import type { ConversationViewer } from "@/features/inbox/contexts/conversation-viewers-context";
 import { useCallApi } from "@/features/calls/call-provider";
 import { AccountLabel } from "@/features/channels/components/account-label";
 import { ContactStagePicker } from "@/features/contacts/components/contact-stage-picker";
@@ -31,15 +33,6 @@ import { AssignmentDropdown } from "./assignment-dropdown";
 import { ConversationMenu } from "./conversation-menu";
 import { StatusDropdown } from "./status-dropdown";
 
-/**
- * Tiny "X is also viewing this" pill. Shown to the right of the contact
- * name when one or more OTHER teammates have this conversation open.
- * Empty list (the common case) renders nothing.
- *
- * Up to 3 avatars; the rest collapse to `+N`. Tooltip on hover lists every
- * viewer by name. Stable identity per-userId so the avatar row doesn't
- * reshuffle on every membership change.
- */
 /**
  * Live presence of a WEBSITE-WIDGET visitor, so an agent knows whether the person
  * is still on the page instead of waiting on a dead thread.
@@ -76,44 +69,6 @@ function VisitorPresenceChip({ present, leftAt }: { present?: boolean | null; le
       <span className="size-1.5 rounded-full bg-muted-foreground/50" />
       {label}
     </span>
-  );
-}
-
-function ConversationViewersPill({ viewers }: { viewers: User[] }) {
-  if (viewers.length === 0) return null;
-  const shown = viewers.slice(0, 3);
-  const extra = viewers.length - shown.length;
-  const title =
-    viewers.length === 1
-      ? `${viewers[0]!.name} is also viewing this chat`
-      : `${viewers.map((v) => v.name).join(", ")} are also viewing this chat`;
-  return (
-    <div
-      className="ml-2 flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-warning-border bg-warning-bg px-2.5 py-1 text-2xs text-warning-fg"
-      title={title}
-      aria-label={title}
-    >
-      <div className="flex shrink-0 -space-x-2">
-        {shown.map((u) => (
-          <Avatar
-            key={u.id}
-            className="size-4 ring-1 ring-warning-bg"
-          >
-            <AvatarFallback
-              className="text-4xs text-white"
-              style={{ backgroundImage: avatarGradient(u.id) }}
-            >
-              {initials(u.name)}
-            </AvatarFallback>
-          </Avatar>
-        ))}
-      </div>
-      {extra > 0 ? (
-        <span className="font-medium">+{extra} viewing</span>
-      ) : (
-        <span className="font-medium">also viewing</span>
-      )}
-    </div>
   );
 }
 
@@ -174,10 +129,10 @@ function ThreadHeaderImpl({
   currentUserName: string;
   /**
    * Other teammates currently viewing this conversation. Empty array = no
-   * pill. Driven by `useConversationViewers` in the parent — already
-   * filtered to exclude the current user.
+   * eye. Driven by `useConversationViewers` in the parent — already filtered
+   * to exclude the current user.
    */
-  otherViewers: User[];
+  otherViewers: ConversationViewer[];
   /** Surface server errors via the app's modal alert. */
   onAlert: (title: string, description?: string) => Promise<void>;
   /** Open the in-conversation search overlay. */
@@ -258,7 +213,8 @@ function ThreadHeaderImpl({
       <div className="min-w-0">
         <div className="flex items-center gap-2">
           <h2 className="truncate text-sm font-semibold">{contactName}</h2>
-          <ConversationViewersPill viewers={otherViewers} />
+          {/* Same eye as the list row — hover names who else is in here. */}
+          <ViewersEye viewers={otherViewers} />
           {channel === "webchatwidget" && (
             <VisitorPresenceChip present={visitorPresent} leftAt={visitorLeftAt} />
           )}

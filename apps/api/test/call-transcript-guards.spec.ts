@@ -25,7 +25,7 @@ import {
   __testing__,
 } from "@/lib/media/call-recording-download";
 
-const { looksLikeRepetitionLoop, isPlausibleLanguage, languagePolicyFrom, isSubstantive, pickBestRendering } =
+const { looksLikeRepetitionLoop, isPlausibleLanguage, languagePolicyFrom, isSubstantive } =
   __testing__;
 
 describe("looksLikeRepetitionLoop", () => {
@@ -109,67 +109,76 @@ describe("language plausibility (validate, never force)", () => {
   });
 });
 
-describe("pickBestRendering — speaker labels never cost words", () => {
-  const seg = (speaker: "Business" | "Customer", text: string, start = 0) => ({
-    id: 0, speaker, start, text,
+describe("buildCallPrompt — dialect + proper-noun bias", () => {
+  it("anchors Lebanese, and puts the anchor LAST so truncation can't eat it", () => {
+    // Measured on phone-grade audio: without this anchor "هلق" comes back as
+    // "حلّك" and "منيح" as "ميح" — near-miss MSA forms, which is exactly what
+    // a reported live transcript looked like. The prompt window keeps the LAST
+    // 224 tokens, so a long product list must not push the anchor off the front.
+    const prompt = languagePolicyFrom({
+      defaultLanguage: "ar",
+      lebaneseDialect: true,
+      companyName: "شركة الاختبار",
+      products: "x".repeat(500),
+      supportedLanguages: ["ar", "en"],
+    }).prompt!;
+    expect(prompt).toContain("هلق");
+    expect(prompt).toContain("منيح");
+    expect(prompt.indexOf("شركة الاختبار")).toBeLessThan(prompt.indexOf("هلق"));
   });
 
-  it("uses the MIX when the isolated legs lost most of the conversation", () => {
-    // The echo case the maintainer identified: two devices in one room, so both
-    // legs carry the same voice and the browser's echo canceller mangles the
-    // microphone leg. The split then yields fragments ("I don't...just...just")
-    // while the mix — what a human hears on playback — is perfectly clear.
-    const split = {
-      text: "Agent: I don't...just...just...",
-      segments: [seg("Business", "I don't...just...just...")],
-    };
-    const mixed = {
-      text: "Hello, test test. Yes I can hear you fine, go ahead please.",
-      segments: [],
-    };
-    expect(pickBestRendering(split, mixed, "c1")).toBe(mixed);
+  it("SHOWS the Arabic/English mixing Lebanese speakers actually use", () => {
+    // An Arabic-ONLY prompt makes the model transliterate English into Arabic
+    // script — measured: "order" → "أوردر", "delivery" → "الدليفري", and
+    // "price" → "البيت" ("the house"), a meaning error. Demonstrating the
+    // mixing in the prompt kept all three in Latin script.
+    const prompt = languagePolicyFrom({
+      defaultLanguage: "ar",
+      lebaneseDialect: true,
+      codeSwitching: true,
+      supportedLanguages: ["ar", "en"],
+    }).prompt!;
+    expect(prompt).toContain("order");
+    expect(prompt).toContain("delivery");
+    expect(prompt).toContain("please");
   });
 
-  it("keeps the SPEAKER-ATTRIBUTED rendering when the split held the words", () => {
-    // Independent legs (a customer on a distant phone). Here the mix is the
-    // lossy one — measured, it can drop an entire speaker — so attribution wins.
-    const split = {
-      text: "Agent: Hello, how can I help?\nCustomer: I want to ask about my order please.",
-      segments: [
-        seg("Business", "Hello, how can I help?"),
-        seg("Customer", "I want to ask about my order please.", 3),
-      ],
-    };
-    const mixed = {
-      text: "Hello, how can I help? I want to ask about my order please.",
-      segments: [],
-    };
-    expect(pickBestRendering(split, mixed, "c2")).toBe(split);
+  it("drops the English examples when code-switching is turned off", () => {
+    const prompt = languagePolicyFrom({
+      defaultLanguage: "ar",
+      lebaneseDialect: true,
+      codeSwitching: false,
+      supportedLanguages: ["ar"],
+    }).prompt!;
+    expect(prompt).not.toContain("order");
+    expect(prompt).toContain("هلق");
   });
 
-  it("does not surrender attribution over a couple of filler words", () => {
-    // Two decodes never agree exactly; a 15% slack keeps the labels.
-    const split = {
-      text: "Agent: Hello how can I help you today",
-      segments: [seg("Business", "Hello how can I help you today")],
-    };
-    const mixed = { text: "Um, hello, how can I help you today, uh", segments: [] };
-    expect(pickBestRendering(split, mixed, "c3")).toBe(split);
+  it("carries the business's own nouns — the words a model otherwise invents", () => {
+    const prompt = languagePolicyFrom({
+      defaultLanguage: "ar",
+      lebaneseDialect: true,
+      companyName: "مطعم الشام",
+      supportedLanguages: ["ar"],
+    }).prompt!;
+    expect(prompt).toContain("مطعم الشام");
   });
 
-  it("returns whichever rendering exists when only one does", () => {
-    const only = { text: "Hello", segments: [] };
-    expect(pickBestRendering(null, only, "c4")).toBe(only);
-    expect(pickBestRendering(only, null, "c5")).toBe(only);
-    expect(pickBestRendering(null, null, "c6")).toBeNull();
+  it("produces NO prompt for a non-Arabic workspace", () => {
+    // A prompt in the wrong language biases against the audio.
+    expect(
+      languagePolicyFrom({ defaultLanguage: "en", supportedLanguages: ["en"] }).prompt,
+    ).toBeNull();
   });
 
-  it("ignores the speaker prefixes when comparing — they are not content", () => {
-    // "Agent: " / "Customer: " inflate the split's text length. Comparing raw
-    // strings would hand it a free win over an equally good mix.
-    const split = { text: "Agent: hi\nCustomer: ok", segments: [seg("Business", "hi"), seg("Customer", "ok", 1)] };
-    const mixed = { text: "hi ok and quite a lot more was actually said here", segments: [] };
-    expect(pickBestRendering(split, mixed, "c7")).toBe(mixed);
+  it("drops the Lebanese wording when the dialect toggle is off", () => {
+    const prompt = languagePolicyFrom({
+      defaultLanguage: "ar",
+      lebaneseDialect: false,
+      supportedLanguages: ["ar"],
+    }).prompt!;
+    expect(prompt).not.toContain("هلق");
+    expect(prompt).toContain("العربية");
   });
 });
 

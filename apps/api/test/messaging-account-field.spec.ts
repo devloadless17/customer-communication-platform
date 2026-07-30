@@ -39,7 +39,7 @@ import type { MetaSendConfig } from "@/lib/providers/config";
 const base = {
   phoneNumberId: "PHONE_1",
   accessToken: "tok",
-  graphVersion: "v25.0",
+  graphVersion: "v26.0",
 } as MetaSendConfig;
 
 describe("when no Messaging Account is configured (every tenant today)", () => {
