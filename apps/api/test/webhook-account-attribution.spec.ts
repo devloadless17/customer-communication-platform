@@ -33,7 +33,7 @@ vi.mock("@/lib/events/bus", async (importOriginal) => {
 });
 
 import { metaProvider } from "@/lib/providers/meta";
-import { ingestEvents } from "@/lib/providers/ingest";
+import { ingestWithRedelivery } from "./_ingest-redelivery";
 import { listContacts, listPeople } from "@/lib/queries";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
@@ -71,7 +71,7 @@ function webhook(entryId: string, field: string, value: Record<string, unknown>)
 async function deliver(payload: unknown) {
   const events = metaProvider.parseWebhook(payload);
   expect(events.length).toBeGreaterThan(0);
-  await ingestEvents(workspaceId, "whatsapp", events, undefined);
+  await ingestWithRedelivery(workspaceId, "whatsapp", events, undefined);
 }
 
 beforeAll(async () => {
@@ -469,7 +469,7 @@ describe("conversation → account binding", () => {
       ],
     });
     expect(events.length).toBeGreaterThan(0);
-    await ingestEvents(workspaceId, "whatsapp", events, connId);
+    await ingestWithRedelivery(workspaceId, "whatsapp", events, connId);
   }
 
   it("stamps the receiving account on the thread, and re-stamps when the customer switches numbers", async () => {
@@ -553,7 +553,7 @@ describe("cross-account broadcast semantics", () => {
           messages: [{ from: phone, id: `wamid.${S}.mig1`, timestamp: `${Math.floor(Date.now() / 1000)}`, type: "text", text: { body: "hi A" } }],
         } }] }],
       });
-      await ingestEvents(workspaceId, "whatsapp", events, connA);
+      await ingestWithRedelivery(workspaceId, "whatsapp", events, connA);
     })();
 
     const contact = await prisma.contact.findFirstOrThrow({
@@ -577,7 +577,7 @@ describe("cross-account broadcast semantics", () => {
           messages: [{ from: phone, id: `wamid.${S}.mig2`, timestamp: `${Math.floor(Date.now() / 1000)}`, type: "text", text: { body: "hi B" } }],
         } }] }],
       });
-      await ingestEvents(workspaceId, "whatsapp", events, connB);
+      await ingestWithRedelivery(workspaceId, "whatsapp", events, connB);
     })();
 
     // ONE thread, not two — the same row, now owned by B.

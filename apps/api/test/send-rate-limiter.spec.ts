@@ -60,6 +60,14 @@ async function take(key: string, rate: number, capacity: number): Promise<number
 const SLOW_RATE = 4;
 const SLOW_REFILL_MS = 1000 / SLOW_RATE;
 
+/**
+ * Rate for tests that must prove a drained bucket STAYS drained, and never sleep
+ * a refill interval. 1/s = one token per second, so no plausible sequence of
+ * local Redis round-trips can refill mid-test. Costs nothing: these tests read
+ * the returned wait value, they do not wait it out.
+ */
+const NO_REFILL_RATE = 1;
+
 beforeAll(async () => {
   await redis.del(KEY, OTHER);
 });
@@ -77,13 +85,16 @@ describe("the bucket limits", () => {
   it("grants exactly `capacity` tokens in one instant, then makes you wait", async () => {
     const capacity = 5;
     const granted: number[] = [];
-    for (let i = 0; i < capacity; i++) granted.push(await take(KEY, 5, capacity));
+    // NO_REFILL_RATE: six sequential round-trips at 5/s can outrun the 200ms
+    // refill on a loaded box, handing the sixth take a freshly minted token and
+    // failing the assertion for a reason that has nothing to do with the bucket.
+    for (let i = 0; i < capacity; i++) granted.push(await take(KEY, NO_REFILL_RATE, capacity));
     // All five immediate — a full bucket must not throttle a campaign opening
     // on an idle number.
     expect(granted).toEqual([0, 0, 0, 0, 0]);
 
     // The sixth is the whole point.
-    const sixth = await take(KEY, 5, capacity);
+    const sixth = await take(KEY, NO_REFILL_RATE, capacity);
     expect(sixth).toBeGreaterThan(0);
   });
 

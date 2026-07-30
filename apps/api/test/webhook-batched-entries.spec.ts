@@ -31,7 +31,7 @@ vi.mock("@/lib/events/bus", async (importOriginal) => {
 
 import { metaProvider } from "@/lib/providers/meta";
 import { messengerProvider } from "@/lib/providers/messenger";
-import { ingestEvents } from "@/lib/providers/ingest";
+import { ingestWithRedelivery } from "./_ingest-redelivery";
 import { groupEventsByInboundAccount } from "@/lib/providers/inbound-accounts";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
@@ -61,7 +61,7 @@ async function deliverWhatsapp(payload: unknown) {
   const events = metaProvider.parseWebhook(payload);
   const grouped = await groupEventsByInboundAccount(workspaceId, "whatsapp", events);
   for (const g of grouped.groups) {
-    await ingestEvents(workspaceId, "whatsapp", g.events, g.channelConnectionId);
+    await ingestWithRedelivery(workspaceId, "whatsapp", g.events, g.channelConnectionId);
   }
   return grouped;
 }
@@ -70,7 +70,7 @@ async function deliverMessenger(payload: unknown) {
   const events = messengerProvider.parseWebhook(payload);
   const grouped = await groupEventsByInboundAccount(workspaceId, "messenger", events);
   for (const g of grouped.groups) {
-    await ingestEvents(workspaceId, "messenger", g.events, g.channelConnectionId);
+    await ingestWithRedelivery(workspaceId, "messenger", g.events, g.channelConnectionId);
   }
   return grouped;
 }
