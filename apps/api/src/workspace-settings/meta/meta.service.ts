@@ -17,7 +17,7 @@ import { MessengerService } from "../messenger/messenger.service";
 import { WhatsappService } from "../whatsapp/whatsapp.service";
 import type { UpdateMetaConnectionInput } from "./meta.schemas";
 
-const GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
+const GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v26.0";
 const GRAPH_BASE = process.env.META_GRAPH_BASE_URL || "https://graph.facebook.com";
 
 interface MetaConnConfig {

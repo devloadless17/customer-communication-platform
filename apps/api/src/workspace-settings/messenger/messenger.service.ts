@@ -17,7 +17,7 @@ import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
 import type { UpdateMessengerConfigInput } from "./messenger.schemas";
 
-const GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
+const GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v26.0";
 const GRAPH_BASE = process.env.META_GRAPH_BASE_URL || "https://graph.facebook.com";
 const CHANNEL = "messenger" as const;
 

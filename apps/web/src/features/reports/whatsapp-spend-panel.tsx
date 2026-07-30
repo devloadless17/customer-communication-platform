@@ -193,14 +193,23 @@ export function WhatsappSpendPanel({ days }: { days: number }) {
 }
 
 function AccountBlock({ account }: { account: WabaAccount }) {
+  // NEVER default the currency. Every cost Meta returns is denominated in that
+  // WABA's own currency, and `account.currency` is null specifically when Meta
+  // did not report it (the read is best-effort and fails soft). Defaulting to USD
+  // rendered a BRL account's R$12,400 as "$12,400.00" — a ~5x understatement of
+  // the bill, presented with no caveat. Two WABAs in one portfolio can legitimately
+  // hold different currencies, so there is no safe fallback: show the bare number
+  // and say the unit is unknown.
   const money = (v: number | null): string | null =>
     v === null
       ? null
-      : new Intl.NumberFormat(undefined, {
-          style: "currency",
-          currency: account.currency || "USD",
-          maximumFractionDigits: 2,
-        }).format(v);
+      : account.currency
+        ? new Intl.NumberFormat(undefined, {
+            style: "currency",
+            currency: account.currency,
+            maximumFractionDigits: 2,
+          }).format(v)
+        : `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(v)} (currency unknown)`;
 
   const totalCost =
     account.totals.messagingCost === null && account.totals.callCost === null

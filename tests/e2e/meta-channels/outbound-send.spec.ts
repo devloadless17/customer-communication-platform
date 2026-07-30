@@ -12,6 +12,15 @@
 import { test, expect } from "@playwright/test";
 
 import { db } from "../_helpers/db";
+
+/**
+ * Read the Graph version from the SAME env var the app resolves its default
+ * from, instead of pinning a literal. These assertions exist to prove the send
+ * goes to the PAGE host with the right body — not to pin a version, and a
+ * hardcoded `/v25.0/` turned every future version bump into a spurious e2e
+ * failure in a spec that has nothing to do with versioning.
+ */
+const GRAPH_V = process.env.META_GRAPH_VERSION ?? "v26.0";
 import {
   seedMetaTestTeam,
   seedSocialConversation,
@@ -60,7 +69,7 @@ test("Messenger send inside the window → RESPONSE to the PSID via the Page hos
   const sends = await mockSends();
   expect(sends).toHaveLength(1);
   const s = sends[0]!;
-  expect(s.path).toBe(`/v25.0/${MSGR_PAGE_ID}/messages`);
+  expect(s.path).toBe(`/${GRAPH_V}/${MSGR_PAGE_ID}/messages`);
   expect(s.body.recipient.id).toBe(psid);
   expect(s.body.messaging_type).toBe("RESPONSE");
   expect(s.body.tag).toBeUndefined();
@@ -109,7 +118,7 @@ test("Instagram send targets the linked Page host with the IGSID recipient", asy
 
   const s = (await mockSends())[0]!;
   // Instagram-via-Facebook-Login sends through the PAGE, not the IG id.
-  expect(s.path).toBe(`/v25.0/${IG_PAGE_ID}/messages`);
+  expect(s.path).toBe(`/${GRAPH_V}/${IG_PAGE_ID}/messages`);
   expect(s.body.recipient.id).toBe(igsid);
   expect(s.body.messaging_type).toBe("RESPONSE");
 });

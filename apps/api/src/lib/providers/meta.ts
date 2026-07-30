@@ -133,6 +133,34 @@ const META_FETCH_MAX_ATTEMPTS = 2; // 1 retry on transient 5xx
 const GRAPH_BASE = process.env.META_GRAPH_BASE_URL || "https://graph.facebook.com";
 
 /**
+ * Follow-up page ceiling for `GET /{wabaId}/message_templates` (limit=200).
+ * Sized to Meta's documented maximum of 6,000 templates per WABA under a
+ * VERIFIED business portfolio (250 when unverified) = 30 pages, plus headroom.
+ * See `fetchTemplates`, which throws rather than returning a truncated catalog.
+ */
+const TEMPLATE_LIST_MAX_PAGES = 40;
+
+/**
+ * Does a Graph 400 mean "you asked for this the wrong SHAPE" (as opposed to a
+ * real data or permission error)? Used to fall back between the edge form
+ * (`GET /{wabaId}/<field>`) and the field-expansion form
+ * (`GET /{wabaId}?fields=<field>...`) for the WABA analytics surfaces.
+ *
+ * Widened 2026-07-30: the pattern was `/unknown path|nonexisting field/`, which
+ * misses the response Meta actually documents for an unsupported edge —
+ * "Unsupported get request. Object with ID * does not exist, cannot be loaded due
+ * to missing permissions, or does not support this operation." (code 100,
+ * subcode 33). Because it never matched, the fallback never fired and three of
+ * the four analytics surfaces surfaced as an empty panel whose reason blamed
+ * Meta. `error parsing graph query` (#2500) covers a malformed modifier list.
+ */
+function isGraphShapeDisagreement(text: string): boolean {
+  return /unknown path|nonexisting field|nonexistent field|unsupported get request|does not support this operation|error parsing graph query/i.test(
+    text,
+  );
+}
+
+/**
  * Per-call fetch options layered on top of `RequestInit`.
  *
  *   retry — opt IN to the transient-5xx/timeout retry. Defaults to FALSE so a
@@ -410,6 +438,12 @@ interface MetaChangeValue {
   // ACCOUNT_RESTRICTION is an active pause with an expiry.
   restriction_info?: Array<{
     restriction_type?: string;
+    /**
+     * The documented human-readable field ("<REMEDIATION_STEPS>") — what the
+     * operator has to DO to lift the restriction. `reason` is not a documented
+     * key on `restriction_info`; it is retained below only as a tolerated alias.
+     */
+    remediation?: string;
     reason?: string;
     /** Epoch seconds the restriction lifts. */
     expiration?: number;
@@ -714,15 +748,24 @@ interface MetaCallingSettings {
 }
 
 interface MetaContact {
-  profile?: { name?: string };
+  /**
+   * `username` lives INSIDE `profile`, alongside `name` — verified 2026-07-30
+   * against Meta's business-scoped-user-ids reference, which shows
+   * `"profile": { "name": …, "username": "<USERNAME>" }`. It was previously
+   * declared as a sibling of `wa_id`, so `contact.username` was always
+   * undefined and the @username — the only human-readable handle a phone-less
+   * BSUID contact has — never reached the inbox.
+   */
+  profile?: { name?: string; username?: string; country_code?: string };
   /** The customer's phone. CONDITIONAL since the 2026 BSUID rollout: Meta omits
    *  it unless we've messaged/called that number in the last 30 days. */
   wa_id?: string;
   /** The business-scoped user id (BSUID), e.g. "LB.946402411360800". Present on
    *  inbound webhooks since the April-2026 rollout, whether or not the customer
-   *  enabled a username. This — not `messages[]` — is where Meta puts it. */
+   *  enabled a username. Also stamped on `messages[]` as `from_user_id`. */
   user_id?: string;
-  /** Set only for customers who enabled the optional WhatsApp @username (2026). */
+  /** Kept for wire tolerance only — the documented location is `profile.username`
+   *  above. Read as a fallback so a Meta-side move can't silently blank it. */
   username?: string;
   /** Parent portfolio BSUID ("US.ENT.…") for multi-portfolio businesses. */
   parent_user_id?: string;
@@ -868,10 +911,23 @@ interface MetaMessage {
    * conversation with someone who never messaged the business.
    */
   group_id?: string;
-  // NOTE: BSUID / @username do NOT live here. Meta stamps them on `contacts[]`
-  // as `user_id` / `username` (see MetaContact) — the parser reads them from
-  // there. `messages[].from` carries the phone (or the BSUID once Meta stops
-  // sending the phone for a cold contact).
+  /**
+   * The customer's BSUID, stamped directly on the message row.
+   *
+   * Corrected 2026-07-30 against Meta's business-scoped-user-ids reference,
+   * which marks both of these ADDED on `messages[]` and marks `wa_id` as
+   * carrying a "New empty value". The previous note here claimed the opposite —
+   * that BSUIDs live only on `contacts[]` and that `from` becomes the BSUID for
+   * a cold contact. Both halves were wrong, and that comment was the stated
+   * reason the message path read only `from`: for a username-adopting customer
+   * Meta EMPTIES/omits `from` and `contacts[].wa_id`, so keying off `from` alone
+   * dropped the inbound outright. The call path already carries the correct
+   * fallback chain (see `parseMetaCall`) after the identical bug made inbound
+   * callers invisible; the message path was never given it.
+   */
+  from_user_id?: string;
+  /** Parent portfolio BSUID ("US.ENT.…") for multi-portfolio businesses. */
+  from_parent_user_id?: string;
   // Present on Coexistence echo/history rows the BUSINESS sent: the CUSTOMER's
   // number. Absent on ordinary inbound `messages[]` (where `from` is already
   // the customer).
@@ -1923,19 +1979,39 @@ function parseChannelHealthUpdate(
         r.restriction_type?.includes("CALLING"),
       );
       // Meta can pause each direction independently and may list both in one
-      // webhook. Prefer the BUSINESS_INITIATED entry: its window is what gates
-      // OUR outbound calls, while RESTRICTED_USER_INITIATED_CALLING (and the
-      // low-pickup _CALL_BUTTON_HIDDEN variant) only pause inbound + the call
-      // icon — see the placeCall gate, which lets outbound proceed for those.
+      // webhook. Prefer the entry that gates OUR outbound calls, because
+      // RESTRICTED_USER_INITIATED_CALLING (and the low-pickup
+      // _CALL_BUTTON_HIDDEN variant) only pause inbound + the call icon — see
+      // the placeCall gate, which lets outbound proceed for those.
+      //
+      // BEWARE: Meta's own enum mixes prefixes. The combined restriction is
+      // spelled `RESTRICTED_BIZ_INITIATED_AND_USER_INITIATED_CALLING` ("Business
+      // cannot make or receive calls") while the outbound-only one is
+      // `RESTRICTED_BUSINESS_INITIATED_CALLING` ("Business cannot initiate
+      // outbound calls"). Matching only "BUSINESS_INITIATED" therefore MISSED the
+      // strongest restriction of the two, so when it arrived alongside the
+      // user-initiated entry the arbitrary `[0]` could pick the inbound-only one
+      // and outbound calls were left ungated — a week of unexplained hard call
+      // failures behind a banner that said inbound-only. Check the combined form
+      // first, then either outbound spelling.
+      const isBothDirections = (t: string) =>
+        t.includes("BIZ_INITIATED_AND_USER_INITIATED") ||
+        t.includes("BUSINESS_INITIATED_AND_USER_INITIATED");
+      const isOutbound = (t: string) =>
+        t.includes("BIZ_INITIATED") || t.includes("BUSINESS_INITIATED");
       const calling =
-        callingRestrictions.find((r) =>
-          r.restriction_type?.includes("BUSINESS_INITIATED"),
-        ) ?? callingRestrictions[0];
+        callingRestrictions.find((r) => isBothDirections(r.restriction_type ?? "")) ??
+        callingRestrictions.find((r) => isOutbound(r.restriction_type ?? "")) ??
+        callingRestrictions[0];
       if (calling) {
         matched = true;
         health.callingRestrictedUntil = expiry(calling);
         health.callingRestrictionType = calling.restriction_type ?? null;
-        health.callingRestrictionReason = calling.reason ?? null;
+        // The documented human field is `remediation` ("<REMEDIATION_STEPS>"),
+        // not `reason` — reading only `reason` left this ALWAYS null, dropping the
+        // one field that tells the operator how to get calling back. `reason` is
+        // kept as an alias so an older pinned version still populates it.
+        health.callingRestrictionReason = calling.remediation ?? calling.reason ?? null;
       }
       // Policy/spam MESSAGING enforcement (the escalation ladder in the
       // policy-enforcement guide). Matched by substring, not exact name, so a
@@ -3243,12 +3319,24 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           const phoneDigits = rawFrom.replace(/^\+/, "");
           const fromIsPhone = phoneDigits.length > 0 && !/\D/.test(phoneDigits);
           const phone = fromIsPhone ? phoneDigits : undefined;
-          const contact = contactByKey.get(rawFrom);
-          // BSUID + @username come off `contacts[]`; fall back to `from` when it
-          // IS the BSUID (Meta omitted the phone for a cold contact).
+          // `contactByKey` is keyed by wa_id/user_id, so an EMPTY `from` misses it
+          // entirely — fall back to the sole `contacts[]` entry, which is where the
+          // identity still is. Meta empties/omits BOTH `from` and `contacts[].wa_id`
+          // for a customer who adopted a @username outside the 30-day phone window.
+          const contact = contactByKey.get(rawFrom) ?? (rawFrom ? undefined : value.contacts?.[0]);
+          // Resolve the BSUID the same way the CALL path does (see `parseMetaCall`):
+          // `from` when it is itself the BSUID, else the dedicated message-level
+          // field, else `contacts[]`. Reading only the first of those dropped a
+          // username-adopter's message outright — no row, no unread, no 24h window,
+          // and a 200 that stops Meta ever redelivering it.
           const bsuid =
-            contact?.user_id?.trim() || (!fromIsPhone && rawFrom ? rawFrom : undefined);
-          const username = contact?.username?.trim() || undefined;
+            (!fromIsPhone && rawFrom ? rawFrom : undefined) ??
+            m.from_user_id?.trim() ??
+            contact?.user_id?.trim() ??
+            undefined;
+          // Documented location is `profile.username`; the top-level read is wire
+          // tolerance only (see MetaContact).
+          const username = contact?.profile?.username?.trim() || contact?.username?.trim() || undefined;
           if (!externalId || (!phone && !bsuid)) continue;
           const contactName = contact?.profile?.name ?? null;
           // Shared identity fragment spread into every inbound-message emit
@@ -4345,11 +4433,22 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
     const results: ProviderTemplate[] = [];
     let next: string | null = url.toString();
-    // Hard cap on follow-up pages: if a team has > 1000 templates something's
-    // wrong upstream, and pagination loops are the easy way to hang a server.
+    // Page ceiling sized to Meta's real maximum, not a guess: "if a parent
+    // business portfolio is unverified, each of its WhatsApp Business Accounts is
+    // limited to 250 message templates. However, if the portfolio is verified …
+    // up to 6,000 templates." At limit=200 that is 30 pages, so 40 leaves
+    // headroom while still bounding the loop.
+    //
+    // The ceiling was 5 (=1000 templates) and the loop RETURNED the truncated
+    // list. `reconcileWaba` documents its input as complete-or-thrown and
+    // deleteMany()s every local row absent from it, so a verified portfolio's
+    // WABA holding more than 1000 templates had the remainder silently and
+    // permanently deleted on first sync — taking `variableBindings`, which Meta
+    // cannot give back, with them. Hence the throw below: truncation must be an
+    // error, never a short list, because the caller cannot tell the difference.
     let pages = 0;
 
-    while (next && pages < 5) {
+    while (next && pages < TEMPLATE_LIST_MAX_PAGES) {
       pages += 1;
       // GET — idempotent; keep the transient-blip retry.
       const res = await metaFetch(next, {
@@ -4374,6 +4473,15 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         if (t) results.push(t);
       }
       next = json.paging?.next ?? null;
+    }
+
+    // Still more pages than the ceiling allows: refuse rather than hand back a
+    // partial catalog. `reconcileWaba` prunes against whatever it is given, so a
+    // silent short list is silent permanent data loss; a throw only costs one
+    // skipped sweep, and the sweeper already reports it in `failed[]`.
+    if (next) {
+      const detail = `meta fetchTemplates truncated: more than ${TEMPLATE_LIST_MAX_PAGES * 200} templates on this WABA`;
+      throw new MetaSendError(detail, 502, detail);
     }
 
     return results;
@@ -4996,7 +5104,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         // a shape disagreement, not a data refusal — fall back to the field-
         // expansion form (`?fields=template_analytics.<...>`) once, on the
         // first page only, rather than failing a fetch the account can serve.
-        if (page === 0 && res.status === 400 && /unknown path|nonexisting field|nonexistent field/i.test(text)) {
+        if (page === 0 && res.status === 400 && isGraphShapeDisagreement(text)) {
           return fetchTemplateAnalyticsViaFieldExpansion(
             { ids, startSec, endSec },
             config,
@@ -7382,7 +7490,7 @@ async function fetchWabaAnalyticsEdge(
       if (
         page === 0 &&
         res.status === 400 &&
-        /unknown path|nonexisting field|nonexistent field/i.test(text)
+        isGraphShapeDisagreement(text)
       ) {
         return fetchWabaAnalyticsField(field, fieldSpec, config);
       }

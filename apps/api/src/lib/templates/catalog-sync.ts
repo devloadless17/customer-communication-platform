@@ -191,8 +191,16 @@ async function backfillLibraryParamTypes(
     byName.set(name, ids);
   }
   for (const [name, ids] of byName) {
-    const blueprints = await provider.fetchTemplateLibrary({ name }, config);
-    const types = blueprints[0]?.bodyParamTypes ?? [];
+    // `name` is NOT a documented query parameter on `/message_template_library`
+    // (Meta documents only search/topic/usecase/industry/language), and Graph
+    // silently ignores unrecognised GET params — so filtering by it no-op'd and
+    // `blueprints[0]` was an ARBITRARY library template. Its `bodyParamTypes`
+    // were then persisted onto our rows and govern `validateTemplateParamValues`
+    // on every future send, rejecting valid values as `param_type_mismatch` with
+    // no discoverable cause. Search, then match the name exactly — the same shape
+    // the sibling call site in `whatsapp.service.ts` already uses.
+    const blueprints = await provider.fetchTemplateLibrary({ search: name }, config);
+    const types = blueprints.find((t) => t.name === name)?.bodyParamTypes ?? [];
     if (types.length === 0) continue;
     await db.messageTemplate.updateMany({
       where: { workspaceId, id: { in: ids } },

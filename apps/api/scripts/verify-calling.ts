@@ -7,7 +7,7 @@ import {
 } from "@/lib/providers/meta-social";
 
 const MOCK = process.env.META_GRAPH_BASE_URL ?? "http://127.0.0.1:4100";
-const opts = { accountId: "PAGE1", accessToken: "tok", graphVersion: "v26.0" };
+const opts = { accountId: "PAGE1", accessToken: "tok", graphVersion: process.env.META_GRAPH_VERSION ?? "v26.0" };
 
 async function main() {
   await fetch(`${MOCK}/__mock/reset`, { method: "POST" });

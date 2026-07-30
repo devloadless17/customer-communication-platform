@@ -210,7 +210,7 @@ export class ProviderNotConfiguredError extends Error {
   }
 }
 
-const DEFAULT_GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
+const DEFAULT_GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v26.0";
 
 /**
  * In-process credential cache.

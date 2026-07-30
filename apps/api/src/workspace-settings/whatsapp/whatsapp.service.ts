@@ -74,7 +74,18 @@ import type {
   UpdateQrCodeInput,
 } from "./whatsapp.schemas";
 
-const GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
+const GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v26.0";
+/**
+ * Graph origin, honouring `META_GRAPH_BASE_URL` exactly like every sibling
+ * service (`meta`, `messenger`, `instagram`) and the two providers.
+ *
+ * This file previously built three URLs against a hardcoded
+ * `https://graph.facebook.com`, which meant the e2e mock-Graph server could not
+ * intercept connect-validation, the WABA phone-number ownership assertion, or
+ * `/register` — i.e. the three multi-account ONBOARDING calls, leaving them the
+ * least-tested real Graph requests in the system.
+ */
+const GRAPH_BASE = process.env.META_GRAPH_BASE_URL || "https://graph.facebook.com";
 
 /**
  * Lookback windows Meta's template-comparison endpoint accepts. Not a clamp — a
@@ -342,7 +353,7 @@ export class WhatsappService {
       // name voids the certificate) and `status`/`code_verification_status`
       // (an unregistered number saves cleanly but fails every send).
       const res = await fetch(
-        `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(phoneNumberId)}` +
+        `${GRAPH_BASE}/${GRAPH_VERSION}/${encodeURIComponent(phoneNumberId)}` +
           `?fields=display_phone_number,verified_name,name_status,code_verification_status,status`,
         {
           headers: { authorization: `Bearer ${accessToken}` },
@@ -1084,7 +1095,7 @@ export class WhatsappService {
     let numbers: Array<{ id?: string }>;
     try {
       const res = await fetch(
-        `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(wabaId)}/phone_numbers?fields=id&limit=200`,
+        `${GRAPH_BASE}/${GRAPH_VERSION}/${encodeURIComponent(wabaId)}/phone_numbers?fields=id&limit=200`,
         {
           headers: { authorization: `Bearer ${accessToken}` },
           signal: AbortSignal.timeout(20_000),
@@ -1149,7 +1160,7 @@ export class WhatsappService {
     let res: Response;
     try {
       res = await fetch(
-        `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(config.phoneNumberId)}/register`,
+        `${GRAPH_BASE}/${GRAPH_VERSION}/${encodeURIComponent(config.phoneNumberId)}/register`,
         {
           method: "POST",
           headers: {

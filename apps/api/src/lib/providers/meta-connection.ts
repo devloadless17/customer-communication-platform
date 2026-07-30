@@ -40,7 +40,7 @@ interface Cipher {
   graphVersion: string;
 }
 
-const DEFAULT_GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
+const DEFAULT_GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v26.0";
 const TTL_MS = 60_000;
 const CACHE_MAX = 10_000;
 const SWEEP_MS = 5 * 60_000;

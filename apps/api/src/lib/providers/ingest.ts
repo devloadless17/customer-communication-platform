@@ -3564,22 +3564,31 @@ export async function ingestHistoricalMessage(
           lastName,
           countryCode: getCountryFromPhone(msg.contactPhone),
           stageId: defaultStageId,
-          // Historical inbound sets lastInboundAt so the 24h-window UI is
-          // accurate for a thread that only exists via backfill.
-          ...(msg.direction === "in" ? { lastInboundAt: msg.timestamp } : {}),
+          // Deliberately NOT setting lastInboundAt — see below.
         },
         select: { id: true },
       });
       contactId = createdContact.id;
-    } else if (msg.direction === "in") {
-      await tx.contact.updateMany({
-        where: {
-          id: contactId,
-          OR: [{ lastInboundAt: null }, { lastInboundAt: { lt: msg.timestamp } }],
-        },
-        data: { lastInboundAt: msg.timestamp },
-      });
     }
+    // A Coexistence HISTORY backfill must NEVER open a customer-service window.
+    // Meta: "Customer service windows will only be opened when a WhatsApp user
+    // messages a business customer who is already onboarded onto Cloud API. If a
+    // WhatsApp user messages a business just prior to the business being onboarded
+    // onto Cloud API, the business can only respond with a template message, since
+    // no customer service was opened."
+    //
+    // The history webhook delivers exactly that pre-onboarding conversation
+    // (phase 0 runs backwards from the onboarding instant), so phase 0 routinely
+    // contains inbounds from minutes before onboarding. Stamping lastInboundAt
+    // from them made the composer show an OPEN 24h window on the first day of
+    // every Coexistence onboarding, accept a free-form reply, and have Meta reject
+    // it as template-required. A backfilled thread is closed by construction.
+    //
+    // The inverse is already correct and stays correct: business-app sends do not
+    // extend the window either ("Messages sent from the WhatsApp Business app are
+    // not subject to the customer service window and do not create, extend, or
+    // affect Cloud API conversation windows"), and the echo path writes no
+    // lastInboundAt.
 
     const existingConvo = await tx.conversation.findFirst({
       where: { workspaceId, contactId },

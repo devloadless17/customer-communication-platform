@@ -384,7 +384,7 @@ services:
       MAIL_SMTP_USER: ${MAIL_SMTP_USER:-}
       MAIL_SMTP_PASSWORD: ${MAIL_SMTP_PASSWORD:-}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
-      META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v25.0}
+      META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v26.0}
       # Sign every Meta Graph call with `appsecret_proof` (HMAC of the access
       # token, keyed by that account's own app secret) so a stolen token cannot be
       # replayed from elsewhere. Additive: Meta accepts a correct proof whether or

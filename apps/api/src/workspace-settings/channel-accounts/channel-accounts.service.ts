@@ -30,7 +30,7 @@ import { DbService } from "../../db/db.service";
 export type AccountChannel = "whatsapp" | "messenger" | "instagram";
 
 /** Same default the channel services use; Graph version is a non-secret env. */
-const GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
+const GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v26.0";
 
 export interface ChannelAccountDto {
   id: string;
