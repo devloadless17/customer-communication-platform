@@ -127,6 +127,8 @@ import {
 import { TicketsService } from "@/tickets/tickets.service";
 import {
   AddEscalationCommentSchema,
+  CreateTicketViewSchema,
+  UpdateTicketViewSchema,
   CreateTicketFieldSchema,
   AddTicketNoteSchema,
   CreateTicketSchema,
@@ -137,6 +139,8 @@ import {
   UpdateTicketSchema,
   UpsertSlaPolicySchema,
   type AddEscalationCommentInput,
+  type CreateTicketViewInput,
+  type UpdateTicketViewInput,
   type CreateTicketFieldInput,
   type AddTicketNoteInput,
   type CreateTicketInput,
@@ -1119,6 +1123,56 @@ export class ExternalV1Controller {
     return { counts };
   }
 
+  /** Saved ticket views. Static segment — before `tickets/:id`. */
+  @Get("tickets/views")
+  @RequireScope("read:tickets")
+  async listTicketViewsV1(@CurrentApiKey() auth: ApiKeyContext) {
+    // An API key has no agent identity, so it sees the SHARED views only (a
+    // personal view belongs to one person, and "" matches nobody). Role
+    // "admin": a scoped key is trusted like an integration, the same call the
+    // delete route already makes.
+    return this.tickets.listViews(auth.workspaceId, "", "admin");
+  }
+
+  @Post("tickets/views")
+  @RequireScope("write:tickets")
+  async createTicketViewV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(CreateTicketViewSchema)) body: CreateTicketViewInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    // Forced SHARED: a key has no person to own a personal view, and one
+    // created with a null author would be visible to nobody.
+    return this.tickets.createView(auth.workspaceId, "", "admin", {
+      ...body,
+      visibility: "shared",
+    });
+  }
+
+  @Patch("tickets/views/:viewId")
+  @RequireScope("write:tickets")
+  async updateTicketViewV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("viewId") viewId: string,
+    @Body(zBody(UpdateTicketViewSchema)) body: UpdateTicketViewInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    return this.tickets.updateView(auth.workspaceId, "", "admin", viewId, body);
+  }
+
+  @Delete("tickets/views/:viewId")
+  @RequireScope("write:tickets")
+  async deleteTicketViewV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("viewId") viewId: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    return this.tickets.deleteView(auth.workspaceId, "", "admin", viewId);
+  }
+
   /** Sibling workspaces a ticket can be escalated to (id + name only).
    *  Static segment — declared before `tickets/:id` so it isn't captured. */
   @Get("tickets/escalation-targets")
@@ -1213,7 +1267,7 @@ export class ExternalV1Controller {
     return this.tickets.escalate(auth.workspaceId, { apiKeyId: auth.apiKeyId }, id, body);
   }
 
-  /** A comment BOTH workspaces of the escalation pair see (unlike /notes). */
+  /** A comment every workspace with access to the ticket sees (unlike /notes). */
   @Post("tickets/:id/escalation-comments")
   @RequireScope("write:tickets")
   async addEscalationCommentV1(
@@ -1223,11 +1277,46 @@ export class ExternalV1Controller {
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
     this.guardChainDepth(xCcpDepth);
-    return this.tickets.addEscalationComment(
+    // No files on the /v1 comment route: a partner posts JSON, and a multipart
+    // API surface for an integration nobody asked for is scope we would have to
+    // keep working. The in-app composer covers files.
+    return this.tickets.addComment(auth.workspaceId, { apiKeyId: auth.apiKeyId }, id, body.body);
+  }
+
+  /** Revoke a workspace's access to a shared ticket. */
+  @Delete("tickets/:id/shares/:guestWorkspaceId")
+  @RequireScope("write:tickets")
+  async revokeTicketShareV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Param("guestWorkspaceId") guestWorkspaceId: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    return this.tickets.revokeShare(
       auth.workspaceId,
       { apiKeyId: auth.apiKeyId },
       id,
-      body.body,
+      guestWorkspaceId,
+    );
+  }
+
+  /** Remove one attachment from a ticket. (Uploads stay in-app — see the
+   *  comment on the /v1 comment route.) */
+  @Delete("tickets/:id/attachments/:attachmentId")
+  @RequireScope("write:tickets")
+  async removeTicketAttachmentV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Param("attachmentId") attachmentId: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    return this.tickets.removeAttachment(
+      auth.workspaceId,
+      { apiKeyId: auth.apiKeyId },
+      id,
+      attachmentId,
     );
   }
 

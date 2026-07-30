@@ -99,6 +99,9 @@ export function TicketsBoardClient({
   const [bulkBusy, setBulkBusy] = useState(false);
 
   const view = params.get("view");
+  // A saved view scopes the board server-side; the chips below then narrow
+  // further, which is why `viewId` is sent alongside them rather than instead.
+  const viewId = params.get("viewId");
   const statusParam = params.get("status") as TicketStatus | null;
   const assignee = view === "mine" ? "me" : view === "unassigned" ? "none" : null;
   const breachedOnly = view === "breached";
@@ -125,8 +128,9 @@ export function TicketsBoardClient({
     if (breachedOnly) p.set("breached", "true");
     if (sharedOnly) p.set("shared", "true");
     if (debouncedSearch) p.set("q", debouncedSearch);
+    if (viewId) p.set("viewId", viewId);
     return p;
-  }, [assignee, teamFilter, priority, breachedOnly, sharedOnly, debouncedSearch, columns]);
+  }, [assignee, teamFilter, priority, breachedOnly, sharedOnly, debouncedSearch, viewId, columns]);
 
   const load = useCallback(async () => {
     const token = ++requestToken.current;
@@ -301,6 +305,58 @@ export function TicketsBoardClient({
     }
   };
 
+  /**
+   * Save what is on screen as a named view.
+   *
+   * Captures the ACTIVE narrowing only — the chips and the search box, not the
+   * status columns, because a view that pinned columns would fight the board's
+   * own layout. A shared view is team configuration; personal is the default so
+   * an experiment does not clutter everyone's sidebar.
+   */
+  const saveCurrentView = async () => {
+    const name = window.prompt("Name this view (e.g. Urgent · unclaimed)")?.trim();
+    if (!name) return;
+    const shared = window.confirm(
+      "Share this view with the whole workspace?\n\nOK = shared, Cancel = just for you.",
+    );
+    setBulkBusy(true);
+    try {
+      const res = await apiFetch("/api/tickets/views", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name,
+          visibility: shared ? "shared" : "personal",
+          filters: {
+            ...(priority ? { priority: [priority] } : {}),
+            ...(teamFilter ? { team: teamFilter } : {}),
+            ...(assignee ? { assignee } : {}),
+            ...(breachedOnly ? { breachedOnly: true } : {}),
+            ...(sharedOnly ? { sharedWithUsOnly: true } : {}),
+            ...(debouncedSearch ? { query: debouncedSearch } : {}),
+          },
+        }),
+      });
+      if (res.status === 409) {
+        toast.error("A view with that name already exists here.");
+        return;
+      }
+      if (!res.ok) {
+        const d = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
+        throw new Error(d.detail || d.error || "Couldn't save the view");
+      }
+      toast.success(`Saved “${name}” — it's in the sidebar`);
+      // The sidebar loads its list on mount, so a refresh is what surfaces the
+      // new entry. Cheaper and simpler than lifting the list into shared state
+      // for something saved a handful of times per workspace.
+      window.location.reload();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't save the view");
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   const toggleSelected = (id: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -355,6 +411,19 @@ export function TicketsBoardClient({
             className="cursor-pointer text-2xs text-muted-foreground hover:text-foreground"
           >
             Clear
+          </button>
+        ) : null}
+        {/* Only offered when there IS a narrowing to save — a "Save view" button
+            on an unfiltered board saves nothing. */}
+        {!viewId &&
+        (priority || teamFilter || assignee || breachedOnly || sharedOnly || debouncedSearch) ? (
+          <button
+            type="button"
+            disabled={bulkBusy}
+            onClick={() => void saveCurrentView()}
+            className="ml-auto h-8 cursor-pointer rounded-md border px-3 text-xs font-medium disabled:opacity-50"
+          >
+            Save as view
           </button>
         ) : null}
       </div>

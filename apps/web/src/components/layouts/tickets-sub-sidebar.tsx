@@ -7,6 +7,7 @@ import {
   CircleDot,
   Inbox,
   PauseCircle,
+  Filter,
   Settings2,
   User2,
   Users,
@@ -49,12 +50,19 @@ export function TicketsSubSidebar() {
   const pathname = usePathname();
   const params = useSearchParams();
   const [counts, setCounts] = useState<TicketCounts | null>(null);
+  const [views, setViews] = useState<Array<{ id: string; name: string }>>([]);
 
   // Only light a view on the board itself — a ticket detail page shouldn't
   // leave a filter looking selected.
   const onBoard = pathname === "/tickets";
+  const viewIdParam = onBoard ? params.get("viewId") : null;
+  // A saved view being active means no built-in is: they are alternative
+  // scopings of the same board, and lighting both reads as "two filters".
   const isView = (v: string | null, s: string | null) =>
-    onBoard && (params.get("view") ?? null) === v && (params.get("status") ?? null) === s;
+    onBoard &&
+    !viewIdParam &&
+    (params.get("view") ?? null) === v &&
+    (params.get("status") ?? null) === s;
 
   useEffect(() => {
     let alive = true;
@@ -70,6 +78,18 @@ export function TicketsSubSidebar() {
       }
     };
     void load();
+    // Saved views change when someone SAVES one, not per ticket — loaded once
+    // and refreshed by navigation rather than on every `ticket:changed`.
+    void (async () => {
+      try {
+        const res = await apiFetch("/api/tickets/views");
+        if (!res.ok) return;
+        const body = (await res.json()) as { views: Array<{ id: string; name: string }> };
+        if (alive) setViews(body.views ?? []);
+      } catch {
+        // Best-effort chrome.
+      }
+    })();
     const socket = getClientSocket();
     const onChange = () => {
       if (timer) clearTimeout(timer);
@@ -125,6 +145,24 @@ export function TicketsSubSidebar() {
             active={isView("shared", null)}
             trailing={badge(counts.sharedWithUs)}
           />
+        ) : null}
+        {/* Saved views — the named queries a department lives in. Rendered
+            after the built-ins because those are the universal ones. */}
+        {views.length > 0 ? (
+          <>
+            <div className="mt-2 px-2 pb-1 text-3xs font-medium uppercase tracking-wider text-muted-foreground">
+              Saved views
+            </div>
+            {views.map((v) => (
+              <SubSidebarItem
+                key={v.id}
+                href={`/tickets?viewId=${v.id}`}
+                label={v.name}
+                leading={<Filter className="size-4" />}
+                active={viewIdParam === v.id}
+              />
+            ))}
+          </>
         ) : null}
         <SubSidebarItem
           href="/tickets?view=breached"

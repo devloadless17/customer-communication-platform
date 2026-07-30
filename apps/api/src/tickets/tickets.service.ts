@@ -41,6 +41,14 @@ import {
   removeTicketAttachment,
 } from "@/lib/tickets/attachments";
 import { ticketByIdWhere } from "@/lib/tickets/access";
+import {
+  createTicketView,
+  deleteTicketView,
+  getTicketViewFilters,
+  listTicketViews,
+  ticketViewToFilters,
+  updateTicketView,
+} from "@/lib/tickets/views";
 import type { Role } from "@ccp/shared/types";
 import {
   getTicket,
@@ -56,11 +64,13 @@ import { DbService } from "../db/db.service";
 import type {
   CreateTicketFieldInput,
   CreateTicketInput,
+  CreateTicketViewInput,
   EscalateTicketInput,
   ListTicketsQuery,
   TicketSettingsInput,
   UpdateTicketFieldInput,
   UpdateTicketInput,
+  UpdateTicketViewInput,
   UpsertSlaPolicyInput,
 } from "./tickets.schemas";
 
@@ -156,7 +166,17 @@ export class TicketsService {
     // to apply it is how this control has silently died before.
     const restrictedTo = this.restriction(viewer) ? viewerUserId : undefined;
 
+    // A saved view's criteria go UNDERNEATH the explicit query params: the view
+    // is the board you opened, the chips are what you then narrowed by. An
+    // unknown/foreign view id contributes nothing rather than 404ing the board
+    // (getTicketViewFilters is scoped to what this agent may SEE, so a
+    // colleague's personal view id simply resolves to null).
+    const viewFilters = query.viewId
+      ? await getTicketViewFilters(this.db, workspaceId, viewerUserId, query.viewId)
+      : null;
+
     return listTickets(this.db, workspaceId, {
+      ...(viewFilters ? ticketViewToFilters(viewFilters, viewerUserId) : {}),
       ...this.filters(query),
       ...(assignedUserId !== undefined ? { assignedUserId } : {}),
       ...(assignedTeamId !== undefined ? { assignedTeamId } : {}),
@@ -316,6 +336,75 @@ export class TicketsService {
       throw new BadRequestException({ error: "empty_note" });
     }
     throw new NotFoundException({ error: outcome.reason });
+  }
+
+  // ---- Saved views ----
+
+  async listViews(workspaceId: string, viewerUserId: string, role: string) {
+    return { views: await listTicketViews(this.db, workspaceId, viewerUserId, role) };
+  }
+
+  async createView(
+    workspaceId: string,
+    viewerUserId: string,
+    role: string,
+    body: CreateTicketViewInput,
+  ) {
+    const outcome = await createTicketView(this.db, {
+      workspaceId,
+      viewerUserId,
+      role,
+      name: body.name,
+      ...(body.color ? { color: body.color } : {}),
+      ...(body.icon ? { icon: body.icon } : {}),
+      visibility: body.visibility,
+      filters: body.filters,
+    });
+    if (outcome.ok) return { view: outcome.view };
+    if (outcome.reason === "name_taken") {
+      throw new ConflictException({
+        error: "name_taken",
+        detail: "A view with that name already exists here.",
+      });
+    }
+    throw new NotFoundException({ error: outcome.reason });
+  }
+
+  async updateView(
+    workspaceId: string,
+    viewerUserId: string,
+    role: string,
+    id: string,
+    body: UpdateTicketViewInput,
+  ) {
+    const outcome = await updateTicketView(this.db, {
+      workspaceId,
+      viewerUserId,
+      role,
+      id,
+      ...body,
+    });
+    if (outcome.ok) return { view: outcome.view };
+    if (outcome.reason === "name_taken") {
+      throw new ConflictException({ error: "name_taken" });
+    }
+    if (outcome.reason === "forbidden") {
+      throw new ForbiddenException({
+        error: "forbidden",
+        detail:
+          "Only the person who created this view — or an admin, for a shared one — can change it.",
+      });
+    }
+    throw new NotFoundException({ error: "view_not_found" });
+  }
+
+  async deleteView(workspaceId: string, viewerUserId: string, role: string, id: string) {
+    const outcome = await deleteTicketView(this.db, { workspaceId, viewerUserId, role, id });
+    if (outcome.ok) return { ok: true as const };
+    if (outcome.reason === "forbidden") {
+      throw new ForbiddenException({ error: "forbidden" });
+    }
+    throw new NotFoundException({ error: "view_not_found" });
   }
 
   // ---- Cross-workspace escalation ----

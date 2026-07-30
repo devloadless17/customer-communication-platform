@@ -20,6 +20,7 @@
  *   pnpm --filter @ccp/api exec vitest run test/tickets.spec.ts
  */
 import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 
 import { PrismaClient } from "@prisma/client";
 import { createTestPrismaClient } from "./_prisma";
@@ -36,6 +37,13 @@ import {
   updateTicket,
 } from "@/lib/tickets/mutations";
 import { listTickets } from "@/lib/tickets/queries";
+import {
+  createTicketView,
+  getTicketViewFilters,
+  listTicketViews,
+  ticketViewToFilters,
+  updateTicketView,
+} from "@/lib/tickets/views";
 import { setSharedDb } from "@/lib/db";
 import { computeDueDates, dueAt } from "@/lib/tickets/sla";
 
@@ -650,7 +658,10 @@ describe("assignee inheritance", () => {
 
   it("NEVER takes a ticket away from whoever already owns it", async () => {
     const other = await prisma.user.create({
-      data: { name: "TK Other", email: `tk-other-${S}@example.test`, organizationId: orgId },
+      // randomUUID, not the run marker: `User.email` is globally unique across
+      // the deployment and this spec shares a dev DB with concurrent sessions,
+      // so a time-derived local part can collide with another run's.
+      data: { name: "TK Other", email: `tk-other-${randomUUID()}@example.test`, organizationId: orgId },
       select: { id: true },
     });
     await prisma.workspaceMember.create({
@@ -827,6 +838,133 @@ describe("ticket search", () => {
     expect(wrong.tickets.map((t) => t.id)).not.toContain(opened.ticket.id);
     const right = await listTickets(db, workspaceId, { query: marker, priority: ["low"] });
     expect(right.tickets.map((t) => t.id)).toContain(opened.ticket.id);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SAVED VIEWS. The named query a department lives in. The rule that matters:
+// criteria are ONE document turned into filters in ONE place, and "assigned to
+// me" means the READER — not whoever saved the view.
+// ---------------------------------------------------------------------------
+
+describe("saved ticket views", () => {
+  it("scopes the board, and resolves `me` to the READER not the author", async () => {
+    const other = await prisma.user.create({
+      // randomUUID, not the run marker: `User.email` is globally unique across
+      // the deployment and this spec shares a dev DB with concurrent sessions,
+      // so a time-derived local part can collide with another run's.
+      data: { name: "TK Other", email: `tk-other-${randomUUID()}@example.test`, organizationId: orgId },
+      select: { id: true },
+    });
+    await prisma.workspaceMember.create({
+      data: { userId: other.id, workspaceId, role: "agent" },
+    });
+
+    const mine = await createTicket(db, {
+      workspaceId,
+      conversationId: await makeConversation(),
+      actor: { userId },
+      assignedUserId: userId,
+    });
+    const theirs = await createTicket(db, {
+      workspaceId,
+      conversationId: await makeConversation(),
+      actor: { userId },
+      assignedUserId: other.id,
+    });
+    if (!mine.ok || !theirs.ok) throw new Error("setup failed");
+
+    // A SHARED view saved by `userId`, meaning "assigned to me".
+    const created = await createTicketView(db, {
+      workspaceId,
+      viewerUserId: userId,
+      role: "admin",
+      name: `Mine ${S}`,
+      visibility: "shared",
+      filters: { assignee: "me" },
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    const filters = await getTicketViewFilters(db, workspaceId, userId, created.view.id);
+    expect(filters).not.toBeNull();
+
+    // Read as the AUTHOR → their own work.
+    const asAuthor = await listTickets(db, workspaceId, ticketViewToFilters(filters!, userId));
+    expect(asAuthor.tickets.map((t) => t.id)).toContain(mine.ticket.id);
+    expect(asAuthor.tickets.map((t) => t.id)).not.toContain(theirs.ticket.id);
+
+    // Read as SOMEONE ELSE → THEIR work. A shared "Assigned to me" that meant
+    // the author would be one person's board wearing the team's name.
+    const asOther = await listTickets(db, workspaceId, ticketViewToFilters(filters!, other.id));
+    expect(asOther.tickets.map((t) => t.id)).toContain(theirs.ticket.id);
+    expect(asOther.tickets.map((t) => t.id)).not.toContain(mine.ticket.id);
+  });
+
+  it("refuses a duplicate name, keeps personal views private, and gates edits", async () => {
+    const other = await prisma.user.create({
+      data: { name: "TK Third", email: `tk-third-${randomUUID()}@example.test`, organizationId: orgId },
+      select: { id: true },
+    });
+    await prisma.workspaceMember.create({
+      data: { userId: other.id, workspaceId, role: "agent" },
+    });
+
+    const name = `Urgent ${S}`;
+    const first = await createTicketView(db, {
+      workspaceId,
+      viewerUserId: userId,
+      role: "admin",
+      name,
+      visibility: "shared",
+      filters: { priority: ["urgent"] },
+    });
+    expect(first.ok).toBe(true);
+    // Case-insensitively the same name, same visibility group → refused by the
+    // partial unique index, surfaced as a conflict not a 500.
+    const dupe = await createTicketView(db, {
+      workspaceId,
+      viewerUserId: userId,
+      role: "admin",
+      name: name.toUpperCase(),
+      visibility: "shared",
+      filters: {},
+    });
+    expect(dupe).toEqual({ ok: false, reason: "name_taken" });
+
+    // A PERSONAL view belongs to one person.
+    const personal = await createTicketView(db, {
+      workspaceId,
+      viewerUserId: userId,
+      role: "admin",
+      name: `Private ${S}`,
+      visibility: "personal",
+      filters: { untriagedOnly: true },
+    });
+    if (!personal.ok) throw new Error("setup failed");
+    const seenByOther = await listTicketViews(db, workspaceId, other.id, "agent");
+    expect(seenByOther.map((v) => v.id)).not.toContain(personal.view.id);
+    // ...and cannot be scoped-by from another account either.
+    expect(await getTicketViewFilters(db, workspaceId, other.id, personal.view.id)).toBeNull();
+
+    // An AGENT cannot edit someone else's shared view; an admin can.
+    if (!first.ok) return;
+    const refused = await updateTicketView(db, {
+      workspaceId,
+      viewerUserId: other.id,
+      role: "agent",
+      id: first.view.id,
+      name: `Hijacked ${S}`,
+    });
+    expect(refused).toEqual({ ok: false, reason: "forbidden" });
+    const allowed = await updateTicketView(db, {
+      workspaceId,
+      viewerUserId: other.id,
+      role: "admin",
+      id: first.view.id,
+      filters: { priority: ["high"] },
+    });
+    expect(allowed.ok).toBe(true);
   });
 });
 

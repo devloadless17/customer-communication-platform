@@ -40,6 +40,18 @@ afterAll(async () => {
 /** Every raw partial index the product depends on, and what it protects. */
 const REQUIRED_PARTIAL_INDEXES: { name: string; unique: boolean; protects: string }[] = [
   {
+    name: "TicketView_shared_name_key",
+    unique: true,
+    protects:
+      "case-insensitive name uniqueness for SHARED saved views — two team " +
+      "boards called 'Escalations' is a configuration nobody can tell apart",
+  },
+  {
+    name: "TicketView_personal_name_key",
+    unique: true,
+    protects: "the same, per author, for PERSONAL views",
+  },
+  {
     name: "Ticket_subject_trgm_idx",
     unique: false,
     protects:

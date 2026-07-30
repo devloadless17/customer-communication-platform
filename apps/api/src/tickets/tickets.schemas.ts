@@ -75,6 +75,9 @@ export const ListTicketsQuerySchema = z.object({
   /** Free-text search: `#47`, a subject, a cause, a customer name, or any
    *  comment on the ticket. */
   q: z.string().trim().max(200).optional(),
+  /** Scope the board by a SAVED view. Its criteria are merged UNDER the
+   *  explicit query params, so a chip the agent toggles still narrows further. */
+  viewId: z.string().min(1).optional(),
   /** Only tickets another workspace escalated to us. */
   shared: z
     .enum(["true", "false"])
@@ -176,6 +179,50 @@ export const AddTicketNoteSchema = z.object({
   body: z.string().trim().min(1).max(5000),
 });
 export type AddTicketNoteInput = z.infer<typeof AddTicketNoteSchema>;
+
+/**
+ * A saved view's criteria. Every field optional and additive — an empty
+ * document means "no narrowing", which is what a new view holds before you
+ * configure it. Validated on WRITE here; tolerated-and-narrowed on read (see
+ * parseTicketViewFilters) so a document from a newer build degrades instead of
+ * failing the board.
+ */
+export const TicketViewFiltersSchema = z.object({
+  status: z.array(StatusSchema).max(6).optional(),
+  priority: z.array(PrioritySchema).max(4).optional(),
+  assignee: z.string().min(1).max(60).optional(),
+  team: z.string().min(1).max(60).optional(),
+  tagIds: z.array(z.string()).max(50).optional(),
+  channel: z.string().min(1).max(40).optional(),
+  accountId: z.string().min(1).max(60).optional(),
+  breachedOnly: z.boolean().optional(),
+  sharedWithUsOnly: z.boolean().optional(),
+  untriagedOnly: z.boolean().optional(),
+  query: z.string().trim().max(200).optional(),
+});
+
+const VisibilitySchema = z.enum(["personal", "shared"]);
+
+export const CreateTicketViewSchema = z.object({
+  name: z.string().trim().min(1).max(60),
+  color: z.string().trim().max(20).optional(),
+  icon: z.string().trim().max(20).optional(),
+  visibility: VisibilitySchema.default("personal"),
+  filters: TicketViewFiltersSchema.default({}),
+});
+export type CreateTicketViewInput = z.infer<typeof CreateTicketViewSchema>;
+
+export const UpdateTicketViewSchema = z
+  .object({
+    name: z.string().trim().min(1).max(60).optional(),
+    color: z.string().trim().max(20).optional(),
+    icon: z.string().trim().max(20).optional(),
+    visibility: VisibilitySchema.optional(),
+    filters: TicketViewFiltersSchema.optional(),
+    position: z.number().int().min(0).max(1000).optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, { message: "at least one field must be provided" });
+export type UpdateTicketViewInput = z.infer<typeof UpdateTicketViewSchema>;
 
 /**
  * Attachment limits. Deliberately far below the 100 MiB message-media ceiling:

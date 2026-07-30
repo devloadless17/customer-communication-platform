@@ -1298,7 +1298,24 @@ export default function ApiDocsPage() {
           with the other filters rather than replacing them. <code>shared=true</code>
           returns only tickets another workspace escalated to you;{" "}
           <code>untriaged=true</code> only work nobody in your workspace has claimed.
-          Scope <code>read:tickets</code>.
+          <code>viewId=</code> scopes the board by a SAVED view, merged UNDER the
+          explicit params so a chip still narrows further. Scope{" "}
+          <code>read:tickets</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/tickets/views">
+          <strong>Saved ticket views</strong> — the named, reusable filters a
+          department works from. A key sees the SHARED views (a personal view belongs
+          to one person). <code>POST</code> the same path to create one (always shared
+          for a key — a personal view with no author would be visible to nobody),{" "}
+          <code>PATCH</code> / <code>DELETE</code> <code>/tickets/views/:viewId</code> to
+          change or remove it. Names are unique per visibility group,
+          case-insensitively (<code>409 name_taken</code>). Criteria accept{" "}
+          <code>status</code>, <code>priority</code>, <code>assignee</code> (
+          <code>me</code> resolves to the reader, <code>none</code> = unassigned),{" "}
+          <code>team</code>, <code>tagIds</code>, <code>channel</code>,{" "}
+          <code>accountId</code>, <code>breachedOnly</code>,{" "}
+          <code>sharedWithUsOnly</code>, <code>untriagedOnly</code>, <code>query</code>.
+          Scopes <code>read:tickets</code> / <code>write:tickets</code>.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/tickets/counts">
           Header badges: <code>totalActive</code>, <code>mineActive</code>,{" "}

@@ -27,6 +27,8 @@ import { RequireRole } from "../auth/role.guard";
 import { RoleGuard } from "../auth/role.guard";
 import {
   AddEscalationCommentSchema,
+  CreateTicketViewSchema,
+  UpdateTicketViewSchema,
   MAX_FILES_PER_REQUEST,
   TICKET_ATTACHMENT_MAX_BYTES,
   CreateTicketFieldSchema,
@@ -39,6 +41,8 @@ import {
   UpdateTicketSchema,
   UpsertSlaPolicySchema,
   type AddEscalationCommentInput,
+  type CreateTicketViewInput,
+  type UpdateTicketViewInput,
   type CreateTicketFieldInput,
   type CreateTicketInput,
   type EscalateTicketInput,
@@ -92,6 +96,43 @@ export class TicketsController {
   async counts(@CurrentSession() session: ApiSession) {
     const counts = await this.tickets.counts(session.workspaceId, session.userId, session);
     return { counts };
+  }
+
+  /**
+   * Saved views — the named, reusable filters a department lives in. Static
+   * segment, so declared before any `:id` route.
+   */
+  @Get("views")
+  async listViews(@CurrentSession() session: ApiSession) {
+    return this.tickets.listViews(session.workspaceId, session.userId, session.role);
+  }
+
+  @Post("views")
+  async createView(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(CreateTicketViewSchema)) body: CreateTicketViewInput,
+  ) {
+    return this.tickets.createView(session.workspaceId, session.userId, session.role, body);
+  }
+
+  @Patch("views/:viewId")
+  async updateView(
+    @CurrentSession() session: ApiSession,
+    @Param("viewId") viewId: string,
+    @Body(zBody(UpdateTicketViewSchema)) body: UpdateTicketViewInput,
+  ) {
+    return this.tickets.updateView(
+      session.workspaceId,
+      session.userId,
+      session.role,
+      viewId,
+      body,
+    );
+  }
+
+  @Delete("views/:viewId")
+  async deleteView(@CurrentSession() session: ApiSession, @Param("viewId") viewId: string) {
+    return this.tickets.deleteView(session.workspaceId, session.userId, session.role, viewId);
   }
 
   /** Sibling workspaces a ticket can be escalated to. Static — before `:id`. */

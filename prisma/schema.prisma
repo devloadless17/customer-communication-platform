@@ -710,6 +710,7 @@ model Workspace {
   messageFlagDefinitions  MessageFlagDefinition[]
   messageFlags            MessageFlag[]
   inboxViews              InboxView[]
+  ticketViews             TicketView[]
   templateAnalytics       TemplateAnalyticsDaily[]
   tickets                 Ticket[]
   ticketEvents            TicketEvent[]
@@ -1287,6 +1288,7 @@ model User {
   // Saved inbox views. SetNull on the view side (not Cascade) so a SHARED view
   // survives its author leaving; personal views are cleaned up explicitly.
   createdInboxViews       InboxView[]              @relation("CreatedInboxViews")
+  createdTicketViews      TicketView[]             @relation("CreatedTicketViews")
   // Audit-log authorship. Nullable on the event row + SetNull so deleting a
   // user keeps the audit trail; the timeline just renders "Removed user".
   authoredEvents          ConversationEvent[]
@@ -3689,6 +3691,50 @@ model TicketAttachment {
   @@index([eventId])
   @@index([workspaceId])
   @@index([uploadedById])
+}
+
+// A saved TICKET view — a named, reusable filter over the board.
+//
+// The board's own filters (status column, priority chip, team queue) are
+// transient narrowings you toggle while working. A saved view is the query a
+// department actually lives in: "urgent + unclaimed", "shared with us, past
+// due", "everything on the Billing queue". Modelled exactly like InboxView —
+// same visibility split, same colour/icon slots, same "criteria are ONE
+// validated JSON document turned into a where in exactly one place" rule —
+// because the two are the same product idea over two different lists, and a
+// second, subtly-different design would be two sets of bugs.
+model TicketView {
+  id          String              @id @default(cuid())
+  workspaceId String
+  name        String
+  /// Named colour slot from TAG_COLORS — never a hex, so the UI maps to a
+  /// safelist instead of building dynamic class strings.
+  color       String              @default("slate")
+  /// Key from TICKET_VIEW_ICONS; an unknown value degrades to the default.
+  icon        String              @default("filter")
+  visibility  InboxViewVisibility @default(personal)
+  createdById String?
+  /// Validated TicketViewFilters document — see @ccp/shared/tickets/views.
+  filters     Json                @default("{}")
+  /// Manual ordering within its visibility group. Ties broken by name.
+  position    Int                 @default(0)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  // SetNull, not Cascade, for the same reason as InboxView: a SHARED view
+  // outlives the agent who built it — deleting the team's "Escalations" board
+  // because its author left is a silent loss of team configuration. Personal
+  // views are the opposite case and are removed with their owner in
+  // UsersService.remove.
+  createdBy User?     @relation("CreatedTicketViews", fields: [createdById], references: [id], onDelete: SetNull)
+
+  // Name uniqueness is case-insensitive and per visibility group, enforced by
+  // two PARTIAL unique indexes in migration 20260730180000 (Prisma's DSL can
+  // express neither `lower(name)` nor a `WHERE`) and asserted by
+  // apps/api/test/partial-indexes.spec.ts.
+  @@index([workspaceId, visibility, position])
+  @@index([createdById])
 }
 
 // One SLA commitment per priority. Modelled per-priority rather than as a
