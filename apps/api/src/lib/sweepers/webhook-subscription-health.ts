@@ -2,6 +2,7 @@
 // via @swc-node/register, outside the Next bundler context.
 
 import { db } from "@/lib/db";
+import { pickWabaProbe } from "@/lib/providers/waba-probe";
 import { flagChannelNeedsReconnect } from "@/lib/providers/channel-health";
 import { getMetaSendConfig } from "@/lib/providers/config";
 import { getInstagramSendConfig } from "@/lib/providers/instagram-config";
@@ -236,6 +237,8 @@ export async function sweepWebhookSubscriptionHealthOnce(): Promise<void> {
       channel: true,
       label: true,
       isDefault: true,
+      // `pickWabaProbe` breaks an isDefault tie by age, so it needs this.
+      createdAt: true,
       wabaAccount: { select: { externalWabaId: true } },
       workspace: { select: { name: true } },
     },
@@ -282,7 +285,11 @@ export async function sweepWebhookSubscriptionHealthOnce(): Promise<void> {
     // Prefer the default number as the probe — it is the one most likely to hold
     // working credentials, and `getMetaSendConfig` prefers the WABA's own token
     // anyway when it has one.
-    const probe = group.find((c) => c.isDefault) ?? group[0];
+    // Same rule as the DB-side probes (default first, then oldest). The previous
+    // `find(isDefault) ?? group[0]` agreed on the default but fell back to an
+    // ARBITRARY row when a WABA has none — the same non-determinism reached a
+    // different way.
+    const probe = pickWabaProbe(group);
     if (!probe) continue; // unreachable — a group exists only once something is in it
     units.push({ probe, applyTo: group });
   }

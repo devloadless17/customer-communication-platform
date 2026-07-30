@@ -8,6 +8,7 @@ import { Prisma } from "@prisma/client";
 import { getCountryFromPhone } from "@ccp/shared/utils";
 
 import { db } from "@/lib/db";
+import { WABA_PROBE_ORDER } from "@/lib/providers/waba-probe";
 import { getProviderBinding } from "@/lib/providers";
 import { invalidateProviderConfig } from "@/lib/providers/config";
 import type {
@@ -263,7 +264,7 @@ export async function refreshTemplateAnalytics(
           wabaAccountId: opts.wabaAccountId,
           isActive: true,
         },
-        orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+        orderBy: WABA_PROBE_ORDER,
         select: { id: true },
       })
     )?.id ?? null;
@@ -574,11 +575,19 @@ export async function templateAnalyticsAccountContext(
     where: {
       workspaceId,
       channel: "whatsapp",
+      // Only a CONNECTED number can speak for the account. Without this a
+      // disconnected row could be chosen, and its country then decided the
+      // `regionUnsupported` copy.
+      isActive: true,
       // A named WABA scopes to its own numbers; with none named (a caller that
       // genuinely has no template in hand) the default account is the only
       // sensible answer for the region/`analyticsSince` copy.
       ...(wabaAccountId ? { wabaAccountId } : { isDefault: true }),
     },
+    // Deterministic, so the region/`analyticsSince` answer cannot flip between
+    // calls for a WABA holding several numbers. The file's own warning is that a
+    // wrong answer here tells an operator to stop investigating a real problem.
+    orderBy: WABA_PROBE_ORDER,
     select: {
       config: true,
       // Insights are a WABA-level switch, so the timestamp lives on the WABA.

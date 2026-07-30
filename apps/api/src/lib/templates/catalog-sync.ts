@@ -11,6 +11,7 @@ import {
   ProviderNotConfiguredError,
   type MetaSendConfig,
 } from "@/lib/providers/config";
+import { WABA_PROBE_ORDER } from "@/lib/providers/waba-probe";
 import type { ProviderTemplate } from "@ccp/shared/providers/types";
 
 /**
@@ -90,7 +91,7 @@ export async function syncTemplateCatalog(workspaceId: string): Promise<CatalogS
       externalWabaId: true,
       connections: {
         where: { isActive: true },
-        orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+        orderBy: WABA_PROBE_ORDER,
         take: 1,
         select: { id: true },
       },

@@ -1,6 +1,7 @@
 import { BadGatewayException, BadRequestException } from "@nestjs/common";
 
 import { db } from "@/lib/db";
+import { WABA_PROBE_ORDER, wabaProbeMismatch } from "@/lib/providers/waba-probe";
 import { getProviderBinding } from "@/lib/providers";
 
 /**
@@ -30,11 +31,21 @@ import { getProviderBinding } from "@/lib/providers";
  * instead. That is the whole reason the two halves of Meta analytics are shaped
  * differently, and it is a deliberate asymmetry, not an inconsistency.
  *
- * EVERYTHING IS PER-WABA. Analytics are a WABA-node field; a workspace can hold
- * several WABAs, and their figures must never be silently pooled — the currency
- * can differ, the tier ladders are independent, and one account's outage would
- * look like a company-wide drop. Each account reports its own block, with its
- * own `unavailable` reason when it can't be read.
+ * REPORTED PER-WABA — but not everything IS per-WABA. Analytics are a WABA-node
+ * field, a workspace can hold several WABAs, and their figures must never be
+ * silently pooled: the CURRENCY can differ (Meta: cost is "in your WABA's
+ * currency"), and one account's outage would otherwise look like a company-wide
+ * drop. Each account reports its own block with its own `unavailable` reason.
+ *
+ * The one exception, corrected 2026-07-30: the VOLUME TIER is NOT per-WABA.
+ * "Messages are aggregated at the business portfolio level, across all WhatsApp
+ * Business Accounts (WABAs) owned by the portfolio… This rate applies across all of
+ * their WABAs", and tiers reset monthly at 12am in the WABA's timezone. This
+ * docblock previously asserted "the tier ladders are independent", which is the
+ * opposite. Meta stamps the portfolio-derived tier onto each WABA's rows, so
+ * PRESENTING it per WABA is still right — but any future change that ROLLS UP or
+ * derives a tier per WABA would double-count a portfolio-wide counter. See the
+ * `toNextTier` caveat on TierStanding.
  */
 
 /** Meta cut messaging/conversation/pricing analytics to a one-year lookback on
@@ -258,6 +269,11 @@ export async function getWabaAnalytics(
       // that is an `unavailable` reason, not an error.
       connections: {
         where: { channel: "whatsapp", isActive: true },
+        // Deterministic: `take: 1` with no ordering let Postgres hand back any
+        // number, so a dead token on an arbitrary sibling made the WHOLE WABA
+        // report unavailable — non-deterministically, which reads as flaky rather
+        // than broken. Shared rule, same as catalog-sync.
+        orderBy: WABA_PROBE_ORDER,
         select: { id: true },
         take: 1,
       },
@@ -344,6 +360,22 @@ async function loadAccount(
       ...base,
       unavailable: err instanceof Error ? err.message.slice(0, 200) : "Connection unavailable.",
     };
+  }
+
+  // Assert the join before reading. Every request below is built from
+  // `config.wabaId`, so if the connection→WABA FK and the resolved send config ever
+  // disagree we would authorize against a DIFFERENT WABA and then report the result
+  // under THIS one's label — silently attributing one account's spend to another.
+  // That is the §18 invariant ("a WABA's figures belong to the WABA they came from,
+  // or to nothing"), and `catalog-sync` has always guarded it for the same reason.
+  // `binding.getSendConfig` is typed against the generic provider binding, so it
+  // widens; every other read of `config` in this function narrows the same way.
+  const mismatch = wabaProbeMismatch(
+    config as { wabaAccountId?: string | null; wabaId?: string | null },
+    waba.id,
+  );
+  if (mismatch) {
+    return { ...base, unavailable: mismatch };
   }
 
   const [messaging, pricing, conversations, calls, state] = await Promise.all([
