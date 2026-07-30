@@ -351,7 +351,11 @@ export function TicketDetailClient({
   const breached = ticket.sla.firstResponseBreached || ticket.sla.resolutionBreached;
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
+    // Two tracks on desktop: the WORK (fields, handoffs, escalation, notes)
+    // on the left, the HISTORY as a sticky rail on the right — the log reads
+    // alongside the thing it describes instead of a mile below it. Stacks
+    // back to one column under lg.
+    <div className="mx-auto flex w-full max-w-6xl flex-col gap-4">
       <div>
         <Link
           href="/tickets"
@@ -465,6 +469,9 @@ export function TicketDetailClient({
           )}
         </div>
       </div>
+
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
+        <div className="flex min-w-0 flex-1 flex-col gap-4">
 
       <section className="grid gap-3 rounded-xl border bg-card p-4 sm:grid-cols-2">
         <Field label="Status">
@@ -864,9 +871,14 @@ export function TicketDetailClient({
         </button>
       </section>
 
-      <section className="rounded-xl border bg-card p-4">
+        </div>
+
+        {/* The history rail. Sticky beside the work on desktop; a long
+            timeline scrolls INSIDE the rail rather than pushing the page. */}
+        <aside className="w-full shrink-0 lg:sticky lg:top-0 lg:w-80">
+      <section className="flex flex-col rounded-xl border bg-card p-4 lg:max-h-[calc(100dvh-7rem)]">
         <h2 className="mb-2 text-sm font-semibold">History</h2>
-        <ol className="flex flex-col gap-2">
+        <ol className="flex min-h-0 flex-col gap-2 lg:overflow-y-auto">
           {events.map((e) => (
             <li key={e.id} className="flex flex-wrap items-baseline gap-x-2 text-2xs">
               <span className="text-muted-foreground">
@@ -943,8 +955,13 @@ export function TicketDetailClient({
               ) : null}
             </li>
           ))}
+          {events.length === 0 && (
+            <li className="text-2xs text-muted-foreground">Nothing yet.</li>
+          )}
         </ol>
       </section>
+        </aside>
+      </div>
 
       {busy && (
         <p className="flex items-center gap-1.5 text-2xs text-muted-foreground">
