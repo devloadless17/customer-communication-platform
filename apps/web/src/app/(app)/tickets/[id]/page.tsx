@@ -37,11 +37,13 @@ export default async function TicketDetailPage({
     const elsewhere = await locateTicket(id).catch(() => null);
     if (elsewhere) {
       return (
-        <TicketElsewhere
-          workspaceId={elsewhere.workspaceId}
-          workspaceName={elsewhere.workspaceName}
-          number={elsewhere.number}
-        />
+        <div className="h-full overflow-y-auto">
+          <TicketElsewhere
+            workspaceId={elsewhere.workspaceId}
+            workspaceName={elsewhere.workspaceName}
+            number={elsewhere.number}
+          />
+        </div>
       );
     }
     notFound();
@@ -62,14 +64,20 @@ export default async function TicketDetailPage({
   // click will actually work.
   const canDelete = session.user.role === "admin" || session.user.role === "manager";
   return (
-    <TicketDetailClient
-      ticket={ticket}
-      events={events}
-      users={users}
-      tags={tags}
-      teams={teams}
-      escalationTargets={escalationTargets}
-      canDelete={canDelete}
-    />
+    // The section layout pins <main> to `overflow-hidden` for the BOARD's
+    // sake (its columns own their scrolling). A ticket detail is a normal
+    // long document, so it brings its own vertical scroller — without this,
+    // anything below the fold (history, escalation thread) was unreachable.
+    <div className="h-full overflow-y-auto px-4 py-6 sm:px-6 md:px-8">
+      <TicketDetailClient
+        ticket={ticket}
+        events={events}
+        users={users}
+        tags={tags}
+        teams={teams}
+        escalationTargets={escalationTargets}
+        canDelete={canDelete}
+      />
+    </div>
   );
 }
