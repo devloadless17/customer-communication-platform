@@ -32,7 +32,10 @@ import {
   gcOrphanWhatsappPortfolios,
   getWhatsappHealth,
 } from "@/lib/providers/meta-health";
-import { ensureWabaSubscribed } from "@/lib/providers/meta-waba-subscription";
+import {
+  ensureWabaSubscribed,
+  listWabaPhoneNumberIds,
+} from "@/lib/providers/meta-waba-subscription";
 import { normalizeDefaultAccount } from "@/lib/providers/normalize-default-account";
 import {
   readTemplateAnalytics,
@@ -1094,45 +1097,43 @@ export class WhatsappService {
     phoneNumberId: string,
     accessToken: string,
   ): Promise<string | null> {
-    let numbers: Array<{ id?: string }>;
-    try {
-      const res = await fetch(
-        `${GRAPH_BASE}/${GRAPH_VERSION}/${encodeURIComponent(wabaId)}/phone_numbers?fields=id&limit=200`,
-        {
-          headers: { authorization: `Bearer ${accessToken}` },
-          signal: AbortSignal.timeout(20_000),
-        },
-      );
-      if (!res.ok) {
-        // A skip is not silent anymore: 401/403 means the token can't read the
-        // WABA (`whatsapp_business_management` missing) — ownership is
-        // unverified AND template sync + portfolio discovery will be degraded,
-        // which the admin standing at the form can actually fix.
-        this.logger.warn(
-          `skipping waba-ownership check: meta returned ${res.status} reading ${wabaId}/phone_numbers`,
-        );
-        return res.status === 401 || res.status === 403
-          ? "Your access token can't read this WhatsApp Business Account " +
-              "(whatsapp_business_management scope missing?). WABA ownership was NOT " +
-              "verified, and template sync + business-portfolio discovery will be " +
-              "degraded until the token can read it."
-          : `Couldn't verify this WABA owns the number (Meta returned ${res.status}); ` +
-              "connected anyway. If templates look wrong, re-check the WABA ID.";
-      }
-      const data = (await res.json()) as { data?: Array<{ id?: string }> };
-      numbers = data.data ?? [];
-    } catch (err) {
+    // `listWabaPhoneNumberIds` is the one definition of this read, shared with the
+    // health sweeper's re-parent probe (which asks the same question on a schedule).
+    // Sharing it fixed two things this local copy had: it stopped at `limit=200`
+    // with no paging, so a WABA above Meta's documented expanded limit could refuse
+    // a number it really owns; and it bypassed `withAppsecretProof`.
+    const owned = await listWabaPhoneNumberIds(wabaId, accessToken, GRAPH_VERSION);
+    if (!owned.ok) {
+      // A skip is not silent: 401/403 means the token can't read the WABA
+      // (`whatsapp_business_management` missing) — ownership is unverified AND
+      // template sync + portfolio discovery will be degraded, which the admin
+      // standing at the form can actually fix.
       this.logger.warn(
-        `skipping waba-ownership check: could not reach meta (${
-          err instanceof Error ? err.message : String(err)
-        })`,
+        `skipping waba-ownership check for ${wabaId}/phone_numbers: ${owned.error}`,
+      );
+      return /graph GET 40[13]\b/.test(owned.error)
+        ? "Your access token can't read this WhatsApp Business Account " +
+            "(whatsapp_business_management scope missing?). WABA ownership was NOT " +
+            "verified, and template sync + business-portfolio discovery will be " +
+            "degraded until the token can read it."
+        : "Couldn't verify this WABA owns the number; connected anyway. " +
+            "If templates look wrong, re-check the WABA ID.";
+    }
+    if (owned.ids.length === 0 && owned.rowsSeen > 0) {
+      // Numbers came back in a shape we could not read. Refusing the connect here
+      // would block every onboarding on a parser problem, so treat ownership as
+      // unverified — the same posture as an unreadable token above.
+      this.logger.warn(
+        `waba-ownership check inconclusive: ${wabaId}/phone_numbers returned ` +
+          `${owned.rowsSeen} row(s) with no readable id`,
       );
       return (
-        "Couldn't reach Meta to verify this WABA owns the number; connected anyway. " +
-        "If templates look wrong, re-check the WABA ID."
+        "Couldn't read this WhatsApp Business Account's phone numbers, so WABA " +
+        "ownership was NOT verified; connected anyway. If templates look wrong, " +
+        "re-check the WABA ID."
       );
     }
-    if (!numbers.some((n) => n.id === phoneNumberId)) {
+    if (!owned.ids.includes(phoneNumberId)) {
       throw new BadRequestException({
         error: "waba_id_does_not_own_this_phone_number",
         detail:

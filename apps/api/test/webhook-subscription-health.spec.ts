@@ -86,6 +86,36 @@ async function clearReconnectFlag(): Promise<void> {
   });
 }
 
+/**
+ * Route the ONE `graphGetJson` mock by URL.
+ *
+ * The sweeper asks Graph TWO questions per WABA now — "is our app subscribed"
+ * (`/subscribed_apps`) and "does this WABA still own our numbers"
+ * (`/phone_numbers`, the re-parent probe). Both URLs contain the WABA id, so the
+ * old `if (url.includes(WABA))` served the subscribed_apps payload to both, and
+ * the probe read an app list as a number list: zero numbers owned, every case
+ * "re-parented". A URL-routed mock is also simply closer to Graph.
+ *
+ * `ownedNumbers` defaults to every number this spec files under the WABA, so a
+ * test only names it when the point IS that a number moved away.
+ */
+function graphRoutes(opts: {
+  subscribedApps: unknown;
+  ownedNumbers?: string[];
+}): (url: string) => Promise<Record<string, unknown>> {
+  return async (url: string) => {
+    const u = String(url);
+    if (u.includes("/phone_numbers")) {
+      const ids = opts.ownedNumbers ?? [PHONE, `${PHONE}_sib`];
+      return { data: ids.map((id) => ({ id })) };
+    }
+    if (u.includes("/subscribed_apps") && u.includes(WABA)) {
+      return opts.subscribedApps as Record<string, unknown>;
+    }
+    throw new Error(`unexpected graph call: ${u}`);
+  };
+}
+
 beforeAll(async () => {
   orgId = (await prisma.organization.create({ data: { name: `WHS Org ${S}`, status: "active" } })).id;
   workspaceId = (
@@ -128,10 +158,9 @@ afterAll(async () => {
 
 describe("webhook subscription health", () => {
   it("leaves a healthy subscription alone", async () => {
-    mockedGraph.mockImplementation(async (url: string) => {
-      if (url.includes(WABA)) return { data: [{ whatsapp_business_api_data: { id: APP } }] };
-      throw new Error(`unexpected graph call: ${url}`);
-    });
+    mockedGraph.mockImplementation(
+      graphRoutes({ subscribedApps: { data: [{ whatsapp_business_api_data: { id: APP } }] } }),
+    );
 
     await sweepWebhookSubscriptionHealthOnce();
 
@@ -158,10 +187,7 @@ describe("webhook subscription health", () => {
     // reset by a dashboard re-save. The sweeper must re-subscribe with the same
     // idempotent helper onboarding uses, and NOT raise the reconnect banner —
     // there is nothing for the admin to do once it is fixed.
-    mockedGraph.mockImplementation(async (url: string) => {
-      if (url.includes(WABA)) return { data: [] };
-      throw new Error(`unexpected graph call: ${url}`);
-    });
+    mockedGraph.mockImplementation(graphRoutes({ subscribedApps: { data: [] } }));
     mockedEnsure.mockResolvedValue({ ok: true });
 
     await sweepWebhookSubscriptionHealthOnce();
@@ -176,10 +202,7 @@ describe("webhook subscription health", () => {
   });
 
   it("raises needsReconnect when the subscription is gone AND cannot be healed", async () => {
-    mockedGraph.mockImplementation(async (url: string) => {
-      if (url.includes(WABA)) return { data: [] };
-      throw new Error(`unexpected graph call: ${url}`);
-    });
+    mockedGraph.mockImplementation(graphRoutes({ subscribedApps: { data: [] } }));
     mockedEnsure.mockResolvedValue({ ok: false, error: "insufficient permission" });
 
     await sweepWebhookSubscriptionHealthOnce();
@@ -259,10 +282,7 @@ describe("the subscription has to be OURS", () => {
   const OTHER = { whatsapp_business_api_data: { id: "some_other_bsp_app" } };
 
   it("does NOT count another app's subscription as ours", async () => {
-    mockedGraph.mockImplementation(async (url: string) => {
-      if (url.includes(WABA)) return { data: [OTHER] };
-      throw new Error(`unexpected graph call: ${url}`);
-    });
+    mockedGraph.mockImplementation(graphRoutes({ subscribedApps: { data: [OTHER] } }));
     mockedEnsure.mockResolvedValue({ ok: true });
 
     await sweepWebhookSubscriptionHealthOnce();
@@ -277,10 +297,7 @@ describe("the subscription has to be OURS", () => {
   });
 
   it("raises the banner when we are absent and the re-subscribe fails", async () => {
-    mockedGraph.mockImplementation(async (url: string) => {
-      if (url.includes(WABA)) return { data: [OTHER] };
-      throw new Error(`unexpected graph call: ${url}`);
-    });
+    mockedGraph.mockImplementation(graphRoutes({ subscribedApps: { data: [OTHER] } }));
     mockedEnsure.mockResolvedValue({ ok: false, error: "no permission on this WABA" });
 
     await sweepWebhookSubscriptionHealthOnce();
@@ -290,12 +307,11 @@ describe("the subscription has to be OURS", () => {
 
   it("still counts a subscription among OTHERS when ours is there too", async () => {
     // The realistic shared-WABA shape: two BSPs, both subscribed. Nothing to fix.
-    mockedGraph.mockImplementation(async (url: string) => {
-      if (url.includes(WABA)) {
-        return { data: [OTHER, { whatsapp_business_api_data: { id: APP } }] };
-      }
-      throw new Error(`unexpected graph call: ${url}`);
-    });
+    mockedGraph.mockImplementation(
+      graphRoutes({
+        subscribedApps: { data: [OTHER, { whatsapp_business_api_data: { id: APP } }] },
+      }),
+    );
 
     await sweepWebhookSubscriptionHealthOnce();
 
@@ -312,10 +328,7 @@ describe("the subscription has to be OURS", () => {
       data: { config: { phoneNumberId: PHONE } },
     });
     invalidateProviderConfig(workspaceId);
-    mockedGraph.mockImplementation(async (url: string) => {
-      if (url.includes(WABA)) return { data: [OTHER] };
-      throw new Error(`unexpected graph call: ${url}`);
-    });
+    mockedGraph.mockImplementation(graphRoutes({ subscribedApps: { data: [OTHER] } }));
 
     try {
       await sweepWebhookSubscriptionHealthOnce();
@@ -379,24 +392,27 @@ describe("the WABA is the subscription unit, not the number", () => {
   });
 
   it("asks Graph about the WABA ONCE for two numbers under it", async () => {
-    mockedGraph.mockImplementation(async (url: string) => {
-      if (url.includes(WABA)) return { data: [{ whatsapp_business_api_data: { id: APP } }] };
-      throw new Error(`unexpected graph call: ${url}`);
-    });
+    mockedGraph.mockImplementation(
+      graphRoutes({ subscribedApps: { data: [{ whatsapp_business_api_data: { id: APP } }] } }),
+    );
 
     await sweepWebhookSubscriptionHealthOnce();
 
     // Scoped to OUR waba id — the sweep covers every connection on the platform,
     // so a global call count would be another fixture's business.
-    const ours = mockedGraph.mock.calls.filter(([url]) => String(url).includes(WABA));
-    expect(ours).toHaveLength(1);
+    //
+    // Counted PER QUESTION, not in total: the invariant is "one call per WABA per
+    // question", and the sweeper legitimately asks two now (subscription state, and
+    // whether the WABA still owns these numbers). A bare total would have to change
+    // every time a question is added, which is how a deduplication test quietly
+    // stops testing deduplication.
+    const ours = mockedGraph.mock.calls.map(([url]) => String(url)).filter((u) => u.includes(WABA));
+    expect(ours.filter((u) => u.includes("/subscribed_apps"))).toHaveLength(1);
+    expect(ours.filter((u) => u.includes("/phone_numbers"))).toHaveLength(1);
   });
 
   it("still flags BOTH numbers when that one subscription is broken", async () => {
-    mockedGraph.mockImplementation(async (url: string) => {
-      if (url.includes(WABA)) return { data: [] };
-      throw new Error(`unexpected graph call: ${url}`);
-    });
+    mockedGraph.mockImplementation(graphRoutes({ subscribedApps: { data: [] } }));
     mockedEnsure.mockResolvedValue({ ok: false, error: "no permission" });
 
     await sweepWebhookSubscriptionHealthOnce();
@@ -407,5 +423,102 @@ describe("the WABA is the subscription unit, not the number", () => {
       select: { needsReconnect: true },
     });
     expect(sibling.needsReconnect, "sibling number under the same WABA").toBe(true);
+  });
+});
+
+/**
+ * The THIRD way inbound dies silently — and the only one `/subscribed_apps`
+ * cannot see.
+ *
+ * Meta's Currency Migration API changes a WABA's billing currency by "creating a
+ * new WABA and automatically migrating your phone numbers, message templates, and
+ * Flows"; the completing call "moves phone numbers and deprecates the old WABA".
+ * Our `externalWabaId` then names a WABA that owns nothing, and the migration
+ * explicitly does NOT carry over "App installation" — so there is no subscription
+ * on the new WABA and nothing here can create one.
+ *
+ * What makes it worth its own probe is the MASKING: the old WABA can still report
+ * our app as subscribed, so the subscription check returns "ok" while zero inbound
+ * arrives. A detector that reports healthy in the one case it exists for is worse
+ * than no detector, because it is trusted.
+ */
+describe("the WABA still has to OWN the numbers filed under it", () => {
+  const SUBSCRIBED = { data: [{ whatsapp_business_api_data: { id: APP } }] };
+
+  it("flags the account when the WABA owns NONE of our numbers", async () => {
+    // The migration shape: numbers moved to the cloned WABA, ours owns nothing.
+    mockedGraph.mockImplementation(
+      graphRoutes({ subscribedApps: SUBSCRIBED, ownedNumbers: ["a_stranger_number"] }),
+    );
+    mockedEnsure.mockResolvedValue({ ok: true });
+
+    await sweepWebhookSubscriptionHealthOnce();
+
+    expect(await needsReconnect()).toBe(true);
+    // Nothing to heal: the subscription we would create is on the OLD WABA, which
+    // no longer routes anything. Re-subscribing there would report success and fix
+    // nothing — the whole reason this returns before the heal path.
+    expect(mockedEnsure).not.toHaveBeenCalled();
+  });
+
+  it("is NOT masked by a subscription that still reads healthy", async () => {
+    // The entire point. `subscribed_apps` says our app is on the WABA — the old
+    // check's definition of healthy — while every number has left it.
+    mockedGraph.mockImplementation(
+      graphRoutes({ subscribedApps: SUBSCRIBED, ownedNumbers: [] }),
+    );
+
+    await sweepWebhookSubscriptionHealthOnce();
+
+    expect(
+      mockedGraph.mock.calls.some(([url]) => String(url).includes("/phone_numbers")),
+      "the ownership probe never ran — this test is vacuous",
+    ).toBe(true);
+    expect(await needsReconnect()).toBe(true);
+  });
+
+  it("stays quiet when the WABA still owns the number", async () => {
+    mockedGraph.mockImplementation(
+      graphRoutes({ subscribedApps: SUBSCRIBED, ownedNumbers: [PHONE] }),
+    );
+
+    await sweepWebhookSubscriptionHealthOnce();
+
+    expect(await needsReconnect()).toBe(false);
+  });
+
+  it("does NOT flag when the numbers come back in a shape we cannot read", async () => {
+    // Same not-crying-wolf rule as `isAppSubscribedToWaba`: rows present but no
+    // readable id is a PARSER problem. Reading it as "owns nothing" would report
+    // every WhatsApp account on the platform dark at once, off one Meta shape
+    // change — a self-inflicted outage dressed up as a detection.
+    mockedGraph.mockImplementation(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/phone_numbers")) return { data: [{ phone_number_id: PHONE }] };
+      if (u.includes("/subscribed_apps")) return SUBSCRIBED;
+      throw new Error(`unexpected graph call: ${u}`);
+    });
+
+    await sweepWebhookSubscriptionHealthOnce();
+
+    expect(await needsReconnect()).toBe(false);
+  });
+
+  it("a probe failure must not take down the subscription check that was already here", async () => {
+    // The new read is additive; if it breaks, the 2026-07-10 detection it was
+    // bolted onto still has to work.
+    mockedGraph.mockImplementation(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/phone_numbers")) throw new Error("graph GET 500 phone_numbers");
+      if (u.includes("/subscribed_apps")) return { data: [] };
+      throw new Error(`unexpected graph call: ${u}`);
+    });
+    mockedEnsure.mockResolvedValue({ ok: false, error: "no permission" });
+
+    await sweepWebhookSubscriptionHealthOnce();
+
+    // Reached the subscription check, found it missing, could not heal → banner.
+    expect(mockedEnsure).toHaveBeenCalled();
+    expect(await needsReconnect()).toBe(true);
   });
 });

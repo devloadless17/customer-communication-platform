@@ -15,6 +15,7 @@ import {
 import {
   ensureWabaSubscribed,
   isAppSubscribedToWaba,
+  listWabaPhoneNumberIds,
 } from "@/lib/providers/meta-waba-subscription";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import { isPoolClosedError } from "@/lib/sweepers/_mutex";
@@ -132,10 +133,95 @@ function isTokenError(err: unknown): boolean {
   return msg.includes('"code":190') || msg.includes("OAuthException");
 }
 
+/**
+ * Has this WABA stopped owning the numbers we have filed under it?
+ *
+ * The third way inbound dies silently, and the only one the subscription check
+ * CANNOT see. Meta's Currency Migration API changes a WABA's billing currency by
+ * "creating a new WABA and automatically migrating your phone numbers, message
+ * templates, and Flows"; the completing call "moves phone numbers and deprecates
+ * the old WABA". Two consequences land on us at once:
+ *
+ *   - our `externalWabaId` now names a deprecated WABA that owns nothing, so the
+ *     numbers' webhooks are delivered against a WABA id we have never heard of;
+ *   - the migration explicitly does NOT carry over "App installation", so our app
+ *     is not subscribed to the new WABA and there is nothing to re-subscribe TO
+ *     from here.
+ *
+ * And it is masked: `subscribed_apps` on the old WABA can still read back with our
+ * app present, so the subscription check says "ok" while zero inbound arrives. That
+ * is precisely the failure shape this sweeper exists to catch, which is why this
+ * probe runs unconditionally rather than only when the subscription looks wrong —
+ * it costs one extra Graph read per WABA per 30 min (4/hr against a 200/hr budget)
+ * to close a hole that otherwise loses a customer's messages indefinitely.
+ *
+ * Deliberately DETECTS and does not repair. Repairing means writing a discovered id
+ * into `WhatsappBusinessAccount.externalWabaId`, which is globally unique precisely
+ * because it is the tenancy guard (CLAUDE.md §18) — a wrong id there is a
+ * cross-tenant defect, not a cosmetic one. And it would not restore inbound anyway,
+ * since the app still has to be installed on the new WABA. So this drives the
+ * existing in-product reconnect banner, and the admin re-runs connect, which writes
+ * the new id through the validated path that already asserts ownership.
+ *
+ * `null` = no verdict (probe failed, or we hold no number id to test with).
+ */
+async function checkWabaStillOwnsNumbers(
+  wabaId: string,
+  expectedNumberIds: string[],
+  accessToken: string,
+  graphVersion: string,
+  appSecret: string | undefined,
+): Promise<CheckResult | null> {
+  if (expectedNumberIds.length === 0) return null;
+  const owned = await listWabaPhoneNumberIds(wabaId, accessToken, graphVersion, appSecret);
+  if (!owned.ok) return null; // transient / unreadable — the subscription check still runs
+  if (owned.ids.length === 0 && owned.rowsSeen > 0) {
+    // Meta returned numbers in a shape we cannot read. That is a parser problem, not
+    // a re-parent, and guessing "re-parented" here would mark every WhatsApp account
+    // on the platform dark simultaneously. Stay quiet and let the subscription check
+    // speak — same not-crying-wolf rule as `isAppSubscribedToWaba`.
+    console.warn(
+      `[webhook-subscription-health] ${wabaId}/phone_numbers returned ${owned.rowsSeen} ` +
+        "row(s) with no readable id — skipping the re-parent verdict. If this persists, " +
+        "Meta changed the shape and listWabaPhoneNumberIds needs updating.",
+    );
+    return null;
+  }
+  const missing = expectedNumberIds.filter((id) => !owned.ids.includes(id));
+  if (missing.length === 0) return null;
+
+  if (missing.length === expectedNumberIds.length) {
+    // EVERY number gone is the migration signature — they move together — and the
+    // whole group loses inbound together, so a group-wide verdict is correct.
+    return {
+      state: "broken",
+      detail:
+        `WABA ${wabaId} no longer owns any of its ${expectedNumberIds.length} phone ` +
+        `number(s) (${expectedNumberIds.join(", ")}). The number(s) were re-parented to ` +
+        "a different WABA — the documented cause is Meta's WABA currency/payment " +
+        "migration, which clones the WABA, moves the numbers and deprecates the old " +
+        "one. Inbound for this account is DARK: the new WABA does not carry over our " +
+        "app installation. Reconnect the number so the new WABA id is stored and the " +
+        "app is subscribed to it.",
+    };
+  }
+  // Only SOME missing is not the migration shape (that moves all of them) — more
+  // likely one number was deleted or deregistered. Say so, but do not flag the
+  // siblings that are still owned: a per-number verdict is channel-health.ts's job.
+  console.warn(
+    `[webhook-subscription-health] WABA ${wabaId} no longer owns ${missing.length} of ` +
+      `${expectedNumberIds.length} filed number(s): ${missing.join(", ")}. Not the ` +
+      "currency-migration shape (that moves every number); check whether the number " +
+      "was deleted or moved in WhatsApp Manager.",
+  );
+  return null;
+}
+
 async function checkWhatsapp(
   workspaceId: string,
   connectionId: string,
   wabaId: string,
+  expectedNumberIds: string[],
 ): Promise<CheckResult> {
   let config;
   try {
@@ -146,6 +232,29 @@ async function checkWhatsapp(
     }
     throw err;
   }
+
+  // Ownership BEFORE subscription: a deprecated WABA can fail or lie on
+  // `subscribed_apps`, and a definitive re-parent verdict must not be lost to a
+  // transient error on the check that runs after it.
+  try {
+    const reparented = await checkWabaStillOwnsNumbers(
+      wabaId,
+      expectedNumberIds,
+      config.accessToken,
+      config.graphVersion,
+      config.appSecret,
+    );
+    if (reparented) return reparented;
+  } catch (err) {
+    if (isPoolClosedError(err)) throw err;
+    // Never let the added probe take down the check that was already here.
+    console.warn(
+      `[webhook-subscription-health] re-parent probe failed for WABA ${wabaId}: ${
+        err instanceof Error ? err.message : err
+      }`,
+    );
+  }
+
   const url = `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(wabaId)}/subscribed_apps`;
   try {
     const res = await graphGetJson(url, config.accessToken, { retry: true });
@@ -237,6 +346,9 @@ export async function sweepWebhookSubscriptionHealthOnce(): Promise<void> {
       channel: true,
       label: true,
       isDefault: true,
+      // The phone-number id, for the WABA re-parent probe. `""` is the
+      // credential-less placeholder row, filtered out at the call site.
+      externalAccountId: true,
       // `pickWabaProbe` breaks an isDefault tie by age, so it needs this.
       createdAt: true,
       wabaAccount: { select: { externalWabaId: true } },
@@ -309,6 +421,11 @@ export async function sweepWebhookSubscriptionHealthOnce(): Promise<void> {
                   conn.workspaceId,
                   conn.id,
                   conn.wabaAccount.externalWabaId,
+                  // Every number filed under this WABA, not just the probe's — the
+                  // re-parent verdict is "did they ALL leave", which needs the group.
+                  unit.applyTo
+                    .map((c) => c.externalAccountId)
+                    .filter((id) => id.length > 0),
                 )
               : { state: null as ConnState | null, detail: "no WABA linked — skipped" }
             : await checkPageChannel(

@@ -90,6 +90,72 @@ export function isAppSubscribedToWaba(
 }
 
 /**
+ * Every phone-number id this WABA currently owns (`GET /{waba-id}/phone_numbers`).
+ *
+ * Two callers, one question: connect-time asserts the pasted WABA really owns the
+ * number being connected, and the health sweeper asserts it STILL does. That second
+ * use is the one that matters, because a number can leave a WABA without us doing
+ * anything — see the re-parent detection in `webhook-subscription-health.ts`.
+ *
+ * PAGES, and treats truncation as an ERROR rather than a short list. Both callers ask
+ * "is my number in here", so a truncated page is a FALSE NEGATIVE: connect refuses a
+ * WABA that does own the number, and the sweeper reports a re-parent that never
+ * happened. A single `limit=200` read was silently capable of both — Meta documents
+ * WABAs with "expanded limits of up to 1,200 numbers", so 200 is not a safe ceiling.
+ * Same discipline as `fetchTemplates`: an incomplete list must not be handed to a
+ * membership test.
+ *
+ * Returns `rowsSeen` alongside the ids, and callers MUST branch on it, for the same
+ * reason `isAppSubscribedToWaba` refuses to cry wolf: `ids: []` with `rowsSeen > 0`
+ * means Meta returned numbers in a shape we could not read, NOT that the WABA owns
+ * none. Collapsing those two into "owns nothing" makes one Meta shape change refuse
+ * every connect and report every WhatsApp account on the platform as dark at once —
+ * a self-inflicted outage dressed as a detection.
+ */
+const WABA_NUMBER_PAGE_LIMIT = 200;
+/** 1,200 documented max ÷ 200 per page, with headroom. */
+const WABA_NUMBER_MAX_PAGES = 12;
+
+export async function listWabaPhoneNumberIds(
+  wabaId: string,
+  accessToken: string,
+  graphVersion: string,
+  /** Threaded so this call is covered when `META_APPSECRET_PROOF` is flipped on,
+   *  rather than becoming one more unproofed read outside `meta.ts`. */
+  appSecret?: string,
+): Promise<{ ok: true; ids: string[]; rowsSeen: number } | { ok: false; error: string }> {
+  const ids: string[] = [];
+  let rowsSeen = 0;
+  let url =
+    `${GRAPH_BASE}/${graphVersion}/${encodeURIComponent(wabaId)}` +
+    `/phone_numbers?fields=id&limit=${WABA_NUMBER_PAGE_LIMIT}`;
+  try {
+    for (let page = 0; ; page++) {
+      if (page >= WABA_NUMBER_MAX_PAGES) {
+        return {
+          ok: false,
+          error:
+            `phone_numbers did not terminate within ${WABA_NUMBER_MAX_PAGES} pages — ` +
+            "refusing to answer an ownership question from a truncated list",
+        };
+      }
+      const res = await graphGetJson(url, accessToken, { retry: true }, appSecret);
+      const rows = Array.isArray(res.data) ? (res.data as Array<{ id?: unknown }>) : [];
+      rowsSeen += rows.length;
+      for (const row of rows) {
+        if (typeof row?.id === "string" && row.id.length > 0) ids.push(row.id);
+        else if (typeof row?.id === "number") ids.push(String(row.id));
+      }
+      const next = (res.paging as { next?: unknown } | undefined)?.next;
+      if (typeof next !== "string" || next.length === 0) return { ok: true, ids, rowsSeen };
+      url = next;
+    }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
  * Release this app's subscription to a WABA (`DELETE /{waba-id}/subscribed_apps`).
  *
  * The counterpart to {@link ensureWabaSubscribed}, and the half that was missing:
