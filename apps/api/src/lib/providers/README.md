@@ -13,14 +13,19 @@ drops in without touching ingest, send orchestration, or business logic.
 | `meta.ts` | The Meta WhatsApp Cloud implementation. |
 | `config.ts` | Per-team Meta credential loader (`getMetaSendConfig`) + cache. Each provider gets its OWN config module + cache (no shared key — so "same team, two channels" can't collide). |
 | `index.ts` | The **registry**: `ProviderBinding` (provider + its config loader, coupled), `getProviderBinding(name)`, `requireProviderMethod(...)`, and the Meta-only `getMetaProvider()`. |
-| `channel.ts` | `resolveContactChannel(contact)` → `{ provider, to }`. The ONE place "phone number == identity" lives. |
-| `ingest.ts` | Provider-agnostic inbound pipeline: `ingestEvents(workspaceId, provider, events)`. Dedup on `(workspaceId, provider, externalId)`. |
+| `channel.ts` | `resolveContactChannel(contact)` → `{ channel, to, viaBsuid? }`. The ONE place "phone number == identity" lives. |
+| `ingest.ts` | Channel-agnostic inbound pipeline: `ingestEvents(workspaceId, channel, events, …)`. Dedup on `(workspaceId, channel, externalId)`. |
 
 ## Recipe — adding `telegram` (example)
 
-1. **Schema:** add `telegram` to the `ProviderName` enum in `prisma/schema.prisma`,
+1. **Schema:** add `telegram` to the **`Channel`** enum in `prisma/schema.prisma`,
    `prisma migrate dev`. (Contact identity already supports it:
-   `identityProvider` + `externalContactId`, both nullable.)
+   `identityChannel` + `externalContactId`, both nullable.)
+
+   There is **no `ProviderName` enum and no `provider`/`vendor` column** — the
+   `Channel` enum is the only discriminator, and which vendor implements a channel
+   is an implementation detail that is never stored (CLAUDE.md §5, §18). This
+   recipe used to say otherwise; corrected 2026-07-30.
 2. **Implement the provider:** `telegram.ts` exporting a
    `MessagingProvider<TelegramSendConfig>` — at minimum `name`, `capabilities`
    (`freeFormWindowMs: null` if the channel has no free-form window),
@@ -32,9 +37,14 @@ drops in without touching ingest, send orchestration, or business logic.
    keep your own cache — don't share Meta's).
 4. **Register the binding** in `index.ts`:
    ```ts
-   const REGISTRY: Record<ProviderName, ProviderBinding> = {
-     meta_cloud: { provider: metaProvider, getSendConfig: getMetaSendConfig } as ProviderBinding,
-     telegram:   { provider: telegramProvider, getSendConfig: getTelegramSendConfig } as ProviderBinding,
+   // Partial<> on purpose: the Channel enum carries values that are DESIGNED-for
+   // but not yet implemented, and getProviderBinding throws
+   // UnsupportedProviderError for any channel absent here.
+   const REGISTRY: Partial<Record<Channel, ProviderBinding>> = {
+     whatsapp:  { provider: metaProvider,       getSendConfig: getMetaSendConfig } as ProviderBinding,
+     messenger: { provider: messengerProvider,  getSendConfig: getMessengerSendConfig } as ProviderBinding,
+     instagram: { provider: instagramProvider,  getSendConfig: getInstagramSendConfig } as ProviderBinding,
+     telegram:  { provider: telegramProvider,   getSendConfig: getTelegramSendConfig } as ProviderBinding,
    };
    ```
 5. **Webhook controller:** add `webhooks/telegram/telegram.controller.ts` at
@@ -74,12 +84,12 @@ every message row.
   it provider-aware; that's the wrong layer.
 - **Per-channel error normalization.** `normalizeMetaSendError` is Meta-specific.
   A new channel would add its own; the send call sites catch the typed result.
-- **Broadcasts** are bound to `meta_cloud` by design (`broadcast-runner.ts`):
+- **Broadcasts** are bound to `whatsapp` by design (`broadcast-runner.ts`):
   they send pre-approved WhatsApp templates, which is a Meta capability. A
   "broadcast over channel X" is a separate feature, not per-recipient routing.
 
 ## Behavior note
 
 This whole layer was generalized as a behavior-preserving refactor — with only
-`meta_cloud` registered, every send routes identically to the old hardcoded
-path. `getProviderBinding("meta_cloud").provider` IS `metaProvider`.
+`whatsapp` registered, every send routes identically to the old hardcoded
+path. `getProviderBinding("whatsapp").provider` IS `metaProvider`.
