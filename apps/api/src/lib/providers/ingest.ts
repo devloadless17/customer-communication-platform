@@ -3004,6 +3004,13 @@ async function ingestOutboundEcho(
         status: evt.status ?? "sent",
         rawPayload: evt.rawPayload as Prisma.InputJsonValue,
         timestamp: messageTimestamp,
+        // Structured non-media content on an echo (a Messenger appointment the
+        // business just confirmed from Meta's inbox, a shared post/reel). Same
+        // column and same shape the inbound path writes — an echo is a real
+        // message on the thread, so it renders the same card.
+        ...(evt.structured
+          ? { structured: evt.structured as unknown as Prisma.InputJsonValue }
+          : {}),
         ...(evt.media
           ? {
               mediaKind: evt.media.kind,
@@ -3092,6 +3099,10 @@ async function ingestOutboundEcho(
     ...(mediaBlock
       ? { media: mediaBlock, ...(mediaPending ? { mediaPending: true } : {}) }
       : {}),
+    // Must ride the LIVE frame too, for the same reason the inbound path spells
+    // out: it is persisted on the row, so omitting it here renders the plain
+    // label live and only becomes a card after a refetch.
+    ...(evt.structured ? { structured: evt.structured } : {}),
   };
 
   // Splice-in row so a brand-new / reopened phone-initiated thread appears in a
@@ -4103,6 +4114,63 @@ export async function loadReplySnapshotById(
  * can race ahead — we retry both signals so the loser's tx restarts cleanly
  * and finds the row the winner committed.
  */
+/**
+ * Is this the RACE a Serializable retry can actually resolve?
+ *
+ * Narrower than {@link isTransientDbError} on purpose: that one answers "should
+ * Meta redeliver" and so includes dead connections and pool timeouts, which
+ * retrying in a tight loop would only make worse. This answers "will running the
+ * same transaction again plausibly succeed", which is true of a serialization
+ * conflict and of the unique-violation backstop, and of nothing else.
+ *
+ * THE SHAPE IS THE WHOLE POINT — this matched `PrismaClientKnownRequestError`
+ * with P2034/P2002 only, and `@prisma/adapter-pg` does not raise that. It raises
+ * `DriverAdapterError` with `cause.kind = "TransactionWriteConflict"`: no
+ * `.code`, not that class, none of Prisma's text. So the dominant conflict shape
+ * matched nothing and the retry loop threw on its FIRST attempt — a five-attempt
+ * backoff that never took a second attempt.
+ *
+ * `isTransientDbError` was fixed for exactly this shape (see its docblock, which
+ * even names "a serialization conflict that escapes runWithSerializableRetry"),
+ * but the escape hatch was treated as the fix and the retry itself was left
+ * broken. The result was not data loss — the 503 path caught it and Meta
+ * redelivered — but it inverted this function's economics: the B-M5 burst
+ * harness measured 273 conflicts across 500 webhooks, which with a working retry
+ * cost 32 requests a 503 (6.4%) and with a dead one costs all of them. Every one
+ * of those redelivers the whole BATCH, amplifying the load that caused it, and a
+ * sustained 5xx rate is how Meta throttles or disables a webhook subscription
+ * outright.
+ *
+ * Matched by cause kind AND by message text for the same reason the sibling does
+ * it: the adapter has moved this detail between the two across releases, and
+ * being wrong toward "permanent" costs a redelivered batch while being wrong the
+ * other way costs one extra, deduped attempt.
+ */
+function isSerializationRace(err: unknown): boolean {
+  if (err instanceof Prisma.PrismaClientKnownRequestError) {
+    return err.code === "P2034" || err.code === "P2002";
+  }
+  const cause = (err as { cause?: { kind?: unknown } }).cause;
+  const causeKind = typeof cause?.kind === "string" ? cause.kind : "";
+  if (
+    (err as { name?: unknown }).name === "DriverAdapterError" &&
+    (causeKind === "TransactionWriteConflict" ||
+      causeKind === "UniqueConstraintViolation")
+  ) {
+    return true;
+  }
+  const message = (err as { message?: unknown }).message;
+  if (typeof message !== "string" || message.length === 0) return false;
+  const m = message.toLowerCase();
+  return (
+    m === "transactionwriteconflict" ||
+    m.includes("write conflict") ||
+    m.includes("could not serialize") ||
+    m.includes("deadlock") ||
+    m.includes("duplicate key value")
+  );
+}
+
 export async function runWithSerializableRetry<T>(
   work: (tx: Prisma.TransactionClient) => Promise<T>,
 ): Promise<T> {
@@ -4137,10 +4205,7 @@ export async function runWithSerializableRetry<T>(
     try {
       return await db.$transaction(work, { isolationLevel: "Serializable" });
     } catch (err) {
-      const isRaceRetryable =
-        err instanceof Prisma.PrismaClientKnownRequestError &&
-        (err.code === "P2034" || err.code === "P2002");
-      if (!isRaceRetryable || attempt === MAX_ATTEMPTS - 1) throw err;
+      if (!isSerializationRace(err) || attempt === MAX_ATTEMPTS - 1) throw err;
       const cap = Math.min(240, 15 * 2 ** attempt);
       await new Promise((r) => setTimeout(r, Math.random() * cap));
     }
