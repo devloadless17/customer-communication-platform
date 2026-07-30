@@ -70,6 +70,24 @@ const TIER_DAILY_CAP: Record<string, number | null> = {
   TIER_10K: 10_000,
   TIER_100K: 100_000,
   TIER_UNLIMITED: null,
+  /**
+   * `UNTIERED` is a documented member of `whatsapp_business_manager_messaging_limit`
+   * alongside the TIER_* values, but Meta publishes NO numeric meaning for it.
+   *
+   * It is mapped here — rather than left to fall through `normalizeMessagingTier`'s
+   * final `return null` — purely so the token is RECOGNISED. Falling through made
+   * it indistinguishable from `TIER_UNLIMITED`, because that also carries a null
+   * cap: the composer showed no headroom warning either way, so an untiered number
+   * looked exactly like an uncapped one.
+   *
+   * The cap stays null because inventing a number would be a guess, and this gate
+   * is deliberately ADVISORY (it warns and shows headroom, it does not refuse), so
+   * the correct behaviour for "limit unknown" is to say so rather than to fabricate
+   * a ceiling. Callers that need to tell the two apart compare the tier STRING —
+   * `"UNTIERED"` (Meta has not assigned one) vs `"TIER_UNLIMITED"` (genuinely
+   * uncapped) vs `null` (we have no snapshot at all).
+   */
+  UNTIERED: null,
 };
 
 /** Snapshot shape read back for the gate + UI. */

@@ -5992,6 +5992,11 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       // outright.
       body: JSON.stringify({
         messaging_product: "whatsapp",
+        // Changelog 2026-06-16: `messaging_account_id` is the preferred Cloud API
+        // parameter on messaging **AND CALLING** endpoints. Returns {} when the
+        // account carries no id, so the wire stays byte-identical until a tenant
+        // is on a multi-Messaging-Account setup.
+        ...messagingAccountField(config),
         ...(args.to ? { to: args.to } : {}),
         ...(args.recipient ? { recipient: args.recipient } : {}),
         action: "connect",
@@ -6072,6 +6077,11 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       },
       body: JSON.stringify({
         messaging_product: "whatsapp",
+        // Changelog 2026-06-16: `messaging_account_id` is the preferred Cloud API
+        // parameter on messaging **AND CALLING** endpoints. Returns {} when the
+        // account carries no id, so the wire stays byte-identical until a tenant
+        // is on a multi-Messaging-Account setup.
+        ...messagingAccountField(config),
         call_id: args.externalCallId,
         action: "pre_accept",
         session: { sdp_type: "answer", sdp: args.sdpAnswer },
@@ -6109,6 +6119,11 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       },
       body: JSON.stringify({
         messaging_product: "whatsapp",
+        // Changelog 2026-06-16: `messaging_account_id` is the preferred Cloud API
+        // parameter on messaging **AND CALLING** endpoints. Returns {} when the
+        // account carries no id, so the wire stays byte-identical until a tenant
+        // is on a multi-Messaging-Account setup.
+        ...messagingAccountField(config),
         call_id: args.externalCallId,
         action: "accept",
         session: { sdp_type: "answer", sdp: args.sdpAnswer },
@@ -6171,6 +6186,11 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       // agent declined. Any reason is recorded locally instead.
       body: JSON.stringify({
         messaging_product: "whatsapp",
+        // Changelog 2026-06-16: `messaging_account_id` is the preferred Cloud API
+        // parameter on messaging **AND CALLING** endpoints. Returns {} when the
+        // account carries no id, so the wire stays byte-identical until a tenant
+        // is on a multi-Messaging-Account setup.
+        ...messagingAccountField(config),
         call_id: args.externalCallId,
         action: "reject",
       }),
@@ -6202,6 +6222,11 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       },
       body: JSON.stringify({
         messaging_product: "whatsapp",
+        // Changelog 2026-06-16: `messaging_account_id` is the preferred Cloud API
+        // parameter on messaging **AND CALLING** endpoints. Returns {} when the
+        // account carries no id, so the wire stays byte-identical until a tenant
+        // is on a multi-Messaging-Account setup.
+        ...messagingAccountField(config),
         call_id: args.externalCallId,
         action: "terminate",
       }),

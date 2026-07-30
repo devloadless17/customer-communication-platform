@@ -323,6 +323,22 @@ export const SendInteractiveSchema = z
   .refine((b) => b.kind !== "buttons" || b.options.length <= 3, {
     message: "buttons supports at most 3 options — use kind=list for more",
   })
+  // Meta caps the two reply-id kinds DIFFERENTLY: button reply ids at 256, LIST
+  // row ids at 200. `options` is shared by both kinds, so the field-level
+  // `max(256)` is right for buttons and 56 chars too loose for a list.
+  //
+  // The provider comment at `meta.ts` sendInteractive already relies on this
+  // guard existing — it declines to truncate a list id there (truncating at 200
+  // once corrupted a >200-char id so `list_reply.id` no longer matched on reply
+  // and ask_question routing fell through) on the stated grounds that "the
+  // request schemas hold NEW list ids to 200 at authoring time". They did not.
+  // A 201-256 char row id therefore reached Meta and came back as an opaque
+  // 132xxx surfacing to the operator as "send failed". Reject it here, where the
+  // author can actually see and fix it.
+  .refine(
+    (b) => b.kind !== "list" || b.options.every((o) => o.id.length <= 200),
+    { message: "list row ids are limited to 200 characters (button ids allow 256)" },
+  )
   .refine((b) => ["location_request", "cta_url", "carousel"].includes(b.kind) || b.options.length >= 1, {
     message: "at least one option is required",
   })

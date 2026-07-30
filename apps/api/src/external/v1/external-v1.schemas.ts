@@ -653,6 +653,17 @@ export const ExternalSendInteractiveSchema = z
     message: "buttons supports at most 3 options — use kind=list for more",
     path: ["options"],
   })
+  // Meta caps button reply ids at 256 but LIST row ids at 200, and `options` is
+  // shared by both kinds. Mirrors the internal guard in messages.schemas.ts —
+  // /v1 keeps parity with the UI, so an id the inbox rejects must not slip
+  // through the API and fail opaquely at Meta instead.
+  .refine(
+    (b) => b.kind !== "list" || b.options.every((o) => o.id.length <= 200),
+    {
+      message: "list row ids are limited to 200 characters (button ids allow 256)",
+      path: ["options"],
+    },
+  )
   .refine((b) => ["location_request", "cta_url", "carousel"].includes(b.kind) || b.options.length >= 1, {
     message: "at least one option is required",
     path: ["options"],

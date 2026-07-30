@@ -42,7 +42,7 @@ export class MetaSendError extends Error {
  */
 export type MetaErrorCode =
   | "outside_24h_window"   // WA 131047 · social 10/2018278 · 2534022 — messaging window closed
-  | "invalid_recipient"    // WA 131026/131051 · IG linkage 2534013/14/29/41 — recipient invalid/unreachable
+  | "invalid_recipient"    // WA 131026 · IG linkage 2534013/14/29/41 — recipient invalid/unreachable
   | "rate_limited"         // WA 4/80007/130429/131048/131056 · social 613/80006 — rate/throughput limit
   | "per_user_marketing_cap" // WA 131049 — Meta's per-USER marketing frequency cap (not our rate limit)
   | "marketing_opt_out"     // WA 131050 — this recipient stopped marketing messages FROM US
@@ -54,7 +54,7 @@ export type MetaErrorCode =
   | "auth_expired"         // 190 — access token expired
   | "recipient_unavailable" // social 551/1545041 — person can't be messaged (blocked / deactivated)
   | "message_unavailable"  // social 10900/9000001 — referenced message deleted/unavailable
-  | "unsupported_message"  // 131009 — content type not supported on this account
+  | "unsupported_message"  // 131009/131051 — message TYPE/content not supported (not a bad recipient)
   | "duplicate_button_title" // 131009 + "Duplicate button title" — interactive buttons reuse a title
   | "call_permission_required" // WA 138006 — customer hasn't granted calling permission
   | "account_restricted"   // WA 368/131031 — WABA restricted/disabled/locked by policy enforcement
@@ -158,11 +158,10 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
     };
   }
   // ── Recipient invalid / not reachable on this channel ────────────────────
-  // WhatsApp 131026/131051; Instagram linkage errors (page not linked to the
+  // WhatsApp 131026; Instagram linkage errors (page not linked to the
   // IG account, or the recipient can't be resolved).
   if (
     numericCode === 131026 ||
-    numericCode === 131051 ||
     numericCode === 2534013 ||
     numericCode === 2534014 ||
     numericCode === 2534029 ||
@@ -412,7 +411,12 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
       httpStatus,
     };
   }
-  if (numericCode === 131009) {
+  // 131051 is documented as "Unsupported message type" — the MESSAGE is wrong,
+  // not the customer. It used to sit in `invalid_recipient`, the one bucket that
+  // means "delete this contact", so a perfectly reachable customer was reported
+  // as list-cleaning material because we sent them a type their client or the
+  // account can't render.
+  if (numericCode === 131009 || numericCode === 131051) {
     // 131009 is a catch-all "Parameter value is not valid". Meta puts the
     // specific reason in error_data.details. Interactive button sends with
     // repeated titles surface as "Duplicate button title" — map that to an
@@ -470,7 +474,6 @@ export function classifyMetaStatusError(code: number | null | undefined): MetaEr
     case 2534022:
       return "outside_24h_window";
     case 131026:
-    case 131051:
     case 2534013:
     case 2534014:
     case 2534029:
@@ -536,6 +539,10 @@ export function classifyMetaStatusError(code: number | null | undefined): MetaEr
     case 9000001:
       return "message_unavailable";
     case 131009:
+    // 131051 "Unsupported message type" — moved out of `invalid_recipient`,
+    // which is the only bucket that tells the operator to delete the contact.
+    // The recipient is fine; the message type is not supported.
+    case 131051:
       return "unsupported_message";
     default:
       return "provider_rejected";
