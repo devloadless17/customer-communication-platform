@@ -147,6 +147,35 @@ export function resolveSendRate(
 }
 
 /**
+ * Send rate for a SOCIAL channel (Messenger / Instagram), which has nothing to do
+ * with the WhatsApp throughput ladder above.
+ *
+ * `resolveSendRate` was being used for these too, and since social carries no
+ * `throughput.level` it landed on the WhatsApp BASELINE of 40/s. That is the wrong
+ * number for the wrong reason, and it sat exactly ON the binding limit rather than
+ * under it.
+ *
+ * Meta's Page limits are a ladder of three, and the LOWEST one binds:
+ *   - 300 calls/s per Page for text, links, reactions and stickers,
+ *   - 10/s for audio and video,
+ *   - and a ~40 messages/s Page-INBOX ceiling, past which the Page silently stops
+ *     sending — the nastiest of the three because nothing errors.
+ *
+ * So 300 is a red herring for a campaign: the inbox ceiling is what actually stops
+ * you, and being at 40 rather than below it means the first burst is the one that
+ * finds out. Default 36 keeps a margin, mirroring how HIGH/STANDARD sit under
+ * 1,000/80 for WhatsApp.
+ *
+ * The 10/s audio-video tier deliberately has no branch: `Broadcast` carries only
+ * `bodyText` / `templateName` and no media columns, so a social broadcast is text by
+ * construction. If media broadcasts ever ship for social, this is the function that
+ * needs the second rate — not the caller.
+ */
+export function resolveSocialSendRate(): number {
+  return envInt("BROADCAST_RATE_SOCIAL", 36, 1, 300);
+}
+
+/**
  * Take one send token for `accountKey`, waiting if the bucket is empty.
  *
  * `accountKey` is the provider's own account id (WhatsApp `phoneNumberId`) —

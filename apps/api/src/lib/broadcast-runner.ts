@@ -29,6 +29,7 @@ import {
   acquireSendToken,
   resolveSendRate,
   sendRateLimiterEnabled,
+  resolveSocialSendRate,
 } from "@/lib/broadcasts/send-rate-limiter";
 import { getWhatsappHealth } from "@/lib/providers/meta-health";
 
@@ -1331,16 +1332,33 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   // so two campaigns on one number must share it — which a per-lane sleep can
   // never express. `rateKey` falls back to the workspace for channels with no
   // per-number concept, so the bucket is still a single shared ceiling there.
-  // The resolved send config already names the account this run sends from
-  // (`phoneNumberId` for WhatsApp). Falling back to a workspace+channel key
-  // keeps the bucket a single shared ceiling for channels with no per-number
-  // concept, rather than silently degrading to per-run.
+  // The resolved send config names the account this run sends from — and EVERY
+  // live channel has one, so the workspace fallback should never fire:
+  // `phoneNumberId` for WhatsApp, `pageId` for Messenger AND Instagram (IG sends
+  // through its linked Page).
+  //
+  // Social used to have no per-account key at all, because this only read
+  // `phoneNumberId`. Two Pages in one workspace therefore SHARED one bucket: they
+  // throttled each other, and the aggregate could still overshoot because Meta's
+  // limits are per PAGE. The fallback is kept only as a genuine last resort for a
+  // channel with no account concept (the first-party web widget), not as the
+  // routine social path it had become.
   const sendConfig = bindingByChannel.get(broadcast.channel)?.config as
-    | { phoneNumberId?: string }
+    | { phoneNumberId?: string; pageId?: string }
     | undefined;
   const rateKey =
-    sendConfig?.phoneNumberId || `ws:${broadcast.workspaceId}:${broadcast.channel}`;
-  const sendRate = resolveSendRate(throughputLevel, isOnBusinessApp);
+    sendConfig?.phoneNumberId ||
+    sendConfig?.pageId ||
+    `ws:${broadcast.workspaceId}:${broadcast.channel}`;
+  // WhatsApp paces off Meta's throughput ladder + the Coexistence cap; social has
+  // its own, unrelated Page limits. Feeding a social run through
+  // `resolveSendRate` landed it on the WhatsApp BASELINE (40/s) purely because
+  // `throughput.level` is null for a Page — the right number by accident, for the
+  // wrong reason, and sitting exactly ON Meta's Page-inbox ceiling instead of under it.
+  const sendRate =
+    broadcast.channel === "whatsapp"
+      ? resolveSendRate(throughputLevel, isOnBusinessApp)
+      : resolveSocialSendRate();
 
   // Cooperative cancel — operators flip the broadcast row to `canceled`
   // via POST /api/broadcasts/:id/cancel; the lanes check this flag at the

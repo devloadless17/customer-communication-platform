@@ -25,6 +25,10 @@ import {
 } from "@/lib/providers/meta-send-error";
 import { resolveContactChannel } from "@/lib/providers/channel";
 import { mergePricingSlices } from "@/lib/analytics/waba-analytics";
+import {
+  resolveSendRate,
+  resolveSocialSendRate,
+} from "@/lib/broadcasts/send-rate-limiter";
 import { SendInteractiveSchema } from "@/messages/messages.schemas";
 
 describe("W13-01 · 131051 is an unsupported MESSAGE, not a bad recipient", () => {
@@ -191,5 +195,29 @@ describe("W6-07 · pricing slices are AGGREGATED, not one row per time bucket", 
   it("treats a null volume as zero rather than NaN-ing the total", () => {
     const out = mergePricingSlices([pt({ volume: null }), pt({ volume: 5 })]);
     expect(out[0]!.volume).toBe(5);
+  });
+});
+
+describe("MACC-03 · social broadcasts pace off Meta's PAGE limits, not WhatsApp's ladder", () => {
+  it("keeps the social rate strictly UNDER Meta's ~40/s Page-inbox ceiling", () => {
+    // That ceiling is the binding one — 300/s is the text limit, but past ~40 msg/s
+    // the Page silently stops sending, which is worse than an error. Sitting AT 40
+    // means the first burst is what discovers it.
+    const rate = resolveSocialSendRate();
+    expect(rate).toBeLessThan(40);
+    expect(rate).toBeGreaterThan(0);
+  });
+
+  it("is NOT the WhatsApp baseline it used to inherit", () => {
+    // Social carries no `throughput.level`, so routing it through resolveSendRate
+    // landed on the WhatsApp BASELINE — the right ballpark by accident, for the
+    // wrong reason, and exactly on the ceiling.
+    expect(resolveSocialSendRate()).not.toBe(resolveSendRate(null, false));
+  });
+
+  it("still paces WhatsApp off the throughput ladder and the Coexistence cap", () => {
+    expect(resolveSendRate("HIGH", false)).toBeGreaterThan(resolveSocialSendRate());
+    // Coexistence is a FIXED cap outside the ladder, and must win over the level.
+    expect(resolveSendRate("HIGH", true)).toBeLessThanOrEqual(20);
   });
 });
