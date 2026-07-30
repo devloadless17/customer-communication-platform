@@ -168,6 +168,22 @@ export interface NormalizedInboundMessage
    * provider-agnostic by emitting the wamid only.
    */
   replyToExternalId?: string;
+  /**
+   * Whether this inbound OPENS the channel's free-form messaging window.
+   *
+   * Defaults to true, because for every message type that existed before this
+   * flag, receiving one is exactly what opens the window. It exists for the one
+   * inbound that does NOT: an Instagram COMMENT. Meta is explicit that a comment
+   * buys a single private reply addressed by `comment_id` within 7 days — it does
+   * not start a 24-hour conversation, and the customer must answer that reply
+   * before ordinary DMs are allowed.
+   *
+   * So a comment must not bump `Contact.lastInboundAt`. That column is the window
+   * clock the composer, the send guards and the broadcast runner all read; letting
+   * a comment set it would tell every one of them the thread is open, and each
+   * would then hand Meta a send it is guaranteed to reject.
+   */
+  opensMessagingWindow?: boolean;
   timestamp: Date;
   rawPayload: Record<string, unknown>;
 }
@@ -838,6 +854,14 @@ export interface NormalizedOutboundEcho
   /** Set when the echoed message carries an attachment that needs downloading. */
   media?: NormalizedMediaRef;
   /**
+   * Structured non-media content on an echo — the same shape the inbound path
+   * uses. Needed because a business reply typed in Meta's native inbox can BE
+   * the structured content: confirming or declining an appointment ships the
+   * updated booking on `message_echoes`, and a post/reel share echoes back with
+   * its title and url. Without this the echo mirrors as a bare label.
+   */
+  structured?: MessageStructured;
+  /**
    * History backfill only — the delivery state the message had already earned
    * (`history_context.status`, mapped to our ladder). Absent on live echoes;
    * ingest defaults to "sent".
@@ -1130,12 +1154,34 @@ export interface SendTextArgs {
    */
   useHumanAgentTag?: boolean;
   /**
+   * MESSENGER only: send under a named PERSONA rather than the Page's own
+   * identity, so the bubble reads "Adam from Jasper's Market".
+   *
+   * The provider must place this at the TOP LEVEL of the send body, beside
+   * `message` — nested inside `message` Meta ignores it silently and the reply
+   * goes out as the Page with no error to notice. See `messenger-personas.ts`.
+   */
+  personaId?: string;
+  /**
    * WhatsApp only: render a link preview card for the first URL in `body`
    * (Meta's `text.preview_url`). When omitted, the provider auto-enables it if
    * the body contains an http(s) URL. Ignored by channels that preview links
    * natively (Messenger / Instagram).
    */
   previewUrl?: boolean;
+  /**
+   * INSTAGRAM PRIVATE REPLY — address this send at a COMMENT rather than at a
+   * person (`recipient: { comment_id }` instead of `recipient: { id }`).
+   *
+   * This is the only way to open a thread with someone who has commented but
+   * never messaged: Meta allows exactly one such reply, within 7 days of the
+   * comment, and it lands in the person's Inbox or Requests folder. It is not
+   * subject to the 24-hour window — there is no window yet, which is the entire
+   * point — and only once they answer does ordinary DM sending become legal.
+   *
+   * `to` is ignored when this is set; the comment identifies the recipient.
+   */
+  privateReplyToCommentId?: string;
 }
 
 export interface SendTextResult {
@@ -1213,7 +1259,15 @@ export interface SendInteractiveArgs {
    * either one URL button or uniform quick-reply buttons. Configured via
    * `carouselCards` below; no `options`.
    */
-  kind: "buttons" | "list" | "voice_call" | "location_request" | "cta_url" | "carousel";
+  kind:
+    | "buttons"
+    | "list"
+    | "voice_call"
+    | "location_request"
+    | "cta_url"
+    | "carousel"
+    | "generic"
+    | "product";
   /** Ignored for `voice_call` / `location_request` / `cta_url` / `carousel`. */
   options: InteractiveOption[];
   /**
@@ -1276,6 +1330,25 @@ export interface SendInteractiveArgs {
   headerText?: string;
   /** Buttons + list — optional footer line under the body (≤60 chars). */
   footerText?: string;
+  /**
+   * `generic` only — Meta's GENERIC TEMPLATE: 1-10 cards, each an image + title +
+   * subtitle + up to 3 buttons. More than one card renders as a horizontally
+   * scrollable carousel.
+   *
+   * Distinct from `carousel` on purpose. WhatsApp's interactive carousel demands
+   * a media header on every card and a UNIFORM button variant and count across
+   * them (Meta rejects mixed ones); the generic template requires none of that —
+   * a card may be text-only and each may carry different buttons. Folding them
+   * together would mean enforcing WhatsApp's uniformity rule on a surface that
+   * doesn't have it, and relaxing it where it is mandatory.
+   */
+  genericCards?: GenericTemplateCard[];
+  /**
+   * `product` only — 1-10 catalog product ids to render as product cards. The
+   * ids come from the Catalog API or Commerce Manager; there is no other content
+   * to send, because Meta draws the card from the catalog entry itself.
+   */
+  productIds?: string[];
   /** Quoted-reply context, same semantics as SendTextArgs. */
   replyToExternalId?: string;
   /** Meta social only — see SendTextArgs.useHumanAgentTag. */
@@ -1296,8 +1369,322 @@ export interface SendInteractiveArgs {
   contactShare?: ContactShareField[];
 }
 
+/**
+ * One button on a generic-template card. Meta supports exactly two types here —
+ * "Only `postback` and `web_url` buttons are supported" — so a phone-number or
+ * login button is not modelled rather than being silently dropped at send time.
+ */
+export type GenericTemplateButton =
+  | { type: "web_url"; title: string; url: string }
+  | { type: "postback"; title: string; payload: string };
+
+/**
+ * One card of a generic template. `title` is the only required field, and Meta
+ * additionally requires at least one property BEYOND it — a title alone renders
+ * an empty card, so the schema refuses it rather than letting Meta accept
+ * something useless.
+ */
+export interface GenericTemplateCard {
+  /** ≤80 characters. */
+  title: string;
+  /** ≤80 characters. */
+  subtitle?: string;
+  imageUrl?: string;
+  /** Tapping the card itself opens this URL (Meta's `default_action`). */
+  defaultActionUrl?: string;
+  /** 1-3 buttons. */
+  buttons?: GenericTemplateButton[];
+}
+
 /** A profile field a social contact can share with one tap. */
 export type ContactShareField = "phone" | "email";
+
+/**
+ * CONVERSATION ENTRY POINTS — what a customer can see and tap BEFORE they have
+ * typed anything.
+ *
+ * Instagram and Messenger both expose these on `/{page-id}/messenger_profile`
+ * (Instagram requires `platform=instagram`), and they are the closest thing the
+ * social channels have to a self-serve front door: an ice breaker is one of up to
+ * four FAQ questions shown in an empty thread, and the persistent menu is an
+ * always-available hamburger of up to five items.
+ *
+ * Modelled channel-agnostically because the CONCEPT is not Meta's — a future
+ * Telegram provider's command menu is the same idea — and because keeping the
+ * vendor's `call_to_actions`/per-locale envelope out of the domain layer is the
+ * whole point of the provider seam.
+ *
+ * A tap on either arrives as an ordinary `messaging_postbacks` webhook carrying
+ * the author-assigned `payload`, which the parser already surfaces as an
+ * `interactiveReply` — so workflow routing (`ask_question`, trigger conditions)
+ * works on them with no further plumbing.
+ */
+export interface ChannelIceBreaker {
+  /** The question text the customer sees. */
+  question: string;
+  /** Author-assigned id echoed back on the postback when tapped. */
+  payload: string;
+}
+
+/** One persistent-menu item: a URL button or a postback button. */
+export type ChannelMenuItem =
+  | { type: "web_url"; title: string; url: string }
+  | { type: "postback"; title: string; payload: string };
+
+export interface ChannelEntryPoints {
+  iceBreakers: ChannelIceBreaker[];
+  menuItems: ChannelMenuItem[];
+}
+
+/**
+ * THE WELCOME SURFACE — what a person sees on a channel BEFORE they have ever
+ * messaged the business, as opposed to {@link ChannelEntryPoints}, which is what
+ * they see in an empty thread they have already opened.
+ *
+ * Messenger-only today, and modelled separately from entry points for a concrete
+ * reason rather than tidiness: Instagram's profile node accepts `ice_breakers`
+ * and `persistent_menu` but rejects all three fields here, so a single combined
+ * shape would describe a save that cannot succeed on one of its two channels.
+ *
+ * `getStartedPayload` doubles as the on/off switch for the button itself — null
+ * means no button, which is a state the customer can see, not just an empty
+ * string. A tap arrives as an ordinary postback carrying that payload, so
+ * workflow routing needs no new plumbing.
+ */
+export interface ChannelWelcomeScreen {
+  /** Payload echoed back when the Get Started button is tapped. Null = no button. */
+  getStartedPayload: string | null;
+  /** Greeting shown on the welcome screen. Null/empty CLEARS it. */
+  greeting: string | null;
+  /** Tappable `/commands`. Empty CLEARS the menu. */
+  commands: ChannelCommand[];
+}
+
+/** One entry in the commands menu. */
+export interface ChannelCommand {
+  name: string;
+  description: string;
+}
+
+/**
+ * THREAD CONTROL — a request to change who is allowed to answer a conversation.
+ *
+ * Meta's Handover Protocol lets several apps attach to one Page while exactly one
+ * holds control of any given thread. Modelled channel-agnostically because the
+ * CONCEPT outlives the vendor (any platform that lets a bot and a human share a
+ * conversation needs the same four verbs), and because keeping `target_app_id`
+ * and the per-edge endpoint names out of the domain layer is the point of the
+ * provider seam.
+ *
+ *   take    — claim it (PRIMARY receiver only)
+ *   request — ask the primary receiver for it (SECONDARY only; it may be ignored)
+ *   pass    — give it away; defaults to the platform's own inbox app
+ *   release — give it back to the primary receiver
+ */
+export interface ThreadControlArgs {
+  /** The customer's channel identity (PSID on Messenger). */
+  to: string;
+  action: "take" | "request" | "pass" | "release";
+  /** `pass` only. Omitted = the platform's first-party inbox app. */
+  targetAppId?: string;
+  /** Echoed back to every app on the Page in the handover webhook. */
+  metadata?: string;
+}
+
+export interface ThreadControlResult {
+  /**
+   * Who owns the thread AFTER the call, re-read rather than assumed.
+   *
+   * Load-bearing for `request`: the primary receiver "may then choose to honor
+   * the request and pass thread control, or ignore the request", so a successful
+   * call does NOT mean we can now reply. Null when the owner can't be read (we
+   * are not the primary receiver, or the Page never used routing).
+   */
+  ownerAppId: string | null;
+}
+
+/**
+ * A named voice inside a Page's conversations (Messenger Personas).
+ *
+ * Modelled channel-agnostically because the CONCEPT is generic — "which of our
+ * people is speaking" is a question every shared inbox has — even though Meta is
+ * the only provider offering it today. For a shared inbox this is what stops
+ * three agents and a workflow reading as one indistinguishable voice.
+ */
+export interface ChannelPersona {
+  id: string;
+  name: string | null;
+  profilePictureUrl: string | null;
+}
+
+/**
+ * Send an inline STRUCTURED template (Messenger's button / generic message
+ * shapes).
+ *
+ * Explicitly NOT the same thing as `sendTemplate`, which sends an APPROVED
+ * template from a provider catalog by name. These are authored inline, need no
+ * review, and are gated on the ordinary messaging window. The provider-level
+ * shape stays vendor-typed (`unknown` here would lose every cap the builder
+ * enforces), so this arg is Messenger-specific by design.
+ */
+export interface SendStructuredTemplateArgs {
+  to: string;
+  /** The vendor template descriptor — see `messenger-templates.ts`. */
+  template: MessengerStructuredTemplate;
+  /** Send under a named persona rather than the Page's own identity. */
+  personaId?: string;
+  /** Meta social only — see SendTextArgs.useHumanAgentTag. */
+  useHumanAgentTag?: boolean;
+}
+
+/**
+ * The Messenger structured-template descriptor, mirrored here so the provider
+ * interface can name it without the shared package importing app code. Kept
+ * deliberately narrow: only the two template types that are implemented.
+ */
+export type MessengerStructuredTemplate =
+  | { kind: "button"; text: string; buttons: MessengerStructuredButton[] }
+  | {
+      kind: "generic";
+      elements: Array<{
+        title: string;
+        subtitle?: string;
+        imageUrl?: string;
+        defaultActionUrl?: string;
+        buttons?: MessengerStructuredButton[];
+      }>;
+      sharable?: boolean;
+    }
+  | {
+      /** ONE image or video. Audio is not supported by this template. */
+      kind: "media";
+      mediaType: "image" | "video";
+      /** From the Attachment Upload API. Mutually exclusive with `url`. */
+      attachmentId?: string;
+      /**
+       * MUST be Facebook-hosted — Meta rejects external URLs on this template
+       * specifically, unlike every other place a URL appears.
+       */
+      url?: string;
+      buttons?: MessengerStructuredButton[];
+    }
+  | {
+      /** 2-6 images in one message, each independently tappable. */
+      kind: "image_grid";
+      images: Array<{
+        url: string;
+        /** At most ONE per grid; more than one is an error on Meta's side. */
+        isHeroImage?: boolean;
+        action?:
+          | { type: "web_url"; url: string }
+          // `text` is what Meta posts as the recipient's reply — a postback
+          // action without it renders a tap that appears to do nothing.
+          | { type: "postback"; payload: string; text: string };
+      }>;
+      /** 45-character cap here, NOT the generic template's 80. */
+      title?: string;
+      subtitle?: string;
+      /** Only `web_url` and `postback` are accepted below a grid. */
+      buttons?: MessengerStructuredButton[];
+    }
+  | {
+      /** An order confirmation: line items, totals, address. */
+      kind: "receipt";
+      recipientName: string;
+      /** Must be unique per Meta. */
+      orderNumber: string;
+      currency: string;
+      paymentMethod: string;
+      summary: {
+        subtotal?: number;
+        shippingCost?: number;
+        totalTax?: number;
+        /** Required — includes subtotal, shipping and tax. */
+        totalCost: number;
+      };
+      merchantName?: string;
+      orderUrl?: string;
+      /** Serialized to Unix SECONDS by the provider, which is what Meta wants. */
+      orderedAt?: Date;
+      /** Max 100. */
+      elements?: Array<{
+        title: string;
+        subtitle?: string;
+        quantity?: number;
+        price: number;
+        currency?: string;
+        imageUrl?: string;
+      }>;
+      address?: {
+        street1: string;
+        street2?: string;
+        city: string;
+        postalCode: string;
+        state: string;
+        country: string;
+      };
+      adjustments?: Array<{ name: string; amount: number }>;
+      sharable?: boolean;
+    }
+  | {
+      /** A discount with Meta's built-in Reveal-code button. */
+      kind: "coupon";
+      title: string;
+      subtitle?: string;
+      /** One of `couponCode`/`couponUrl` is required. Codes cannot contain spaces. */
+      couponCode?: string;
+      couponUrl?: string;
+      couponUrlButtonTitle?: string;
+      couponPreMessage?: string;
+      imageUrl?: string;
+      /** Echoed back on the webhook when Reveal code is tapped. */
+      payload?: string;
+    };
+
+export type MessengerStructuredButton =
+  | {
+      type: "web_url";
+      title: string;
+      url: string;
+      webviewHeightRatio?: "compact" | "tall" | "full";
+      messengerExtensions?: boolean;
+      fallbackUrl?: string;
+      hideShareButton?: boolean;
+    }
+  | { type: "postback"; title: string; payload: string }
+  | { type: "phone_number"; title: string; payload: string };
+
+/**
+ * Send an APPROVED utility template — the Messenger analogue of a WhatsApp
+ * template send, and the only outbound that legitimately bypasses the messaging
+ * window.
+ *
+ * Distinct from both `SendTemplateArgs` (WhatsApp's catalog, different component
+ * grammar) and `SendStructuredTemplateArgs` (inline, no approval). Three
+ * different things called "template" is unavoidable — Meta named them — so each
+ * one says in its own doc which it is.
+ */
+export interface SendUtilityTemplateArgs {
+  to: string;
+  templateName: string;
+  languageCode: string;
+  /** From the template itself, never re-derived from its body text. */
+  parameterFormat?: "POSITIONAL" | "NAMED";
+  bodyParameters?: Array<{ text: string; name?: string }>;
+  buttonParameters?: Array<
+    { type: "POSTBACK"; payload: string } | { type: "URL"; urlSuffix: string }
+  >;
+  personaId?: string;
+}
+
+/** Send a first-party sticker by catalog id. */
+export interface SendStickerArgs {
+  /** Recipient's channel identity (PSID on Messenger). */
+  to: string;
+  stickerId: string;
+  /** Meta social only — see SendTextArgs.useHumanAgentTag. */
+  useHumanAgentTag?: boolean;
+}
 
 /** Outbound location share (WhatsApp `type:"location"`). */
 export interface SendLocationArgs {
@@ -2203,12 +2590,28 @@ export interface ProviderCapabilities {
    */
   locationRequest?: boolean;
   /**
-   * CTA URL button messages (`interactive.type:"cta_url"` — one button that
-   * opens a URL, keeping the raw link out of the body). Gates the
-   * composer/`/v1` `cta_url` interactive kind. WhatsApp only today.
+   * CTA URL button messages — one button that opens a URL, keeping the raw link
+   * out of the body. Gates the composer/`/v1` `cta_url` interactive kind.
+   *
+   * The WIRE differs per channel and that is the provider's business, not the
+   * caller's: WhatsApp sends `interactive.type:"cta_url"`, Instagram sends Meta's
+   * BUTTON TEMPLATE (`attachment.type:"template"`, `template_type:"button"`, one
+   * `web_url` button) because Instagram has no interactive cta_url type. Both
+   * render one tappable link button, which is the promise this flag makes.
    * Optional — absent = false.
    */
   ctaUrlButton?: boolean;
+  /**
+   * Max characters of TEXT a structured template on this channel may carry, when
+   * that limit is tighter than `messageTextMaxChars`.
+   *
+   * Exists because Instagram's plain-text ceiling (1,000) and its button-template
+   * `text` ceiling (640) are different numbers, so the generic text-cap check is
+   * not sufficient for a `cta_url` send there — an 800-character link message
+   * would pass our gate and be rejected by Meta deep inside the send worker.
+   * Absent = the channel has no separate template limit.
+   */
+  templateTextMaxChars?: number;
   /**
    * Interactive media carousels (`interactive.type:"carousel"` — 2-10
    * scrollable media cards with URL or quick-reply buttons). Gates the `/v1`
@@ -2235,6 +2638,87 @@ export interface ProviderCapabilities {
    * different, weaker promise we deliberately don't fake).
    */
   blockUsers?: boolean;
+  /**
+   * The channel can answer a public comment PUBLICLY, on the comment thread
+   * itself. Distinct from `commentPrivateReply`, which opens a DM with the one
+   * commenter: this is visible to everyone and has no per-comment cap. Gates the
+   * inbox's "Reply publicly" action. Optional — absent = false.
+   */
+  publicCommentReply?: boolean;
+  /**
+   * The channel can file a conversation as SPAM at the provider without blocking
+   * the person (Instagram `move_to_spam`). Gates the inbox's "Mark as spam"
+   * action. Optional — absent = false.
+   */
+  moderateSpam?: boolean;
+  /**
+   * Meta's GENERIC TEMPLATE — 1-10 image/title/subtitle/button cards, rendered as
+   * a carousel beyond one. Gates the `generic` interactive kind. Optional —
+   * absent = false.
+   */
+  genericTemplate?: boolean;
+  /**
+   * Meta's PRODUCT TEMPLATE — 1-10 catalog products rendered as product cards.
+   * Needs a connected commerce catalog on the account. Gates the `product`
+   * interactive kind. Optional — absent = false.
+   */
+  productTemplate?: boolean;
+  /**
+   * The channel lets a business reply PRIVATELY to a public comment
+   * (Instagram: `recipient: { comment_id }`). This is not a messaging-window
+   * extension — it is the one send allowed when no window exists at all, capped
+   * at one reply per comment within 7 days. Gates the send path's private-reply
+   * resolution. Optional — absent = false.
+   */
+  commentPrivateReply?: boolean;
+  /**
+   * The channel supports CONVERSATION ENTRY POINTS — ice breakers and a
+   * persistent menu the customer sees before typing (see
+   * {@link ChannelEntryPoints}). Gates the Settings panel that edits them.
+   * Optional — absent = false.
+   */
+  entryPoints?: boolean;
+  /**
+   * The channel has a configurable WELCOME SURFACE — the screen a person sees
+   * before they have ever messaged the business. On Messenger that is the Get
+   * Started button, the greeting text, and the commands menu
+   * (`/{page-id}/messenger_profile`). Deliberately SEPARATE from
+   * `entryPoints`: Instagram has ice breakers and a persistent menu but accepts
+   * none of these three fields, so one flag covering both would light up a
+   * Settings panel that 400s on save for half its channels.
+   * Optional — absent = false.
+   */
+  welcomeScreen?: boolean;
+  /**
+   * The channel can send a first-party STICKER by id, and exposes a catalog to
+   * pick one from (Messenger's Sticker API). Gates the composer's sticker
+   * picker. Distinct from `MediaKind: "sticker"`, which is about RECEIVING one.
+   * Optional — absent = false.
+   */
+  stickers?: boolean;
+  /**
+   * The channel implements the HANDOVER PROTOCOL — several apps may attach to
+   * one account and exactly one holds control of a thread at a time. Gates the
+   * "take over this conversation" affordance. Messenger-only today: Instagram
+   * replaced Handover Protocol with Conversation Routing on 2025-10-23, which is
+   * a different model and not what these four verbs describe.
+   * Optional — absent = false.
+   */
+  threadControl?: boolean;
+  /**
+   * The channel can send INLINE structured templates — text with buttons, and
+   * card carousels — authored at send time with no review step. Deliberately a
+   * different flag from `templates`, which means an APPROVED catalog: a channel
+   * can have one, both or neither, and Messenger today has this one only.
+   * Optional — absent = false.
+   */
+  structuredTemplates?: boolean;
+  /**
+   * The channel supports named PERSONAS — sending as "Adam from Jasper's
+   * Market" rather than as the Page. Gates the per-agent identity affordance.
+   * Optional — absent = false.
+   */
+  personas?: boolean;
   /**
    * Voice calling. True if the provider implements placeCall / acceptCall /
    * etc. Gates the inbox "Call" button at the channel level — a future
@@ -2700,6 +3184,80 @@ export interface MessagingProvider<SendConfig = unknown> {
   blockUsers?(users: string[], config: SendConfig): Promise<BlockUsersResult>;
   /** Unblock users (WhatsApp `DELETE /{phone-id}/block_users`). Same contract. */
   unblockUsers?(users: string[], config: SendConfig): Promise<BlockUsersResult>;
+  /**
+   * Reply PUBLICLY to a comment (Instagram `POST /<comment-id>/replies`).
+   * Returns the new comment's id. Optional — gated by
+   * `capabilities.publicCommentReply`.
+   */
+  replyToComment?(
+    commentId: string,
+    message: string,
+    config: SendConfig,
+  ): Promise<{ commentId: string }>;
+  /**
+   * File these people's conversations as SPAM at the provider (Instagram's
+   * `move_to_spam` moderation action). Distinct from blocking: it does not sever
+   * contact, it just moves the existing thread out of the way. Optional — gated
+   * by `capabilities.moderateSpam`.
+   */
+  markSpam?(users: string[], config: SendConfig): Promise<BlockUsersResult>;
+  /**
+   * Read this account's conversation entry points (ice breakers + persistent
+   * menu). Optional — only channels whose capabilities declare `entryPoints`
+   * implement it. See {@link ChannelEntryPoints}.
+   */
+  getEntryPoints?(config: SendConfig): Promise<ChannelEntryPoints>;
+  /** Replace this account's entry points. An empty list CLEARS that field. */
+  setEntryPoints?(entryPoints: ChannelEntryPoints, config: SendConfig): Promise<void>;
+  /**
+   * Read this account's WELCOME SURFACE — what a person sees before they have
+   * ever messaged the business. Optional; gated by `capabilities.welcomeScreen`.
+   * See {@link ChannelWelcomeScreen}.
+   */
+  getWelcomeScreen?(config: SendConfig): Promise<ChannelWelcomeScreen>;
+  /** Replace it. A null/empty field CLEARS that property on the provider. */
+  setWelcomeScreen?(welcome: ChannelWelcomeScreen, config: SendConfig): Promise<void>;
+  /**
+   * Send a first-party sticker by id. Its own message shape on the wire (not an
+   * attachment), so it takes no caption and cannot be combined with text.
+   * Optional; gated by `capabilities.stickers`.
+   */
+  sendSticker?(args: SendStickerArgs, config: SendConfig): Promise<SendTextResult>;
+  /**
+   * Change who may answer a conversation (Handover Protocol). Optional; gated by
+   * `capabilities.threadControl`. See {@link ThreadControlArgs}.
+   */
+  threadControl?(args: ThreadControlArgs, config: SendConfig): Promise<ThreadControlResult>;
+  /**
+   * Send an inline structured template (button / generic card carousel).
+   * Optional; gated by `capabilities.structuredTemplates`. NOT `sendTemplate` —
+   * see {@link SendStructuredTemplateArgs}.
+   */
+  sendStructuredTemplate?(
+    args: SendStructuredTemplateArgs,
+    config: SendConfig,
+  ): Promise<SendTextResult>;
+  /**
+   * The account's APPROVED templates, read from the provider. Separate from
+   * `fetchTemplates` (WhatsApp's catalog) because the shapes and the owning
+   * entity differ — a Page, not a WABA.
+   */
+  fetchUtilityTemplates?(config: SendConfig): Promise<unknown[]>;
+  /** Send one. Bypasses the messaging window BY DESIGN — do not gate it. */
+  sendUtilityTemplate?(
+    args: SendUtilityTemplateArgs,
+    config: SendConfig,
+  ): Promise<SendTextResult>;
+  /** Named voices on this account. Gated by `capabilities.personas`. */
+  listPersonas?(config: SendConfig): Promise<ChannelPersona[]>;
+  createPersona?(
+    args: { name: string; profilePictureUrl: string },
+    config: SendConfig,
+  ): Promise<ChannelPersona>;
+  /** SOFT delete — history is preserved, only future sends are blocked. */
+  deletePersona?(personaId: string, config: SendConfig): Promise<void>;
+  /** Which app currently owns a conversation. Null when unknown/not applicable. */
+  threadOwner?(externalContactId: string, config: SendConfig): Promise<string | null>;
   /** Outbound media — caller uploads first, then sends with the returned id. */
   uploadMedia?(args: UploadMediaArgs, config: SendConfig): Promise<UploadMediaResult>;
   sendMedia?(args: SendMediaArgs, config: SendConfig): Promise<SendTextResult>;

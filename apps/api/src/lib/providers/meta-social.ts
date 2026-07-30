@@ -31,7 +31,11 @@ import type {
   NormalizedReaction,
   NormalizedMessageFeedback,
   NormalizedStatusUpdate,
+  ChannelEntryPoints,
+  ChannelIceBreaker,
+  ChannelMenuItem,
   ContactShareField,
+  GenericTemplateCard,
   SendInteractiveArgs,
   SendMediaArgs,
   SendReactionArgs,
@@ -44,11 +48,17 @@ import type {
 import type { MediaKind, MessageAttribution, MessageStructured, SocialProfile } from "@ccp/shared/types";
 import {
   GRAPH_BASE,
+  graphDeleteJson,
   graphGetJson,
   graphPostForm,
   graphPostJson,
 } from "@/lib/providers/meta-graph";
 import { kindFromMime } from "@/lib/media-storage";
+import {
+  blocksMessaging,
+  messagingRestrictionExpiry,
+  parsePageIntegrity,
+} from "@/lib/providers/messenger-integrity";
 
 /** Shared identity of the Meta account addressing a send (Page id / IG id). */
 export interface SocialSendTarget {
@@ -61,6 +71,25 @@ export interface SocialSendTarget {
    *  proof is skipped when absent). Must be the secret of the app that issued
    *  `accessToken` (the channel's OWN stored secret; IG may be a different app). */
   appSecret?: string;
+}
+
+/**
+ * Widen a parsed wire object to `NormalizedEvent.rawPayload`.
+ *
+ * `rawPayload` is `Record<string, unknown>` (we keep the original body verbatim —
+ * CLAUDE.md §7), while the wire shapes above are INTERFACES, which TypeScript
+ * denies an implicit index signature. Every one of the ~16 `rawPayload:` sites
+ * therefore reached for `as unknown as Record<string, unknown>` — a double
+ * assertion repeated until it read as house style, and each one silently
+ * accepted a non-object too.
+ *
+ * Constraining to `T extends object` makes ONE ordinary assertion sufficient, so
+ * the widening is stated once, in a named place, and the call sites carry no
+ * casts at all. Zero-copy on purpose: this is the inbound hot path and the value
+ * is only ever serialised to JSONB.
+ */
+function rawPayloadOf<T extends object>(value: T): Record<string, unknown> {
+  return value as Record<string, unknown>;
 }
 
 /**
@@ -88,7 +117,7 @@ interface SocialEnvelope {
   object?: string;
   entry?: SocialEntry[];
 }
-interface SocialEntry {
+interface SocialEntry extends Pick<PageIntegrityWire, "restrictions"> {
   id?: string;
   time?: number;
   messaging?: MessagingEvent[];
@@ -120,8 +149,72 @@ interface SocialCallWire {
     sdp_renegotiation?: { sdp_type?: string; sdp?: string };
   };
 }
-interface MessagingEvent {
+/**
+ * One entry of `message.attachments[]`. Deliberately a NAMED type rather than an
+ * inline shape: the inbound branch, the echo branch and every structured helper
+ * below all read it, and they must agree on which fields exist — the appointment
+ * fields were being dropped precisely because only some readers knew about them.
+ */
+interface SocialAttachment {
+  type?: string;
+  title?: string;
+  payload?: {
+    url?: string;
+    coordinates?: { lat?: number; long?: number };
+    /** post / ig_post — the shared post's id. */
+    id?: string;
+    /** appointment_booking (2026-03-03). */
+    booking_id?: string;
+    status?: string;
+    start_time?: number;
+    end_time?: number;
+    timezone?: string;
+  };
+}
+
+/**
+ * Page INTEGRITY fields, which ride `entry[].messaging[]` alongside real messages
+ * despite being about the Page rather than a conversation. Declared on the wire
+ * type rather than cast at the read site: they are documented fields of this
+ * exact envelope (Page Integrity API & Webhook), so the interface is where they
+ * belong, and a cast would hide them from anyone reading the shape.
+ */
+interface PageIntegrityWire {
+  /** ok | warning | restricted | suspended. */
+  status?: string;
+  violations?: unknown[];
+  restrictions?: unknown[];
+  action_events?: unknown[];
+  actions_events?: unknown[];
+}
+
+/**
+ * Handover Protocol fields (`messaging_handovers`). Four sub-events about WHO
+ * MAY REPLY, none of which carries a message.
+ */
+interface HandoverWire {
+  pass_thread_control?: {
+    previous_owner_app_id?: string | number | null;
+    new_owner_app_id?: string | number | null;
+    metadata?: string;
+  };
+  take_thread_control?: {
+    previous_owner_app_id?: string | number | null;
+    new_owner_app_id?: string | number | null;
+    metadata?: string;
+  };
+  request_thread_control?: { requested_owner_app_id?: string | number; metadata?: string };
+  app_roles?: Record<string, unknown>;
+}
+
+interface MessagingEvent extends PageIntegrityWire, HandoverWire {
   sender?: { id?: string };
+  /**
+   * `messaging_policy_enforcement` — Meta warning/blocking/unblocking the Page
+   * from messaging. `reason` explains a warning or a block and is absent on an
+   * unblock.
+   */
+  policy_enforcement?: { action?: string; reason?: string };
   recipient?: { id?: string };
   timestamp?: number;
   message?: {
@@ -140,11 +233,16 @@ interface MessagingEvent {
     // customer tapping "Send Location"); every other attachment uses
     // `payload.url`. Widened here so the location branch can lift coordinates
     // into a structured map card (see socialStructuredFromAttachments).
-    attachments?: {
-      type?: string;
-      title?: string;
-      payload?: { url?: string; coordinates?: { lat?: number; long?: number } };
-    }[];
+    //
+    // Per the CURRENT `messages` webhook reference (re-verified 2026-07-30), the
+    // payload fields are scoped per attachment type:
+    //   url            → audio, file, image, video, fallback, reel, ig_reel,
+    //                    post, ig_post (and sticker)
+    //   title          → fallback, reel, ig_reel, post, ig_post
+    //   sticker_id     → sticker (and, until 2026-08-30, image)
+    //   booking_id / status / start_time / end_time / timezone
+    //                  → appointment_booking
+    attachments?: SocialAttachment[];
     quick_reply?: { payload?: string };
     // Set when the customer quoted a message — the mid they replied to.
     // A quoted reply to a message (`mid`) OR — Instagram only — a reply to one of
@@ -214,6 +312,21 @@ interface SocialReferral {
   type?: string;
   ad_id?: string;
   ads_context_data?: Record<string, unknown>;
+  /**
+   * INSTAGRAM ONLY — the Shop product the customer opened the thread from. Meta's
+   * `messages` webhook reference documents it verbatim as
+   * `"referral": { "product": { "id": "PRODUCT-ID" } }`, with the comment
+   * "Included when a customer clicks an Instagram Shop product". It is a referral
+   * with neither `ad_id` nor `ref`, so it was previously read as an attribution
+   * with source `unknown` and no data at all.
+   */
+  product?: { id?: string };
+  /**
+   * The Welcome Message flow the referral came through. Added to the referral
+   * webhooks 2025-02-24 ("`messaging_referrals` webhook now contains `flow_id`
+   * for ad referrals from Welcome Message flows").
+   */
+  flow_id?: string;
 }
 
 /**
@@ -227,12 +340,25 @@ function attributionFromSocialReferral(r: SocialReferral): MessageAttribution {
   const ctx = (r.ads_context_data ?? {}) as { ad_title?: unknown };
   const headline =
     typeof ctx.ad_title === "string" && ctx.ad_title.trim() ? ctx.ad_title.trim() : undefined;
-  const source: MessageAttribution["source"] = r.ad_id ? "ad" : r.ref ? "ref" : "unknown";
+  const productId = r.product?.id?.trim();
+  // An Instagram Shop product referral is ORGANIC — the customer tapped a product
+  // in the shop, not an ad — so it maps to `post`, the source the UI already
+  // labels "Started from a post". Calling it `unknown` sent it down the chip's
+  // else-branch, which says "From your ad" about a shopper who clicked no ad.
+  const source: MessageAttribution["source"] = r.ad_id
+    ? "ad"
+    : productId
+      ? "post"
+      : r.ref
+        ? "ref"
+        : "unknown";
   return {
     source,
     ...(headline ? { headline } : {}),
     ...(r.ad_id?.trim() ? { clickId: r.ad_id.trim() } : {}),
     ...(r.ref?.trim() ? { ref: r.ref.trim() } : {}),
+    ...(productId ? { productId } : {}),
+    ...(r.flow_id?.trim() ? { flowId: r.flow_id.trim() } : {}),
   };
 }
 
@@ -390,6 +516,12 @@ function socialAttachmentLabel(type: string): string {
       return "📍 Location";
     case "appointment_booking":
       return "📅 Appointment";
+    // A sticker normally carries `payload.url` and never reaches here. It is
+    // labelled anyway because after the 2026-08-30 transition the `image`
+    // twin stops being sent, so a url-less sticker payload would otherwise
+    // render as the raw `[sticker]` default.
+    case "sticker":
+      return "🙂 Sticker";
     // Meta's generic fallbacks for content the Send/webhook shape can't model
     // (a shared link, a structured template) — a clean label beats the raw
     // "[fallback]" / "[template]" the default used to emit.
@@ -409,14 +541,34 @@ function socialAttachmentLabel(type: string): string {
  * for non-story attachments (handled elsewhere).
  */
 function socialStructuredFromAttachments(
-  atts:
-    | {
-        type?: string;
-        title?: string;
-        payload?: { url?: string; coordinates?: { lat?: number; long?: number } };
-      }[]
-    | undefined,
+  atts: SocialAttachment[] | undefined,
 ): MessageStructured | undefined {
+  // Appointment booking (Messenger). Meta ships the booking's own state on the
+  // `messages` webhook when the customer requests one and on `message_echoes`
+  // when the business confirms/declines it — the whole point of the 2026-03-03
+  // change was that partners stop having to open Business Suite to read it. We
+  // used to keep only the "📅 Appointment" label, which threw away the status
+  // and the time the entire message is about. Checked FIRST because an
+  // appointment carries no url and would otherwise fall through to the
+  // share-card branch's `fallback` arm on some payloads.
+  const appt = atts?.find((a) => a.type === "appointment_booking");
+  if (appt) {
+    const p = appt.payload ?? {};
+    // Meta sends Unix SECONDS; normalize at the seam so nothing downstream has
+    // to know that (and a 1970 date can't reach the UI).
+    const iso = (t: number | undefined): string | undefined =>
+      typeof t === "number" && t > 0 ? new Date(t * 1000).toISOString() : undefined;
+    const start = iso(p.start_time);
+    const end = iso(p.end_time);
+    return {
+      kind: "appointment",
+      ...(p.booking_id ? { bookingId: String(p.booking_id) } : {}),
+      ...(p.status?.trim() ? { status: p.status.trim() } : {}),
+      ...(start ? { startTime: start } : {}),
+      ...(end ? { endTime: end } : {}),
+      ...(p.timezone?.trim() ? { timezone: p.timezone.trim() } : {}),
+    };
+  }
   // A shared location renders a map pin — the social equivalent of WhatsApp's
   // structuredForMessage location card — instead of a bare "📍 Location" label
   // that hides where the customer actually is. Coordinates ride on
@@ -451,6 +603,11 @@ function socialStructuredFromAttachments(
     kind: "story",
     storyType,
     ...(att.payload?.url ? { url: att.payload.url } : {}),
+    // `title` is documented on fallback / reel / ig_reel / post / ig_post, and
+    // Meta added it to Messenger post+reel shares on 2026-03-26. Without it the
+    // card says "Shared a post" and the agent has to open the link to find out
+    // WHICH post the customer is asking about.
+    ...(att.title?.trim() ? { title: att.title.trim() } : {}),
   };
 }
 
@@ -470,7 +627,7 @@ function mapSocialCall(c: SocialCallWire): NormalizedCallEvent | null {
   const externalCallId = c.id;
   if (!externalCallId || !c.event) return null;
   const timestamp = new Date((c.timestamp ?? Date.now()) * (c.timestamp ? 1000 : 1));
-  const base = { kind: "call" as const, externalCallId, contactName: null, timestamp, rawPayload: c as unknown as Record<string, unknown> };
+  const base = { kind: "call" as const, externalCallId, contactName: null, timestamp, rawPayload: rawPayloadOf(c) };
 
   switch (c.event) {
     case "connect": {
@@ -523,6 +680,95 @@ function mapSocialCall(c: SocialCallWire): NormalizedCallEvent | null {
   }
 }
 
+/** One item of `entry[].changes[]` — the non-messaging Instagram topics. */
+interface SocialChange {
+  field?: string;
+  value?: {
+    from?: { id?: string; username?: string };
+    /** Facebook-Login comment payloads carry the id here. */
+    comment_id?: string;
+    /** Business-Login payloads spell it `id`; accept both. */
+    id?: string;
+    text?: string;
+    media?: { id?: string; media_product_type?: string; ad_id?: string };
+    /** Present on a reply to another comment. */
+    parent_id?: string;
+  };
+}
+
+/**
+ * An Instagram COMMENT (`comments` / `live_comments`) as an inbound message.
+ *
+ * Why a comment becomes a Message at all: answering comments is half of what an
+ * Instagram team does, and the only legal way to answer one PRIVATELY is a
+ * `comment_id`-addressed private reply — which an agent can only send from
+ * somewhere they can see the comment. Modelling it as a message on the
+ * commenter's own conversation reuses contact resolution, realtime, workflows and
+ * tickets wholesale, with no new entity.
+ *
+ * That is only safe because of one documented fact, and it is the fact the whole
+ * design rests on: the comment webhook's `from.id` is "an Instagram-scoped ID
+ * suitable for the Send API" — the SAME id space as a DM sender. A different id
+ * space would have forked every commenter into a duplicate contact.
+ *
+ * `opensMessagingWindow: false` is the other load-bearing bit. A comment does NOT
+ * start a 24-hour conversation; it buys ONE private reply within 7 days. Letting
+ * it bump `lastInboundAt` would tell the composer, the send guards and the
+ * broadcast runner that the thread is open, and each would then hand Meta a send
+ * it is certain to reject.
+ *
+ * Returns null for any other `changes[]` field (mentions, story_insights), which
+ * the caller then reports as unhandled.
+ */
+function commentEvent(
+  change: SocialChange | undefined,
+  entryTime: number | undefined,
+): NormalizedInboundMessage | null {
+  const field = change?.field;
+  if (field !== "comments" && field !== "live_comments") return null;
+  const value = change?.value;
+  const commentId = value?.comment_id ?? value?.id;
+  const authorId = value?.from?.id;
+  // No id to dedupe on, or no author to attribute to, is not a comment we can
+  // file — dropping beats inventing an identity.
+  if (!commentId || !authorId) return null;
+
+  const isLive = field === "live_comments";
+  const text = typeof value?.text === "string" ? value.text : "";
+  const username = value?.from?.username?.trim();
+  return {
+    kind: "message",
+    // Namespaced so a comment id can never collide with a message `mid` in the
+    // `(workspaceId, channel, externalId)` dedupe key.
+    externalId: `comment:${commentId}`,
+    externalContactId: authorId,
+    // Left null like every other social inbound, so the Graph enrichment pass
+    // still fills the real display name rather than wedging on the @handle.
+    contactName: null,
+    // A comment with no text (an image-only reply) still needs a body so the
+    // row and the list preview aren't blank.
+    body: text || (isLive ? "💬 Commented on your live" : "💬 Commented on your post"),
+    structured: {
+      kind: "comment",
+      commentId,
+      ...(username ? { username } : {}),
+      ...(value?.media?.id ? { mediaId: value.media.id } : {}),
+      ...(value?.media?.media_product_type
+        ? { mediaProductType: value.media.media_product_type }
+        : {}),
+      ...(isLive ? { isLive: true } : {}),
+    },
+    // See the docblock — the one inbound that does not open the window.
+    opensMessagingWindow: false,
+    // A comment from an ad's post carries the ad id; same "from your ad" chip.
+    ...(value?.media?.ad_id
+      ? { attribution: { source: "ad" as const, clickId: value.media.ad_id } }
+      : {}),
+    timestamp: new Date(entryTime ?? Date.now()),
+    rawPayload: rawPayloadOf(change ?? {}),
+  };
+}
+
 export function parseSocialMessaging(
   payload: unknown,
   expectedObject: string,
@@ -566,7 +812,7 @@ export function parseSocialMessaging(
         direction: "out",
         phase: approved ? "permission_granted" : "permission_revoked",
         timestamp: new Date((entry.timestamp ?? Math.floor(Date.now() / 1000)) * 1000),
-        rawPayload: entry as unknown as Record<string, unknown>,
+        rawPayload: rawPayloadOf(entry),
       });
     }
     // Defensive: `entry.standby[]` means ANOTHER app currently holds thread
@@ -579,45 +825,70 @@ export function parseSocialMessaging(
     // separate build.
     const standby = (entry as { standby?: unknown[] }).standby;
     if (Array.isArray(standby) && standby.length > 0) {
+      // Now that `standby` is actually SUBSCRIBED (it was added to
+      // PAGE_OPTIONAL_FIELDS alongside `messaging_handovers`), this branch is
+      // reachable for the first time — Meta only delivers standby traffic to
+      // apps that asked for it, so the warning below could never previously fire
+      // in the situation it was written for.
+      //
+      // Still not ingested, deliberately. A standby message is a copy of a
+      // conversation we may not answer: filing it in the inbox would put a thread
+      // in front of an agent whose every reply is guaranteed to fail with 2018300.
+      // The honest surface is a loud, diagnosable log naming the customer, so an
+      // operator can take thread control (see messenger-handover.ts) and the
+      // NEXT inbound arrives normally.
+      //
+      // Escalated to `critical`: for a Page that has been routed away from us,
+      // this is what "our inbox stopped receiving messages" looks like from the
+      // inside, and it is silent everywhere else.
+      const psids = standby.flatMap((s) => {
+        const sender = (s as { sender?: { id?: unknown } } | null)?.sender?.id;
+        return typeof sender === "string" ? [sender] : [];
+      });
       console.warn(
         JSON.stringify({
           event: "social.standby_received",
-          severity: "warning",
+          severity: "critical",
           channel: expectedObject,
           entryId: (entry as { id?: string }).id ?? null,
           count: standby.length,
-          note: "another app holds thread control (Conversation Routing); inbound on standby is not ingested — take/receive thread control to handle it",
+          psids: [...new Set(psids)],
+          note: "another app holds thread control; these customers' messages are NOT in the inbox and replies would fail with 2018300 — take thread control to recover",
         }),
       );
     }
-    if (!Array.isArray(entry.messaging)) {
-      // Some subscribed topics arrive as `entry[].changes[]`, not
-      // `entry[].messaging[]` — on Instagram that is `comments`,
-      // `live_comments`, `mentions` and `story_insights`. They bailed out here
-      // with NO trace at all, because the `unhandled_messaging` warn below lives
-      // INSIDE the messaging loop and is therefore unreachable for them. The
-      // WhatsApp path warns on an unknown `field`; this one did not, so the two
-      // channels had asymmetric observability and four subscribed IG topics
-      // vanished silently.
-      //
-      // Warn rather than parse: none of those four is a MESSAGE, so there is
-      // nothing for a shared inbox to ingest. This exists so "subscribed but
-      // unhandled" is visible instead of indistinguishable from "never sent".
-      const changes = (entry as { changes?: unknown[] }).changes;
-      if (Array.isArray(changes) && changes.length > 0) {
+    // Some subscribed topics arrive as `entry[].changes[]`, not
+    // `entry[].messaging[]` — on Instagram that is `comments`, `live_comments`,
+    // `mentions` and `story_insights`.
+    //
+    // COMMENTS are ingested (see `commentEvent`); the rest are warned about, so
+    // "subscribed but unhandled" stays visible instead of being
+    // indistinguishable from "never sent". Handled BEFORE the `messaging` guard
+    // rather than inside its else-branch: Meta's contract permits an entry to
+    // carry both arrays, and hanging comment parsing off "there was no messaging
+    // array" would drop them silently in exactly that case.
+    const changes = (entry as { changes?: SocialChange[] }).changes;
+    if (Array.isArray(changes) && changes.length > 0) {
+      const unhandled: string[] = [];
+      for (const change of changes) {
+        const comment = commentEvent(change, entry.time);
+        if (comment) emit(comment);
+        else if (typeof change?.field === "string") unhandled.push(change.field);
+      }
+      if (unhandled.length > 0) {
         console.warn(
           JSON.stringify({
             event: "social.unhandled_changes_entry",
             severity: "warning",
             channel: expectedObject,
             entryId: (entry as { id?: string }).id ?? null,
-            fields: changes
-              .map((c) => (c as { field?: string } | null)?.field ?? null)
-              .filter((f): f is string => typeof f === "string"),
+            fields: unhandled,
             note: "topic delivers entry[].changes[], not entry[].messaging[] — subscribed but not ingested",
           }),
         );
       }
+    }
+    if (!Array.isArray(entry.messaging)) {
       continue;
     }
     for (const m of entry.messaging) {
@@ -630,13 +901,17 @@ export function parseSocialMessaging(
           action: "delete",
           targetExternalId: m.message.mid,
           timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
-          rawPayload: m as unknown as Record<string, unknown>,
+          rawPayload: rawPayloadOf(m),
         });
         continue;
       }
-      // Edit (Messenger `message_edits`; Instagram has no equivalent webhook).
+      // Edit — Messenger `message_edits`, Instagram `message_edit` (singular;
+      // Meta shipped it for Instagram on 2025-09-10). This comment used to say
+      // "Instagram has no equivalent webhook", contradicting the corrected note on
+      // the `message_edit` field above and inviting the next reader to delete a
+      // live path. The branch itself is object-agnostic, so both parse here.
       // Rewrites an existing row's body, exactly as the WhatsApp `type:"edit"`
-      // branch does — without this, the Page is subscribed to `message_edits`
+      // branch does — without this the account is subscribed to the edit field
       // and the notification is parsed into nothing, leaving the agent looking
       // at text the customer has already corrected.
       if (m.message_edit?.mid && typeof m.message_edit.text === "string") {
@@ -646,7 +921,7 @@ export function parseSocialMessaging(
           targetExternalId: m.message_edit.mid,
           newBody: m.message_edit.text,
           timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
-          rawPayload: m as unknown as Record<string, unknown>,
+          rawPayload: rawPayloadOf(m),
         });
         continue;
       }
@@ -674,14 +949,23 @@ export function parseSocialMessaging(
               : !media && echoAtt
                 ? socialAttachmentLabel(echoAtt)
                 : "";
+          // Structured content on an ECHO. A business reply typed in Meta's own
+          // inbox can BE the structured message: confirming or declining an
+          // appointment ships the UPDATED booking on `message_echoes`
+          // (2026-03-03), and a shared post/reel echoes back with its title and
+          // url. The inbound branch has read this for a while; the echo branch
+          // dropped it, so the agent saw "📅 Appointment" for the confirmation
+          // their own colleague had just sent from Business Suite.
+          const echoStructured = socialStructuredFromAttachments(m.message.attachments);
           emit({
             kind: "echo",
             externalId: mid,
             externalContactId: customerId,
             body: echoBody,
             ...(media ? { media } : {}),
+            ...(echoStructured ? { structured: echoStructured } : {}),
             timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
-            rawPayload: m as unknown as Record<string, unknown>,
+            rawPayload: rawPayloadOf(m),
           });
           // A business can send a multi-photo album from Meta's native inbox;
           // Meta mirrors it back as ONE echo mid with N attachments. Mirror the
@@ -704,7 +988,7 @@ export function parseSocialMessaging(
               body: "",
               media: extra,
               timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
-              rawPayload: m as unknown as Record<string, unknown>,
+              rawPayload: rawPayloadOf(m),
             });
           });
         }
@@ -800,7 +1084,7 @@ export function parseSocialMessaging(
             return structured ? { structured } : {};
           })(),
           timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
-          rawPayload: m as unknown as Record<string, unknown>,
+          rawPayload: rawPayloadOf(m),
         };
         emit(msg);
         // Sibling rows for the additional media in a multi-attachment message.
@@ -816,7 +1100,7 @@ export function parseSocialMessaging(
             body: "",
             media: extra,
             timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
-            rawPayload: m as unknown as Record<string, unknown>,
+            rawPayload: rawPayloadOf(m),
           } satisfies NormalizedInboundMessage);
         });
         continue;
@@ -842,7 +1126,7 @@ export function parseSocialMessaging(
             interactiveReply: { kind: "button_reply", id: payload, title },
             ...(referral ? { attribution: attributionFromSocialReferral(referral) } : {}),
             timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
-            rawPayload: m as unknown as Record<string, unknown>,
+            rawPayload: rawPayloadOf(m),
           };
           emit(msg);
         }
@@ -868,7 +1152,9 @@ export function parseSocialMessaging(
           const base =
             attribution.source === "ad"
               ? "Started a conversation from your ad"
-              : "Started a conversation from a link";
+              : attribution.productId
+                ? "Started a conversation from a shop product"
+                : "Started a conversation from a link";
           const label = attribution.headline ? `${base} · ${attribution.headline}` : base;
           emit({
             kind: "message",
@@ -878,7 +1164,7 @@ export function parseSocialMessaging(
             body: label,
             attribution,
             timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
-            rawPayload: m as unknown as Record<string, unknown>,
+            rawPayload: rawPayloadOf(m),
           } satisfies NormalizedInboundMessage);
         }
         continue;
@@ -900,7 +1186,7 @@ export function parseSocialMessaging(
           targetExternalId: m.reaction.mid,
           emoji,
           timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
-          rawPayload: m as unknown as Record<string, unknown>,
+          rawPayload: rawPayloadOf(m),
         };
         emit(reaction);
         continue;
@@ -922,7 +1208,7 @@ export function parseSocialMessaging(
           feedback:
             m.response_feedback.feedback === "Bad response" ? "negative" : "positive",
           timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
-          rawPayload: m as unknown as Record<string, unknown>,
+          rawPayload: rawPayloadOf(m),
         };
         emit(fb);
         continue;
@@ -940,7 +1226,7 @@ export function parseSocialMessaging(
             kind: "delivered_watermark",
             externalContactId: from,
             watermark: new Date(m.delivery.watermark),
-            rawPayload: m as unknown as Record<string, unknown>,
+            rawPayload: rawPayloadOf(m),
           });
         }
       }
@@ -954,7 +1240,7 @@ export function parseSocialMessaging(
             externalId: m.read.mid,
             status: "read",
             timestamp: new Date(m.timestamp ?? Date.now()),
-            rawPayload: m as unknown as Record<string, unknown>,
+            rawPayload: rawPayloadOf(m),
           };
           emit(status);
         } else if (typeof m.read.watermark === "number") {
@@ -964,10 +1250,115 @@ export function parseSocialMessaging(
               kind: "read_watermark",
               externalContactId: from,
               watermark: new Date(m.read.watermark),
-              rawPayload: m as unknown as Record<string, unknown>,
+              rawPayload: rawPayloadOf(m),
             });
           }
         }
+      }
+      // ── Handover protocol (`messaging_handovers`) ─────────────────────────
+      //
+      // Four sub-events on one field, all about WHO MAY REPLY rather than about
+      // any message. None creates a row; each is logged with the app ids so an
+      // operator can tell "the inbox went quiet" from "another app took the
+      // thread", which are indistinguishable from the outside.
+      //
+      // `previous_owner_app_id` is null when the thread was in IDLE mode (nobody
+      // held it), which is not the same as an unknown app and is reported as such.
+      const controlChange = m.pass_thread_control ?? m.take_thread_control;
+      if (controlChange || m.request_thread_control || m.app_roles) {
+        const appId = (v: unknown): string | null =>
+          typeof v === "string" || typeof v === "number" ? String(v) : null;
+        console.warn(
+          JSON.stringify({
+            event: "meta.thread_control_changed",
+            severity: "warning",
+            channel: expectedObject,
+            accountId: receivingAccountId ?? null,
+            psid: m.sender?.id ?? null,
+            action: m.pass_thread_control
+              ? "passed"
+              : m.take_thread_control
+                ? "taken"
+                : m.request_thread_control
+                  ? "requested"
+                  : "app_roles_changed",
+            previousOwnerAppId: controlChange ? appId(controlChange.previous_owner_app_id) : null,
+            newOwnerAppId: controlChange ? appId(controlChange.new_owner_app_id) : null,
+            requestedByAppId: appId(m.request_thread_control?.requested_owner_app_id),
+            ...(m.app_roles ? { appRoles: m.app_roles } : {}),
+            note: "thread ownership changed — only the owning app may reply; see messenger-handover.ts",
+          }),
+        );
+        continue;
+      }
+      // ── Page health: integrity + messaging-policy enforcement ─────────────
+      //
+      // Both of these ride `entry[].messaging[]` — the SAME array customer
+      // messages arrive on — despite being about the PAGE, not a conversation.
+      // They carry no `sender`, no `message` and no `mid`, so without a branch
+      // here they fall into the catch-all below at `severity: "info"`, the one
+      // severity nobody alerts on. Subscribing to a field and then discarding it
+      // invisibly is strictly worse than not subscribing.
+      //
+      // Logged at `critical` when the Page can no longer message and `warning`
+      // otherwise, because this is the earliest possible notice of the condition
+      // that `normalizeMetaSendError` can only report AFTER a send has already
+      // failed with `10 – 1893063`. The settings panel reads the full picture
+      // live from `GET /{page-id}/page_status` (see messenger-integrity.ts);
+      // this is the push half that makes it timely.
+      if (
+        typeof m.status === "string" &&
+        (Array.isArray(m.violations) ||
+          Array.isArray(m.restrictions) ||
+          Array.isArray(m.action_events))
+      ) {
+        // `restrictions` sits inside the messaging item in one of Meta's
+        // examples and as a SIBLING of `messaging` in another — pass the entry
+        // so both positions are read.
+        const integrity = parsePageIntegrity(m, entry);
+        const blocked = blocksMessaging(integrity);
+        console.warn(
+          JSON.stringify({
+            event: "meta.page_integrity",
+            severity: blocked ? "critical" : "warning",
+            channel: expectedObject,
+            accountId: receivingAccountId ?? null,
+            status: integrity.status,
+            blocksMessaging: blocked,
+            restrictedUntil: messagingRestrictionExpiry(integrity),
+            violations: integrity.violations.map((v) => v.type),
+            restrictions: integrity.restrictions.map((r) => `${r.feature}:${r.status ?? "RESTRICTED"}`),
+            appeals: integrity.appeals.map((a) => `${a.type}:${a.status}`),
+            note: blocked
+              ? "this Page cannot send messages right now — sends will fail with 10/1893063"
+              : "Page integrity changed",
+          }),
+        );
+        continue;
+      }
+      // `messaging_policy_enforcement`: the older, narrower notice.
+      // `action` is "warning" | "block" | "unblock"; `reason` explains the first
+      // two and is absent on an unblock.
+      const enforcement = m.policy_enforcement;
+      if (enforcement?.action) {
+        const action = enforcement.action.toLowerCase();
+        console.warn(
+          JSON.stringify({
+            event: "meta.messaging_policy_enforcement",
+            severity: action === "block" ? "critical" : action === "unblock" ? "info" : "warning",
+            channel: expectedObject,
+            accountId: receivingAccountId ?? null,
+            action,
+            reason: enforcement.reason ?? null,
+            note:
+              action === "block"
+                ? "Meta has blocked this Page from messaging"
+                : action === "unblock"
+                  ? "Meta has lifted this Page's messaging block"
+                  : "Meta has warned this Page about a messaging-policy violation",
+          }),
+        );
+        continue;
       }
       // `messaging_optins` — an EXPLICIT, reviewed drop rather than a generic
       // unknown.
@@ -1061,7 +1452,19 @@ function replyToFragment(
  * `useHumanAgentTag` from the window band; when it's undefined we keep the tag
  * (safe default — the tag is valid across the whole 7-day window).
  */
-function messagingTypeFields(useHumanAgentTag?: boolean): object {
+/**
+ * The persona fragment for a send body.
+ *
+ * Its own helper for one reason: `persona_id` belongs at the TOP LEVEL, and the
+ * single most likely mistake is nesting it in `message`, where Meta accepts the
+ * send, returns a message id, and delivers it as the Page. A named fragment
+ * spliced next to `messaging_type` makes the placement obvious at every call site.
+ */
+function personaFragment(personaId?: string): object {
+  return personaId ? { persona_id: personaId } : {};
+}
+
+export function messagingTypeFields(useHumanAgentTag?: boolean): object {
   return useHumanAgentTag === false
     ? { messaging_type: "RESPONSE" }
     : { messaging_type: "MESSAGE_TAG", tag: "HUMAN_AGENT" };
@@ -1078,12 +1481,28 @@ export async function sendSocialText(
   opts: SocialSendTarget,
 ): Promise<SendTextResult> {
   const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messages`;
-  const res = await graphPostJson(url, opts.accessToken, {
-    recipient: { id: args.to },
-    ...messagingTypeFields(args.useHumanAgentTag),
-    ...replyToFragment(args.replyToExternalId, args.useHumanAgentTag),
-    message: { text: args.body },
-  }, opts.appSecret);
+  // PRIVATE REPLY to a comment. The comment IS the address (`recipient:
+  // {comment_id}`), and every window-related field is deliberately absent:
+  // there is no messaging window yet — that is the whole reason this send shape
+  // exists — so a `messaging_type`/tag or a `reply_to` would be describing a
+  // conversation that has not started. Meta allows exactly one of these per
+  // comment, within 7 days.
+  const body = args.privateReplyToCommentId
+    ? {
+        recipient: { comment_id: args.privateReplyToCommentId },
+        message: { text: args.body },
+      }
+    : {
+        recipient: { id: args.to },
+        ...messagingTypeFields(args.useHumanAgentTag),
+        ...replyToFragment(args.replyToExternalId, args.useHumanAgentTag),
+        // TOP LEVEL, beside `message` — see SendTextArgs.personaId. Deliberately
+        // NOT on the private-reply branch above: a persona is a voice inside a
+        // conversation, and a private reply is the message that starts one.
+        ...personaFragment(args.personaId),
+        message: { text: args.body },
+      };
+  const res = await graphPostJson(url, opts.accessToken, body, opts.appSecret);
   const messageId = typeof res.message_id === "string" ? res.message_id : "";
   if (!messageId) {
     throw new Error(`${opts.label} sendText: response missing message_id`);
@@ -1101,11 +1520,20 @@ const CONTACT_SHARE_CONTENT_TYPE: Record<ContactShareField, string> = {
 };
 
 /**
- * Send an interactive question with tappable options on a social channel, as
- * Meta QUICK REPLIES (up to 13; title ≤20 chars; the option id rides in the
- * `payload` and comes back on the tapped reply). Both "buttons" and "list"
- * kinds collapse to quick replies — the social platforms have no native list
- * sheet, and quick replies are the closest tap-to-choose UX. Human Agent tag.
+ * Send an interactive message on a social channel.
+ *
+ * TWO wire shapes, chosen by `kind`:
+ *
+ *   - `cta_url` → Meta's BUTTON TEMPLATE with one `web_url` button (see
+ *     `ctaUrlTemplatePayload`). Quick replies cannot carry a destination, so this
+ *     kind cannot be collapsed into them.
+ *   - everything else → QUICK REPLIES (up to 13; title ≤20 chars; the option id
+ *     rides in the `payload` and comes back on the tapped reply). Both "buttons"
+ *     and "list" collapse here — the social platforms have no native list sheet,
+ *     and quick replies are the closest tap-to-choose UX, with a 13-option
+ *     ceiling that beats the button template's 3.
+ *
+ * Human Agent tag in both cases.
  *
  * `args.contactShare` appends Meta's auto-fill consent chips. Those carry ONLY
  * a `content_type` — sending `title`/`payload` alongside makes Meta reject the
@@ -1114,10 +1542,136 @@ const CONTACT_SHARE_CONTENT_TYPE: Record<ContactShareField, string> = {
  * so a full option set can't push them out of the 13-chip budget silently: the
  * text options are trimmed instead.
  */
+/**
+ * The BUTTON TEMPLATE body for a `cta_url` send — the Instagram equivalent of
+ * WhatsApp's `interactive.type:"cta_url"`.
+ *
+ * Doc-exact (Instagram Messaging → Button Template): an attachment of
+ * `type:"template"` whose payload is `{ template_type:"button", text, buttons }`,
+ * with "1-3 buttons" and text "up to 640 characters". Only `web_url` and
+ * `postback` buttons are supported, so the single URL button is a `web_url`.
+ *
+ * The template has ONE text field, so an optional header/footer are folded into
+ * it rather than dropped — `send-interactive-internal` measures the same joined
+ * string against `templateTextMaxChars`, so what is validated is what is sent.
+ */
+function ctaUrlTemplatePayload(args: SendInteractiveArgs): object | null {
+  const cta = args.ctaUrl;
+  if (!cta) return null;
+  const text = [cta.headerText, args.bodyText, cta.footerText]
+    .filter((part): part is string => !!part && part.length > 0)
+    .join("\n\n");
+  return {
+    attachment: {
+      type: "template",
+      payload: {
+        template_type: "button",
+        text,
+        buttons: [{ type: "web_url", url: cta.url, title: cta.displayText }],
+      },
+    },
+  };
+}
+
+/**
+ * Meta's GENERIC TEMPLATE payload — 1-10 cards, a carousel beyond one.
+ *
+ * Doc-exact (Instagram Messaging → Generic Template): `template_type:"generic"`
+ * with an `elements` array; per element `title` (80 chars) is required,
+ * `subtitle` (80), `image_url`, `default_action` and up to 3 buttons are
+ * optional, and "Only `postback` and `web_url` buttons are supported".
+ *
+ * `default_action` is a `web_url` action with no title — Meta's shape for
+ * "tapping the card itself opens this" — which is why it is not just another
+ * button.
+ */
+function genericTemplatePayload(cards: readonly GenericTemplateCard[]): object {
+  return {
+    attachment: {
+      type: "template",
+      payload: {
+        template_type: "generic",
+        elements: cards.map((card) => ({
+          title: card.title,
+          ...(card.subtitle ? { subtitle: card.subtitle } : {}),
+          ...(card.imageUrl ? { image_url: card.imageUrl } : {}),
+          ...(card.defaultActionUrl
+            ? { default_action: { type: "web_url", url: card.defaultActionUrl } }
+            : {}),
+          ...(card.buttons?.length
+            ? {
+                buttons: card.buttons.map((b) =>
+                  b.type === "web_url"
+                    ? { type: "web_url", url: b.url, title: b.title }
+                    : { type: "postback", title: b.title, payload: b.payload },
+                ),
+              }
+            : {}),
+        })),
+      },
+    },
+  };
+}
+
+/**
+ * Meta's PRODUCT TEMPLATE payload — up to 10 catalog products.
+ *
+ * Doc-exact: `template_type:"product"` with `elements: [{ id }]`. There is no
+ * other content to send; Meta draws each card from the catalog entry, which is
+ * also why an id that isn't in the connected catalog fails at Meta rather than
+ * here.
+ */
+function productTemplatePayload(productIds: readonly string[]): object {
+  return {
+    attachment: {
+      type: "template",
+      payload: {
+        template_type: "product",
+        elements: productIds.map((id) => ({ id })),
+      },
+    },
+  };
+}
+
 export async function sendSocialInteractive(
   args: SendInteractiveArgs,
   opts: SocialSendTarget,
 ): Promise<SendTextResult> {
+  // A URL button is a TEMPLATE on the social channels, not a quick reply — quick
+  // replies carry no destination, so collapsing `cta_url` into them would have
+  // sent the body text with the link silently missing.
+  //
+  // The three TEMPLATE kinds share one send shape (an `attachment` of type
+  // `template`) and differ only in the payload, so they are built here and sent
+  // through one call rather than three near-identical blocks.
+  const templateMessage =
+    args.kind === "cta_url"
+      ? ctaUrlTemplatePayload(args)
+      : args.kind === "generic" && args.genericCards?.length
+        ? genericTemplatePayload(args.genericCards)
+        : args.kind === "product" && args.productIds?.length
+          ? productTemplatePayload(args.productIds)
+          : null;
+  const ctaTemplate = templateMessage;
+  if (ctaTemplate) {
+    const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messages`;
+    const res = await graphPostJson(
+      url,
+      opts.accessToken,
+      {
+        recipient: { id: args.to },
+        ...messagingTypeFields(args.useHumanAgentTag),
+        ...replyToFragment(args.replyToExternalId, args.useHumanAgentTag),
+        message: ctaTemplate,
+      },
+      opts.appSecret,
+    );
+    const templateMessageId = typeof res.message_id === "string" ? res.message_id : "";
+    if (!templateMessageId) {
+      throw new Error(`${opts.label} sendInteractive: response missing message_id`);
+    }
+    return { externalId: templateMessageId, timestamp: new Date() };
+  }
   // Instagram's auto-fill quick replies document ONLY `user_phone_number` — a
   // `user_email` chip is a Messenger-only content_type and makes Meta reject the
   // whole IG message. Drop the email chip on Instagram (phone still offered).
@@ -1164,6 +1718,12 @@ export async function uploadSocialMedia(
   const type = attachmentTypeFromKind(kindFromMime(args.mimeType));
   const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/message_attachments`;
   const form = new FormData();
+  // `platform` is Instagram-only and REQUIRED there: the Attachment Upload API is
+  // hosted on the same Page node for both channels, so Meta needs telling which
+  // surface the attachment is for. Messenger's own reference has no such field,
+  // and sending it there would be an unknown parameter — hence the label check
+  // rather than an unconditional add.
+  if (opts.label === "instagram") form.append("platform", "instagram");
   form.append(
     "message",
     JSON.stringify({ attachment: { type, payload: { is_reusable: true } } }),
@@ -1266,6 +1826,226 @@ export async function sendSocialReaction(
   return { externalId: `reaction:${args.messageExternalId}`, timestamp: new Date() };
 }
 
+// ─── Conversation entry points (`/{page-id}/messenger_profile`) ─────────────
+//
+// Ice breakers and the persistent menu are the two things a customer can see
+// BEFORE they type anything — the closest Instagram has to a self-serve front
+// door. Both live on the same `messenger_profile` node, both are per-locale, and
+// on Instagram both REQUIRE `platform=instagram` (the node is hosted on the
+// linked Page, which also serves Messenger, so the platform is what disambiguates
+// which surface is being configured).
+//
+// Meta's own limits, enforced by the request schema rather than discovered at
+// send time: at most 4 ice breakers, and "limit to 5" persistent-menu items. Both
+// documents make the `default` locale mandatory — an entry-point set with no
+// default locale simply never renders, with no error.
+
+/** Meta's documented caps. Exported so the request schema can't drift from them. */
+export const MAX_ICE_BREAKERS = 4;
+export const MAX_PERSISTENT_MENU_ITEMS = 5;
+
+function entryPointsUrl(opts: SocialSendTarget, query = ""): string {
+  const base = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messenger_profile`;
+  const platform = opts.label === "instagram" ? "platform=instagram" : "";
+  const qs = [platform, query].filter(Boolean).join("&");
+  return qs ? `${base}?${qs}` : base;
+}
+
+/**
+ * Read the account's current entry points. Returns empty arrays when nothing is
+ * configured — Meta answers `{ data: [] }`, not a 404, so "unset" and "empty" are
+ * the same state and there is nothing to distinguish.
+ */
+export async function getChannelEntryPoints(
+  opts: SocialSendTarget,
+): Promise<ChannelEntryPoints> {
+  const res = await graphGetJson(
+    entryPointsUrl(opts, "fields=ice_breakers,persistent_menu"),
+    opts.accessToken,
+    { retry: true },
+    opts.appSecret,
+  );
+  // `data` is an array of profile objects, one per configured field.
+  const data = Array.isArray(res.data) ? (res.data as Array<Record<string, unknown>>) : [];
+  const iceBreakers: ChannelIceBreaker[] = [];
+  const menuItems: ChannelMenuItem[] = [];
+  for (const entry of data) {
+    // Both fields are per-LOCALE arrays. We configure the `default` locale only
+    // (the one Meta requires), so read that one back and ignore any others a
+    // previous tool may have set rather than merging locales into one flat list.
+    const ib = Array.isArray(entry.ice_breakers) ? entry.ice_breakers : [];
+    for (const locale of ib as Array<Record<string, unknown>>) {
+      if (locale.locale !== undefined && locale.locale !== "default") continue;
+      const calls = Array.isArray(locale.call_to_actions) ? locale.call_to_actions : [];
+      for (const c of calls as Array<Record<string, unknown>>) {
+        if (typeof c.question === "string" && typeof c.payload === "string") {
+          iceBreakers.push({ question: c.question, payload: c.payload });
+        }
+      }
+    }
+    const pm = Array.isArray(entry.persistent_menu) ? entry.persistent_menu : [];
+    for (const locale of pm as Array<Record<string, unknown>>) {
+      if (locale.locale !== undefined && locale.locale !== "default") continue;
+      const calls = Array.isArray(locale.call_to_actions) ? locale.call_to_actions : [];
+      for (const c of calls as Array<Record<string, unknown>>) {
+        if (c.type === "web_url" && typeof c.title === "string" && typeof c.url === "string") {
+          menuItems.push({ type: "web_url", title: c.title, url: c.url });
+        } else if (
+          c.type === "postback" &&
+          typeof c.title === "string" &&
+          typeof c.payload === "string"
+        ) {
+          menuItems.push({ type: "postback", title: c.title, payload: c.payload });
+        }
+      }
+    }
+  }
+  return { iceBreakers, menuItems };
+}
+
+/**
+ * Write the account's entry points.
+ *
+ * An EMPTY list DELETES that field rather than posting an empty array: Meta's
+ * delete is its own `DELETE … {fields:[…]}` call, and posting `call_to_actions:
+ * []` is not documented to clear anything — it would leave the previous set live
+ * while our UI showed none. The two fields are cleared independently so removing
+ * every ice breaker can't also wipe a persistent menu the operator still wants.
+ */
+export async function setChannelEntryPoints(
+  entryPoints: ChannelEntryPoints,
+  opts: SocialSendTarget,
+): Promise<void> {
+  const profile: Record<string, unknown> = {};
+  const clear: string[] = [];
+
+  if (entryPoints.iceBreakers.length > 0) {
+    profile.ice_breakers = [
+      { locale: "default", call_to_actions: entryPoints.iceBreakers },
+    ];
+  } else {
+    clear.push("ice_breakers");
+  }
+
+  if (entryPoints.menuItems.length > 0) {
+    profile.persistent_menu = [
+      {
+        locale: "default",
+        call_to_actions: entryPoints.menuItems,
+      },
+    ];
+  } else {
+    clear.push("persistent_menu");
+  }
+
+  if (Object.keys(profile).length > 0) {
+    await graphPostJson(entryPointsUrl(opts), opts.accessToken, profile, opts.appSecret);
+  }
+  if (clear.length > 0) {
+    // Meta's documented delete shape: the field list travels in the BODY.
+    await graphDeleteJson(
+      entryPointsUrl(opts),
+      opts.accessToken,
+      { fields: clear },
+      opts.appSecret,
+    );
+  }
+}
+
+/**
+ * Reply PUBLICLY to an Instagram comment — a sub-thread reply on the comment
+ * itself, not a DM.
+ *
+ * Doc-exact: `POST /<IG_COMMENT_ID>/replies` with `{ message }`, answering with
+ * `{ id }` — the new comment's id.
+ *
+ * This is the OTHER half of answering a comment, and it is a different promise
+ * from the private reply. A private reply opens a DM with that one person, is
+ * capped at one per comment within 7 days, and nobody else sees it. A public
+ * reply is visible to everyone reading the post, has no such cap, and starts no
+ * conversation. Teams need both: "we've DM'd you" and "for everyone else asking,
+ * here's the answer".
+ *
+ * Addressed at the COMMENT node, so unlike every other call in this module the
+ * host is the comment id rather than the Page.
+ */
+export async function replyToSocialComment(
+  commentId: string,
+  message: string,
+  opts: SocialSendTarget,
+): Promise<{ commentId: string }> {
+  const url = `${GRAPH_BASE}/${opts.graphVersion}/${encodeURIComponent(commentId)}/replies`;
+  const res = await graphPostJson(url, opts.accessToken, { message }, opts.appSecret);
+  const id = typeof res.id === "string" ? res.id : "";
+  if (!id) {
+    throw new Error(`${opts.label} replyToComment: response missing id`);
+  }
+  return { commentId: id };
+}
+
+/**
+ * Meta's cap on ids per Moderate Conversations request: "Up to 10 IDs can be
+ * provided in each request".
+ */
+const MODERATE_CONVERSATIONS_MAX_IDS = 10;
+
+/**
+ * Block or unblock Instagram users through the Moderate Conversations API
+ * (`POST /{page-id}/moderate_conversations`).
+ *
+ * Instagram DOES have a provider-level blocklist — this codebase asserted for a
+ * while that only WhatsApp did, which was simply out of date: Meta shipped the
+ * Instagram Moderate Conversations API on 2025-10-21 ("Instagram Moderate
+ * Conversations API enables blocking/unblocking users and spam management").
+ *
+ * Doc-exact wire shape: `{ user_ids: [{ id: IGSID }], actions: ["block_user"] }`,
+ * against the linked PAGE node (like every other Instagram-via-Facebook-Login
+ * call). `unblock_user` is the inverse and Meta is explicit that it "cannot be
+ * included in the same request as block_user" — which is why each direction is
+ * its own call rather than one batched body.
+ *
+ * The response is `{"success": "true"}` — a STRING, not a boolean, and Meta
+ * documents `"success": "false"` for a failure that still returns 2xx. So a
+ * truthy-object check would report a refused block as applied, and
+ * `Contact.blockedAt` would then claim a block Meta is not enforcing. Both
+ * spellings are accepted and anything else is a failure.
+ */
+export async function moderateSocialConversations(
+  action: "block_user" | "unblock_user" | "move_to_spam",
+  igsids: string[],
+  opts: SocialSendTarget,
+): Promise<{ succeeded: string[]; failed: Array<{ id: string; error: string }> }> {
+  if (igsids.length > MODERATE_CONVERSATIONS_MAX_IDS) {
+    // Refuse rather than truncate: silently dropping ids past the 10th would
+    // report a block that never reached Meta for everyone after it.
+    throw new Error(
+      `${opts.label} ${action}: ${igsids.length} ids exceeds Meta's ${MODERATE_CONVERSATIONS_MAX_IDS}/request cap`,
+    );
+  }
+  const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/moderate_conversations`;
+  const res = await graphPostJson(
+    url,
+    opts.accessToken,
+    { user_ids: igsids.map((id) => ({ id })), actions: [action] },
+    opts.appSecret,
+  );
+  const raw = res.success;
+  const ok = raw === true || (typeof raw === "string" && raw.trim().toLowerCase() === "true");
+  if (ok) return { succeeded: [...igsids], failed: [] };
+  return {
+    succeeded: [],
+    failed: igsids.map((id) => ({
+      id,
+      // Meta returns `success:"false"` with no per-id reason, so surface what it
+      // actually said rather than inventing a cause.
+      error:
+        typeof raw === "string" || typeof raw === "boolean"
+          ? `Instagram refused the ${action.replace("_user", "")} (success=${String(raw)}).`
+          : `Instagram returned an unrecognised response to ${action}.`,
+    })),
+  };
+}
+
 /**
  * Best-effort profile for a social contact — the messaging webhook carries no
  * name, so we read the profile node (`/{id}?fields=…`). `fields` differs per
@@ -1296,6 +2076,17 @@ export async function fetchSocialProfile(
     fields: string;
     label: string;
     /**
+     * The app secret that issued `accessToken`, for `appsecret_proof`.
+     *
+     * Not optional in spirit, only in type: with the Meta app's "Require App
+     * Secret" setting on (Meta's own recommendation) a proof-less Graph call is
+     * REJECTED — and this function fails soft to all-nulls, so the whole channel
+     * would silently lose every contact name, @username and avatar with nothing in
+     * the logs but an info line. Every other social Graph call already threads it;
+     * this read was the one that didn't.
+     */
+    appSecret?: string;
+    /**
      * Core field set to retry with when `fields` is rejected. Graph fails the
      * WHOLE node request if ANY requested field is unavailable to the app, and
      * this function fails soft to all-nulls — so one unapproved field would
@@ -1307,7 +2098,7 @@ export async function fetchSocialProfile(
 ): Promise<SocialContactProfile> {
   const fetchFields = async (fields: string) => {
     const url = `${GRAPH_BASE}/${opts.graphVersion}/${encodeURIComponent(externalId)}?fields=${encodeURIComponent(fields)}`;
-    return graphGetJson(url, opts.accessToken, { retry: true });
+    return graphGetJson(url, opts.accessToken, { retry: true }, opts.appSecret);
   };
   try {
     let res: Record<string, unknown>;

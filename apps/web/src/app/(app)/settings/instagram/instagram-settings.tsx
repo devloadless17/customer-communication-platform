@@ -4,9 +4,11 @@ import { useState, useTransition } from "react";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { Check, Loader2, PlugZap, TriangleAlert, Unplug } from "lucide-react";
 import { cn } from "@ccp/shared/utils";
+import type { InboxSource } from "@ccp/shared/providers/capabilities";
 
 import { Button } from "@/components/ui/button";
 import { ChannelAccountsPanel } from "@/features/channels/components/channel-accounts-panel";
+import { EntryPointsPanel } from "@/features/channels/components/entry-points-panel";
 import {
   channelDisconnectCopy,
   fetchChannelRemovalImpact,
@@ -24,6 +26,10 @@ import { toast } from "@/lib/toast";
 
 export interface InstagramCurrent {
   connected: boolean;
+  /** Non-DM sources currently allowed into the inbox. DMs are always on. */
+  inboxSources?: InboxSource[];
+  /** Every non-DM source this channel can offer. */
+  availableInboxSources?: InboxSource[];
   igId: string | null;
   igUsername: string | null;
   pageId: string | null;
@@ -160,6 +166,17 @@ export function InstagramSettings({
                 ?.scrollIntoView({ behavior: "smooth", block: "center" });
             });
           }}
+        />
+      )}
+
+      {/* Only once an account exists: the panel reads Meta on mount, and there is
+          nothing to read (or to configure) before the handle is connected. */}
+      {canManage && current.connected && <EntryPointsPanel channel="instagram" />}
+
+      {canManage && current.connected && (
+        <InboxSourcesPanel
+          available={current.availableInboxSources ?? []}
+          initial={current.inboxSources ?? []}
         />
       )}
 
@@ -353,5 +370,118 @@ function LabeledInput({
         autoComplete="off"
       />
     </label>
+  );
+}
+
+/**
+ * WHAT COMES INTO THE INBOX.
+ *
+ * Direct messages are the product's core: they are why the channel was connected,
+ * so they are shown as a fixed row rather than a switch — there is no state in
+ * which an Instagram inbox does not carry DMs, and offering a toggle would imply
+ * otherwise.
+ *
+ * Everything else is OFF until an admin says so. Turning a source on materially
+ * changes what this inbox IS for the team — on a busy handle comments outnumber
+ * DMs heavily — and that is not a decision a deploy should make for them. The
+ * list is driven by `availableInboxSources` from the server, so a channel with no
+ * non-DM surface renders nothing and a future source appears here with no change
+ * to this file.
+ *
+ * It cannot be delegated to the Meta dashboard: these webhooks are subscribed per
+ * APP, and one app serves every workspace on the shared connection, so
+ * unsubscribing there for one admin would blind all the others.
+ */
+const SOURCE_COPY: Record<InboxSource, { title: string; detail: string }> = {
+  comments: {
+    title: "Comments on your posts",
+    detail:
+      "Comments on your posts, reels and ads arrive as conversations. Replying sends Instagram's private reply — one per comment, within 7 days — and the person must answer before normal DMs resume.",
+  },
+};
+
+function InboxSourcesPanel({
+  available,
+  initial,
+}: {
+  available: InboxSource[];
+  initial: InboxSource[];
+}) {
+  const [sources, setSources] = useState<InboxSource[]>(initial);
+  const [busy, setBusy] = useState(false);
+
+  if (available.length === 0) return null;
+
+  async function apply(source: InboxSource, on: boolean) {
+    const next = on
+      ? [...new Set([...sources, source])]
+      : sources.filter((s) => s !== source);
+    const previous = sources;
+    // Optimistic with rollback: this is a preference, and making an admin watch
+    // a spinner to learn a checkbox worked is worse than the rare revert.
+    setSources(next);
+    setBusy(true);
+    try {
+      const res = await apiFetch("/api/workspace/instagram/inbox-sources", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        // The full desired set, not a delta — two admins editing at once then
+        // converge on a stated world instead of racing read-modify-write.
+        body: JSON.stringify({ sources: next }),
+      });
+      if (!res.ok) {
+        setSources(previous);
+        toast.error("Couldn't change that setting.");
+        return;
+      }
+      toast.success(
+        on ? "This will now appear in your inbox." : "This will stay out of your inbox.",
+      );
+    } catch {
+      setSources(previous);
+      toast.error("Couldn't reach the server.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-xl border bg-card p-5">
+      <h2 className="text-sm font-semibold">What comes into the inbox</h2>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Direct messages always do. Anything else is up to you.
+      </p>
+
+      <div className="mt-4 flex flex-col gap-3">
+        {/* The core, stated rather than offered. */}
+        <div className="flex items-start gap-3 rounded-lg bg-muted/40 p-3">
+          <Check className="mt-0.5 size-4 shrink-0 text-success-fg" />
+          <span className="min-w-0">
+            <span className="block text-sm font-medium">Direct messages</span>
+            <span className="mt-0.5 block text-xs text-muted-foreground">
+              Always on — this is what the channel is for.
+            </span>
+          </span>
+        </div>
+
+        {available.map((source) => (
+          <label key={source} className="flex items-start gap-3 px-1">
+            <input
+              type="checkbox"
+              checked={sources.includes(source)}
+              disabled={busy}
+              onChange={(e) => void apply(source, e.target.checked)}
+              className="mt-0.5 size-4 shrink-0 accent-primary"
+            />
+            <span className="min-w-0">
+              <span className="block text-sm font-medium">{SOURCE_COPY[source].title}</span>
+              <span className="mt-0.5 block text-xs text-muted-foreground">
+                {SOURCE_COPY[source].detail}
+              </span>
+            </span>
+          </label>
+        ))}
+      </div>
+    </div>
   );
 }

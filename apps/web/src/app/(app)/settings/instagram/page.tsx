@@ -31,6 +31,8 @@ export default async function InstagramSettingsPage() {
     accounts = accountRows;
     current = {
       connected: Boolean(config.igId),
+      inboxSources: config.inboxSources,
+      availableInboxSources: config.availableInboxSources,
       igId: config.igId,
       igUsername: config.igUsername,
       pageId: config.pageId,

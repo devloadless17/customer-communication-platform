@@ -47,6 +47,11 @@ import { zBody, zQuery } from "../../common/zod-validation.pipe";
 import { MAX_CHAIN_DEPTH, parseChainDepth } from "@/lib/workflows/events";
 import { setContactBlocked } from "@/lib/messaging/block-contact";
 import { mapBlockContactError } from "../../common/block-contact-http";
+import { markContactSpam } from "@/lib/messaging/block-contact";
+import {
+  replyToCommentPublicly,
+  ReplyToCommentError,
+} from "@/lib/messaging/reply-to-comment";
 import { ContactTransferService } from "@/contacts/transfer.service";
 import {
   CreateExportSchema,
@@ -56,6 +61,30 @@ import {
 } from "@/contacts/transfer.schemas";
 import { AssignmentService } from "@/assignment/assignment.service";
 import { ChannelAccountsService } from "@/workspace-settings/channel-accounts/channel-accounts.service";
+import { InstagramService } from "@/workspace-settings/instagram/instagram.service";
+import { MessengerService } from "@/workspace-settings/messenger/messenger.service";
+import {
+  SendMessengerTemplateSchema,
+  type SendMessengerTemplateInput,
+} from "@/messages/messages.schemas";
+import {
+  CreatePersonaSchema,
+  StickerCatalogQuerySchema,
+  ThreadControlSchema,
+  UpdateMessengerEntryPointsSchema,
+  UpdateMessengerWelcomeSchema,
+  type CreatePersonaInput,
+  type StickerCatalogQuery,
+  type ThreadControlInput,
+  type UpdateMessengerEntryPointsInput,
+  type UpdateMessengerWelcomeInput,
+} from "@/workspace-settings/messenger/messenger.schemas";
+import {
+  UpdateEntryPointsSchema,
+  UpdateInboxSourcesSchema,
+  type UpdateEntryPointsInput,
+  type UpdateInboxSourcesInput,
+} from "@/workspace-settings/instagram/instagram.schemas";
 import { WhatsappService } from "@/workspace-settings/whatsapp/whatsapp.service";
 import { BroadcastsService } from "@/broadcasts/broadcasts.service";
 import {
@@ -219,6 +248,7 @@ import {
   type ExternalUpdateFlagInput,
   ExternalNoteSchema,
   ExternalSendInteractiveSchema,
+  ReplyToCommentSchema,
   ExternalSendMessageSchema,
   ExternalSetAiSchema,
   ExternalStartImportSchema,
@@ -246,6 +276,7 @@ import {
   type ExternalListCallsQueryInput,
   type ExternalNoteInput,
   type ExternalSendInteractiveInput,
+  type ReplyToCommentInput,
   type ExternalSendMessageInput,
   type ExternalSetAiInput,
   type ExternalStartImportInput,
@@ -338,6 +369,8 @@ export class ExternalV1Controller {
     private readonly flags: ExternalV1FlagsService,
     private readonly inboxViews: InboxViewsService,
     private readonly channelAccounts: ChannelAccountsService,
+    private readonly instagram: InstagramService,
+    private readonly messenger: MessengerService,
     private readonly tickets: TicketsService,
     private readonly whatsapp: WhatsappService,
     private readonly broadcasts: BroadcastsService,
@@ -733,6 +766,68 @@ export class ExternalV1Controller {
   ) {
     this.guardChainDepth(xCcpDepth);
     return this.setContactBlockedV1(auth, id, false);
+  }
+
+  /**
+   * Reply PUBLICLY to a comment that reached the inbox — a sub-thread comment
+   * everyone reading the post sees. The complement to replying in the thread,
+   * which sends Instagram's one-per-comment PRIVATE reply instead.
+   */
+  @Post("messages/:id/comment-reply")
+  @RequireScope("write:messages")
+  @HttpCode(200)
+  async replyToCommentV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(ReplyToCommentSchema)) body: ReplyToCommentInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    try {
+      const res = await replyToCommentPublicly({
+        workspaceId: auth.workspaceId,
+        messageId: id,
+        body: body.body,
+        userId: null,
+        apiKeyId: auth.apiKeyId,
+      });
+      return { ok: true, comment_id: res.commentId };
+    } catch (err) {
+      if (err instanceof ReplyToCommentError) {
+        throw new HttpException(
+          { error: err.code, ...(err.detail ? { detail: err.detail } : {}) },
+          err.code === "message_not_found" ? 404 : 422,
+        );
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * File the contact's conversation as SPAM at the provider, without blocking
+   * them. Instagram only today (`move_to_spam`).
+   */
+  @Post("contacts/:id/spam")
+  @RequireScope("write:contacts")
+  @HttpCode(200)
+  @RateLimit({ perMinute: 20 })
+  async markContactSpamV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    try {
+      await markContactSpam({
+        workspaceId: auth.workspaceId,
+        contactId: id,
+        userId: null,
+        apiKeyId: auth.apiKeyId,
+      });
+      return { ok: true };
+    } catch (err) {
+      throw mapBlockContactError(err);
+    }
   }
 
   private async setContactBlockedV1(auth: ApiKeyContext, id: string, blocked: boolean) {
@@ -1444,6 +1539,236 @@ export class ExternalV1Controller {
   @RequireScope("read:catalog")
   async channelAccountDirectory(@CurrentApiKey() auth: ApiKeyContext) {
     return { accounts: await this.channelAccounts.directory(auth.workspaceId) };
+  }
+
+  // ── Instagram conversation entry points ─────────────────────────────────
+  // The ice breakers + persistent menu a customer sees before typing. These live
+  // on META, not in our database (they can also be edited in Business Suite), so
+  // both routes read and write through the same service the settings panel uses.
+  //
+  // `admin:settings`, not `write:channels`: this is admin-grade workspace
+  // CONFIGURATION whose internal twin is `@RequireRole("admin")`, and it changes
+  // what every future customer is shown — the same reasoning as assignment rules
+  // and SLA policies.
+
+  @Get("channels/instagram/entry-points")
+  @RequireScope("admin:settings")
+  async getInstagramEntryPoints(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query("account_id") accountId?: string,
+  ) {
+    // `null` = we could not read them. Callers must treat that as unknown, NOT
+    // as empty: POSTing an empty set back would clear a live configuration.
+    return {
+      entry_points: await this.instagram.getEntryPoints(
+        auth.workspaceId,
+        accountId?.trim() || undefined,
+      ),
+    };
+  }
+
+  @Post("channels/instagram/entry-points")
+  @RequireScope("admin:settings")
+  async setInstagramEntryPoints(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(UpdateEntryPointsSchema)) body: UpdateEntryPointsInput,
+  ) {
+    return {
+      ok: true,
+      entry_points: await this.instagram.setEntryPoints(auth.workspaceId, body),
+    };
+  }
+
+  // ── Messenger profile: entry points, welcome screen, stickers ───────────
+  // Same reasoning and the same scope as the Instagram block above. Messenger
+  // has one surface Instagram does not: the WELCOME SCREEN (Get Started button,
+  // greeting, commands), which Instagram's profile node rejects outright — hence
+  // separate routes rather than a `channel` parameter on one.
+  //
+  // The sticker catalog is `read:catalog`, not `admin:settings`: it is a public,
+  // read-only list of Meta's own first-party stickers with no workspace data in
+  // it at all, and an integration composing a reply needs it without holding an
+  // admin-grade key.
+
+  @Get("channels/messenger/entry-points")
+  @RequireScope("admin:settings")
+  async getMessengerEntryPoints(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query("account_id") accountId?: string,
+  ) {
+    // `null` = could not read. Treat as unknown, NOT empty — see the Instagram twin.
+    return {
+      entry_points: await this.messenger.getEntryPoints(
+        auth.workspaceId,
+        accountId?.trim() || undefined,
+      ),
+    };
+  }
+
+  @Post("channels/messenger/entry-points")
+  @RequireScope("admin:settings")
+  async setMessengerEntryPoints(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(UpdateMessengerEntryPointsSchema)) body: UpdateMessengerEntryPointsInput,
+  ) {
+    return {
+      ok: true,
+      entry_points: await this.messenger.setEntryPoints(auth.workspaceId, body),
+    };
+  }
+
+  @Get("channels/messenger/welcome")
+  @RequireScope("admin:settings")
+  async getMessengerWelcome(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query("account_id") accountId?: string,
+  ) {
+    return {
+      welcome: await this.messenger.getWelcome(
+        auth.workspaceId,
+        accountId?.trim() || undefined,
+      ),
+    };
+  }
+
+  @Post("channels/messenger/welcome")
+  @RequireScope("admin:settings")
+  async setMessengerWelcome(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(UpdateMessengerWelcomeSchema)) body: UpdateMessengerWelcomeInput,
+  ) {
+    return { ok: true, welcome: await this.messenger.setWelcome(auth.workspaceId, body) };
+  }
+
+  @Get("channels/messenger/stickers")
+  @RequireScope("read:catalog")
+  async messengerStickers(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query(zQuery(StickerCatalogQuerySchema)) query: StickerCatalogQuery,
+  ) {
+    return { catalog: await this.messenger.stickers(auth.workspaceId, query) };
+  }
+
+  /**
+   * Which NON-DM sources reach the inbox for one Instagram account (default:
+   * none — direct messages are the core and are never gated).
+   *
+   * `admin:settings` for the same reason as the entry points: it changes what
+   * every agent in the workspace sees, and the Meta-side subscription for these
+   * sources is app-wide, so this is the only per-workspace control over them.
+   */
+  @Post("channels/instagram/inbox-sources")
+  @RequireScope("admin:settings")
+  async setInstagramInboxSources(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(UpdateInboxSourcesSchema)) body: UpdateInboxSourcesInput,
+  ) {
+    return { ok: true, ...(await this.instagram.setInboxSources(auth.workspaceId, body)) };
+  }
+
+  // Handover Protocol. `write:conversations`, NOT `admin:settings`: unlike the
+  // profile routes above this changes nothing about workspace configuration — it
+  // acts on ONE conversation, and it is the programmatic equivalent of an agent
+  // taking a thread over from a bot. Scoping it as an admin setting would force
+  // an integration that only ever answers messages to hold an admin-grade key.
+  @Post("channels/messenger/thread-control")
+  @RequireScope("write:conversations")
+  async messengerThreadControl(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(ThreadControlSchema)) body: ThreadControlInput,
+  ) {
+    return { ok: true, ...(await this.messenger.threadControl(auth.workspaceId, body)) };
+  }
+
+  @Get("channels/messenger/thread-owner")
+  @RequireScope("read:channels")
+  async messengerThreadOwner(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query("psid") psid: string,
+    @Query("account_id") accountId?: string,
+  ) {
+    return {
+      owner_app_id: await this.messenger.threadOwner(
+        auth.workspaceId,
+        psid,
+        accountId?.trim() || undefined,
+      ),
+    };
+  }
+
+  // Personas + utility templates. Both read Meta live with no local mirror.
+  //
+  // `read:catalog` for the two READS: neither returns workspace data — a persona
+  // is a display name and an avatar, a utility template is Meta-approved copy —
+  // and the composer needs both without an admin-grade key. Creating or deleting
+  // a persona changes what every future customer SEES, so those stay
+  // `admin:settings`.
+  @Get("channels/messenger/personas")
+  @RequireScope("read:catalog")
+  async messengerPersonas(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query("account_id") accountId?: string,
+  ) {
+    return {
+      personas: await this.messenger.personas(auth.workspaceId, accountId?.trim() || undefined),
+    };
+  }
+
+  @Post("channels/messenger/personas")
+  @RequireScope("admin:settings")
+  async createMessengerPersona(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(CreatePersonaSchema)) body: CreatePersonaInput,
+  ) {
+    return { ok: true, persona: await this.messenger.createPersona(auth.workspaceId, body) };
+  }
+
+  @Delete("channels/messenger/personas/:personaId")
+  @RequireScope("admin:settings")
+  async deleteMessengerPersona(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("personaId") personaId: string,
+    @Query("account_id") accountId?: string,
+  ) {
+    await this.messenger.deletePersona(
+      auth.workspaceId,
+      personaId,
+      accountId?.trim() || undefined,
+    );
+    return { ok: true };
+  }
+
+  // Sending a Messenger template. `write:messages` — it IS a message send, not a
+  // settings change, and an integration that posts order updates should not need
+  // an admin-grade key. Rate-limited like the other sends.
+  @Post("conversations/:id/messenger-template")
+  @RequireScope("write:messages")
+  @RateLimit({ perMinute: 60 })
+  async sendMessengerTemplateV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(SendMessengerTemplateSchema)) body: SendMessengerTemplateInput,
+    @Headers("idempotency-key") idempotencyKey?: string,
+  ) {
+    // A send is non-idempotent and bills the business, so `/v1` sends REQUIRE the
+    // header (CLAUDE.md §8) — the same gate every other /v1 send applies.
+    this.idemKeyRequired(idempotencyKey);
+    const out = await this.api.sendMessengerTemplate(auth.workspaceId, auth.apiKeyId, id, body);
+    return { ok: true, message_id: out.messageId };
+  }
+
+  @Get("channels/messenger/utility-templates")
+  @RequireScope("read:catalog")
+  async messengerUtilityTemplates(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query("account_id") accountId?: string,
+  ) {
+    return {
+      templates: await this.messenger.utilityTemplates(
+        auth.workspaceId,
+        accountId?.trim() || undefined,
+      ),
+    };
   }
 
   @Get("broadcasts")

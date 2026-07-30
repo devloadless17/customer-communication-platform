@@ -294,6 +294,11 @@ async function checkPageChannel(
   let token: string;
   let graphVersion: string;
   let appId: string | undefined;
+  // The channel's OWN app secret, for `appsecret_proof` on both Graph calls
+  // below. Without it a Meta app with "Require App Secret" on rejects the read,
+  // the check reports `transient` on every tick, and the self-heal never runs —
+  // an inbound-gap detector permanently blind on the posture Meta recommends.
+  let appSecret: string | undefined;
   try {
     if (channel === "messenger") {
       const cfg = await getMessengerSendConfig(workspaceId, connectionId);
@@ -301,6 +306,7 @@ async function checkPageChannel(
       token = cfg.pageAccessToken;
       graphVersion = cfg.graphVersion;
       appId = cfg.appId;
+      appSecret = cfg.appSecret;
     } else {
       // Instagram-via-Facebook-Login rides the linked PAGE for webhooks, same
       // as sends — the subscription that matters lives on the Page node.
@@ -309,6 +315,7 @@ async function checkPageChannel(
       token = cfg.igAccessToken;
       graphVersion = cfg.graphVersion;
       appId = cfg.appId;
+      appSecret = cfg.appSecret;
     }
   } catch (err) {
     if (err instanceof ProviderNotConfiguredError) {
@@ -319,9 +326,15 @@ async function checkPageChannel(
   try {
     // Scoped to our app id when we have one: a Page shared with another app
     // otherwise reported that app's `messages` subscription as ours.
-    const sub = await getPageSubscription(pageId, token, graphVersion, appId);
+    const sub = await getPageSubscription(pageId, token, graphVersion, appId, appSecret);
     if (sub.receivesMessages) return { state: "ok", detail: "subscribed" };
-    const healed = await ensurePageSubscribedToMessaging(pageId, token, graphVersion, appId);
+    const healed = await ensurePageSubscribedToMessaging(
+      pageId,
+      token,
+      graphVersion,
+      appId,
+      appSecret,
+    );
     if (healed.ok) {
       return { state: "ok", detail: "Page `messages` subscription was MISSING — re-subscribed", healed: true };
     }

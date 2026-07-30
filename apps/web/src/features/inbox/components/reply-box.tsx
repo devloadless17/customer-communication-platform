@@ -5,11 +5,13 @@ import {
   AlertTriangle,
   Languages,
   MapPin,
+  MessageCircle,
   MessageSquare,
   MousePointerClick,
   Paperclip,
   Send,
   Smile,
+  Sticker,
   Sparkles,
   StickyNote,
   UserRound,
@@ -49,7 +51,12 @@ import {
 } from "@/features/inbox/lib/optimistic-activity";
 import { dispatchLocalSocketEvents } from "@/lib/socket-client";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { sendSticker } from "./sticker-send";
 import { computeWindowStatus, effectiveSendWindowMs } from "@ccp/shared/utils/window";
+import {
+  hasAnswerableComment,
+  type PrivateReplyCandidate,
+} from "@ccp/shared/providers/capabilities";
 import { CHANNEL_CAPABILITIES, supportsInlineCaption } from "@ccp/shared/providers/capabilities";
 import { mediaSizeCap, channelSupportsMediaKind } from "@ccp/shared/providers/media-caps";
 import { CHANNEL_LABEL } from "./channel-badge";
@@ -91,6 +98,13 @@ const RefinePopover = dynamic(
   () => import("./reply-box/refine-popover").then((m) => m.RefinePopover),
   { ssr: false },
 );
+// Lazy like the other composer sheets: the catalog view is only ever opened on
+// Messenger threads, and it pulls a grid of remote images with it.
+const StickerPicker = dynamic(
+  () => import("./sticker-picker").then((m) => m.StickerPicker),
+  { ssr: false },
+);
+
 const InteractivePopover = dynamic(
   () => import("./interactive-popover").then((m) => m.InteractivePopover),
   { ssr: false },
@@ -171,6 +185,9 @@ function formatMb(bytes: number): string {
 // are stable across those (callbacks are useCallback'd, catalogs are
 // per-conversation), so it should bail instead of re-rendering this 1.8k-line
 // composer each time. State + context changes still re-render it normally.
+/** Stable identity, so an absent prop can't churn memoised work each render. */
+const EMPTY_CANDIDATES: PrivateReplyCandidate[] = [];
+
 function ReplyBoxImpl({
   conversationId,
   currentUser,
@@ -193,6 +210,7 @@ function ReplyBoxImpl({
   onOptimisticFail,
   onOptimisticRetry,
   prefill,
+  privateReplyCandidates = EMPTY_CANDIDATES,
 }: {
   conversationId: string;
   currentUser: User;
@@ -287,6 +305,15 @@ function ReplyBoxImpl({
     clientTempId?: string;
     mediaKind?: MediaKind;
   } | null;
+  /**
+   * The thread's messages, reduced to just what the private-reply rule needs.
+   *
+   * Passed in rather than fetched: the composer must not run its own query for
+   * something the thread already holds, and keeping the shape minimal stops this
+   * prop from becoming a second copy of the message list that can go stale
+   * against the one being rendered.
+   */
+  privateReplyCandidates?: PrivateReplyCandidate[];
 }) {
   // Shared 60s tick across the inbox so we don't run N parallel intervals
   // (one in WindowBadge, one here, …). Initialized to the server's clock on
@@ -308,8 +335,22 @@ function ReplyBoxImpl({
   const sendWindowMs = effectiveSendWindowMs(caps);
   const hasSendWindow = sendWindowMs !== null;
   const windowStatus = computeWindowStatus(lastInboundAt, now, sendWindowMs ?? undefined);
+  // A comment-only thread has NO window — by design, not by expiry — and Meta
+  // grants exactly one reply addressed at the comment. Locking the composer for
+  // it would make the single legal reply unreachable, which is the difference
+  // between shipping this feature and shipping a send path nobody can reach.
+  //
+  // The rule is the shared one the server resolves with, so the two ends cannot
+  // drift about whether an agent may type. The server stays authoritative: it
+  // re-resolves the comment before sending and refuses if it is already spent,
+  // so being optimistic here on a partially-loaded thread costs at worst the
+  // error the agent would have seen anyway.
+  const privateReplyOpen =
+    caps.commentPrivateReply === true && hasAnswerableComment(privateReplyCandidates, now);
   const windowClosed =
-    hasSendWindow && (windowStatus.state === "closed" || windowStatus.state === "never");
+    hasSendWindow &&
+    !privateReplyOpen &&
+    (windowStatus.state === "closed" || windowStatus.state === "never");
   const [mode, setMode] = useState<Mode>("reply");
   // Draft persistence: WhatsApp/Slack/Telegram all hold typed-but-unsent text
   // across chat switches. We persist to localStorage keyed by team+conv id so
@@ -739,6 +780,8 @@ function ReplyBoxImpl({
   // counterpart of the workflow ask_question step's interactive path.
   const [interactiveOpen, setInteractiveOpen] = useState(false);
   const [locationOpen, setLocationOpen] = useState(false);
+  const [stickerOpen, setStickerOpen] = useState(false);
+  const [stickerSending, setStickerSending] = useState(false);
   const [contactOpen, setContactOpen] = useState(false);
   const [templates, setTemplates] = useState<TemplateDto[]>([]);
   const [templatesLoaded, setTemplatesLoaded] = useState(false);
@@ -1561,7 +1604,19 @@ function ReplyBoxImpl({
             <ToggleButton active={mode === "reply"} onClick={() => switchMode("reply")} icon={MessageSquare} label="Reply" />
             <ToggleButton active={mode === "note"} onClick={() => switchMode("note")} icon={StickyNote} label="Note" />
           </div>
-          {!isNote && <WindowBadgeFromStatus status={windowStatus} size="sm" />}
+          {/* On a comment-only thread the window badge would read "closed",
+              which is true and misleading: there is no window because nobody has
+              messaged, and exactly one private reply IS allowed. Say what the
+              agent can actually do instead. */}
+          {!isNote &&
+            (privateReplyOpen ? (
+              <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-2xs font-medium text-primary">
+                <MessageCircle className="size-3" />
+                Private reply · one per comment
+              </span>
+            ) : (
+              <WindowBadgeFromStatus status={windowStatus} size="sm" />
+            ))}
           {/* WHICH ACCOUNT this reply leaves from. The thread header already says
               which account the conversation arrived on, but the composer is where
               it changes a decision — the agent is choosing to send, and on a
@@ -1914,9 +1969,15 @@ function ReplyBoxImpl({
                 onClose={() => setInteractiveOpen(false)}
                 conversationId={conversationId}
                 initialBody={value}
-                // Capability-gated: WhatsApp-only interactive kinds.
+                // Capability-gated, never channel-name-gated: `location_request`
+                // is WhatsApp-only, while the link button also exists on
+                // Instagram (as a button template) with a tighter text ceiling.
                 allowLocationRequest={caps.locationRequest === true}
                 allowCtaUrl={caps.ctaUrlButton === true}
+                allowCards={caps.genericTemplate === true}
+                {...(caps.templateTextMaxChars !== undefined
+                  ? { templateTextMax: caps.templateTextMaxChars }
+                  : {})}
                 onSent={() => {
                   // Mirror the text-send post-success path: clear the
                   // composer + drop any persisted draft so the next focus
@@ -1958,6 +2019,39 @@ function ReplyBoxImpl({
                   onClose={() => setLocationOpen(false)}
                   conversationId={conversationId}
                   onSent={() => {}}
+                />
+              </div>
+            )}
+            {caps.stickers && (
+              <div className="relative">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-8 pointer-coarse:size-9 text-muted-foreground disabled:text-muted-foreground/40"
+                  type="button"
+                  disabled={isNote || windowClosed || stickerSending}
+                  aria-label="Send a sticker"
+                  title={
+                    isNote
+                      ? "Stickers can only be sent in Reply mode"
+                      : windowClosed
+                        ? "Window closed — reopen the messaging window to send a sticker"
+                        : "Send a sticker"
+                  }
+                  onClick={() => setStickerOpen((v) => !v)}
+                >
+                  <Sticker className="size-4" />
+                </Button>
+                <StickerPicker
+                  open={stickerOpen}
+                  sending={stickerSending}
+                  onClose={() => setStickerOpen(false)}
+                  onPick={(sticker) => {
+                    setStickerSending(true);
+                    void sendSticker(conversationId, sticker).finally(() =>
+                      setStickerSending(false),
+                    );
+                  }}
                 />
               </div>
             )}

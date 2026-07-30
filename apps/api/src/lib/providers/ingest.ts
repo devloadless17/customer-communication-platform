@@ -1693,6 +1693,21 @@ export function mediaPreview(kind: MediaKind | undefined): string {
   return mediaPreviewLabel(kind);
 }
 
+/**
+ * Widen a closed domain object (`MessageStructured`, `MessageAttribution`) into
+ * the JSONB column type.
+ *
+ * `Prisma.InputJsonValue` is a recursive structural type, so TS refuses the
+ * assignment from a discriminated union of object literals even though every
+ * member is plainly JSON-serializable. Three call sites each carried their own
+ * `as unknown as` for that; one named helper is the honest version — the cast is
+ * a TYPE-SYSTEM limitation, not an unchecked claim about the value, and saying so
+ * once beats repeating an unexplained double assertion at every write.
+ */
+function toJsonColumn(value: object): Prisma.InputJsonValue {
+  return value as unknown as Prisma.InputJsonValue;
+}
+
 function statusRank(s: Message["status"]): number {
   switch (s) {
     case "failed":
@@ -2323,13 +2338,9 @@ async function ingestInboundMessage(
           rawPayload: evt.rawPayload as Prisma.InputJsonValue,
           timestamp: evt.timestamp,
           // Structured non-media content (location pin / contact card) → rich bubble.
-          ...(evt.structured
-            ? { structured: evt.structured as unknown as Prisma.InputJsonValue }
-            : {}),
+          ...(evt.structured ? { structured: toJsonColumn(evt.structured) } : {}),
           // Ad / deep-link attribution (Click-to-WhatsApp) → "from your ad" chip.
-          ...(evt.attribution
-            ? { attribution: evt.attribution as unknown as Prisma.InputJsonValue }
-            : {}),
+          ...(evt.attribution ? { attribution: toJsonColumn(evt.attribution) } : {}),
           ...(replySnapshot ? { replyToMessageId: replySnapshot.id } : {}),
           // Persist the structured button/list tap. Until now this was parsed,
           // handed to workflows, and then dropped — only the button's display
@@ -2474,13 +2485,25 @@ async function ingestInboundMessage(
       });
       const effectiveLastMessageAt = bumped.lastMessageAt;
       const effectivePreview = bumped.lastMessagePreview;
-      await tx.contact.updateMany({
-        where: {
-          id: contact.id,
-          OR: [{ lastInboundAt: null }, { lastInboundAt: { lt: evt.timestamp } }],
-        },
-        data: { lastInboundAt: evt.timestamp },
-      });
+      // `lastInboundAt` is the WINDOW CLOCK — the composer, every send guard and
+      // the broadcast runner read it to decide whether free-form messaging is
+      // legal. So it is bumped only by an inbound that actually opens the window.
+      //
+      // The one that does not is an Instagram COMMENT: Meta grants a single
+      // `comment_id`-addressed private reply within 7 days, and no 24-hour
+      // conversation until the person answers it. Stamping this would tell all
+      // three readers the thread is open and each would hand Meta a send it is
+      // certain to reject. Default-true, so every pre-existing inbound is
+      // unaffected.
+      if (evt.opensMessagingWindow !== false) {
+        await tx.contact.updateMany({
+          where: {
+            id: contact.id,
+            OR: [{ lastInboundAt: null }, { lastInboundAt: { lt: evt.timestamp } }],
+          },
+          data: { lastInboundAt: evt.timestamp },
+        });
+      }
 
       // Build the message.received payload inside the tx so all reads
       // (recentMessages) see the row we just wrote and stay consistent
@@ -3008,9 +3031,7 @@ async function ingestOutboundEcho(
         // business just confirmed from Meta's inbox, a shared post/reel). Same
         // column and same shape the inbound path writes — an echo is a real
         // message on the thread, so it renders the same card.
-        ...(evt.structured
-          ? { structured: evt.structured as unknown as Prisma.InputJsonValue }
-          : {}),
+        ...(evt.structured ? { structured: toJsonColumn(evt.structured) } : {}),
         ...(evt.media
           ? {
               mediaKind: evt.media.kind,

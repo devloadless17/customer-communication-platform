@@ -20,6 +20,7 @@
 
 import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { stripNonCode } from "./lib/strip-non-code.mjs";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const BASELINE_FILE = join(ROOT, "scripts", "double-assertion-baseline.json");
@@ -49,7 +50,11 @@ const counts = {};
 let total = 0;
 for (const dir of SCAN_DIRS) {
   for (const file of walk(join(ROOT, dir))) {
-    const n = (readFileSync(file, "utf8").match(RE) ?? []).length;
+    // CODE only. Counting raw text made the ratchet punish its own fix: a
+    // docblock explaining why a cast was removed still reads `as unknown as`,
+    // so the file "rose" while genuinely improving. Strings are blanked too —
+    // a quoted example of the pattern is documentation, not a cast.
+    const n = (stripNonCode(readFileSync(file, "utf8")).match(RE) ?? []).length;
     if (n > 0) {
       counts[file.slice(ROOT.length)] = n;
       total += n;

@@ -19,7 +19,11 @@ import {
 } from "@/lib/providers/config";
 import { isBicAllowedForBusinessNumber } from "@ccp/shared/providers/calling-regions";
 import type { Message } from "@ccp/shared/types";
-import type { ContactShareField, InteractiveOption } from "@ccp/shared/providers/types";
+import type {
+  ContactShareField,
+  GenericTemplateCard,
+  InteractiveOption,
+} from "@ccp/shared/providers/types";
 import {
   computeWindowStatus,
   closedWindowMessage,
@@ -44,7 +48,15 @@ export interface SendInteractiveInternalArgs {
   workspaceId: string;
   conversationId: string;
   bodyText: string;
-  kind: "buttons" | "list" | "voice_call" | "location_request" | "cta_url" | "carousel";
+  kind:
+    | "buttons"
+    | "list"
+    | "voice_call"
+    | "location_request"
+    | "cta_url"
+    | "carousel"
+    | "generic"
+    | "product";
   /** Empty for `voice_call` / `location_request` / `cta_url` — those render a
    *  single vendor-drawn CTA instead of authored options. */
   options: InteractiveOption[];
@@ -59,6 +71,10 @@ export interface SendInteractiveInternalArgs {
     ctaUrl?: { displayText: string; url: string };
     quickReplies?: Array<{ id: string; title: string }>;
   }>;
+  /** `generic` only — 1-10 cards. Shape + caps on SendInteractiveArgs. */
+  genericCards?: GenericTemplateCard[];
+  /** `product` only — 1-10 catalog product ids. */
+  productIds?: string[];
   listCtaLabel?: string;
   listSectionTitle?: string;
   /** Buttons + list — optional text header / footer (≤60 each). */
@@ -231,12 +247,49 @@ export async function sendInteractiveInternal(
     );
   }
 
-  // Same rule for the URL button ("cta_url") — WhatsApp only today.
+  // Same rule for the URL button ("cta_url") — capability, never a channel name:
+  // WhatsApp sends `interactive.type:"cta_url"`, Instagram sends the equivalent
+  // BUTTON TEMPLATE, and a channel with neither is refused here.
   if (args.kind === "cta_url" && !binding.provider.capabilities.ctaUrlButton) {
     throw new SendTextValidationError(
       "provider_not_configured",
       "cta_url_not_supported",
       `${channel.channel} cannot send a URL button message`,
+    );
+  }
+
+  // A structured template can carry LESS text than a plain message on the same
+  // channel — Instagram allows 1,000 bytes of plain text but only 640 characters
+  // of button-template `text`, and the header/footer lines are folded into that
+  // same field because the template has nowhere else to put them. Check the
+  // COMBINED length here, where the caller still gets a 4xx naming the limit,
+  // rather than letting Meta reject it inside the send worker.
+  const templateMax = binding.provider.capabilities.templateTextMaxChars;
+  if (args.kind === "cta_url" && templateMax !== undefined) {
+    const combined = [args.ctaUrl?.headerText, bodyText, args.ctaUrl?.footerText]
+      .filter((part): part is string => !!part && part.length > 0)
+      .join("\n\n");
+    if (combined.length > templateMax) {
+      throw new SendTextValidationError(
+        "message_too_long",
+        `Link-button message is ${combined.length} characters (header + body + footer) — ${provider} allows at most ${templateMax}.`,
+      );
+    }
+  }
+
+  // Meta's structured templates. Same capability-not-channel-name rule.
+  if (args.kind === "generic" && !binding.provider.capabilities.genericTemplate) {
+    throw new SendTextValidationError(
+      "provider_not_configured",
+      "generic_template_not_supported",
+      `${channel.channel} cannot send a card template`,
+    );
+  }
+  if (args.kind === "product" && !binding.provider.capabilities.productTemplate) {
+    throw new SendTextValidationError(
+      "provider_not_configured",
+      "product_template_not_supported",
+      `${channel.channel} cannot send a product template`,
     );
   }
 
@@ -280,6 +333,8 @@ export async function sendInteractiveInternal(
       ...(args.voiceCall ? { voiceCall: args.voiceCall } : {}),
       ...(args.ctaUrl ? { ctaUrl: args.ctaUrl } : {}),
       ...(args.carouselCards ? { carouselCards: args.carouselCards } : {}),
+      ...(args.genericCards ? { genericCards: args.genericCards } : {}),
+      ...(args.productIds ? { productIds: args.productIds } : {}),
       ...(contactShare.length > 0 ? { contactShare } : {}),
       ...(args.listCtaLabel ? { listCtaLabel: args.listCtaLabel } : {}),
       ...(args.listSectionTitle ? { listSectionTitle: args.listSectionTitle } : {}),
@@ -304,7 +359,12 @@ export async function sendInteractiveInternal(
   // normal text quick-reply, so the only trustworthy signal that a value is a
   // shared phone/email is that THIS message offered that chip. Keep it in sync
   // with `resolveContactShare` (@ccp/shared/utils/contact-share).
-  const rawPayload = {
+  // Typed as a plain JSON object, not inferred. `genericCards[].buttons` is a
+  // DISCRIMINATED UNION, and a union of object literals is not structurally
+  // assignable to Prisma's `InputJsonValue` (it has no index signature) — so
+  // inference here would force a second assertion at the write below. Naming the
+  // shape once keeps that a single, honest cast.
+  const rawPayload: Record<string, unknown> = {
     sentVia: args.sentVia,
     interactive: {
       kind: args.kind,
@@ -312,6 +372,8 @@ export async function sendInteractiveInternal(
       ...(args.voiceCall ? { voiceCall: args.voiceCall } : {}),
       ...(args.ctaUrl ? { ctaUrl: args.ctaUrl } : {}),
       ...(args.carouselCards ? { carouselCards: args.carouselCards } : {}),
+      ...(args.genericCards ? { genericCards: args.genericCards } : {}),
+      ...(args.productIds ? { productIds: args.productIds } : {}),
       ...(contactShare.length > 0 ? { contactShare } : {}),
     },
   };

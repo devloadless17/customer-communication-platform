@@ -2,6 +2,10 @@ import { decryptSecret } from "@/lib/crypto/envelope";
 import { db } from "@/lib/db";
 import { ProviderNotConfiguredError, ACCOUNT_UNRESOLVED } from "@/lib/providers/config";
 import { TtlCache } from "@/lib/providers/config-cache";
+import { INBOX_SOURCES, type InboxSource } from "@ccp/shared/providers/capabilities";
+
+/** Shared immutable empty set — the default answer, allocated once. */
+const EMPTY_SOURCES: ReadonlySet<InboxSource> = new Set<InboxSource>();
 import {
   getMetaConnection,
   resolveWebhookSecretCandidates,
@@ -10,10 +14,18 @@ import {
 /**
  * Per-team Instagram DM config. Same credential model as WhatsApp / Messenger
  * (a `ChannelConnection` row keyed (workspaceId, "instagram"); `config` non-secret,
- * `secrets` envelope-encrypted). Identity is the Instagram business account id
- * (`igId`) + an Instagram access token; no phone / no Page / no WABA. The Meta
- * app secret verifies the inbound webhook HMAC. "cache ciphertext, decrypt on
- * demand" posture — decrypted tokens never outlive the request.
+ * `secrets` envelope-encrypted).
+ *
+ * Identity is the Instagram professional-account id (`igId`) — the value Meta
+ * puts in `entry[].id` on an `object:"instagram"` webhook, and therefore the row's
+ * `externalAccountId`. It is NOT self-sufficient: Instagram-via-Facebook-Login
+ * rides the LINKED PAGE for both sending and webhook subscription, so `pageId` is
+ * required too and `igAccessToken` holds a PAGE access token. (An older note here
+ * said "no phone / no Page / no WABA"; the Page half of that has been false since
+ * onboarding started deriving the account from the Page.) No phone, no WABA.
+ *
+ * The Meta app secret verifies the inbound webhook HMAC. "cache ciphertext,
+ * decrypt on demand" posture — decrypted tokens never outlive the request.
  */
 
 interface InstagramChannelConfig {
@@ -23,6 +35,12 @@ interface InstagramChannelConfig {
   pageId?: string;
   appId?: string;
   verifyToken?: string;
+  /**
+   * Which NON-DM sources this account lets into the inbox. Absent or empty =
+   * direct messages only, which is the default and the product's core. See
+   * {@link getInstagramInboxSources}.
+   */
+  inboxSources?: InboxSource[];
 }
 interface InstagramChannelSecrets {
   igAccessToken?: string;
@@ -83,14 +101,66 @@ type CachedSend =
 // TTL/cap/sweep mechanics live in the shared TtlCache primitive (config-cache.ts).
 const sendCache = new TtlCache<CachedSend>();
 const webhookCache = new TtlCache<WebhookCipher>();
+/** (workspace, account) → which non-DM sources it lets into the inbox. */
+const inboxSourcesCache = new TtlCache<InboxSource[]>();
 
-/** Drop cached Instagram credentials for a team. Call after the settings save. */
+/**
+ * Which NON-DM sources this Instagram account lets into the inbox.
+ *
+ * **Empty by default.** Direct messages are the core and are never gated — they
+ * are why the channel was connected. Everything else is different work with
+ * different reply rules and different volume, so an admin opts in per account (a
+ * workspace can want comments on its support handle and not on its brand one).
+ *
+ * It has to live HERE rather than being left to the Meta dashboard. The
+ * `comments` webhook is subscribed at the APP level, and one Meta app serves
+ * every workspace on the shared connection — so unsubscribing there to satisfy
+ * one admin would take comments away from every other workspace on that app. The
+ * dashboard controls whether Meta SENDS them; this controls whether we FILE them.
+ *
+ * No account means no answer, and the answer is NONE. This preference is per
+ * HANDLE, so resolving it from whichever row happens to be the workspace default
+ * would file one handle's comments under another's wishes — the same class of
+ * mistake as resolving inbound HMAC from the default account. Refusing is the
+ * safe direction: the cost is a comment we don't file, not one filed against an
+ * admin's explicit choice. (Unreachable on the live path anyway: a comment
+ * carries `entry[].id`, so grouping always hands us a resolved connection.)
+ *
+ * Stored in `ChannelConnection.config` (no migration) and cached on the same TTL
+ * as the other per-account reads, because it is consulted on the inbound path.
+ */
+export async function getInstagramInboxSources(
+  workspaceId: string,
+  accountId: string | null | undefined,
+): Promise<ReadonlySet<InboxSource>> {
+  if (!accountId) return EMPTY_SOURCES;
+  const key = sendKey(workspaceId, accountId);
+  const hit = inboxSourcesCache.get(key);
+  if (hit !== undefined) return new Set(hit);
+  const conn = await db.channelConnection.findFirst({
+    where: { id: accountId, workspaceId, channel: "instagram" },
+    select: { config: true },
+  });
+  const raw = ((conn?.config ?? {}) as InstagramChannelConfig).inboxSources;
+  // Filter against the known list rather than trusting stored JSON: a value
+  // written by an older build (or by hand) must not become an unknown source
+  // that silently matches nothing downstream.
+  const sources = Array.isArray(raw)
+    ? raw.filter((v): v is InboxSource => (INBOX_SOURCES as readonly string[]).includes(v))
+    : [];
+  inboxSourcesCache.set(key, sources);
+  return new Set(sources);
+}
+
+/** Cache key for one (workspace, account) pair. */
 function sendKey(workspaceId: string, accountId?: string | null): string {
   return `${workspaceId}::${accountId ?? "default"}`;
 }
 
+/** Drop cached Instagram credentials + preferences for a team. Call after a save. */
 export function invalidateInstagramConfig(workspaceId: string): void {
   sendCache.deletePrefix(`${workspaceId}::`);
+  inboxSourcesCache.deletePrefix(`${workspaceId}::`);
   webhookCache.delete(workspaceId);
 }
 

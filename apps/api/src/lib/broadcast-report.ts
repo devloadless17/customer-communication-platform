@@ -196,6 +196,12 @@ export const ERROR_LABELS: Record<string, string> = {
   // completeness, and a code with no label renders as raw snake_case.
   calling_not_enabled: "Calling isn't set up on this number",
   calling_unavailable: "Calling isn't available for this number",
+  // Messenger/Instagram states. `thread_control_lost` clears on its own (Meta's
+  // automated flow finishes, or another app hands control back);
+  // `app_permission_required` needs App Review, and until it clears EVERY
+  // recipient who isn't an app tester fails the same way.
+  thread_control_lost: "Another app or Meta flow controls the chat",
+  app_permission_required: "App not approved to message this recipient",
   provider_rejected: "Rejected by Meta",
 };
 

@@ -613,6 +613,57 @@ export type MessageStructured =
       kind: "story";
       storyType: "mention" | "reply" | "share";
       url?: string;
+      /**
+       * The share's own title. Meta started shipping `title` (alongside `url`
+       * and `id`) on Messenger post/reel share webhooks on 2026-03-26 — before
+       * that a share was a bare url, which is why this is optional. Rendering it
+       * is the difference between "Shared a post" and the post the agent is
+       * being asked about.
+       */
+      title?: string;
+    }
+  | {
+      /**
+       * A Messenger appointment booking (`attachment.type:"appointment_booking"`).
+       * Meta surfaces the booking's own state on BOTH the `messages` webhook (the
+       * customer requesting) and `message_echoes` (the business confirming or
+       * declining) — shipped 2026-03-03 precisely so partners don't have to send
+       * the agent to Business Suite to find out what was booked. Every field is
+       * optional because the label has to keep working for a payload that carries
+       * only some of them.
+       */
+      kind: "appointment";
+      bookingId?: string;
+      /** Meta's own vocabulary: requested | confirmed | declined | cancelled. */
+      status?: string;
+      /** Unix seconds → ISO, normalized at parse so the UI never sees epochs. */
+      startTime?: string;
+      endTime?: string;
+      /** IANA zone (e.g. `America/Los_Angeles`) — the CUSTOMER's, not ours. */
+      timezone?: string;
+    }
+  | {
+      /**
+       * An Instagram COMMENT on one of the business's own posts, reels or ads —
+       * not a DM. It reaches the inbox because answering comments is half of what
+       * an Instagram team does, and because the only legal way to answer one
+       * privately (a `comment_id`-addressed private reply) has to start from
+       * somewhere the agent can see.
+       *
+       * Rendered as its own card so nobody mistakes it for a DM: the reply rules
+       * are completely different (one private reply, 7 days, no 24h window).
+       */
+      kind: "comment";
+      /** Meta's comment id — the address a private reply is sent to. */
+      commentId: string;
+      /** The commenter's @handle, when the webhook carried it. */
+      username?: string;
+      /** The post/reel/ad the comment is on. */
+      mediaId?: string;
+      /** Meta's own vocabulary: FEED | REELS | AD | STORY … */
+      mediaProductType?: string;
+      /** True for a comment on a LIVE broadcast — repliable only while live. */
+      isLive?: boolean;
     }
   | {
       // A WhatsApp catalog order the customer placed (`type:"order"`). Items
@@ -649,6 +700,21 @@ export interface MessageAttribution {
   clickId?: string;
   /** Free-form deep-link ref payload (m.me `ref=...`), when that's the source. */
   ref?: string;
+  /**
+   * Instagram Shop product the customer opened the DM from. Meta ships it as
+   * `message.referral.product.id` on the `messages` webhook — a referral that
+   * carries NO `ad_id` and NO `ref`, so before this it produced an attribution
+   * object with `source:"unknown"` and nothing else: the bubble rendered a bare
+   * "From your ad" chip for a shopper who had clicked no ad at all.
+   */
+  productId?: string;
+  /**
+   * Meta's Welcome Message FLOW the referral came through (`referral.flow_id`,
+   * added to the referral webhooks on 2025-02-24). Tells an agent which
+   * ice-breaker/welcome flow the customer entered by, which is the difference
+   * between "came from a link" and "came from the Returns flow".
+   */
+  flowId?: string;
 }
 
 export interface Message {

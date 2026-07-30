@@ -105,11 +105,37 @@ export const PAGE_MESSAGING_FIELDS = [
  * `messaging_seen` as a page field is the dual-surface table whose row is
  * Instagram-annotated: "message_reads … for Messenger conversations. See
  * messaging_seen for Instagram Messaging conversations."
+ *
+ * TWO MORE OPTIONAL FIELDS, added 2026-07-30 — both confirmed real `page` fields
+ * by `devtools_webhook_list{list_topics}` before being POSTed, precisely because
+ * of the element-wise 400 described above:
+ *
+ *  - `business_integrity` — the Page Integrity webhook (2026-01-30): status,
+ *    violations, restrictions, and appeal progress. This is the PUSH half of
+ *    `messenger-integrity.ts`, and it is the only way to learn that a Page has
+ *    been restricted from messaging BEFORE a send fails with `10 – 1893063`.
+ *    Needs `pages_manage_metadata`, which many installs won't have granted — the
+ *    exact reason it belongs in the optional set rather than the required one.
+ *  - `messaging_policy_enforcement` — the older, narrower warning/block/unblock
+ *    notification with a reason string. Kept alongside `business_integrity`
+ *    rather than replaced by it: it fires for messaging-policy actions that do
+ *    not necessarily raise a Page-level integrity restriction, so subscribing to
+ *    only the newer one would lose the warnings that precede an enforcement.
  */
 export const PAGE_OPTIONAL_FIELDS = [
   "calls",
   "call_permission_reply",
   "response_feedback",
+  "business_integrity",
+  "messaging_policy_enforcement",
+  // The handover pair. `messaging_handovers` says who may reply;
+  // `standby` is the passive copy of traffic we receive while someone else may.
+  // Subscribing to `standby` is what turns "the inbox went silent" into a
+  // diagnosable, logged event — the parser has warned about standby entries for
+  // a while, but the branch was unreachable because Meta only sends them to
+  // subscribers. See messenger-handover.ts for the recovery path.
+  "messaging_handovers",
+  "standby",
 ] as const;
 
 export interface PageSubscriptionStatus {
@@ -177,10 +203,19 @@ export async function getPageSubscription(
   pageAccessToken: string,
   graphVersion: string,
   appId?: string | null,
+  /**
+   * The app secret that issued `pageAccessToken`, for `appsecret_proof`. Optional
+   * because a caller may not hold it, but pass it whenever you do: with the Meta
+   * app's "Require App Secret" setting on, a proof-less call is REJECTED, and
+   * every caller here treats a Graph failure as transient — so the subscription
+   * detector would report "transient" forever and the self-heal below could never
+   * run, on exactly the security posture Meta recommends.
+   */
+  appSecret?: string,
 ): Promise<PageSubscriptionStatus> {
   const url = `${GRAPH_BASE}/${graphVersion}/${encodeURIComponent(pageId)}/subscribed_apps`;
   const { fields: subscribedFields, scopedToApp } = fieldsFromGraph(
-    await graphGetJson(url, pageAccessToken),
+    await graphGetJson(url, pageAccessToken, undefined, appSecret),
     appId,
   );
   const missingFields = PAGE_MESSAGING_FIELDS.filter((f) => !subscribedFields.includes(f));
@@ -205,12 +240,14 @@ export async function ensurePageSubscribedToMessaging(
   pageAccessToken: string,
   graphVersion: string,
   appId?: string | null,
+  /** See {@link getPageSubscription} — `appsecret_proof` for every call below. */
+  appSecret?: string,
 ): Promise<{ ok: true; subscribedFields: string[] } | { ok: false; error: string }> {
   const url = `${GRAPH_BASE}/${graphVersion}/${encodeURIComponent(pageId)}/subscribed_apps`;
   const post = async (fields: string[]) => {
     const form = new FormData();
     form.set("subscribed_fields", fields.join(","));
-    await graphPostForm(url, pageAccessToken, form);
+    await graphPostForm(url, pageAccessToken, form, appSecret);
   };
 
   try {
@@ -218,7 +255,13 @@ export async function ensurePageSubscribedToMessaging(
     // shared Page's other channel keeps its fields — property (1)), never another
     // app's, which would both skip the work below and subscribe us to fields no
     // parser here reads.
-    const current = await getPageSubscription(pageId, pageAccessToken, graphVersion, appId);
+    const current = await getPageSubscription(
+      pageId,
+      pageAccessToken,
+      graphVersion,
+      appId,
+      appSecret,
+    );
     const wanted = [...current.subscribedFields, ...PAGE_MESSAGING_FIELDS];
     if (
       current.missingFields.length === 0 &&
@@ -239,7 +282,13 @@ export async function ensurePageSubscribedToMessaging(
     // Re-read rather than trust the `{success:true}` echo: Meta silently ignores
     // fields the app lacks permission for, and we want the truth on the settings
     // page, not our optimistic intent.
-    const after = await getPageSubscription(pageId, pageAccessToken, graphVersion, appId);
+    const after = await getPageSubscription(
+      pageId,
+      pageAccessToken,
+      graphVersion,
+      appId,
+      appSecret,
+    );
     return { ok: true, subscribedFields: after.subscribedFields };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -272,12 +321,12 @@ export async function releasePageSubscription(
   pageId: string,
   pageAccessToken: string,
   graphVersion: string,
-  opts: { stillInUse: boolean },
+  opts: { stillInUse: boolean; appSecret?: string },
 ): Promise<{ ok: true; action: "deleted" | "kept" } | { ok: false; error: string }> {
   if (opts.stillInUse) return { ok: true, action: "kept" };
   const url = `${GRAPH_BASE}/${graphVersion}/${encodeURIComponent(pageId)}/subscribed_apps`;
   try {
-    await graphDelete(url, pageAccessToken);
+    await graphDelete(url, pageAccessToken, opts.appSecret);
     return { ok: true, action: "deleted" };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };

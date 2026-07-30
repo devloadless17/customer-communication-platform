@@ -52,16 +52,24 @@ import {
 import { messengerProvider } from "@/lib/providers/messenger";
 import { getMessengerWebhookConfig } from "@/lib/providers/messenger-config";
 import { instagramProvider } from "@/lib/providers/instagram";
-import { getInstagramWebhookConfig } from "@/lib/providers/instagram-config";
+import {
+  getInstagramInboxSources,
+  getInstagramWebhookConfig,
+} from "@/lib/providers/instagram-config";
 import {
   enrichSocialContactNames,
   ingestEvents,
   isTransientDbError,
 } from "@/lib/providers/ingest";
 import { enqueueHistoryChunk } from "@/lib/coexistence/history-queue";
-import { SsrfBlockedError, safeFetch } from "@/lib/http/safe-fetch";
+import { fetchUrlBytes, withMediaDownloadSlot } from "@/lib/media-capture";
 import type { NormalizedEvent } from "@ccp/shared/providers/types";
 import type { Channel, MediaKind } from "@ccp/shared/types";
+import {
+  channelInboxSources,
+  inboxSourceOfStructuredKind,
+  type InboxSource,
+} from "@ccp/shared/providers/capabilities";
 import { mediaPreviewLabel } from "@ccp/shared/types";
 
 /**
@@ -86,6 +94,20 @@ function channelForMetaObject(
     default:
       return null;
   }
+}
+
+/**
+ * The NON-DM source this parsed event came from, or null when it is an ordinary
+ * direct message.
+ *
+ * A comment rides the ordinary inbound-message shape (that is the whole point —
+ * it reuses contact/conversation/realtime with no second entity), so the only
+ * honest discriminator is its structured payload. The kind→source mapping itself
+ * lives in `@ccp/shared` so the gate below and every future reader agree.
+ */
+function nonDmSourceOf(evt: NormalizedEvent): InboxSource | null {
+  if (evt.kind !== "message") return null;
+  return inboxSourceOfStructuredKind(evt.structured?.kind);
 }
 
 /** The provider + webhook-config loader for a social (non-WhatsApp) channel. */
@@ -779,6 +801,45 @@ export class MetaWebhookController implements OnModuleDestroy {
       return { ok: true, ingested: 0, dropped: "unknown_account" };
     }
 
+    // NON-DM SOURCE GATE, per account.
+    //
+    // Direct messages are the core and pass untouched — they are why the channel
+    // was connected. Everything else (comments today) is different work with
+    // different reply rules and far higher volume, so it reaches the inbox only
+    // where an admin has switched it on for THAT account.
+    //
+    // It has to be enforced here rather than at Meta: the `comments` webhook is
+    // subscribed at the APP level and one app serves every workspace on the
+    // shared connection, so unsubscribing there for one admin would blind all the
+    // others. The dashboard decides whether Meta SENDS; this decides whether we
+    // FILE. And it is here rather than in the parser because the parser is pure
+    // and has no workspace — this is the first layer that knows whose account the
+    // event arrived on. A group left with nothing after the filter is dropped, so
+    // an opted-out workspace does no ingest work at all.
+    let ingestable = groups;
+    if (channelInboxSources(channel).length > 0) {
+      const filtered: typeof groups = [];
+      for (const group of groups) {
+        if (!group.events.some((e) => nonDmSourceOf(e) !== null)) {
+          filtered.push(group);
+          continue;
+        }
+        const allowed = await getInstagramInboxSources(
+          workspaceId,
+          group.channelConnectionId,
+        );
+        const events = group.events.filter((e) => {
+          const source = nonDmSourceOf(e);
+          return source === null || allowed.has(source);
+        });
+        if (events.length > 0) filtered.push({ ...group, events });
+      }
+      ingestable = filtered;
+      if (ingestable.length === 0) {
+        return { ok: true, ingested: 0, dropped: "source_not_enabled" };
+      }
+    }
+
     // Kick off social media downloads (direct CDN URL → R2) concurrently with
     // ingest, which commits the rows as media-pending. Non-consuming catch so
     // an orphaned rejection can't float if ingest below fails and returns early;
@@ -796,7 +857,7 @@ export class MetaWebhookController implements OnModuleDestroy {
 
     // Sequential per group, same fail-soft contract as WhatsApp.
     let ingested = 0;
-    for (const group of groups) {
+    for (const group of ingestable) {
       if (await this.ingestGroup(workspaceId, channel, group)) {
         ingested += group.events.length;
       }
@@ -810,7 +871,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     // Per GROUP, because a PSID/IGSID only resolves against the Page/IG account
     // that issued it — enriching a second Page's senders with the first Page's
     // token returns nothing (or the wrong person).
-    for (const group of groups) {
+    for (const group of ingestable) {
       if (!group.channelConnectionId) continue;
       const senderIds = group.events.flatMap((e) =>
         e.kind === "message" && e.externalContactId ? [e.externalContactId] : [],
@@ -1504,186 +1565,10 @@ async function retry<T>(
   throw lastErr;
 }
 
-/**
- * Process-wide gate on concurrent inbound-media DOWNLOADS.
- *
- * WHY: each download buffers the whole binary in memory (up to the per-kind cap
- * — 100MB for a WhatsApp document, 25MB for social). The per-webhook-batch
- * `runWithConcurrency(4)` bounds ONE delivery, but Meta fans webhooks out in
- * parallel across all ~30 tenants, so a redelivery burst after downtime can put
- * dozens of full Buffers in flight at once — external memory that is NOT counted
- * against `--max-old-space-size`, so RSS can blow past the 3g cgroup and
- * OOM-kill the api (the same failure class ffmpeg-slots.ts guards for the decode
- * stage). A counting semaphore with a bounded wait caps the aggregate. On
- * wait-timeout the acquire throws into each download's existing catch, which
- * records the outcome (retriable for WhatsApp → the inbound-media sweeper
- * re-fetches; a labeled bubble for social) — no message row is lost. Single
- * process, like every in-memory gate here (CLAUDE.md §16); a second app instance
- * would need a shared counter.
- */
-const MEDIA_DOWNLOAD_WAIT_MS = 15_000;
-
-function mediaDownloadMaxConcurrent(): number {
-  const raw = Number.parseInt(process.env.MEDIA_DOWNLOAD_CONCURRENCY ?? "8", 10);
-  return Number.isFinite(raw) && raw > 0 && raw <= 32 ? raw : 8;
-}
-
-let mediaDownloadsActive = 0;
-const mediaDownloadWaiters: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
-
-function releaseMediaDownloadSlot(): void {
-  const next = mediaDownloadWaiters.shift();
-  if (next) {
-    // Hand the slot straight to the next waiter — do NOT decrement first, or a
-    // caller arriving between the decrement and the handoff can steal it and
-    // push `active` over the cap (same discipline as ffmpeg-slots.ts).
-    next.resolve();
-    return;
-  }
-  mediaDownloadsActive = Math.max(0, mediaDownloadsActive - 1);
-}
-
-function acquireMediaDownloadSlot(waitMs: number): Promise<void> {
-  if (mediaDownloadsActive < mediaDownloadMaxConcurrent()) {
-    mediaDownloadsActive += 1;
-    return Promise.resolve();
-  }
-  return new Promise<void>((resolve, reject) => {
-    const entry = {
-      resolve: () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      reject,
-    };
-    const timer = setTimeout(() => {
-      const i = mediaDownloadWaiters.indexOf(entry);
-      if (i >= 0) mediaDownloadWaiters.splice(i, 1);
-      reject(
-        new Error(
-          `media download slot wait exceeded ${waitMs}ms (${mediaDownloadsActive} active, ${mediaDownloadWaiters.length} queued)`,
-        ),
-      );
-    }, waitMs);
-    timer.unref();
-    mediaDownloadWaiters.push(entry);
-  });
-}
-
-/**
- * Run `fn` (a single media download) holding one process-wide slot. Throws if no
- * slot frees within the wait budget; both callers already treat a throw as a
- * failed download and record the appropriate outcome.
- */
-async function withMediaDownloadSlot<T>(fn: () => Promise<T>): Promise<T> {
-  await acquireMediaDownloadSlot(MEDIA_DOWNLOAD_WAIT_MS);
-  try {
-    return await fn();
-  } finally {
-    releaseMediaDownloadSlot();
-  }
-}
-
-/**
- * Fetch a direct media URL (Messenger / Instagram attachment) into memory,
- * capping by Content-Length before buffering when the CDN sends it. The
- * authoritative post-buffer cap lives in the caller (`downloadSocialMedia`) for
- * CDNs that omit/understate the header. Reads the real mime type from the
- * response. 20s hard timeout so a hung CDN can't pin a connection.
- */
-async function fetchUrlBytes(
-  url: string,
-  capBytes: number,
-): Promise<{ bytes: Uint8Array; mimeType: string }> {
-  try {
-    // SSRF-SAFE, not raw `fetch`. This URL comes straight out of a webhook
-    // payload, and the HMAC that authenticates that payload is signed with an
-    // `appSecret` the WORKSPACE ADMIN sets themselves — so an admin can sign a
-    // body naming any host reachable from this container (`127.0.0.1`,
-    // `169.254.169.254`, another service on the VPS), have us fetch it, and
-    // then read the bytes back through `GET /api/media/:messageId`. Full read
-    // exfiltration, not blind: the mime gate doesn't stop it, because an
-    // unknown body sniffs to nothing and falls through to the kind's canonical
-    // type.
-    //
-    // `safeFetch` resolves the host, refuses every private/link-local range in
-    // both v4 and all v6 notations, and PINS the validated address for the
-    // actual connection so a DNS rebind between check and fetch can't win.
-    // CLAUDE.md §16 already required it for provider/webhook calls; this path
-    // was the one that missed. Redirects off — a CDN 302 to an internal host
-    // would otherwise re-open the hole one hop later.
-    const res = await safeFetch(url, {
-      timeoutMs: 20_000,
-      maxRedirects: 0,
-      maxResponseBytes: capBytes,
-    });
-    if (!res.ok) throw new Error(`social media fetch ${res.status}`);
-    // Content-Length is an EARLY reject when present, but a CDN can omit or
-    // understate it — so we ALSO enforce the cap while STREAMING the body,
-    // aborting the moment accumulated bytes exceed `capBytes`. Never buffer an
-    // unbounded response into heap (`res.arrayBuffer()` would): a Content-Length-
-    // less multi-hundred-MB attachment must not spike RAM on the shared VPS.
-    const cl = Number(res.headers.get("content-length") ?? "0");
-    if (Number.isFinite(cl) && cl > capBytes) {
-      throw new Error(`social media over cap (content-length ${cl} > ${capBytes})`);
-    }
-    const bytes = await readBodyCapped(res, capBytes);
-    const mimeType =
-      (res.headers.get("content-type") ?? "application/octet-stream")
-        .split(";")[0]
-        ?.trim() || "application/octet-stream";
-    return { bytes, mimeType };
-  } catch (err) {
-    // Surface an SSRF refusal distinctly so an operator debugging a missing
-    // attachment sees "we refused this host", not a generic fetch failure.
-    // (This block used to rethrow unchanged, which made the comment a lie and
-    // the wrapper dead weight — lint's `no-useless-catch` was right.)
-    if (err instanceof SsrfBlockedError) {
-      throw new Error(`social media fetch refused: ${err.message}`, { cause: err });
-    }
-    throw err;
-  }
-}
-
-/**
- * Read a fetch Response body into a Uint8Array, aborting as soon as the running
- * total exceeds `capBytes` — so heap never holds more than ~`capBytes` + one
- * chunk regardless of the (possibly absent/lying) Content-Length header.
- */
-async function readBodyCapped(
-  res: Awaited<ReturnType<typeof fetch>>,
-  capBytes: number,
-): Promise<Uint8Array> {
-  const reader = res.body?.getReader();
-  if (!reader) {
-    // No readable stream — fall back to a full read but still enforce the cap.
-    const buf = new Uint8Array(await res.arrayBuffer());
-    if (buf.length > capBytes) {
-      throw new Error(`social media over cap (${buf.length} > ${capBytes})`);
-    }
-    return buf;
-  }
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (!value) continue;
-    total += value.length;
-    if (total > capBytes) {
-      await reader.cancel().catch(() => {});
-      throw new Error(`social media over cap (streamed ${total} > ${capBytes})`);
-    }
-    chunks.push(value);
-  }
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const c of chunks) {
-    out.set(c, offset);
-    offset += c.length;
-  }
-  return out;
-}
+// `withMediaDownloadSlot`, `fetchUrlBytes` and `readBodyCapped` moved to
+// `@/lib/media-capture` when the outbound sticker send became a second caller.
+// `fetchUrlBytes` is the SSRF gate on a webhook-supplied URL, and a second copy
+// of a security control is one copy that drifts — see that module's header.
 
 function verifySignature(
   rawBody: Buffer,

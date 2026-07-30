@@ -40,6 +40,7 @@ import type {
   User,
 } from "@ccp/shared/types";
 import type { MessageFlagDefinitionWithUsage } from "@ccp/shared/message-flags/types";
+import type { InboxSource } from "@ccp/shared/providers/capabilities";
 import type {
   Ticket as TicketView,
   TicketEvent as TicketEventView,
@@ -673,6 +674,10 @@ export async function getTeamMessengerConfig(): Promise<MessengerConfigView> {
 
 /** Server→browser view for the Instagram connect form (mirrors the API shape). */
 export interface InstagramConfigView {
+  /** Non-DM sources allowed into the inbox (default none; DMs are always on). */
+  inboxSources: InboxSource[];
+  /** Every non-DM source this channel can offer. */
+  availableInboxSources: InboxSource[];
   igId: string | null;
   igUsername: string | null;
   pageId: string | null;

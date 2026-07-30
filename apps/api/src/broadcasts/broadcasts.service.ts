@@ -61,6 +61,7 @@ import type { Channel } from "@ccp/shared/types";
 import {
   BROADCASTABLE_CHANNELS,
   CHANNEL_CAPABILITIES,
+  isAccountScopedIdentity,
 } from "@ccp/shared/providers/capabilities";
 import { checkTextCap } from "../lib/messaging/text-cap";
 import { directoryContactWhere, resolveAudienceGroupMembers } from "@/lib/queries";
@@ -791,7 +792,33 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // That migration is the real cost, and it is why the default audience is
     // the sending account's own contacts and reaching the rest is an explicit
     // opt-in (`includeOtherAccounts`) rather than a silent default.
-    if (sendingAccountId && recipientIds.length > 0 && !input.includeOtherAccounts) {
+    //
+    // ALL OF THE ABOVE IS WHATSAPP REASONING, and it does not carry to the social
+    // channels. A phone number is globally valid, so messaging a contact from a
+    // second number WORKS — that is why the cost there is merely ownership
+    // migration. An Instagram-scoped id is, in Meta's words, "specific to the
+    // person and the Instagram account they are interacting with", and a
+    // Messenger PSID is page-scoped identically. The id a customer has on account
+    // A is not a resolvable recipient for account B.
+    //
+    // So on those channels the opt-in is not a tradeoff, it is an impossible
+    // request: honouring it queues an entire audience of sends that CANNOT
+    // succeed, burns the campaign, and reports opaque Meta errors that read like
+    // a delivery fault rather than a mis-specified one. It is forced off, and the
+    // caller is told rather than silently overridden.
+    const identityIsAccountScoped = isAccountScopedIdentity(filterChannel);
+    const crossAccountRequested = input.includeOtherAccounts === true;
+    if (identityIsAccountScoped && crossAccountRequested) {
+      throw new BadRequestException({
+        error: "cross_account_not_possible",
+        detail:
+          `On ${filterChannel}, a contact's id only works for the account that received their message — ` +
+          "Meta scopes it to that account. Sending from a different account can't reach them, so " +
+          "this audience is always limited to the sending account's own contacts. Run one broadcast " +
+          "per account to cover everyone.",
+      });
+    }
+    if (sendingAccountId && recipientIds.length > 0 && (identityIsAccountScoped || !input.includeOtherAccounts)) {
       // Only contacts that BELONG TO ANOTHER account are dropped.
       //
       // A contact with no conversation at all has no account yet — imported

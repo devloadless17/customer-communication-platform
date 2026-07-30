@@ -10,7 +10,10 @@ import { emitOptimisticListBump } from "@/features/inbox/lib/optimistic-list-bum
 import { useFocusTrap } from "@/hooks/use-modal-overlay";
 
 /**
- * Inbox-side composer for WhatsApp interactive messages (buttons).
+ * Inbox-side composer for interactive messages (buttons / location request /
+ * link button). Which modes appear is driven entirely by the channel's
+ * capabilities, so Instagram gets the buttons + link-button modes and WhatsApp
+ * gets all three — no channel name is read here.
  *
  * Triggered from the reply-box toolbar. Pre-fills the body from the
  * composer's current text; the agent adds 1-3 buttons (id + title) and
@@ -25,6 +28,27 @@ import { useFocusTrap } from "@/hooks/use-modal-overlay";
  *     message bubble appears via the same `message.sent` socket event
  *     that text sends use (sendInteractiveInternal publishes it).
  */
+
+/**
+ * One card of Meta's generic template, as the composer holds it.
+ *
+ * Buttons here are LINK buttons only. The wire also allows `postback`, but a
+ * postback is an author-assigned id that means something to a workflow — it is
+ * not something an agent invents mid-conversation, and a card whose button does
+ * nothing visible would be worse than no button. Workflows and `/v1` can still
+ * send postback cards; the ad-hoc composer offers the one an agent can reason
+ * about.
+ */
+interface CardDraft {
+  title: string;
+  subtitle?: string;
+  imageUrl?: string;
+  buttons: Array<{ title: string; url: string }>;
+}
+
+/** Meta's caps: "A maximum of 10 elements" and "3 buttons per element". */
+const MAX_CARDS = 10;
+const MAX_CARD_BUTTONS = 3;
 
 interface ButtonOption {
   id: string;
@@ -42,9 +66,18 @@ interface Props {
   /** Channel capability `locationRequest` — shows the "Request location" mode
    *  (WhatsApp's interactive location_request_message). */
   allowLocationRequest?: boolean;
-  /** Channel capability `ctaUrlButton` — shows the "Link button" mode
-   *  (WhatsApp's interactive cta_url: one URL-opening button). */
+  /** Channel capability `ctaUrlButton` — shows the "Link button" mode: one
+   *  URL-opening button (WhatsApp `interactive.type:"cta_url"`, Instagram's
+   *  button template). */
   allowCtaUrl?: boolean;
+  /** Channel capability `genericTemplate` — shows the "Cards" mode: Meta's
+   *  generic template, 1-10 image/title/subtitle/button cards. */
+  allowCards?: boolean;
+  /** Channel capability `templateTextMaxChars` — the tighter text ceiling a
+   *  STRUCTURED template carries on this channel (Instagram: 640 vs its 1,000
+   *  plain-text limit). Applied to the body only in link-button mode, so the
+   *  agent is stopped at the real limit instead of being rejected on send. */
+  templateTextMax?: number;
 }
 
 export function InteractivePopover({
@@ -55,12 +88,18 @@ export function InteractivePopover({
   onSent,
   allowLocationRequest = false,
   allowCtaUrl = false,
+  allowCards = false,
+  templateTextMax,
 }: Props) {
   const [body, setBody] = useState("");
   // "buttons" = agent-authored quick replies; "location_request" = WhatsApp's
   // own "send location" button (reply arrives as a normal location pin);
   // "cta_url" = one URL-opening button so the raw link stays out of the body.
-  const [mode, setMode] = useState<"buttons" | "location_request" | "cta_url">("buttons");
+  const [mode, setMode] = useState<"buttons" | "location_request" | "cta_url" | "generic">(
+    "buttons",
+  );
+  // Meta's caps for the generic template: 1-10 cards, ≤3 buttons each.
+  const [cards, setCards] = useState<CardDraft[]>([{ title: "", buttons: [] }]);
   const [ctaLabel, setCtaLabel] = useState("");
   const [ctaUrl, setCtaUrl] = useState("");
   const [options, setOptions] = useState<ButtonOption[]>([
@@ -147,16 +186,33 @@ export function InteractivePopover({
   const validationHint = !idsUnique
     ? "Button IDs must be unique."
     : !titlesUnique
-      ? "Button titles must be unique — WhatsApp rejects duplicates."
+      ? "Button titles must be unique — Meta rejects duplicates."
       : null;
 
   const locationMode = mode === "location_request";
   const ctaMode = mode === "cta_url";
+  const cardsMode = mode === "generic";
+  // Meta requires a card to carry something BEYOND its title, or it renders
+  // empty — the same rule the server schema refines, checked here so the agent
+  // is stopped at the keyboard rather than by a 422.
+  const cardsValid =
+    cards.length >= 1 &&
+    cards.length <= MAX_CARDS &&
+    cards.every(
+      (c) =>
+        c.title.trim().length > 0 &&
+        (c.subtitle?.trim() || c.imageUrl?.trim() || c.buttons.length > 0) &&
+        c.buttons.every(
+          (b) => b.title.trim().length > 0 && /^https?:\/\/\S+$/i.test(b.url.trim()),
+        ),
+    );
   const ctaUrlValid = /^https?:\/\/\S+$/i.test(ctaUrl.trim());
   const canSend =
-    body.trim().length > 0 &&
+    (cardsMode || body.trim().length > 0) &&
     !busy &&
-    (locationMode ||
+    (cardsMode
+      ? cardsValid
+      : locationMode ||
       (ctaMode
         ? ctaLabel.trim().length > 0 && ctaUrlValid
         : options.length >= 1 &&
@@ -184,13 +240,43 @@ export function InteractivePopover({
         body: JSON.stringify({
           conversationId,
           clientTempId,
-          body: body.trim(),
-          kind: locationMode ? "location_request" : ctaMode ? "cta_url" : "buttons",
+          // The generic template has no body of its own — each card is the
+          // content — but the send path stores a message body for the list
+          // preview, so give it the first card's title rather than "".
+          body: cardsMode ? (cards[0]?.title.trim() ?? "Cards") : body.trim(),
+          kind: locationMode
+            ? "location_request"
+            : ctaMode
+              ? "cta_url"
+              : cardsMode
+                ? "generic"
+                : "buttons",
           // location_request / cta_url carry no options — WhatsApp renders the button.
           options:
-            locationMode || ctaMode
+            locationMode || ctaMode || cardsMode
               ? []
               : options.map((o) => ({ id: o.id.trim(), title: o.title.trim() })),
+          ...(cardsMode
+            ? {
+                // Trimmed and pruned here so an empty optional never reaches the
+                // wire as `""` — Meta treats a present-but-blank subtitle as
+                // content and renders a gap.
+                genericCards: cards.map((c) => ({
+                  title: c.title.trim(),
+                  ...(c.subtitle?.trim() ? { subtitle: c.subtitle.trim() } : {}),
+                  ...(c.imageUrl?.trim() ? { imageUrl: c.imageUrl.trim() } : {}),
+                  ...(c.buttons.length > 0
+                    ? {
+                        buttons: c.buttons.map((b) => ({
+                          type: "web_url" as const,
+                          title: b.title.trim(),
+                          url: b.url.trim(),
+                        })),
+                      }
+                    : {}),
+                })),
+              }
+            : {}),
           ...(ctaMode
             ? { ctaUrl: { displayText: ctaLabel.trim(), url: ctaUrl.trim() } }
             : {}),
@@ -235,7 +321,13 @@ export function InteractivePopover({
       role="dialog"
       aria-modal="true"
       aria-label={
-        locationMode ? "Request location" : ctaMode ? "Send link button" : "Send buttons"
+        locationMode
+          ? "Request location"
+          : ctaMode
+            ? "Send link button"
+            : cardsMode
+              ? "Send cards"
+              : "Send buttons"
       }
       tabIndex={-1}
       // left-0 (opens to the RIGHT): the trigger is a LEFT-side composer-toolbar
@@ -251,7 +343,9 @@ export function InteractivePopover({
             ? "Request location"
             : ctaMode
               ? "Send a link button"
-              : "Send with buttons"}
+              : cardsMode
+                ? "Send cards"
+                : "Send with buttons"}
         </div>
         <button
           type="button"
@@ -276,6 +370,7 @@ export function InteractivePopover({
                 ? [["location_request", "Location"] as const]
                 : []),
               ...(allowCtaUrl ? [["cta_url", "Link button"] as const] : []),
+              ...(allowCards ? [["generic", "Cards"] as const] : []),
             ] as ReadonlyArray<readonly [string, string]>
           ).map(([value, label]) => (
             <button
@@ -296,13 +391,15 @@ export function InteractivePopover({
         </div>
       )}
 
-      <label className="mb-2 flex flex-col gap-1">
+      {/* The generic template carries NO body text — each card is the content —
+          so the question box would be a field the send silently discards. */}
+      <label className={cardsMode ? "hidden" : "mb-2 flex flex-col gap-1"}>
         <span className="text-xs font-medium text-muted-foreground">Question</span>
         <textarea
           value={body}
           onChange={(e) => setBody(e.target.value)}
           rows={2}
-          maxLength={1024}
+          maxLength={ctaMode && templateTextMax ? templateTextMax : 1024}
           placeholder="Want a callback?"
           className="min-h-15 resize-y rounded-md border border-border bg-background px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
         />
@@ -345,7 +442,149 @@ export function InteractivePopover({
         </div>
       )}
 
-      <div className={locationMode || ctaMode ? "hidden" : "mb-2 flex flex-col gap-1.5"}>
+      {cardsMode && (
+        <div className="mb-2 flex max-h-72 flex-col gap-2 overflow-y-auto">
+          {cards.map((card, i) => (
+            <div key={i} className="flex flex-col gap-1.5 rounded-lg border border-border p-2">
+              <div className="flex items-center justify-between">
+                <span className="text-2xs font-medium text-muted-foreground">
+                  Card {i + 1}
+                </span>
+                {cards.length > 1 && (
+                  <button
+                    type="button"
+                    aria-label={`Remove card ${i + 1}`}
+                    onClick={() => setCards((p) => p.filter((_, j) => j !== i))}
+                    className="text-2xs text-muted-foreground hover:text-destructive-fg"
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+              <Input
+                value={card.title}
+                onChange={(e) =>
+                  setCards((p) => p.map((c, j) => (j === i ? { ...c, title: e.target.value } : c)))
+                }
+                placeholder="Title"
+                maxLength={80}
+                className="text-xs"
+                aria-label={`Card ${i + 1} title`}
+              />
+              <Input
+                value={card.subtitle ?? ""}
+                onChange={(e) =>
+                  setCards((p) =>
+                    p.map((c, j) => (j === i ? { ...c, subtitle: e.target.value } : c)),
+                  )
+                }
+                placeholder="Subtitle (optional)"
+                maxLength={80}
+                className="text-xs"
+                aria-label={`Card ${i + 1} subtitle`}
+              />
+              <Input
+                value={card.imageUrl ?? ""}
+                onChange={(e) =>
+                  setCards((p) =>
+                    p.map((c, j) => (j === i ? { ...c, imageUrl: e.target.value } : c)),
+                  )
+                }
+                placeholder="Image URL (optional)"
+                className="text-xs"
+                aria-label={`Card ${i + 1} image URL`}
+              />
+              {card.buttons.map((b, bi) => (
+                <div key={bi} className="flex items-center gap-1.5">
+                  <Input
+                    value={b.title}
+                    onChange={(e) =>
+                      setCards((p) =>
+                        p.map((c, j) =>
+                          j === i
+                            ? {
+                                ...c,
+                                buttons: c.buttons.map((x, k) =>
+                                  k === bi ? { ...x, title: e.target.value } : x,
+                                ),
+                              }
+                            : c,
+                        ),
+                      )
+                    }
+                    placeholder="Button"
+                    maxLength={20}
+                    className="text-xs"
+                    aria-label={`Card ${i + 1} button ${bi + 1} label`}
+                  />
+                  <Input
+                    value={b.url}
+                    onChange={(e) =>
+                      setCards((p) =>
+                        p.map((c, j) =>
+                          j === i
+                            ? {
+                                ...c,
+                                buttons: c.buttons.map((x, k) =>
+                                  k === bi ? { ...x, url: e.target.value } : x,
+                                ),
+                              }
+                            : c,
+                        ),
+                      )
+                    }
+                    placeholder="https://…"
+                    className="text-xs"
+                    aria-label={`Card ${i + 1} button ${bi + 1} URL`}
+                  />
+                  <button
+                    type="button"
+                    aria-label={`Remove card ${i + 1} button ${bi + 1}`}
+                    onClick={() =>
+                      setCards((p) =>
+                        p.map((c, j) =>
+                          j === i
+                            ? { ...c, buttons: c.buttons.filter((_, k) => k !== bi) }
+                            : c,
+                        ),
+                      )
+                    }
+                    className="shrink-0 text-2xs text-muted-foreground hover:text-destructive-fg"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+              {card.buttons.length < MAX_CARD_BUTTONS && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setCards((p) =>
+                      p.map((c, j) =>
+                        j === i ? { ...c, buttons: [...c.buttons, { title: "", url: "" }] } : c,
+                      ),
+                    )
+                  }
+                  className="self-start text-2xs font-medium text-primary hover:underline"
+                >
+                  + Link button
+                </button>
+              )}
+            </div>
+          ))}
+          {cards.length < MAX_CARDS && (
+            <button
+              type="button"
+              onClick={() => setCards((p) => [...p, { title: "", buttons: [] }])}
+              className="self-start text-2xs font-medium text-primary hover:underline"
+            >
+              + Add card ({cards.length}/{MAX_CARDS})
+            </button>
+          )}
+        </div>
+      )}
+
+      <div className={locationMode || ctaMode || cardsMode ? "hidden" : "mb-2 flex flex-col gap-1.5"}>
         <div className="flex items-center justify-between">
           <span className="text-xs font-medium text-muted-foreground">
             Buttons (1–3)

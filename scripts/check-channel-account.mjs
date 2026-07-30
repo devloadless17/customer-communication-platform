@@ -33,6 +33,7 @@
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
+import { stripNonCode } from "./lib/strip-non-code.mjs";
 
 const ROOT = process.cwd();
 const SCAN_DIRS = ["apps/api/src"];
@@ -69,41 +70,6 @@ function walk(dir, out = []) {
     else if (entry.endsWith(".ts") && !entry.endsWith(".d.ts")) out.push(full);
   }
   return out;
-}
-
-/**
- * Blank out comments and string/template literals, preserving offsets and
- * newlines so reported line numbers stay true.
- */
-function stripNonCode(src) {
-  const out = src.split("");
-  let i = 0;
-  const blank = (from, to) => {
-    for (let k = from; k < to && k < out.length; k++) if (out[k] !== "\n") out[k] = " ";
-  };
-  while (i < src.length) {
-    const two = src.slice(i, i + 2);
-    if (two === "//") {
-      const end = src.indexOf("\n", i);
-      blank(i, end === -1 ? src.length : end);
-      i = end === -1 ? src.length : end;
-    } else if (two === "/*") {
-      const end = src.indexOf("*/", i + 2);
-      blank(i, end === -1 ? src.length : end + 2);
-      i = end === -1 ? src.length : end + 2;
-    } else if (src[i] === '"' || src[i] === "'" || src[i] === "`") {
-      const quote = src[i];
-      let j = i + 1;
-      while (j < src.length) {
-        if (src[j] === "\\") j += 2;
-        else if (src[j] === quote) break;
-        else j++;
-      }
-      blank(i + 1, j);
-      i = j + 1;
-    } else i++;
-  }
-  return out.join("");
 }
 
 /** Split a call's argument text on TOP-LEVEL commas. */
@@ -203,7 +169,10 @@ const DEFAULT_READ_BUDGET = new Map([
   ],
   [
     "apps/api/src/workspace-settings/instagram/instagram.service.ts",
-    { max: 1, why: "Legacy single-account settings form." },
+    {
+      max: 2,
+      why: "The single-account settings form: getConfig renders the default account, and setCommentIngest writes the preference for that same form when no accountId is named. Both take an explicit account when one is given — the default is only the form's own subject.",
+    },
   ],
   [
     "apps/api/src/lib/analytics/template-analytics.ts",

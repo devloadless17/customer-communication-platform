@@ -37,6 +37,7 @@ import {
   ensurePageSubscribedToMessaging,
   getPageSubscription,
   PAGE_MESSAGING_FIELDS,
+  PAGE_OPTIONAL_FIELDS,
 } from "@/lib/providers/meta-page-subscription";
 import { isAppSubscribedToWaba } from "@/lib/providers/meta-waba-subscription";
 
@@ -184,15 +185,15 @@ describe("ensurePageSubscribedToMessaging repairs OUR subscription", () => {
       data: [
         {
           id: OURS,
-          subscribed_fields: [
-            ...PAGE_MESSAGING_FIELDS,
-            // Mirror PAGE_OPTIONAL_FIELDS. `messaging_seen` used to be here; it is
-            // not a `page` field at all (it belongs to the app-level `instagram`
-            // topic), so it was removed from the array and from this fixture.
-            "calls",
-            "call_permission_reply",
-            "response_feedback",
-          ],
+          // SPREAD both arrays rather than restating them. This fixture used to
+          // hardcode the optional field names "to mirror PAGE_OPTIONAL_FIELDS",
+          // and then didn't: adding `business_integrity` +
+          // `messaging_policy_enforcement` to the real array left the fixture
+          // one release behind, so the early return stopped firing and this test
+          // failed for a reason that had nothing to do with what it asserts.
+          // Reading the real constants means the no-op case is tested against
+          // the actual complete set, forever.
+          subscribed_fields: [...PAGE_MESSAGING_FIELDS, ...PAGE_OPTIONAL_FIELDS],
         },
       ],
     });

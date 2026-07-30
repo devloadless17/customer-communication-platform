@@ -766,6 +766,7 @@ model Workspace {
   invites                 Invite[]
 
   @@index([organizationId])
+  messengerPersonas    MessengerPersona[]
 }
 
 // Join table: a user's membership + role in ONE workspace. A user (org-scoped)
@@ -962,6 +963,7 @@ model ChannelConnection {
   // account never deletes conversation history.
   conversations Conversation[]
   broadcasts    Broadcast[]
+  personas      MessengerPersona[]
 
   // One row per ACCOUNT, not per channel: a workspace may connect several
   // WhatsApp numbers / Pages / IG handles. `externalAccountId` is the provider's
@@ -985,6 +987,54 @@ model ChannelConnection {
   // enforcement writes, and the credential fallback for a WABA whose own token
   // isn't set. Also backs the FK's SetNull scan on WABA delete.
   @@index([wabaAccountId])
+}
+
+/// A named VOICE on a Messenger Page — Meta's Personas API, mapped to one of our
+/// agents.
+///
+/// Meta shows "Adam from Jasper's Market" above every message a persona sends,
+/// with that person's avatar. Without it three agents and a workflow all speak as
+/// one indistinguishable Page, so a thread reads as a single voice and a handoff
+/// is invisible to the customer.
+///
+/// ## Why this is the ONE Messenger surface with a local table
+///
+/// Every other Meta-owned record in this build is read through with no mirror
+/// (profile, stickers, integrity, templates), because Meta owns them and a cached
+/// copy drifts. This row is different: it is not a copy of Meta's record, it is
+/// the MAPPING from our `userId` to Meta's persona id — our data, which Meta does
+/// not store and cannot answer. The persona's name and picture are Meta's and are
+/// deliberately not treated as authoritative here; only the join is.
+///
+/// ## Lazily minted, per (agent, Page)
+///
+/// Created on an agent's first reply on a Page, not by syncing the roster ahead
+/// of time — Meta explicitly endorses this: "You can create a persona quickly. It
+/// is not necessary to sync your entire database of agents in advance." Scoped to
+/// the CONNECTION rather than the workspace because a persona belongs to one Page:
+/// the same agent working two Pages legitimately has two persona ids.
+model MessengerPersona {
+  id                  String   @id @default(cuid())
+  // TENANCY: present on every row and in every query (CLAUDE.md §7), even though
+  // it is derivable through the connection — the same rule every other table follows.
+  workspaceId         String
+  channelConnectionId String
+  userId              String
+  /// Meta's persona id — what a send actually carries as `persona_id`.
+  externalPersonaId   String
+  /// The display name we minted it with, kept only so the settings list can show
+  /// what the customer sees without a round trip. Meta is authoritative.
+  name                String
+  createdAt           DateTime @default(now())
+
+  workspace         Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  channelConnection ChannelConnection @relation(fields: [channelConnectionId], references: [id], onDelete: Cascade)
+  user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// One persona per agent per Page — the lookup the send path makes, and the
+  /// guard that stops a racing double-send minting two personas for one agent.
+  @@unique([channelConnectionId, userId])
+  @@index([workspaceId])
 }
 
 /// A WhatsApp Business Account (WABA).
@@ -1319,6 +1369,8 @@ model User {
   assignmentMemberships   AssignmentPolicyMember[] @relation("AssignmentPolicyMemberships")
 
   @@index([organizationId])
+  /// Messenger personas minted for this agent (one per Page). See MessengerPersona.
+  messengerPersonas   MessengerPersona[]
 }
 
 // ---------------------------------------------------------------------------

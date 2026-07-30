@@ -541,8 +541,20 @@ export class ChannelAccountsService {
       wabaAccount: { id: string; externalWabaId: string } | null;
     },
   ): Promise<void> {
-    const secrets = (target.secrets ?? {}) as { accessToken?: string; pageAccessToken?: string };
-    const cipher = secrets.accessToken ?? secrets.pageAccessToken ?? null;
+    // Each channel names its token differently in `secrets`: WhatsApp
+    // `accessToken`, Messenger `pageAccessToken`, Instagram `igAccessToken` (which
+    // holds a PAGE token — Instagram-via-Facebook-Login sends and subscribes
+    // through the linked Page). `igAccessToken` was missing here, so removing the
+    // last Instagram account on a Page found no credential, returned early, and
+    // never released the subscription — Meta kept POSTing that account's customer
+    // DMs forever, which is the exact failure this release path exists to close.
+    const secrets = (target.secrets ?? {}) as {
+      accessToken?: string;
+      pageAccessToken?: string;
+      igAccessToken?: string;
+    };
+    const cipher =
+      secrets.accessToken ?? secrets.pageAccessToken ?? secrets.igAccessToken ?? null;
     if (!cipher) return;
     let accessToken: string;
     try {
@@ -576,7 +588,22 @@ export class ChannelAccountsService {
           config: { path: ["pageId"], equals: pageId },
         },
       })) > 0;
-    await releasePageSubscription(pageId, accessToken, GRAPH_VERSION, { stillInUse });
+    // The removed row's OWN app secret, for `appsecret_proof` — an account on its
+    // own Meta app is signed by that app, and a proof-less DELETE is rejected
+    // outright when "Require App Secret" is on.
+    const ownAppSecret = (() => {
+      const c = (target.secrets as { appSecret?: string } | null)?.appSecret;
+      if (!c) return undefined;
+      try {
+        return decryptSecret(c);
+      } catch {
+        return undefined;
+      }
+    })();
+    await releasePageSubscription(pageId, accessToken, GRAPH_VERSION, {
+      stillInUse,
+      ...(ownAppSecret ? { appSecret: ownAppSecret } : {}),
+    });
   }
 
   /**

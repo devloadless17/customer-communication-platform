@@ -564,7 +564,15 @@ export const ExternalSendInteractiveSchema = z
     // `location_request` renders WhatsApp's own "send location" button — no
     // authored options (refined below); `cta_url` is the single URL-opening
     // button configured via `ctaUrl`. Mirrors SendInteractiveSchema.
-    kind: z.enum(["buttons", "list", "location_request", "cta_url", "carousel"]),
+    kind: z.enum([
+      "buttons",
+      "list",
+      "location_request",
+      "cta_url",
+      "carousel",
+      "generic",
+      "product",
+    ]),
     options: z
       .array(
         z.object({
@@ -588,6 +596,64 @@ export const ExternalSendInteractiveSchema = z
       })
       .optional(),
     listCtaLabel: z.string().min(1).max(20).optional(),
+    // `generic` / `product` — Meta's structured templates. Caps are Meta's:
+    // 1-10 cards, title/subtitle 80 chars, ≤3 buttons per card, and only
+    // `web_url` / `postback` button types. A card needs more than a title, or
+    // it renders empty. See the internal twin in messages.schemas.ts — both
+    // gates must agree or `/v1` and the UI would accept different templates.
+    genericCards: z
+      .array(
+        z
+          .object({
+            title: z.string().trim().min(1).max(80),
+            subtitle: z.string().trim().min(1).max(80).optional(),
+            imageUrl: z
+              .string()
+              .trim()
+              .url()
+              .max(2048)
+              .regex(/^https?:\/\//i, "must be http(s)")
+              .optional(),
+            defaultActionUrl: z
+              .string()
+              .trim()
+              .url()
+              .max(2000)
+              .regex(/^https?:\/\//i, "must be http(s)")
+              .optional(),
+            buttons: z
+              .array(
+                z.discriminatedUnion("type", [
+                  z.object({
+                    type: z.literal("web_url"),
+                    title: z.string().trim().min(1).max(20),
+                    url: z
+                      .string()
+                      .trim()
+                      .url()
+                      .max(2000)
+                      .regex(/^https?:\/\//i, "must be http(s)"),
+                  }),
+                  z.object({
+                    type: z.literal("postback"),
+                    title: z.string().trim().min(1).max(20),
+                    payload: z.string().trim().min(1).max(1000),
+                  }),
+                ]),
+              )
+              .min(1)
+              .max(3)
+              .optional(),
+          })
+          .refine(
+            (c) => Boolean(c.subtitle || c.imageUrl || c.defaultActionUrl || c.buttons?.length),
+            { message: "a card needs more than a title (subtitle, image, link or buttons)" },
+          ),
+      )
+      .min(1)
+      .max(10)
+      .optional(),
+    productIds: z.array(z.string().trim().min(1).max(200)).min(1).max(10).optional(),
     // `carousel` only — 2-10 media cards (interactive-carousel doc). Card
     // rules: image/video header LINK required (Meta fetches it); body ≤160
     // chars with ≤2 line breaks; EITHER one `ctaUrl` button OR 1-3
@@ -664,14 +730,30 @@ export const ExternalSendInteractiveSchema = z
       path: ["options"],
     },
   )
-  .refine((b) => ["location_request", "cta_url", "carousel"].includes(b.kind) || b.options.length >= 1, {
-    message: "at least one option is required",
-    path: ["options"],
-  })
-  .refine((b) => !["location_request", "cta_url", "carousel"].includes(b.kind) || b.options.length === 0, {
-    message: "this kind carries no options — WhatsApp renders the button",
-    path: ["options"],
-  })
+  // The kinds that carry NO authored options: the vendor draws the affordance
+  // (location_request), or the content lives in a dedicated field (cta_url,
+  // carousel, generic, product). Adding a kind without listing it here rejects
+  // every send of it with "at least one option is required" — which is exactly
+  // what happened to `generic`/`product` until a schema test caught it, because
+  // the provider-level tests bypass this gate entirely.
+  .refine(
+    (b) =>
+      ["location_request", "cta_url", "carousel", "generic", "product"].includes(b.kind) ||
+      b.options.length >= 1,
+    {
+      message: "at least one option is required",
+      path: ["options"],
+    },
+  )
+  .refine(
+    (b) =>
+      !["location_request", "cta_url", "carousel", "generic", "product"].includes(b.kind) ||
+      b.options.length === 0,
+    {
+      message: "this kind carries no options — the vendor or a dedicated field supplies the content",
+      path: ["options"],
+    },
+  )
   .refine(
     // LIST row ids cap at 200 (interactive-list-messages doc) vs 256 for
     // button reply ids. Authoring-time gate; the provider never truncates.
@@ -715,6 +797,18 @@ export const ExternalSendInteractiveSchema = z
     { message: "quick-reply ids must be unique across all cards",
     path: ["carouselCards"], },
   )
+  .refine((b) => b.kind !== "generic" || b.genericCards !== undefined, {
+    message: "generic requires genericCards",
+  })
+  .refine((b) => b.kind === "generic" || b.genericCards === undefined, {
+    message: "genericCards is only valid with kind generic",
+  })
+  .refine((b) => b.kind !== "product" || b.productIds !== undefined, {
+    message: "product requires productIds",
+  })
+  .refine((b) => b.kind === "product" || b.productIds === undefined, {
+    message: "productIds is only valid with kind product",
+  })
   .refine((b) => b.kind !== "cta_url" || b.ctaUrl !== undefined, {
     message: "cta_url requires ctaUrl { displayText, url }",
     path: ["ctaUrl"],
@@ -1011,3 +1105,15 @@ export const ExternalTemplateListQuerySchema = z
 export type ExternalTemplateListQueryInput = z.infer<
   typeof ExternalTemplateListQuerySchema
 >;
+
+/**
+ * POST /v1/messages/:id/comment-reply — answer a comment PUBLICLY.
+ *
+ * `:id` is OUR message id for the inbound comment, not Meta's comment id: the
+ * caller works in the ids this API already gave them, and the mapping to Meta's
+ * comment id is ours to keep.
+ */
+export const ReplyToCommentSchema = z.object({
+  body: z.string().trim().min(1).max(2200),
+});
+export type ReplyToCommentInput = z.infer<typeof ReplyToCommentSchema>;

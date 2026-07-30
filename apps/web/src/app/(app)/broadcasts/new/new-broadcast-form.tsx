@@ -36,7 +36,10 @@ import {
 } from "@/features/broadcasts/components/campaign-assignment";
 import type { ContactFieldDefinition, ContactStage, Tag, TemplateDto } from "@ccp/shared/types";
 import { CHANNEL_LABEL } from "@/features/inbox/components/channel-badge";
-import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
+import {
+  CHANNEL_CAPABILITIES,
+  isAccountScopedIdentity,
+} from "@ccp/shared/providers/capabilities";
 import type { ContactLabel } from "@/features/contacts/components/contact-select-dialog";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import type { AudienceGroupDto } from "@ccp/shared/dtos";
@@ -725,7 +728,9 @@ export function NewBroadcastForm({
     const scope = {
       ...(countChannel ? { channel: countChannel } : {}),
       ...(accountId ? { accountId } : {}),
-      ...(includeOtherAccounts ? { includeOtherAccounts: true } : {}),
+      ...(includeOtherAccounts && !isAccountScopedIdentity(selectedChannel)
+        ? { includeOtherAccounts: true }
+        : {}),
     };
     if (
       audience.mode === "custom" &&
@@ -1176,7 +1181,9 @@ export function NewBroadcastForm({
                 }),
             // Bind the campaign to the chosen sender.
             ...(accountId ? { channelConnectionId: accountId } : {}),
-            ...(includeOtherAccounts ? { includeOtherAccounts: true } : {}),
+            ...(includeOtherAccounts && !isAccountScopedIdentity(selectedChannel)
+        ? { includeOtherAccounts: true }
+        : {}),
             ...(name.trim() ? { name: name.trim() } : {}),
             ...(scheduledAtIso ? { scheduledAt: scheduledAtIso } : {}),
             // Omitted entirely when the campaign assigns nobody, so the request
@@ -1327,7 +1334,12 @@ export function NewBroadcastForm({
             </label>
           )}
 
-          {channelAccounts.length > 1 && (
+          {/* Offered ONLY where reaching another account's contacts is possible.
+              Meta scopes an Instagram id to "the person and the Instagram account
+              they are interacting with", and a Messenger PSID the same way — so
+              there the checkbox would promise an audience the send can never
+              reach. A phone number is global, which is why WhatsApp keeps it. */}
+          {channelAccounts.length > 1 && !isAccountScopedIdentity(selectedChannel) && (
             <label className="flex items-start gap-2 rounded-md border border-border bg-muted/20 px-3 py-2">
               <input
                 type="checkbox"

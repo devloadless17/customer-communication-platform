@@ -101,7 +101,18 @@ async function mkWhatsapp(suffix: string, wabaAccountId: string, isDefault = fal
   ).id;
 }
 
+/**
+ * Seed one social account THE WAY ITS OWN ONBOARDING WRITES IT.
+ *
+ * The token key differs per channel — Messenger stores `pageAccessToken`,
+ * Instagram stores `igAccessToken` (which still holds a Page token, because
+ * Instagram-via-Facebook-Login rides the linked Page). This fixture used to write
+ * `pageAccessToken` for BOTH, which is why the release path's Instagram blindness
+ * survived a passing suite: production rows never look like that, so the only
+ * Instagram case here exercised a credential shape that cannot exist.
+ */
 async function mkSocial(channel: "messenger" | "instagram", pageId: string, isDefault = true) {
+  const token = encryptSecret("ptok");
   return (
     await prisma.channelConnection.create({
       data: {
@@ -111,7 +122,10 @@ async function mkSocial(channel: "messenger" | "instagram", pageId: string, isDe
         isDefault,
         isActive: true,
         config: { pageId },
-        secrets: { pageAccessToken: encryptSecret("ptok"), appSecret: encryptSecret("sec") },
+        secrets: {
+          ...(channel === "instagram" ? { igAccessToken: token } : { pageAccessToken: token }),
+          appSecret: encryptSecret("sec"),
+        },
       },
       select: { id: true },
     })
@@ -177,6 +191,22 @@ describe("social — the PAGE is the subscription unit, and it can be shared", (
     const messenger = await mkSocial("messenger", pageId);
 
     await service.remove(workspaceId, "messenger", messenger);
+
+    expect(deletedFor(pageId)).toBe(true);
+  });
+
+  it("releases for an INSTAGRAM-only Page too — its token key is igAccessToken", async () => {
+    // The release reads the removed row's stored credential to authenticate the
+    // DELETE. It looked for `accessToken` / `pageAccessToken` only, so an
+    // Instagram row (whose token lives under `igAccessToken`) produced no
+    // credential, returned early, and released nothing — Meta kept delivering the
+    // removed handle's DMs indefinitely. An Instagram-only Page is the case that
+    // exposes it: with Messenger also connected, `stillInUse` makes it a no-op
+    // anyway and the miss is invisible.
+    const pageId = `${S}_ig_only_page`;
+    const instagram = await mkSocial("instagram", pageId);
+
+    await service.remove(workspaceId, "instagram", instagram);
 
     expect(deletedFor(pageId)).toBe(true);
   });

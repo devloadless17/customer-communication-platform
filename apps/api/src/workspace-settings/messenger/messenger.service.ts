@@ -9,13 +9,42 @@ import { normalizeDefaultAccount } from "@/lib/providers/normalize-default-accou
 import {
   ensurePageSubscribedToMessaging,
   getPageSubscription,
+  releasePageSubscription,
 } from "@/lib/providers/meta-page-subscription";
 import { getMetaConnection } from "@/lib/providers/meta-connection";
 import { assertChannelDisconnectConfirmed } from "@/lib/providers/assert-channel-disconnect";
 
+import {
+  blocksMessaging,
+  getPageIntegrity,
+  messagingRestrictionExpiry,
+} from "@/lib/providers/messenger-integrity";
+import { ProviderNotConfiguredError } from "@/lib/providers/config";
+import { getMessengerSendConfig, type MessengerSendConfig } from "@/lib/providers/messenger-config";
+import { messengerProvider } from "@/lib/providers/messenger";
+import {
+  listStickerPacks,
+  listStickersInPack,
+  searchStickers,
+  type MessengerSticker,
+  type MessengerStickerPack,
+} from "@/lib/providers/messenger-stickers";
+import type {
+  ChannelEntryPoints,
+  ChannelPersona,
+  ChannelWelcomeScreen,
+} from "@ccp/shared/providers/types";
+
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
-import type { UpdateMessengerConfigInput } from "./messenger.schemas";
+import type {
+  StickerCatalogQuery,
+  UpdateMessengerConfigInput,
+  UpdateMessengerEntryPointsInput,
+  UpdateMessengerWelcomeInput,
+  ThreadControlInput,
+  CreatePersonaInput,
+} from "./messenger.schemas";
 
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v26.0";
 const GRAPH_BASE = process.env.META_GRAPH_BASE_URL || "https://graph.facebook.com";
@@ -58,6 +87,26 @@ export interface MessengerConfigView {
     receivesMessages: boolean;
     subscribedFields: string[];
     missingFields: string[];
+  } | null;
+  /**
+   * Live Page integrity (`GET /{page-id}/page_status`). `null` when we can't
+   * check — needs `pages_manage_metadata`, and MANY installs won't have granted
+   * it, so an unreadable status is genuinely "unknown". It is deliberately NOT
+   * reported as healthy: claiming a Page is fine because we couldn't ask is the
+   * cry-wolf mistake in reverse, and this is the one signal that explains why
+   * every send is about to start failing.
+   */
+  integrity: {
+    status: string | null;
+    /** True when a `page_messaging`/`page_messaging_api` restriction is active. */
+    blocksMessaging: boolean;
+    /** ISO — when the messaging restriction lifts. Null = none, or indefinite. */
+    restrictedUntil: string | null;
+    violations: { type: string; description: string | null; url: string | null }[];
+    restrictions: { feature: string; description: string | null; expiresAt: string | null }[];
+    /** Meta's own next steps, including the appeal link. We can't author these. */
+    recommendedActions: { actionType: string; url: string | null }[];
+    appeals: { type: string; status: string }[];
   } | null;
 }
 
@@ -156,6 +205,7 @@ export class MessengerService {
           pageAccessToken,
           GRAPH_VERSION,
           config.appId,
+          appSecret ?? undefined,
         );
         webhookSubscription = {
           receivesMessages: status.receivesMessages,
@@ -165,6 +215,49 @@ export class MessengerService {
       } catch (err) {
         this.logger.warn(
           `[${workspaceId}] could not read messenger page subscription: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    // Page integrity, read live for the same reason the subscription above is:
+    // it changes on Meta's side without telling our database, and a cached copy
+    // would keep saying "healthy" through an enforcement. Never fatal — a Graph
+    // blip or a missing `pages_manage_metadata` leaves it null (= unknown).
+    let integrity: MessengerConfigView["integrity"] = null;
+    if (config.pageId && pageAccessToken) {
+      try {
+        const snapshot = await getPageIntegrity({
+          accountId: config.pageId,
+          accessToken: pageAccessToken,
+          graphVersion: GRAPH_VERSION,
+          label: CHANNEL,
+          ...(appSecret ? { appSecret } : {}),
+        });
+        integrity = {
+          status: snapshot.status,
+          blocksMessaging: blocksMessaging(snapshot),
+          restrictedUntil: messagingRestrictionExpiry(snapshot),
+          violations: snapshot.violations.map((v) => ({
+            type: v.type,
+            description: v.description,
+            url: v.url,
+          })),
+          restrictions: snapshot.restrictions.map((r) => ({
+            feature: r.feature,
+            description: r.description,
+            expiresAt: r.expiresAt,
+          })),
+          recommendedActions: snapshot.recommendedActions.map((a) => ({
+            actionType: a.actionType,
+            url: a.url,
+          })),
+          appeals: snapshot.appeals.map((a) => ({ type: a.type, status: a.status })),
+        };
+      } catch (err) {
+        this.logger.warn(
+          `[${workspaceId}] could not read messenger page integrity: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
         );
       }
     }
@@ -179,6 +272,7 @@ export class MessengerService {
       credentialsUndecryptable,
       needsReconnect: conn?.needsReconnect ?? false,
       webhookSubscription,
+      integrity,
     };
   }
 
@@ -352,6 +446,7 @@ export class MessengerService {
       tokenToStore,
       GRAPH_VERSION,
       appId,
+      appSecret,
     );
     if (!sub.ok) {
       this.logger.warn(
@@ -370,11 +465,393 @@ export class MessengerService {
     return { config: { pageId, pageName: pageName ?? null, verifyToken } };
   }
 
+  // ── Messenger Profile API (entry points + welcome screen) ────────────────
+  //
+  // These read and write META, not our database, and there is deliberately no
+  // local mirror: both are editable in Business Suite too, so a cached copy would
+  // start lying the moment someone edited it there. The panel reads through,
+  // writes through, and re-reads.
+  //
+  // Meta's rate limit is the constraint that shapes this: "10 API calls per 10
+  // minute interval… enforced per Page". So a read fetches every field in ONE
+  // request, and nothing here is called on a hot path.
+  //
+  // `null` from a read means we could not ask (not connected, or Graph refused).
+  // The caller must render "couldn't load" rather than an empty editor — an empty
+  // editor's next save would CLEAR a live configuration.
+
+  async getEntryPoints(
+    workspaceId: string,
+    accountId?: string,
+  ): Promise<ChannelEntryPoints | null> {
+    const read = messengerProvider.getEntryPoints;
+    if (!read) return null;
+    try {
+      return await read(await getMessengerSendConfig(workspaceId, accountId ?? null));
+    } catch (err) {
+      if (err instanceof ProviderNotConfiguredError) return null;
+      this.logger.warn(
+        `[${workspaceId}] could not read messenger entry points: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return null;
+    }
+  }
+
+  async setEntryPoints(
+    workspaceId: string,
+    input: UpdateMessengerEntryPointsInput,
+  ): Promise<ChannelEntryPoints | null> {
+    const write = messengerProvider.setEntryPoints;
+    if (!write) {
+      throw new BadRequestException({
+        error: "entry_points_not_supported",
+        detail: "This channel has no ice breakers or persistent menu.",
+      });
+    }
+    const config = await this.sendConfigOrThrow(workspaceId, input.accountId);
+    try {
+      await write({ iceBreakers: input.iceBreakers, menuItems: input.menuItems }, config);
+    } catch (err) {
+      // Meta's own rejection is the useful message (a bad URL, a missing
+      // permission, the profile rate limit) — surface it, not a generic 500.
+      throw new BadGatewayException({
+        error: "entry_points_update_failed",
+        detail: err instanceof Error ? err.message.slice(0, 300) : String(err),
+      });
+    }
+    // Re-read rather than echo the intent: Meta silently ignores parts it won't
+    // apply, and the panel must show what is actually live.
+    return this.getEntryPoints(workspaceId, input.accountId);
+  }
+
+  async getWelcome(
+    workspaceId: string,
+    accountId?: string,
+  ): Promise<ChannelWelcomeScreen | null> {
+    const read = messengerProvider.getWelcomeScreen;
+    if (!read) return null;
+    try {
+      return await read(await getMessengerSendConfig(workspaceId, accountId ?? null));
+    } catch (err) {
+      if (err instanceof ProviderNotConfiguredError) return null;
+      this.logger.warn(
+        `[${workspaceId}] could not read messenger welcome screen: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return null;
+    }
+  }
+
+  async setWelcome(
+    workspaceId: string,
+    input: UpdateMessengerWelcomeInput,
+  ): Promise<ChannelWelcomeScreen | null> {
+    const write = messengerProvider.setWelcomeScreen;
+    if (!write) {
+      throw new BadRequestException({
+        error: "welcome_screen_not_supported",
+        detail: "This channel has no Get Started button or greeting.",
+      });
+    }
+    const config = await this.sendConfigOrThrow(workspaceId, input.accountId);
+    try {
+      await write(
+        {
+          getStartedPayload: input.getStartedPayload || null,
+          greeting: input.greeting || null,
+          commands: input.commands,
+        },
+        config,
+      );
+    } catch (err) {
+      throw new BadGatewayException({
+        error: "welcome_screen_update_failed",
+        detail: err instanceof Error ? err.message.slice(0, 300) : String(err),
+      });
+    }
+    return this.getWelcome(workspaceId, input.accountId);
+  }
+
+  /**
+   * Sticker catalog. The three catalog endpoints authenticate with an APP access
+   * token (`app_id|app_secret`), not the Page token every other call here uses —
+   * so this resolves the app credentials off the connection rather than reusing
+   * the send config wholesale. A connection stored before `appId` was captured
+   * simply can't browse; that is reported as `null`, not an error, because the
+   * picker degrades to the always-sendable like sticker.
+   */
+  async stickers(
+    workspaceId: string,
+    query: StickerCatalogQuery,
+  ): Promise<
+    | { packs: MessengerStickerPack[]; stickers?: undefined }
+    | { stickers: MessengerSticker[]; packs?: undefined }
+    | null
+  > {
+    let config: MessengerSendConfig;
+    try {
+      config = await getMessengerSendConfig(workspaceId, null);
+    } catch (err) {
+      if (err instanceof ProviderNotConfiguredError) return null;
+      throw err;
+    }
+    if (!config.appId || !config.appSecret) return null;
+    const auth = {
+      appId: config.appId,
+      appSecret: config.appSecret,
+      graphVersion: config.graphVersion,
+    };
+    try {
+      if (query.q) return { stickers: await searchStickers(query.q, auth, query.locale) };
+      if (query.packId) {
+        return { stickers: await listStickersInPack(query.packId, auth, query.locale) };
+      }
+      return { packs: await listStickerPacks(auth, query.locale) };
+    } catch (err) {
+      this.logger.warn(
+        `[${workspaceId}] sticker catalog read failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Handover Protocol — change who may answer a conversation.
+   *
+   * Explicit, never automatic. A reply that fails with Meta's `2018300` is
+   * classified `thread_control_lost` and left for a human to resolve with this,
+   * because taking a thread away from a bot mid-flow is a decision about the
+   * customer's experience, not an error-recovery detail. See the header of
+   * `messenger-handover.ts`.
+   *
+   * The returned `ownerAppId` is RE-READ from Meta, not inferred. That matters
+   * most for `request`: the primary receiver may ignore it, so a 200 here does
+   * not mean the thread is ours and the caller must check.
+   */
+  async threadControl(
+    workspaceId: string,
+    input: ThreadControlInput,
+  ): Promise<{ ownerAppId: string | null }> {
+    const act = messengerProvider.threadControl;
+    if (!act) {
+      throw new BadRequestException({
+        error: "thread_control_not_supported",
+        detail: "This channel has no handover protocol.",
+      });
+    }
+    const config = await this.sendConfigOrThrow(workspaceId, input.accountId);
+    try {
+      return await act(
+        {
+          to: input.psid,
+          action: input.action,
+          ...(input.targetAppId ? { targetAppId: input.targetAppId } : {}),
+          ...(input.metadata ? { metadata: input.metadata } : {}),
+        },
+        config,
+      );
+    } catch (err) {
+      // Meta's own rejection is the useful text: "not the primary receiver",
+      // "no app has control", etc. A generic 500 would send an operator hunting.
+      throw new BadGatewayException({
+        error: "thread_control_failed",
+        detail: err instanceof Error ? err.message.slice(0, 300) : String(err),
+      });
+    }
+  }
+
+  /** Which app currently owns a conversation. Null = unknown (see the provider). */
+  async threadOwner(
+    workspaceId: string,
+    psid: string,
+    accountId?: string,
+  ): Promise<string | null> {
+    const read = messengerProvider.threadOwner;
+    if (!read) return null;
+    try {
+      return await read(psid, await getMessengerSendConfig(workspaceId, accountId ?? null));
+    } catch (err) {
+      if (err instanceof ProviderNotConfiguredError) return null;
+      throw err;
+    }
+  }
+
+  // ── Personas + utility templates ─────────────────────────────────────────
+  // Both read Meta live and keep no local mirror, for the reason spelled out in
+  // each module: Meta owns the record, both are editable elsewhere, and a cached
+  // copy would be a second truth needing a reconciler.
+
+  async personas(workspaceId: string, accountId?: string): Promise<ChannelPersona[] | null> {
+    const read = messengerProvider.listPersonas;
+    if (!read) return null;
+    try {
+      return await read(await getMessengerSendConfig(workspaceId, accountId ?? null));
+    } catch (err) {
+      if (err instanceof ProviderNotConfiguredError) return null;
+      this.logger.warn(
+        `[${workspaceId}] could not list messenger personas: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return null;
+    }
+  }
+
+  async createPersona(
+    workspaceId: string,
+    input: CreatePersonaInput,
+  ): Promise<ChannelPersona> {
+    const create = messengerProvider.createPersona;
+    if (!create) {
+      throw new BadRequestException({
+        error: "personas_not_supported",
+        detail: "This channel has no personas.",
+      });
+    }
+    const config = await this.sendConfigOrThrow(workspaceId, input.accountId);
+    try {
+      return await create(
+        { name: input.name, profilePictureUrl: input.profilePictureUrl },
+        config,
+      );
+    } catch (err) {
+      // Meta DOWNLOADS the image at create time, so "your URL is unreachable" is
+      // by far the most common failure and its own message is the useful one.
+      throw new BadGatewayException({
+        error: "persona_create_failed",
+        detail: err instanceof Error ? err.message.slice(0, 300) : String(err),
+      });
+    }
+  }
+
+  async deletePersona(
+    workspaceId: string,
+    personaId: string,
+    accountId?: string,
+  ): Promise<void> {
+    const del = messengerProvider.deletePersona;
+    if (!del) {
+      throw new BadRequestException({
+        error: "personas_not_supported",
+        detail: "This channel has no personas.",
+      });
+    }
+    const config = await this.sendConfigOrThrow(workspaceId, accountId);
+    try {
+      // SOFT delete on Meta's side: history is preserved, only future sends are
+      // blocked. Safe to call when an agent leaves.
+      await del(personaId, config);
+    } catch (err) {
+      throw new BadGatewayException({
+        error: "persona_delete_failed",
+        detail: err instanceof Error ? err.message.slice(0, 300) : String(err),
+      });
+    }
+  }
+
+  /**
+   * The Page's approved UTILITY templates — the only way to message a customer
+   * outside the 24h window since Meta retired the three update tags.
+   *
+   * `null` means we could not read them (not connected, or Graph refused), which
+   * must NOT be shown as "this Page has no templates": the difference decides
+   * whether an operator creates one or goes looking for a permission problem.
+   */
+  async utilityTemplates(workspaceId: string, accountId?: string): Promise<unknown[] | null> {
+    const read = messengerProvider.fetchUtilityTemplates;
+    if (!read) return null;
+    try {
+      return await read(await getMessengerSendConfig(workspaceId, accountId ?? null));
+    } catch (err) {
+      if (err instanceof ProviderNotConfiguredError) return null;
+      this.logger.warn(
+        `[${workspaceId}] could not list messenger utility templates: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return null;
+    }
+  }
+
+  /** Load the send config, turning "not connected" into a 400 the UI can read. */
+  private async sendConfigOrThrow(
+    workspaceId: string,
+    accountId?: string,
+  ): Promise<MessengerSendConfig> {
+    try {
+      return await getMessengerSendConfig(workspaceId, accountId ?? null);
+    } catch (err) {
+      if (err instanceof ProviderNotConfiguredError) {
+        throw new BadRequestException({
+          error: "messenger_not_connected",
+          detail: "Connect this Page before configuring its Messenger profile.",
+        });
+      }
+      throw err;
+    }
+  }
+
   async disconnect(workspaceId: string, confirmAll?: boolean): Promise<void> {
     // Refuse an ambiguous blast radius; see the helper.
     await assertChannelDisconnectConfirmed(workspaceId, CHANNEL, confirmAll);
+    // Read the rows BEFORE deleting them: releasing the subscription needs the
+    // Page id and a token, and both die with the row.
+    const rows = await this.db.channelConnection.findMany({
+      where: { workspaceId, channel: CHANNEL },
+      select: { config: true, secrets: true },
+    });
     await this.db.channelConnection.deleteMany({ where: { workspaceId, channel: CHANNEL } });
     invalidateMessengerConfig(workspaceId);
+    // Tell Meta to stop delivering. The per-ACCOUNT removal path has released
+    // the Page subscription since multi-account shipped; this channel-wide route
+    // — which is strictly more destructive — never did, so Meta kept posting a
+    // disconnected Page's customer messages forever and ingest dropped them as
+    // `unknown_account`. "We drop it" is not "we don't receive it": the Page
+    // still looks connected in Meta's dashboard, and reconnecting elsewhere
+    // silently competes with a subscription nobody remembers granting.
+    await this.releasePages(workspaceId, rows);
     await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "channels" });
+  }
+
+  /**
+   * Best-effort `DELETE /{page-id}/subscribed_apps` for every Page this channel
+   * held, honouring the one rule that makes it safe: Messenger and Instagram can
+   * share ONE Page and `meta-page-subscription` deliberately keeps a SINGLE union
+   * of fields across both, with no per-channel subset to subtract. So a Page the
+   * Instagram channel still uses is KEPT — releasing it would take that channel's
+   * inbound dark, which is the exact failure the union exists to prevent.
+   *
+   * Never throws: this runs AFTER the rows are gone, so a failure leaves exactly
+   * the pre-existing behaviour rather than half-completing a removal the operator
+   * asked for.
+   */
+  private async releasePages(
+    workspaceId: string,
+    rows: { config: Prisma.JsonValue; secrets: Prisma.JsonValue }[],
+  ): Promise<void> {
+    const seen = new Set<string>();
+    for (const row of rows) {
+      const pageId = ((row.config ?? {}) as MessengerChannelConfig).pageId;
+      const cipher = ((row.secrets ?? {}) as MessengerChannelSecrets).pageAccessToken;
+      if (!pageId || !cipher || seen.has(pageId)) continue;
+      seen.add(pageId);
+      const token = this.tryDecrypt(cipher, "pageAccessToken");
+      if (!token) continue; // undecryptable — nothing to authenticate the call with
+      const stillInUse =
+        (await this.db.channelConnection.count({
+          where: { workspaceId, channel: "instagram", config: { path: ["pageId"], equals: pageId } },
+        })) > 0;
+      const res = await releasePageSubscription(pageId, token, GRAPH_VERSION, { stillInUse });
+      if (!res.ok) {
+        this.logger.warn(
+          `[${workspaceId}] could not release page subscription for page=${pageId}: ${res.error}`,
+        );
+      }
+    }
   }
 }

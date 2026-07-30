@@ -37,6 +37,8 @@ import { decryptSecret, encryptSecret } from "@/lib/crypto/envelope";
 import { invalidateProviderConfig } from "@/lib/providers/config";
 import { invalidateMetaConnection } from "@/lib/providers/meta-connection";
 import { WhatsappService } from "@/workspace-settings/whatsapp/whatsapp.service";
+import { InstagramService } from "@/workspace-settings/instagram/instagram.service";
+import { invalidateInstagramConfig } from "@/lib/providers/instagram-config";
 import type { DbService } from "@/db/db.service";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
@@ -47,6 +49,7 @@ setSharedDb(prisma as unknown as PrismaClient);
 
 const bus = { publish: async () => undefined };
 const service = new WhatsappService(prisma as unknown as DbService, bus as never);
+const instagram = new InstagramService(prisma as unknown as DbService, bus as never);
 
 const S = `maa${Date.now().toString().slice(-8)}`;
 const SHARED_SECRET = `${S}_shared_app_secret`;
@@ -58,6 +61,10 @@ const PHONE_SHARED = `${S}_pn_shared`;
 const PHONE_OWN = `${S}_pn_own`;
 const WABA_SHARED = `${S}_waba_shared`;
 const WABA_OWN = `${S}_waba_own`;
+
+/** Instagram's account key is the IG professional-account id, NOT the Page id. */
+const IG_PAGE_OWN = `${S}_page_own`;
+const IG_ID_OWN = `${S}_ig_own`;
 
 let orgId = "";
 let workspaceId = "";
@@ -77,6 +84,15 @@ function stubGraph() {
     if (owns) {
       const ids = owns[1] === WABA_OWN ? [PHONE_OWN] : [PHONE_SHARED];
       return jsonResponse({ data: ids.map((id) => ({ id })) });
+    }
+    // The single read `InstagramService.updateConfig` makes: resolve the linked
+    // IG professional account (and derive a Page token) from the Page node.
+    if (url.includes("instagram_business_account")) {
+      return jsonResponse({
+        name: "Test Page",
+        access_token: `${S}_derived_page_token`,
+        instagram_business_account: { id: IG_ID_OWN, username: "testhandle" },
+      });
     }
     if (url.includes("fields=display_phone_number")) {
       return jsonResponse({
@@ -160,7 +176,26 @@ beforeAll(async () => {
       messagingHealthUpdatedAt: new Date(),
     },
   });
+  // An INSTAGRAM account, also on its own Meta app. Keyed on the IG id (that is
+  // what Meta puts in `entry[].id` on an `object:"instagram"` webhook), with the
+  // Page id living in `config` — the split that made this channel's copy of the
+  // own-secret lookup read the wrong key.
+  await prisma.channelConnection.create({
+    data: {
+      workspaceId,
+      channel: "instagram",
+      externalAccountId: IG_ID_OWN,
+      isDefault: true,
+      isActive: true,
+      config: { igId: IG_ID_OWN, pageId: IG_PAGE_OWN, appId: `${S}_own_app` },
+      secrets: {
+        igAccessToken: encryptSecret(OWN_TOKEN),
+        appSecret: encryptSecret(OWN_SECRET),
+      },
+    },
+  });
   invalidateProviderConfig(workspaceId);
+  invalidateInstagramConfig(workspaceId);
 });
 
 afterEach(() => {
@@ -205,6 +240,27 @@ describe("an account on its OWN Meta app", () => {
       appSecret: OWN_SECRET,
     });
     expect((await storedCreds(PHONE_OWN)).appSecret).toBe(OWN_SECRET);
+  });
+});
+
+describe("an INSTAGRAM account on its OWN Meta app", () => {
+  it("keeps its own app secret when re-saved without explicit ones", async () => {
+    stubGraph();
+    // The ordinary re-save: the operator supplies only the Page. This is also
+    // exactly what `MetaService.resyncChannels` replays for every Instagram row.
+    await instagram.updateConfig(workspaceId, { pageId: IG_PAGE_OWN });
+
+    const row = await prisma.channelConnection.findFirstOrThrow({
+      where: { workspaceId, channel: "instagram", externalAccountId: IG_ID_OWN },
+      select: { secrets: true },
+    });
+    const secrets = (row.secrets ?? {}) as { appSecret?: string };
+    // Instagram's copy of this guard looked the row up by `pageId`, but an
+    // Instagram row is keyed by the IG id — so it matched nothing, `ownAppSecret`
+    // was always null, and the shared app's secret won every time. Meta then
+    // signed this handle's webhooks with a secret we no longer held and every
+    // inbound DM was dropped as forged.
+    expect(secrets.appSecret ? decryptSecret(secrets.appSecret) : null).toBe(OWN_SECRET);
   });
 });
 

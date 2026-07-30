@@ -25,9 +25,11 @@ import { kickOutbox, publishInTx } from "@/lib/events/outbox";
 import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
 import { sendInteractiveInternal } from "@/lib/messaging/send-interactive-internal";
 import { SendTextValidationError } from "@/lib/messaging/send-text-internal";
+import { sendMessengerTemplateInternal } from "@/lib/messaging/send-messenger-template-internal";
 import { checkTextCap } from "@/lib/messaging/text-cap";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { MAX_CHAIN_DEPTH } from "@/lib/workflows/events";
+import type { SendMessengerTemplateInput } from "@/messages/messages.schemas";
 
 /**
  * Presign an ExternalMessage's media links so a `/v1` API caller can actually
@@ -607,6 +609,31 @@ export class ExternalV1MessagingService {
         ? convWire
         : { ...convWire, contact: redactExternalContactPii(convWire.contact) },
     };
+  }
+
+  /**
+   * Send a Messenger TEMPLATE from `/v1` — structured or utility.
+   *
+   * `senderApiKeyId` rather than a user: a template posted by an integration has
+   * no human behind it, which is also why the internal sender resolves NO persona
+   * for it. Speaking as a named agent would misattribute the message.
+   */
+  async sendMessengerTemplate(
+    workspaceId: string,
+    apiKeyId: string,
+    conversationId: string,
+    input: SendMessengerTemplateInput,
+  ): Promise<{ messageId: string }> {
+    const r = await sendMessengerTemplateInternal({
+      workspaceId,
+      conversationId,
+      senderApiKeyId: apiKeyId,
+      sentVia: "v1/messenger-template",
+      ...(input.mode === "structured"
+        ? { mode: "structured" as const, template: input.template }
+        : { mode: "utility" as const, template: input.template }),
+    });
+    return { messageId: r.messageId };
   }
 
   async sendMessage(
@@ -1689,6 +1716,8 @@ export class ExternalV1MessagingService {
         options: input.options,
         ...(input.ctaUrl ? { ctaUrl: input.ctaUrl } : {}),
         ...(input.carouselCards ? { carouselCards: input.carouselCards } : {}),
+        ...(input.genericCards ? { genericCards: input.genericCards } : {}),
+        ...(input.productIds ? { productIds: input.productIds } : {}),
         ...(input.listCtaLabel ? { listCtaLabel: input.listCtaLabel } : {}),
         ...(input.headerText ? { headerText: input.headerText } : {}),
         ...(input.footerText ? { footerText: input.footerText } : {}),

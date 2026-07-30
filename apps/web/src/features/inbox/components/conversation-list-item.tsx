@@ -192,6 +192,13 @@ function ConversationListItemImpl({
             accountId={conversation.channelConnectionId}
             verb="Received on"
           />
+          {/* A teammate already has this chat open. The single most useful
+              thing to know BEFORE clicking a row in a shared inbox — it is
+              what stops two agents from writing the same reply, so it sits on
+              the row's TOP line beside the name and time rather than down in
+              the badge lane with the things that need actioning. Costs nothing
+              when nobody is here, which is nearly always. */}
+          {viewers && <ViewersEye viewers={viewers} />}
           <span title={fullDateTime} className="shrink-0">
             <LocalTime
               iso={conversation.lastMessageAt}
@@ -256,13 +263,6 @@ function ConversationListItemImpl({
               {openFlags > 9 ? "9+" : openFlags}
             </span>
           )}
-          {/* A teammate already has this chat open. The single most useful
-              thing to know BEFORE clicking a row in a shared inbox — it is
-              what stops two agents from writing the same reply. Sits in the
-              same right-hand lane as the unread + flag badges (the row's
-              "live signals" column) and costs nothing when nobody is here,
-              which is nearly always. */}
-          {viewers && <ViewersEye viewers={viewers} />}
         </div>
 
         {/* Row 3: status chip + assignment — rendered ONLY when it carries

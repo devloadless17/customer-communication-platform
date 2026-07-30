@@ -19,8 +19,14 @@ import {
   PageSubscriptionWarning,
   type PageSubscription,
 } from "@/components/settings/page-subscription-warning";
+import {
+  PageIntegrityWarning,
+  type PageIntegrity,
+} from "@/components/settings/page-integrity-warning";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
+import { EntryPointsPanel } from "@/features/channels/components/entry-points-panel";
+import { WelcomeScreenPanel } from "@/features/channels/components/welcome-screen-panel";
 import { toast } from "@/lib/toast";
 
 export interface MessengerCurrent {
@@ -35,6 +41,8 @@ export interface MessengerCurrent {
   /** Set when a send failed with Graph 190 — the token expired/was revoked. */
   needsReconnect?: boolean;
   webhookSubscription?: PageSubscription | null;
+  /** Live Page integrity. `null` = we could not ask, NOT "healthy". */
+  integrity?: PageIntegrity | null;
 }
 
 export function MessengerSettings({
@@ -238,6 +246,18 @@ export function MessengerSettings({
             channelLabel="Messenger"
           />
         )}
+
+        {/* The other half of "connected but broken". PageSubscriptionWarning
+            catches a Page Meta never delivers TO us; this catches a Page Meta
+            will reject everything we send FROM. Renders nothing when healthy —
+            and nothing when unreadable, which is a different state and must not
+            be alarmed on. */}
+        {current.connected && (
+          <PageIntegrityWarning
+            integrity={current.integrity}
+            pageName={current.pageName}
+          />
+        )}
       </div>
 
       {/* Gated on the Messenger calling capability (currently off — the product
@@ -247,6 +267,22 @@ export function MessengerSettings({
           calling surface at once. */}
       {canManage && current.connected && CHANNEL_CAPABILITIES.messenger.calling && (
         <CallingCard pageName={current.pageName} />
+      )}
+
+      {/* The Messenger Profile surfaces, in the order a customer meets them:
+          the welcome screen BEFORE they've ever messaged, then the in-chat
+          conversation starters. Both read and write Meta live — see each panel's
+          docblock for why there is deliberately no local mirror, and why a failed
+          read renders an error rather than an empty form.
+
+          Capability-gated rather than hardcoded so the panels follow the flag,
+          exactly like the calling card above. `welcomeScreen` is separate from
+          `entryPoints` because Instagram has the latter and rejects the former. */}
+      {canManage && current.connected && CHANNEL_CAPABILITIES.messenger.welcomeScreen && (
+        <WelcomeScreenPanel />
+      )}
+      {canManage && current.connected && CHANNEL_CAPABILITIES.messenger.entryPoints && (
+        <EntryPointsPanel channel="messenger" />
       )}
 
       {canManage && showForm && (

@@ -283,17 +283,231 @@ export default function ApiDocsPage() {
           List a contact's channels (today: one WhatsApp row per contact).
         </Endpoint>
         <Endpoint method="POST" path="/api/external/v1/contacts/:id/block">
-          Block the contact at the provider (WhatsApp Block Users API): they can
-          no longer message you, and every send to them is rejected until
-          unblocked. The provider is called first and the contact&apos;s{" "}
-          <code>blockedAt</code> only flips on success. WhatsApp constraints
-          surface as typed 400s: <code>reengagement_required</code> (they
-          haven&apos;t messaged you in the last 24 hours — Meta refuses the
+          Block the contact at the provider — WhatsApp&apos;s Block Users API, or
+          Instagram&apos;s Moderate Conversations API — so they can no longer
+          message you, and every send to them is rejected until unblocked. The
+          provider is called first and the contact&apos;s{" "}
+          <code>blockedAt</code> only flips on success. Constraints surface as
+          typed 400s: <code>reengagement_required</code> (WhatsApp only — they
+          haven&apos;t messaged you in the last 24 hours, so Meta refuses the
           block), <code>blocklist_full</code> (the number&apos;s 64,000-entry
-          cap), <code>blocking_not_supported</code> (non-WhatsApp channel).
+          cap), <code>blocking_not_supported</code> (a channel with no provider
+          blocklist — Messenger and the web widget today).
           Blocked contacts are excluded from broadcast audiences automatically.
           Scope <code>write:contacts</code>; full parity with the inbox&apos;s
           Block action.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/channels/instagram/entry-points">
+          The ice breakers and persistent menu an Instagram customer sees{" "}
+          <em>before</em> they type — read live from Meta, not from our database
+          (they can also be edited in Business Suite, so there is deliberately no
+          local copy to go stale). Optional <code>?account_id=</code> targets one
+          connected handle; omitted means the default.{" "}
+          <code>entry_points: null</code> means we could not read them — treat
+          that as <strong>unknown</strong>, never as empty, because POSTing an
+          empty set back would clear whatever is live. Scope{" "}
+          <code>admin:settings</code>.
+        </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/channels/instagram/entry-points">
+          Replace them. Body:{" "}
+          <code>{`{ account_id?, iceBreakers: [{ question, payload }], menuItems: [{ type: "web_url", title, url } | { type: "postback", title, payload }] }`}</code>
+          . Meta&apos;s caps are enforced here as field-level 400s: at most 4 ice
+          breakers and 5 menu items, and only <code>web_url</code> /{" "}
+          <code>postback</code> item types (Instagram supports no others, and{" "}
+          <code>composer_input_disabled</code> / <code>webview_height_ratio</code>{" "}
+          are unavailable there). An <strong>empty array clears</strong> that
+          section; the two sections are cleared independently. The response echoes
+          what Meta actually applied, re-read rather than assumed. A tap arrives as
+          an ordinary inbound message carrying the <code>payload</code>, so
+          workflows can route on it. Scope <code>admin:settings</code>; full parity
+          with Settings → Instagram.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/channels/messenger/entry-points">
+          The Messenger twin of the Instagram route above — same{" "}
+          <code>messenger_profile</code> node, same caps, same{" "}
+          <code>null</code>-means-unknown rule. Optional{" "}
+          <code>?account_id=</code> targets one connected Page. Scope{" "}
+          <code>admin:settings</code>.
+        </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/channels/messenger/entry-points">
+          Replace the Page&apos;s ice breakers and persistent menu. Same body and
+          same clearing semantics as the Instagram route (an empty array clears
+          that section; the two are cleared independently). Scope{" "}
+          <code>admin:settings</code>; full parity with Settings → Messenger.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/channels/messenger/welcome">
+          The Messenger <strong>welcome screen</strong> — the Get Started button,
+          the greeting, and the commands menu. Messenger-only: Instagram&apos;s
+          profile node rejects all three, which is why this is a separate route
+          rather than a channel parameter. Read live from Meta.{" "}
+          <code>welcome: null</code> means unknown, never empty. Scope{" "}
+          <code>admin:settings</code>.
+        </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/channels/messenger/welcome">
+          Replace it. Body:{" "}
+          <code>{`{ account_id?, getStartedPayload: string | null, greeting: string | null, commands: [{ name, description }] }`}</code>
+          . A <strong>null or empty</strong> field clears that property — and{" "}
+          <code>getStartedPayload: null</code> removes the button itself, which a
+          first-time visitor can see: without it they get an empty composer and
+          the greeting has nothing to render on. Meta&apos;s caps are enforced as
+          field-level 400s: greeting 160 characters, at most 10 commands, command
+          name 32 characters (letters, digits, <code>-</code>, <code>_</code> —
+          Meta rejects spaces) and description 64. Taps arrive as ordinary inbound
+          messages carrying the payload, so workflows route on them. Note Meta
+          rate-limits this node to <strong>10 calls per 10 minutes per Page</strong>.
+          Scope <code>admin:settings</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/channels/messenger/stickers">
+          Meta&apos;s first-party sticker catalog. No parameters lists the packs;{" "}
+          <code>?pack_id=</code> lists one pack&apos;s stickers;{" "}
+          <code>?q=</code> searches across all of them (minimum 2 characters).
+          Pass <code>?locale=</code> (e.g. <code>ko_KR</code>) for a non-English
+          query — without it Meta defaults to <code>en_US</code> and matches only
+          English tags, returning an empty list rather than an error.{" "}
+          <code>catalog: null</code> means the catalog is unavailable (the
+          connection predates app-credential capture, or Graph refused); the
+          like sticker <code>369239263222822</code> is always sendable regardless
+          and is deliberately absent from the catalog. Scope{" "}
+          <code>read:catalog</code>.
+        </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/channels/instagram/inbox-sources">
+          Which <strong>non-DM sources</strong> reach the inbox for one Instagram
+          account. Direct messages are the product&apos;s core and are never
+          listed here — they are always on. Body:{" "}
+          <code>{`{ account_id?, sources: ["comments"] }`}</code>; the set is
+          REPLACED, so an omitted source is turned off. <strong>Defaults to
+          none.</strong> Meta subscribes these webhooks at the <em>app</em> level
+          and one app serves every workspace, so this is the per-workspace,
+          per-account control over whether we file them. With{" "}
+          <code>comments</code> on, a comment on your posts, reels or ads arrives
+          as an inbound message carrying{" "}
+          <code>{`structured: { kind: "comment", commentId, … }`}</code> — and it
+          deliberately does <strong>not</strong> open the 24-hour messaging window,
+          because a comment doesn&apos;t. Replying to such a thread sends a{" "}
+          <em>private reply</em> addressed at the comment: one per comment, within
+          7 days, after which the person must answer before normal DMs resume.
+          Scope <code>admin:settings</code>; full parity with Settings → Instagram.
+        </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/channels/messenger/thread-control">
+          <strong>Handover Protocol</strong> — change which app may answer a
+          conversation. Body:{" "}
+          <code>{`{ account_id?, psid, action: "take" | "request" | "pass" | "release", targetAppId?, metadata? }`}</code>
+          . A Page can have several apps attached, and only the one holding
+          thread control may send; everyone else receives the traffic passively on
+          the <code>standby</code> webhook. That is what a reply failing with{" "}
+          <code>thread_control_lost</code> (Meta <code>2018300</code>) means.{" "}
+          <code>take</code> works only for the primary receiver;{" "}
+          <code>request</code> asks the primary receiver, who{" "}
+          <strong>may ignore it</strong> — so check the returned{" "}
+          <code>owner_app_id</code>, which is re-read from Meta rather than
+          assumed. <code>pass</code> defaults to Meta&apos;s Page Inbox
+          (<code>263902037430900</code>), i.e. hand the thread back to whoever is
+          staffing Business Suite. Note <code>metadata</code> is delivered to{" "}
+          <em>every</em> app on the Page, so never put anything private in it.
+          This is deliberately not automatic on send failure: taking a thread from
+          a bot mid-flow is a decision, not error recovery. Scope{" "}
+          <code>write:conversations</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/channels/messenger/thread-owner">
+          Which app currently owns a conversation (<code>?psid=</code>, optional{" "}
+          <code>?account_id=</code>). Readable only by the Page&apos;s primary
+          receiver; <code>owner_app_id: null</code> means unknown — usually that
+          we are not primary, or the Page has never used routing. Scope{" "}
+          <code>read:channels</code>.
+        </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/conversations/:id/messenger-template">
+          Send a <strong>Messenger template</strong>. Body is one of two modes,
+          because Meta has two things called a template and they behave
+          differently:
+          <br />
+          <br />
+          <code>{`{ mode: "structured", template: { kind: "button" | "generic" | "media" | "image_grid" | "receipt" | "coupon", … } }`}</code>{" "}
+          — authored inline, no approval needed, and <strong>gated on the
+          24-hour window</strong> exactly like a text reply.
+          <br />
+          <br />
+          <code>{`{ mode: "utility", template: { templateName, languageCode, parameterFormat?, bodyParameters?, buttonParameters? } }`}</code>{" "}
+          — an <strong>approved</strong> template sent with{" "}
+          <code>messaging_type: UTILITY</code>. This is the{" "}
+          <strong>only send that reaches a customer outside the window</strong>,
+          and is deliberately not window-gated. List the available names at{" "}
+          <code>/channels/messenger/utility-templates</code>; take{" "}
+          <code>parameterFormat</code> from the template itself rather than
+          guessing from its text, and note a URL button parameter carries the{" "}
+          <em>suffix</em>, not a whole URL.
+          <br />
+          <br />
+          Meta&apos;s per-template caps are enforced and return{" "}
+          <code>invalid_template</code> with the specific reason — at most 3
+          buttons, 10 generic cards, 2-6 grid images with at most one hero, a
+          call button in E.164, Facebook-hosted media URLs only, coupon codes
+          without spaces, 100 receipt line items. Requires{" "}
+          <code>Idempotency-Key</code> like every other send. Scope{" "}
+          <code>write:messages</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/channels/messenger/personas">
+          The Page&apos;s <strong>personas</strong> — the named voices a reply can
+          be sent under, so a thread reads as &quot;Adam from Jasper&apos;s
+          Market&quot; rather than as one indistinguishable Page. Read live from
+          Meta. <code>personas: null</code> means we could not ask. Scope{" "}
+          <code>read:catalog</code>.
+        </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/channels/messenger/personas">
+          Create one. Body:{" "}
+          <code>{`{ account_id?, name, profilePictureUrl }`}</code>. Name is
+          capped at Meta&apos;s 50 characters.{" "}
+          <code>profilePictureUrl</code> must be publicly reachable{" "}
+          <em>at create time</em> and https — Meta downloads the image and
+          re-hosts it (max 8 MB), so the URL may rot afterwards without
+          consequence but a private one fails the create. Scope{" "}
+          <code>admin:settings</code>.
+        </Endpoint>
+        <Endpoint method="DELETE" path="/api/external/v1/channels/messenger/personas/:personaId">
+          <strong>Soft</strong> delete: messages the persona already sent stay in
+          the conversation history, and only future sends are blocked — so this is
+          the right call when an agent leaves. Scope <code>admin:settings</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/channels/messenger/utility-templates">
+          The Page&apos;s approved <strong>utility templates</strong> — since Meta
+          retired the <code>CONFIRMED_EVENT_UPDATE</code>,{" "}
+          <code>ACCOUNT_UPDATE</code> and <code>POST_PURCHASE_UPDATE</code> tags
+          on 2026-04-27, this is the only way to message a customer{" "}
+          <em>outside</em> the 24-hour window. Each carries its own{" "}
+          <code>parameterFormat</code> (<code>POSITIONAL</code> or{" "}
+          <code>NAMED</code>), read from Meta and never inferred from the body
+          text — a template whose copy legitimately contains{" "}
+          <code>{`{{word}}`}</code> would otherwise be misread and fail every
+          recipient. <code>templates: null</code> means we could not read them,
+          which is <strong>not</strong> the same as &quot;this Page has
+          none&quot;. Scope <code>read:catalog</code>.
+        </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/messages/:id/comment-reply">
+          Answer an Instagram comment <strong>publicly</strong> — a sub-thread
+          reply on the comment itself, visible to everyone reading the post.{" "}
+          <code>:id</code> is OUR message id for the inbound comment (the one this
+          API gave you), not Meta&apos;s comment id. Body:{" "}
+          <code>{`{ body }`}</code>; responds{" "}
+          <code>{`{ ok: true, comment_id }`}</code> with the new comment&apos;s id.
+          <br />
+          This is the complement to replying in the thread, which sends
+          Instagram&apos;s <em>private</em> reply — one per comment, within 7 days,
+          seen only by that person. A public reply has no cap and starts no
+          conversation, so it is recorded on the audit timeline rather than as an
+          outbound message: it has no recipient and does not consume the messaging
+          window. <code>422 not_a_comment</code> if the message isn&apos;t a
+          comment, <code>422 public_reply_not_supported</code> on other channels.
+          Scope <code>write:messages</code>.
+        </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/contacts/:id/spam">
+          File this contact&apos;s conversation as <strong>spam</strong> at the
+          provider — Instagram&apos;s <code>move_to_spam</code> moderation action.
+          Deliberately NOT the same as blocking: a block severs contact and sets{" "}
+          <code>blockedAt</code>, which stops every future send; this only moves
+          the existing thread out of the way in Meta Business Suite and severs
+          nothing, so no local flag is written and messaging still works. The
+          right answer for bulk junk that doesn&apos;t warrant a permanent block.
+          Channels without a provider-side spam action return{" "}
+          <code>blocking_not_supported</code>. Scope <code>write:contacts</code>.
         </Endpoint>
         <Endpoint method="POST" path="/api/external/v1/contacts/:id/unblock">
           Lift the provider block (no 24-hour constraint). The contact can
@@ -1154,20 +1368,39 @@ export default function ApiDocsPage() {
           <code>kind: &quot;location_request&quot;</code> sends the body with a
           native <strong>Send location</strong> button (no <code>options</code>{" "}
           — WhatsApp renders it); the customer&apos;s pick arrives as a normal
-          inbound location message on the thread. Also WhatsApp-only,{" "}
-          <code>kind: &quot;cta_url&quot;</code> renders one URL-opening button
-          instead of a raw link in the body — pass{" "}
+          inbound location message on the thread. <code>kind: &quot;cta_url&quot;</code>{" "}
+          renders one URL-opening button instead of a raw link in the body — pass{" "}
           <code>{`ctaUrl: { displayText (≤20), url, headerText? (≤60), footerText? (≤60) }`}</code>{" "}
-          and no <code>options</code>. And <code>kind: &quot;carousel&quot;</code>{" "}
+          and no <code>options</code>. It works on WhatsApp (interactive{" "}
+          <code>cta_url</code>) and Instagram (Meta&apos;s button template, where{" "}
+          <code>headerText</code> + body + <code>footerText</code> are folded into
+          one field capped at <strong>640 characters</strong> — over that you get{" "}
+          <code>422 message_too_long</code>); Messenger returns{" "}
+          <code>422 cta_url_not_supported</code>. And <code>kind: &quot;carousel&quot;</code>{" "}
           sends 2–10 scrollable media cards — pass{" "}
           <code>{`carouselCards: [{ headerMedia: { kind: "image"|"video", link }, body? (≤160), ctaUrl? | quickReplies? (1–3) }]`}</code>
           ; every card must use the same button type and count, and quick-reply
-          ids must be unique across the whole carousel. On Messenger &amp;
+          ids must be unique across the whole carousel.{" "}
+          <code>kind: &quot;generic&quot;</code> sends Meta&apos;s GENERIC TEMPLATE
+          on Instagram — 1–10 cards, a horizontally scrollable carousel beyond one
+          — via{" "}
+          <code>{`genericCards: [{ title (≤80), subtitle? (≤80), imageUrl?, defaultActionUrl?, buttons? }]`}</code>
+          , where each card takes 1–3 buttons of type{" "}
+          <code>web_url</code> or <code>postback</code> only (Meta supports no
+          others) and every card must carry something beyond its title.{" "}
+          <code>kind: &quot;product&quot;</code> sends the PRODUCT TEMPLATE — pass{" "}
+          <code>{`productIds: ["…"]`}</code> (1–10 ids from the Catalog API or
+          Commerce Manager); Meta draws each card from the catalog entry, so there
+          is no other content. Both are Instagram-only today and return{" "}
+          <code>422 generic_template_not_supported</code> /{" "}
+          <code>422 product_template_not_supported</code> elsewhere. On Messenger &amp;
           Instagram you can also add <code>contactShare</code> consent chips (
           <code>&quot;phone&quot;</code> / <code>&quot;email&quot;</code>) that
           let the customer share those details in one tap from their Meta
           profile — the only way a social contact&apos;s phone or email ever
-          reaches you. WhatsApp has no such chip and returns{" "}
+          reaches you. Instagram documents only the phone chip, so an{" "}
+          <code>&quot;email&quot;</code> chip is dropped there (sending it would
+          make Meta reject the whole message). WhatsApp has no such chip and returns{" "}
           <code>422 contact_share_not_supported</code>. Requires{" "}
           <code>Idempotency-Key</code>.
         </Endpoint>
@@ -1191,9 +1424,10 @@ export default function ApiDocsPage() {
           <code>400 media_not_yet_supported</code>; send media via the inbox UI for now.
           {" "}Other UI composer send types — direct media <strong>upload</strong>,{" "}
           <strong>location</strong>, <strong>contact-card</strong>,{" "}
-          <strong>reaction</strong>, and message <strong>forward</strong> — are
-          likewise roadmap and have no <code>/v1</code> endpoint yet; text,
-          template, and interactive sends have full parity.
+          <strong>reaction</strong>, <strong>sticker</strong> (Messenger), and
+          message <strong>forward</strong> — are likewise roadmap and have no{" "}
+          <code>/v1</code> endpoint yet; text, template, and interactive sends
+          have full parity.
           <br />
           <br />
           <code>variables</code> accepts every parameter shape Meta defines:{" "}

@@ -47,6 +47,12 @@ import { markConversationRead, setConversationAiEnabled } from "@/lib/conversati
 import { fillActiveTicketAssignee } from "@/lib/tickets/mutations";
 import { SendTextValidationError } from "@/lib/messaging/send-text-internal";
 import { sendInteractiveInternal } from "@/lib/messaging/send-interactive-internal";
+import {
+  personasEnabled,
+  resolvePersonaId,
+} from "@/lib/providers/messenger-persona-registry";
+import { sendMessengerTemplateInternal } from "@/lib/messaging/send-messenger-template-internal";
+import { sendStickerInternal } from "@/lib/messaging/send-sticker-internal";
 import { sendStructuredInternal } from "@/lib/messaging/send-structured-internal";
 import { sendReactionInternal } from "@/lib/messaging/send-reaction-internal";
 import {
@@ -1025,6 +1031,9 @@ export class MessagesService {
         // DEFAULT account, so a two-number workspace replied to number B's
         // customer from number A (wrong sender + no open 24h window there).
         channelConnectionId: true,
+        // Only for the persona opt-in flag — one small JSON field on a row we
+        // are already resolving, not a second query.
+        channelConnection: { select: { config: true } },
         // For the social RESPONSE-vs-Human-Agent-tag decision at send time.
         contact: { select: { lastInboundAt: true } },
       },
@@ -1242,6 +1251,29 @@ export class MessagesService {
       exists.contact?.lastInboundAt?.toISOString() ?? null,
     );
 
+    // The agent's own VOICE on this Page, minted on their first reply. Null for
+    // every non-Messenger channel, for a Page that hasn't opted in, and for an
+    // agent with no avatar — in all of which the message goes out as the Page,
+    // exactly as before. Resolved AFTER the credentials so it costs no extra
+    // round trip, and it can never fail the send (see the registry's header).
+    const personaId =
+      channel === "messenger" && personasEnabled(exists.channelConnection?.config)
+        ? await resolvePersonaId({
+            workspaceId,
+            channelConnectionId: exists.channelConnectionId ?? null,
+            userId,
+            target: {
+              accountId: (config as { pageId?: string }).pageId ?? "",
+              accessToken: (config as { pageAccessToken?: string }).pageAccessToken ?? "",
+              graphVersion: (config as { graphVersion?: string }).graphVersion ?? "v26.0",
+              label: "messenger",
+              ...((config as { appSecret?: string }).appSecret
+                ? { appSecret: (config as { appSecret?: string }).appSecret! }
+                : {}),
+            },
+          })
+        : null;
+
     let send;
     try {
       send = await binding.provider.sendText(
@@ -1250,6 +1282,7 @@ export class MessagesService {
           body,
           useHumanAgentTag,
           ...(replyToExternalId ? { replyToExternalId } : {}),
+          ...(personaId ? { personaId } : {}),
         },
         config,
       );
@@ -3179,6 +3212,8 @@ export class MessagesService {
         options: input.options,
         ...(input.ctaUrl ? { ctaUrl: input.ctaUrl } : {}),
         ...(input.carouselCards ? { carouselCards: input.carouselCards } : {}),
+        ...(input.genericCards ? { genericCards: input.genericCards } : {}),
+        ...(input.productIds ? { productIds: input.productIds } : {}),
         ...(input.listCtaLabel ? { listCtaLabel: input.listCtaLabel } : {}),
         ...(input.headerText ? { headerText: input.headerText } : {}),
         ...(input.footerText ? { footerText: input.footerText } : {}),
@@ -3282,6 +3317,74 @@ export class MessagesService {
           return { messageId: r.messageId };
         } catch (err) {
           this.throwStructuredSendError(err, "contact");
+        }
+      },
+    );
+  }
+
+  /**
+   * Outbound STICKER. Same idempotency lock as every other send: a double-tap
+   * re-POSTing one `clientTempId` returns the first result rather than sending a
+   * second sticker.
+   */
+  async sendSticker(
+    workspaceId: string,
+    userId: string,
+    input: import("./messages.schemas").SendStickerInput,
+  ): Promise<{ messageId: string }> {
+    return runWithSendIdempotency(
+      { workspaceId, userId, conversationId: input.conversationId, clientTempId: input.clientTempId },
+      async () => {
+        try {
+          const r = await sendStickerInternal({
+            workspaceId,
+            conversationId: input.conversationId,
+            stickerId: input.stickerId,
+            ...(input.imageUrl ? { imageUrl: input.imageUrl } : {}),
+            senderUserId: userId,
+            sentVia: "api/messages/sticker",
+          });
+          this.markReadOnAgentSend(workspaceId, userId, input.conversationId);
+          this.autoAssignOnAgentSend(workspaceId, userId, input.conversationId);
+          return { messageId: r.messageId };
+        } catch (err) {
+          this.throwStructuredSendError(err, "sticker");
+        }
+      },
+    );
+  }
+
+  /**
+   * Send a Messenger TEMPLATE — structured (inline) or utility (approved).
+   *
+   * Same idempotency lock as every other send. The window rule differs by mode
+   * and lives in the internal sender, which is the one place that knows why:
+   * a utility template is the only send that legitimately bypasses the 24-hour
+   * window, and gating it would make the feature pointless.
+   */
+  async sendMessengerTemplate(
+    workspaceId: string,
+    userId: string,
+    input: import("./messages.schemas").SendMessengerTemplateInput,
+  ): Promise<{ messageId: string }> {
+    return runWithSendIdempotency(
+      { workspaceId, userId, conversationId: input.conversationId, clientTempId: input.clientTempId },
+      async () => {
+        try {
+          const r = await sendMessengerTemplateInternal({
+            workspaceId,
+            conversationId: input.conversationId,
+            senderUserId: userId,
+            sentVia: "api/messages/messenger-template",
+            ...(input.mode === "structured"
+              ? { mode: "structured" as const, template: input.template }
+              : { mode: "utility" as const, template: input.template }),
+          });
+          this.markReadOnAgentSend(workspaceId, userId, input.conversationId);
+          this.autoAssignOnAgentSend(workspaceId, userId, input.conversationId);
+          return { messageId: r.messageId };
+        } catch (err) {
+          this.throwStructuredSendError(err, "template");
         }
       },
     );

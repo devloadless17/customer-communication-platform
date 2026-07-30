@@ -74,10 +74,19 @@ describe("schemas (composer + /v1 mirror)", () => {
     ).toBe(false);
   });
 
-  it("is capability-gated to WhatsApp", () => {
+  it("is capability-gated, and the capability is not a channel name", () => {
+    // WhatsApp sends `interactive.type:"cta_url"`; Instagram sends the same idea
+    // as Meta's BUTTON TEMPLATE (`template_type:"button"` + one `web_url`), with
+    // its own tighter 640-character text ceiling. Messenger stays off — its
+    // button template is documented but nothing here sends it yet, and the flag
+    // must describe what the provider actually does.
     expect(CHANNEL_CAPABILITIES.whatsapp.ctaUrlButton).toBe(true);
+    expect(CHANNEL_CAPABILITIES.instagram.ctaUrlButton).toBe(true);
+    expect(CHANNEL_CAPABILITIES.instagram.templateTextMaxChars).toBe(640);
     expect(CHANNEL_CAPABILITIES.messenger.ctaUrlButton).toBeUndefined();
-    expect(CHANNEL_CAPABILITIES.instagram.ctaUrlButton).toBeUndefined();
+    // WhatsApp's interactive cta_url has no separate template ceiling — its
+    // ordinary text cap applies, so the extra gate must not fire there.
+    expect(CHANNEL_CAPABILITIES.whatsapp.templateTextMaxChars).toBeUndefined();
   });
 });
 
@@ -144,5 +153,112 @@ describe("provider wire shape", () => {
       (interactive.action as { parameters: { display_text: string } }).parameters
         .display_text,
     ).toHaveLength(20);
+  });
+});
+
+/**
+ * Meta's structured templates — the caps that stop a template being accepted here
+ * and rejected there.
+ *
+ * Both schemas are asserted because `/v1` and the composer must agree: a template
+ * the API accepts and the UI refuses (or worse, the reverse) is a parity break
+ * CLAUDE.md §12 makes a locked rule.
+ */
+describe("generic + product templates", () => {
+  const base = { conversationId: "c1", body: "hi" };
+  const card = { title: "Welcome", subtitle: "We have hats" };
+
+  it("accepts a well-formed card set on both schemas", () => {
+    expect(
+      SendInteractiveSchema.safeParse({ ...base, kind: "generic", genericCards: [card] }).success,
+    ).toBe(true);
+    expect(
+      ExternalSendInteractiveSchema.safeParse({
+        body: base.body,
+        kind: "generic",
+        genericCards: [card],
+      }).success,
+    ).toBe(true);
+  });
+
+  it("refuses a TITLE-ONLY card — Meta renders it empty", () => {
+    // The doc requires at least one property beyond `title`. Without this the
+    // send succeeds and the customer receives a blank card.
+    for (const schema of [SendInteractiveSchema, ExternalSendInteractiveSchema]) {
+      expect(
+        schema.safeParse({ ...base, kind: "generic", genericCards: [{ title: "Only" }] }).success,
+      ).toBe(false);
+    }
+  });
+
+  it("enforces Meta's caps: 10 cards, 3 buttons, 80-char title", () => {
+    const eleven = Array.from({ length: 11 }, () => card);
+    expect(
+      SendInteractiveSchema.safeParse({ ...base, kind: "generic", genericCards: eleven }).success,
+    ).toBe(false);
+    expect(
+      SendInteractiveSchema.safeParse({
+        ...base,
+        kind: "generic",
+        genericCards: [
+          {
+            title: "t",
+            buttons: Array.from({ length: 4 }, (_, i) => ({
+              type: "web_url",
+              title: `b${i}`,
+              url: "https://example.com",
+            })),
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      SendInteractiveSchema.safeParse({
+        ...base,
+        kind: "generic",
+        genericCards: [{ title: "x".repeat(81), subtitle: "s" }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("allows only web_url / postback buttons", () => {
+    expect(
+      SendInteractiveSchema.safeParse({
+        ...base,
+        kind: "generic",
+        genericCards: [
+          { title: "t", buttons: [{ type: "phone_number", title: "Call", payload: "+1" }] },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("pairs each template kind with its own payload and refuses cross-talk", () => {
+    // productIds on a generic send (or the reverse) means the caller expected a
+    // different message than the one they would get.
+    expect(
+      SendInteractiveSchema.safeParse({ ...base, kind: "generic", productIds: ["p1"] }).success,
+    ).toBe(false);
+    expect(
+      SendInteractiveSchema.safeParse({ ...base, kind: "product", genericCards: [card] }).success,
+    ).toBe(false);
+    expect(SendInteractiveSchema.safeParse({ ...base, kind: "product" }).success).toBe(false);
+    expect(
+      SendInteractiveSchema.safeParse({ ...base, kind: "buttons", genericCards: [card] }).success,
+    ).toBe(false);
+  });
+
+  it("caps product sends at Meta's 10 elements", () => {
+    const ids = Array.from({ length: 11 }, (_, i) => `p${i}`);
+    expect(
+      SendInteractiveSchema.safeParse({ ...base, kind: "product", productIds: ids }).success,
+    ).toBe(false);
+    expect(
+      SendInteractiveSchema.safeParse({
+        ...base,
+        kind: "product",
+        productIds: ids.slice(0, 10),
+      }).success,
+    ).toBe(true);
   });
 });

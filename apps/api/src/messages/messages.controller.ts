@@ -37,6 +37,8 @@ import {
   SendInteractiveSchema,
   SendLocationSchema,
   SendMediaFormSchema,
+  SendMessengerTemplateSchema,
+  SendStickerSchema,
   SendReactionSchema,
   DismissReactionSchema,
   SendTemplateSchema,
@@ -47,6 +49,8 @@ import {
   type SendContactsInput,
   type SendInteractiveInput,
   type SendLocationInput,
+  type SendMessengerTemplateInput,
+  type SendStickerInput,
   type SendReactionInput,
   type DismissReactionInput,
   type SendMediaFormInput,
@@ -285,6 +289,28 @@ export class MessagesController {
     @Body(zBody(SendContactsSchema)) body: SendContactsInput,
   ) {
     const out = await this.messages.sendContacts(session.workspaceId, session.userId, body);
+    return { ok: true, messageId: out.messageId };
+  }
+
+  @Post("messenger-template")
+  async sendMessengerTemplate(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(SendMessengerTemplateSchema)) body: SendMessengerTemplateInput,
+  ) {
+    const out = await this.messages.sendMessengerTemplate(
+      session.workspaceId,
+      session.userId,
+      body,
+    );
+    return { ok: true, messageId: out.messageId };
+  }
+
+  @Post("sticker")
+  async sendSticker(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(SendStickerSchema)) body: SendStickerInput,
+  ) {
+    const out = await this.messages.sendSticker(session.workspaceId, session.userId, body);
     return { ok: true, messageId: out.messageId };
   }
 

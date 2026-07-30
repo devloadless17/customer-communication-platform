@@ -1358,7 +1358,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   const sendRate =
     broadcast.channel === "whatsapp"
       ? resolveSendRate(throughputLevel, isOnBusinessApp)
-      : resolveSocialSendRate();
+      : resolveSocialSendRate(broadcast.channel === "instagram" ? "instagram" : "messenger");
 
   // Cooperative cancel — operators flip the broadcast row to `canceled`
   // via POST /api/broadcasts/:id/cancel; the lanes check this flag at the
@@ -2794,9 +2794,14 @@ function isPermanentCredentialError(err: unknown): boolean {
   // reference): a policy restriction/lock (368/131031), a billing problem
   // (131042), and an unregistered number (131045/133010). Feeding them into
   // the same streak breaker pauses the run instead of burning the audience.
+  // `app_permission_required` (social code 200) is the same shape one layer up:
+  // until App Review clears pages_messaging, every recipient who isn't an admin/
+  // developer/tester of the app is refused identically. Burning a 10k audience to
+  // discover that is exactly what the breaker exists to prevent.
   return (
     code === "auth_expired" ||
     code === "account_restricted" ||
+    code === "app_permission_required" ||
     code === "billing_issue" ||
     code === "number_not_registered"
   );

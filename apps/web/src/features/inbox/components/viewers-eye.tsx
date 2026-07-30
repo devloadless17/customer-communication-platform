@@ -23,6 +23,11 @@ import type { ConversationViewer } from "@/features/inbox/contexts/conversation-
  * because the list row is `overflow-hidden` inside a virtualized scroller — a
  * CSS-only hover card would be clipped by both.
  *
+ * It rides the row's TOP line, next to the name and time — where "who else is
+ * on this" belongs — and it is deliberately NOT a filled chip: as a pill in the
+ * badge lane it was a second amber counter sitting where the flag badge lives,
+ * which read as another thing to action rather than as presence.
+ *
  * Renders nothing for an empty list, which is the overwhelmingly common case.
  */
 export function ViewersEye({
@@ -47,12 +52,26 @@ export function ViewersEye({
             and it is a passive indicator — there is nothing to click. */}
         <span
           className={cn(
-            "inline-flex h-5 shrink-0 cursor-default items-center gap-0.5 rounded-full bg-warning-bg px-1.5 text-2xs font-semibold tabular-nums text-warning-fg",
+            // Bare icon, no pill. The badge lane below (unread, flags) is for
+            // things that need HANDLING and each owns a filled chip; this is
+            // ambient presence, so it reads as a mark on the row rather than
+            // another counter competing with them.
+            //
+            // Deliberately NOT a new accent colour: the row already spends
+            // primary on "open", blue on "unread" and amber on "flagged", and a
+            // fourth hue would make all four mean less. An eye is unmistakable
+            // by shape alone, so a quiet neutral is enough — it reads on a
+            // glance down the list without shouting over the badges.
+            "inline-flex shrink-0 cursor-default items-center gap-px text-foreground/65",
             className,
           )}
         >
-          <Eye className="size-3" aria-hidden />
-          {viewers.length > 1 && viewers.length}
+          <Eye className="size-3.5" aria-hidden />
+          {viewers.length > 1 && (
+            <span className="text-3xs font-semibold leading-none tabular-nums">
+              {viewers.length}
+            </span>
+          )}
           {/* The tooltip is hover/pointer-only (this span isn't focusable — it
               lives inside the list row's button). Screen readers get the same
               sentence inline instead; `aria-label` on a plain <span> carries no

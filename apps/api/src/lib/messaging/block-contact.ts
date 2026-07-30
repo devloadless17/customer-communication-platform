@@ -4,11 +4,29 @@ import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 import { recordConversationEvent } from "@/lib/inbox/events";
 import { getProviderBinding } from "@/lib/providers";
+import {
+  NoChannelDestinationError,
+  resolveContactChannel,
+} from "@/lib/providers/channel";
+import { isPhoneChannel } from "@ccp/shared/providers/capabilities";
 import { toContactWire } from "@/lib/queries/_shared";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
 
 /**
- * Block / unblock a contact at the PROVIDER (WhatsApp Block Users API).
+ * Block / unblock a contact at the PROVIDER.
+ *
+ * Two channels have a real provider-level blocklist today, with different wires
+ * and different addresses — which is exactly why the address comes from
+ * `resolveContactChannel` rather than from `contact.phoneNumber`:
+ *
+ *   - WhatsApp: `POST|DELETE /{phone-number-id}/block_users`, addressed by phone.
+ *   - Instagram: `POST /{page-id}/moderate_conversations` with `block_user` /
+ *     `unblock_user`, addressed by IGSID (Moderate Conversations API, 2025-10-21).
+ *
+ * This path used to require a phone number outright, so an Instagram block would
+ * have failed `contact_has_no_phone` on a contact that has no phone BY DESIGN —
+ * a social contact is keyed by its opaque scoped id. The capability flag is the
+ * only gate; the destination is whatever that channel's identity is.
  *
  * The provider's blocklist is the authority — we call it FIRST and only mirror
  * the outcome onto `Contact.blockedAt` when Meta accepted it, so the local
@@ -16,9 +34,9 @@ import { workflowContactSnapshot } from "@/lib/workflows/events";
  * internals, the broadcast runner and the reply-box lock read.
  *
  * Provider constraints surfaced as typed errors (they are operator-actionable,
- * not bugs): blocking needs an inbound within the last 24h (Meta 131047), the
- * blocklist caps at 64,000 entries (139101), and Meta rate-limits bursts
- * (130429). Unblocking has no 24h window.
+ * not bugs): WhatsApp blocking needs an inbound within the last 24h (Meta
+ * 131047), the blocklist caps at 64,000 entries (139101), and Meta rate-limits
+ * bursts (130429). Unblocking has no 24h window.
  */
 
 export class BlockContactError extends Error {
@@ -27,6 +45,9 @@ export class BlockContactError extends Error {
     // The contact's channel has no provider-level blocklist (capability
     // `blockUsers` unset — everything except WhatsApp today).
     | "blocking_not_supported"
+    // The contact carries no address on its own channel at all — no phone AND no
+    // scoped id. Kept under the original key so existing API consumers and the
+    // UI's error map don't break; the message no longer says "phone".
     | "contact_has_no_phone"
     // Meta 131047: no inbound message in the last 24h, so Meta refuses the
     // block (also returned for numbers that aren't on WhatsApp at all).
@@ -81,6 +102,82 @@ function mapProviderFailure(failure: {
   );
 }
 
+/**
+ * File this contact's conversation as SPAM at the provider (Instagram
+ * `move_to_spam`).
+ *
+ * Deliberately NOT folded into `setContactBlocked`. They are different promises:
+ * a block severs contact and is mirrored onto `Contact.blockedAt`, which the send
+ * internals and the broadcast runner read as "never message this person again".
+ * Spam moves the existing thread out of Business Suite's way and severs nothing —
+ * so it writes no local flag, because there is no local behaviour that should
+ * change. Conflating them would silently start refusing sends to someone an agent
+ * only meant to tidy away.
+ *
+ * The provider is the whole effect here, so a failure throws rather than being
+ * mirrored optimistically.
+ */
+export async function markContactSpam(args: {
+  workspaceId: string;
+  contactId: string;
+  userId: string | null;
+  apiKeyId?: string | null;
+}): Promise<void> {
+  const { workspaceId, contactId } = args;
+  const row = await db.contact.findFirst({
+    where: { id: contactId, workspaceId },
+    include: { tags: { select: { id: true } } },
+  });
+  if (!row) throw new BlockContactError("contact_not_found", "contact not found");
+
+  const conversation = await db.conversation.findFirst({
+    where: { workspaceId, contactId },
+    select: { id: true, channel: true, channelConnectionId: true },
+  });
+  const channel = conversation?.channel ?? row.identityChannel;
+  const binding = getProviderBinding(channel);
+  if (!binding.provider.capabilities.moderateSpam || !binding.provider.markSpam) {
+    throw new BlockContactError(
+      "blocking_not_supported",
+      `marking a conversation as spam is not supported on ${channel}`,
+    );
+  }
+
+  let destination: string;
+  try {
+    destination = resolveContactChannel(row).to;
+  } catch (err) {
+    if (err instanceof NoChannelDestinationError) {
+      throw new BlockContactError(
+        "contact_has_no_phone",
+        "contact has no reachable address on its channel",
+      );
+    }
+    throw err;
+  }
+
+  const config = await binding.getSendConfig(workspaceId, conversation?.channelConnectionId);
+  const result = await binding.provider.markSpam(
+    [isPhoneChannel(channel) ? `+${destination}` : destination],
+    config,
+  );
+  const failure = result.failed[0];
+  if (failure) throw mapProviderFailure(failure);
+
+  // Audit only — no local mirror, because nothing local changes. The timeline is
+  // still the record of who tidied the thread away and when.
+  if (conversation) {
+    await recordConversationEvent({
+      conversationId: conversation.id,
+      workspaceId,
+      userId: args.userId,
+      apiKeyId: args.apiKeyId ?? null,
+      kind: "contact_blocked",
+      after: { contactId, action: "move_to_spam" },
+    });
+  }
+}
+
 export async function setContactBlocked(args: {
   workspaceId: string;
   contactId: string;
@@ -117,8 +214,20 @@ export async function setContactBlocked(args: {
       `blocking is not supported on ${channel}`,
     );
   }
-  if (!row.phoneNumber) {
-    throw new BlockContactError("contact_has_no_phone", "contact has no phone number");
+  // The address on THIS contact's own channel: a phone for WhatsApp, the IGSID
+  // for Instagram. `resolveContactChannel` is the single place that mapping is
+  // allowed to live (see lib/providers/channel.ts).
+  let destination: string;
+  try {
+    destination = resolveContactChannel(row).to;
+  } catch (err) {
+    if (err instanceof NoChannelDestinationError) {
+      throw new BlockContactError(
+        "contact_has_no_phone",
+        "contact has no reachable address on its channel",
+      );
+    }
+    throw err;
   }
 
   // Idempotent: re-blocking a blocked contact (or unblocking an unblocked one)
@@ -127,15 +236,17 @@ export async function setContactBlocked(args: {
     return toContactWire(row, { tagIds: row.tags.map((t) => t.id) });
   }
 
-  // Provider first, mirror second. Digits-only storage → send the `+`-prefixed
-  // form (the doc's own example shape, and the same value sends use as input).
+  // Provider first, mirror second. WhatsApp stores phones digits-only and its
+  // Block Users doc addresses them `+`-prefixed (the same value sends use as
+  // input); a social scoped id is passed through verbatim.
   const config = await binding.getSendConfig(
     workspaceId,
     conversation?.channelConnectionId,
   );
+  const user = isPhoneChannel(channel) ? `+${destination}` : destination;
   const result = blocked
-    ? await binding.provider.blockUsers([`+${row.phoneNumber}`], config)
-    : await binding.provider.unblockUsers([`+${row.phoneNumber}`], config);
+    ? await binding.provider.blockUsers([user], config)
+    : await binding.provider.unblockUsers([user], config);
   const failure = result.failed[0];
   if (failure) throw mapProviderFailure(failure);
 

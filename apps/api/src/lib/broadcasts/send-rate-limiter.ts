@@ -147,33 +147,64 @@ export function resolveSendRate(
 }
 
 /**
- * Send rate for a SOCIAL channel (Messenger / Instagram), which has nothing to do
- * with the WhatsApp throughput ladder above.
+ * Send rate for a SOCIAL channel, PER CHANNEL — Messenger and Instagram have
+ * different ceilings and must not share a number.
  *
  * `resolveSendRate` was being used for these too, and since social carries no
  * `throughput.level` it landed on the WhatsApp BASELINE of 40/s. That is the wrong
  * number for the wrong reason, and it sat exactly ON the binding limit rather than
- * under it.
+ * under it. The first fix replaced it with one social rate — better, but still
+ * one number for two channels whose limits genuinely differ.
  *
- * Meta's Page limits are a ladder of three, and the LOWEST one binds:
+ * MESSENGER. A ladder of three, and the LOWEST binds:
  *   - 300 calls/s per Page for text, links, reactions and stickers,
  *   - 10/s for audio and video,
- *   - and a ~40 messages/s Page-INBOX ceiling, past which the Page silently stops
+ *   - a ~40 messages/s Page-INBOX ceiling, past which the Page silently stops
  *     sending — the nastiest of the three because nothing errors.
+ * So 300 is a red herring; 36 keeps a margin under the 40 that actually binds.
  *
- * So 300 is a red herring for a campaign: the inbox ceiling is what actually stops
- * you, and being at 40 rather than below it means the first burst is the one that
- * finds out. Default 36 keeps a margin, mirroring how HIGH/STANDARD sit under
- * 1,000/80 for WhatsApp.
+ * INSTAGRAM. Different ceilings, and the Page-inbox rate does NOT apply:
+ *   - 100 calls/s per Instagram professional account for text, links, reactions
+ *     and stickers,
+ *   - 10/s for audio and video,
+ *   - and a high-volume ceiling of 72,000 messages (sent AND received) per
+ *     account, past which the account cannot send until volume drops.
  *
- * The 10/s audio-video tier deliberately has no branch: `Broadcast` carries only
- * `bodyText` / `templateName` and no media columns, so a social broadcast is text by
- * construction. If media broadcasts ever ship for social, this is the function that
- * needs the second rate — not the caller.
+ * Two things about that are worth stating. First, Meta's own pages DISAGREE on the
+ * per-second figure: the Messenger Platform rate-limit page says 300/s for
+ * Instagram while the Instagram Platform overview and the Graph API rate-limit
+ * reference both say 100/s. We take 100 — the lower number, from the
+ * Instagram-specific sources, on a limit whose failure mode is throttling a live
+ * campaign. Second, the 72,000 ceiling is a cumulative VOLUME, not a rate, so no
+ * token bucket can pace around it; it is a capacity fact to surface, not to smooth.
+ *
+ * The 10/s audio-video tier deliberately has no branch on either channel:
+ * `Broadcast` carries only `bodyText` / `templateName` and no media columns, so a
+ * social broadcast is text by construction. If media broadcasts ever ship for
+ * social, this is the function that needs the second rate — not the caller.
  */
-export function resolveSocialSendRate(): number {
+export function resolveSocialSendRate(channel: "messenger" | "instagram"): number {
+  // Instagram's binding per-second limit is 100/s with no inbox-rate ceiling
+  // beneath it; 80 keeps the same proportional margin Messenger's 36 keeps under
+  // its 40. Separate env keys so an operator can tune one channel without
+  // silently moving the other.
+  if (channel === "instagram") {
+    return envInt("BROADCAST_RATE_INSTAGRAM", 80, 1, 100);
+  }
   return envInt("BROADCAST_RATE_SOCIAL", 36, 1, 300);
 }
+
+/**
+ * Meta's high-volume ceiling for one Instagram professional account: "If an
+ * Instagram Professional account sends and receives more than 72,000 messages,
+ * new messages are not displayed in the Instagram Inbox and the account cannot
+ * send new messages until the volume decreases."
+ *
+ * Exported as a named constant rather than buried in a comment because it is a
+ * CAPACITY fact a campaign planner needs, and because no rate limiter can honour
+ * it — it counts cumulative volume in both directions, so pacing cannot avoid it.
+ */
+export const INSTAGRAM_HIGH_VOLUME_MESSAGE_CEILING = 72_000;
 
 /**
  * Take one send token for `accountKey`, waiting if the bucket is empty.

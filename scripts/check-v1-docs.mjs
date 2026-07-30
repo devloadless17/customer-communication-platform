@@ -70,17 +70,50 @@ function stem(path) {
   return path.split(/\/?:/)[0].replace(/^\/+|\/+$/g, "");
 }
 
-/** STRICT: the path must appear in a route-shaped context, never as prose. */
-function documented(path, text) {
-  const s = stem(path);
-  if (!s) return true;
-  const q = s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/**
+ * The LITERAL segments of a path, in order — `:params` dropped.
+ *
+ * `contacts/:id/spam` → ["contacts", "spam"]. The second one is the whole point:
+ * it is what distinguishes this route from `contacts/:id/block`, and until
+ * 2026-07-30 nothing checked it.
+ */
+function literalSegments(path) {
+  return path
+    .split("/")
+    .filter((seg) => seg && !seg.startsWith(":"));
+}
+
+/** Does one segment appear in a route-shaped context (never as prose)? */
+function segmentDocumented(seg, text) {
+  const q = seg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return [
     new RegExp(`/v1/${q}\\b`),
     new RegExp("`/" + q + "\\b"),
     new RegExp(`/${q}/:`),
-    new RegExp(`\\s/${q}\\b`),
+    new RegExp(`/${q}\\b`),
   ].some((re) => re.test(text));
+}
+
+/**
+ * STRICT: the path must appear in a route-shaped context, never as prose.
+ *
+ * EVERY literal segment is checked, not just the stem before the first `:param`.
+ *
+ * That was a real hole, found 2026-07-30 by adding `POST contacts/:id/spam` and
+ * watching the checker report "all documented". `stem()` truncates at the first
+ * param, so the route was only ever verified as `contacts` — which of course
+ * appears — and the same blindness covered every `.../:id/<verb>` route in the
+ * file. A guard whose green light does not depend on the thing it guards is
+ * worse than no guard: it is the reason nobody re-checks by hand.
+ *
+ * Item routes that add no segment of their own (`ticket-fields/:id`,
+ * `tickets/views/:viewId`) still pass on their collection's documentation, which
+ * is correct — there is nothing distinguishing left to document.
+ */
+function documented(path, text) {
+  const segments = literalSegments(path);
+  if (segments.length === 0) return true;
+  return segments.every((seg) => segmentDocumented(seg, text));
 }
 
 

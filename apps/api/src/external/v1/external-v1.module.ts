@@ -2,6 +2,8 @@ import { Module } from "@nestjs/common";
 
 import { ContactsModule } from "@/contacts/contacts.module";
 
+import { InstagramModule } from "@/workspace-settings/instagram/instagram.module";
+import { MessengerModule } from "@/workspace-settings/messenger/messenger.module";
 import { ApiIdempotencyService } from "./api-idempotency.service";
 import { ExternalV1Controller } from "./external-v1.controller";
 import { ExternalV1MessagingService } from "./external-v1-messaging.service";
@@ -74,6 +76,11 @@ import { WorkflowsModule as WorkflowsSettingsModule } from "@/workspace-settings
     // three things either way (Meta call, local status, resume the campaigns we
     // parked), and a second copy of that would drift.
     WhatsappModule,
+    // Same service the Instagram settings panel calls. Entry points live on
+    // META, not in our DB, so a second implementation here would mean /v1 and
+    // the UI could write different shapes to the same `messenger_profile` node.
+    InstagramModule,
+    MessengerModule,
   ],
   controllers: [ExternalV1Controller],
   providers: [

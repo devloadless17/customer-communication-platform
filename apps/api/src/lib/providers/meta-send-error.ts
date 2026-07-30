@@ -66,6 +66,8 @@ export type MetaErrorCode =
   | "bsuid_needs_phone"    // WA 131062 — this message type needs a PHONE, not a BSUID address
   | "calling_not_enabled"  // WA 138000/138015/138018/131055 — calling is MISCONFIGURED on this number
   | "calling_unavailable"  // WA 138013/138014 — calling not offered here / paused by Meta
+  | "thread_control_lost"  // social 2018300/2018321 — another app / Meta's own flow owns this thread
+  | "app_permission_required" // social 200 (+2018021/2018027/2018028) — app not reviewed for pages_messaging
   | "provider_rejected";   // catch-all for anything else MetaSendError-shaped
 
 /**
@@ -93,6 +95,8 @@ export const ALL_META_ERROR_CODES = [
   "bsuid_needs_phone",
   "calling_not_enabled",
   "calling_unavailable",
+  "thread_control_lost",
+  "app_permission_required",
   "duplicate_button_title",
   "call_permission_required",
   "account_restricted",
@@ -147,6 +151,30 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
   // We read code + subcode (social channels put the discriminator in subcode).
   const { code: numericCode, subcode } = extractMetaError(body);
 
+  // ── Page temporarily restricted from sending (Messenger 10 – 1893063) ────
+  //
+  // Added to Meta's Messenger common-error reference on 2026-06-25. It is the
+  // social twin of WhatsApp's 368/131031 account lock: the PAGE is under a
+  // policy enforcement, so every remaining send fails identically until the
+  // restriction lapses or an appeal succeeds. That is exactly what
+  // `account_restricted` means — and, via `isPermanentCredentialError`, it is
+  // what pauses a running broadcast instead of burning the rest of the audience
+  // on a Page that cannot send at all. Unclassified it read `provider_rejected`,
+  // which the breaker ignores.
+  //
+  // Checked BEFORE the messaging-window branch on purpose: that branch ends in a
+  // free-form body regex, and this error shares its `code: 10` — an ordering
+  // accident there would relabel a policy restriction as a closed 24h window and
+  // send the operator looking for a template they don't need.
+  if (subcode === 1893063) {
+    return {
+      code: "account_restricted",
+      message:
+        "Meta has temporarily restricted this Page from sending messages — check the Page's status in Business Suite and appeal if needed.",
+      detail,
+      httpStatus,
+    };
+  }
   // ── Messaging window closed ──────────────────────────────────────────────
   // WhatsApp 131047 (re-engagement); Messenger/IG code 10 + subcode 2018278,
   // and the 2534022 "message sent outside allowed window" variant.
@@ -166,12 +194,25 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
   // ── Recipient invalid / not reachable on this channel ────────────────────
   // WhatsApp 131026; Instagram linkage errors (page not linked to the
   // IG account, or the recipient can't be resolved).
+  //
+  // The 2534xxx family is matched on code OR SUBCODE. Meta's Messenger error
+  // reference lists 2534041 as the code–subcode PAIR "200 – 2534041 The account
+  // owner has disabled access to instagram direct messages", so a code-only test
+  // never fired for the one shape Meta actually documents — it fell through to
+  // the catch-all and reported an IG account whose owner revoked our access as an
+  // unexplained rejection. Both spellings are accepted rather than swapping,
+  // because the sibling 2534013/14/29 appear as bare codes elsewhere in the same
+  // table and Meta is not consistent about which slot it uses.
   if (
     numericCode === 131026 ||
     numericCode === 2534013 ||
     numericCode === 2534014 ||
     numericCode === 2534029 ||
-    numericCode === 2534041
+    numericCode === 2534041 ||
+    subcode === 2534013 ||
+    subcode === 2534014 ||
+    subcode === 2534029 ||
+    subcode === 2534041
   ) {
     return {
       code: "invalid_recipient",
@@ -417,6 +458,62 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
       httpStatus,
     };
   }
+  // ── Someone else owns this thread right now — social ─────────────────────
+  //
+  // Two documented Messenger errors say the same operational thing:
+  //   2018300 "Message failed to send because another app is controlling this
+  //           thread now" — the Handover Protocol / Conversation Routing.
+  //   2018321 "The chat is currently controlled by Messenger while the user is
+  //           in an automated question and answer flow. Please wait for the flow
+  //           to finish before trying again."
+  //
+  // Neither is a bad recipient, our content, or a rate limit — the same message
+  // to the same person succeeds once control comes back, which is why this gets
+  // its own code and the `retryable` bucket rather than the conservative
+  // catch-all. 2018321 in particular needs no configuration at all on our side:
+  // it fires on any Page running Meta's own in-thread automations, so an agent
+  // was seeing a bare "Rejected by Meta" for a condition that clears by itself.
+  // Meta lists both as bare numbers, so read them as either code or subcode.
+  if (
+    numericCode === 2018300 ||
+    numericCode === 2018321 ||
+    subcode === 2018300 ||
+    subcode === 2018321
+  ) {
+    return {
+      code: "thread_control_lost",
+      message:
+        numericCode === 2018321 || subcode === 2018321
+          ? "Meta's own automated flow is handling this chat right now — try again once it finishes."
+          : "Another app currently has control of this conversation — it can't be replied to from here until control returns.",
+      detail,
+      httpStatus,
+    };
+  }
+  // ── App not reviewed for messaging — social ──────────────────────────────
+  //
+  // Meta's code 200 on the Messenger/IG surface: "Cannot message users who are
+  // not admins, developers or testers of the app until pages_messaging permission
+  // is reviewed and the app is live" (subcodes 2018027/2018028, and 2018021 for
+  // the phone-matching variant). Every send to a real customer fails identically
+  // until App Review clears — so it belongs with the run-fatal family that pauses
+  // a broadcast, not with the per-recipient rejections that burn the audience.
+  //
+  // Ordering: the other documented 200 subcodes are classified ABOVE this point
+  // — 2534041 in `invalid_recipient`, 1545041 in `recipient_unavailable`, and
+  // 2018021/2018027/2018028 are this same permission case — so a 200 reaching
+  // here really is the App Review one. Adding this branch is what forced the
+  // subcode fix on `invalid_recipient` above: 2534041 had never matched, and
+  // before that fix it would have been mislabelled here.
+  if (numericCode === 200) {
+    return {
+      code: "app_permission_required",
+      message:
+        "Meta hasn't approved this app to message people who aren't its admins, developers or testers — finish App Review for pages_messaging and set the app live.",
+      detail,
+      httpStatus,
+    };
+  }
   // ── Calling ──────────────────────────────────────────────────────────────
   // Ten documented calling codes used to collapse into one opaque
   // `provider_rejected`, so an agent retried a call that could never succeed and
@@ -626,6 +723,16 @@ export function classifyMetaStatusError(code: number | null | undefined): MetaEr
     case 138009:
     case 138012:
       return "rate_limited";
+    // Social thread-control + app-review states. Neither can reach a WhatsApp
+    // status webhook today (the social channels have no error-carrying delivery
+    // webhook at all), but the doc comment above this function makes keeping the
+    // two ladders in sync the contract — an unmapped code silently degrades to
+    // `provider_rejected` and the report stops agreeing with the bubble.
+    case 2018300:
+    case 2018321:
+      return "thread_control_lost";
+    case 200:
+      return "app_permission_required";
     case 131009:
     // 131051 "Unsupported message type" — moved out of `invalid_recipient`,
     // which is the only bucket that tells the operator to delete the contact.
@@ -677,6 +784,12 @@ export function failureBucket(code: MetaErrorCode | string | null): FailureBucke
     // Calling misconfiguration is the same shape: the operator fixes the setting and
     // the identical call succeeds.
     case "calling_not_enabled":
+    // Same fix-then-retry shape on the social side: App Review clears, or thread
+    // control comes back, and the identical send to the identical person works.
+    // Explicitly NOT `permanent` — that bucket is the one that tells someone to
+    // delete a contact, and nothing is wrong with these recipients.
+    case "app_permission_required":
+    case "thread_control_lost":
       return "retryable";
     // The ONLY bucket that says "delete this contact" — reserved for a number
     // that genuinely isn't reachable.

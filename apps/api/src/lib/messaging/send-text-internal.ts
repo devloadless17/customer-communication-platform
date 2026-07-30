@@ -7,6 +7,10 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
 import { checkTextCap } from "@/lib/messaging/text-cap";
+import {
+  resolvePrivateReplyTarget,
+  type PrivateReplyTarget,
+} from "@/lib/messaging/private-reply";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { getProviderBinding } from "@/lib/providers";
 import {
@@ -72,7 +76,12 @@ export class SendTextValidationError extends Error {
     | "message_too_old"
     // The workspace blocked this contact (Block Users API) — the provider
     // rejects every send to them, so refuse up front with the reason.
-    | "contact_blocked";
+    | "contact_blocked"
+    // A Messenger template Meta would reject — too many buttons, a call button
+    // that isn't E.164, an external media URL. Its OWN code because it is the
+    // one send failure the AGENT can fix by editing the message, so the composer
+    // points at the offending field instead of showing "rejected by Meta".
+    | "invalid_template";
   detail?: string;
 
   constructor(
@@ -171,15 +180,27 @@ export async function sendTextInternal(
   // the provider's declared window; `null` means the channel has no free-form
   // window restriction (e.g. Telegram), so the check is skipped entirely.
   const windowMs = effectiveSendWindowMs(binding.provider.capabilities);
-  if (windowMs !== null) {
-    const win = computeWindowStatus(lastInboundAt, Date.now(), windowMs);
-    if (win.state === "closed" || win.state === "never") {
-      throw new SendTextValidationError(
-        "outside_24h_window",
-        "outside_24h_window",
-        closedWindowMessage(binding.provider.capabilities),
-      );
-    }
+  // INSTAGRAM PRIVATE REPLY. Someone who commented but never messaged has no
+  // window — by design, not by expiry — so the gate below would refuse the only
+  // reply Meta actually permits. Resolved BEFORE the gate, and only when the
+  // window is shut: while a real conversation is open an ordinary DM is both
+  // legal and better, and burning the single per-comment reply on it would be
+  // strictly worse.
+  let privateReply: PrivateReplyTarget | null = null;
+  const windowShut =
+    windowMs !== null &&
+    ["closed", "never"].includes(
+      computeWindowStatus(lastInboundAt, Date.now(), windowMs).state,
+    );
+  if (windowShut && binding.provider.capabilities.commentPrivateReply) {
+    privateReply = await resolvePrivateReplyTarget(args.workspaceId, conversation.id);
+  }
+  if (windowShut && !privateReply) {
+    throw new SendTextValidationError(
+      "outside_24h_window",
+      "outside_24h_window",
+      closedWindowMessage(binding.provider.capabilities),
+    );
   }
 
   // Meta social: inside the 24h free-form window Meta wants `messaging_type:
@@ -210,7 +231,12 @@ export async function sendTextInternal(
   }
 
   const send = await binding.provider.sendText(
-    { to: channel.to, body, useHumanAgentTag },
+    {
+      to: channel.to,
+      body,
+      useHumanAgentTag,
+      ...(privateReply ? { privateReplyToCommentId: privateReply.commentId } : {}),
+    },
     sendConfig,
   );
 
@@ -256,7 +282,14 @@ export async function sendTextInternal(
     rawPayload: {
       sentVia: args.sentVia,
       ...(send.heldForQualityAssessment ? { heldForQualityAssessment: true } : {}),
+      ...(privateReply ? { privateReplyToCommentId: privateReply.commentId } : {}),
     } as Prisma.InputJsonValue,
+    // Link a private reply to the COMMENT it answers. Two jobs, one column: it
+    // renders the reply under its comment in the thread, and it is how
+    // `resolvePrivateReplyTarget` knows this comment's single permitted reply is
+    // spent — without it we would offer the same comment again and Meta would
+    // reject the second attempt after we had already billed a round trip.
+    ...(privateReply ? { replyToMessageId: privateReply.commentMessageId } : {}),
     timestamp: messageTimestamp,
   });
 

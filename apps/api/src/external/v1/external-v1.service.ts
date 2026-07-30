@@ -265,6 +265,16 @@ export class ExternalV1Service {
     return this.messaging.assign(workspaceId, apiKeyId, conversationId, input, idempotencyKey);
   }
 
+  /** Send a Messenger template (structured or utility) from `/v1`. */
+  async sendMessengerTemplate(
+    workspaceId: string,
+    apiKeyId: string,
+    conversationId: string,
+    input: import("@/messages/messages.schemas").SendMessengerTemplateInput,
+  ) {
+    return this.messaging.sendMessengerTemplate(workspaceId, apiKeyId, conversationId, input);
+  }
+
   setStatus(
     workspaceId: string,
     apiKeyId: string,

@@ -9,13 +9,28 @@ import { normalizeDefaultAccount } from "@/lib/providers/normalize-default-accou
 import {
   ensurePageSubscribedToMessaging,
   getPageSubscription,
+  releasePageSubscription,
 } from "@/lib/providers/meta-page-subscription";
 import { getMetaConnection } from "@/lib/providers/meta-connection";
 import { assertChannelDisconnectConfirmed } from "@/lib/providers/assert-channel-disconnect";
 
+import { getInstagramSendConfig } from "@/lib/providers/instagram-config";
+import { instagramProvider } from "@/lib/providers/instagram";
+import { ProviderNotConfiguredError } from "@/lib/providers/config";
+import type { ChannelEntryPoints } from "@ccp/shared/providers/types";
+import {
+  channelInboxSources,
+  INBOX_SOURCES,
+  type InboxSource,
+} from "@ccp/shared/providers/capabilities";
+
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
-import type { UpdateInstagramConfigInput } from "./instagram.schemas";
+import type {
+  UpdateEntryPointsInput,
+  UpdateInboxSourcesInput,
+  UpdateInstagramConfigInput,
+} from "./instagram.schemas";
 
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v26.0";
 const GRAPH_BASE = process.env.META_GRAPH_BASE_URL || "https://graph.facebook.com";
@@ -29,6 +44,8 @@ interface InstagramChannelConfig {
   pageName?: string;
   appId?: string;
   verifyToken?: string;
+  /** Non-DM sources allowed into the inbox. Absent/empty = DMs only. */
+  inboxSources?: InboxSource[];
 }
 interface InstagramChannelSecrets {
   igAccessToken?: string;
@@ -37,6 +54,10 @@ interface InstagramChannelSecrets {
 
 /** Server→browser view for the admin connect form (never client→server). */
 export interface InstagramConfigView {
+  /** Non-DM sources currently allowed into the inbox (DMs are always on). */
+  inboxSources: InboxSource[];
+  /** Every non-DM source this channel can offer, so the UI needs no channel map. */
+  availableInboxSources: InboxSource[];
   igId: string | null;
   igUsername: string | null;
   pageId: string | null;
@@ -117,6 +138,7 @@ export class InstagramService {
           igAccessToken,
           GRAPH_VERSION,
           config.appId,
+          appSecret ?? undefined,
         );
         webhookSubscription = {
           receivesMessages: status.receivesMessages,
@@ -163,6 +185,12 @@ export class InstagramService {
     }
 
     return {
+      inboxSources: Array.isArray(config.inboxSources)
+        ? config.inboxSources.filter((v): v is InboxSource =>
+            (INBOX_SOURCES as readonly string[]).includes(v),
+          )
+        : [],
+      availableInboxSources: [...channelInboxSources(CHANNEL)],
       igId: config.igId ?? null,
       igUsername: config.igUsername ?? null,
       pageId: config.pageId ?? null,
@@ -188,29 +216,12 @@ export class InstagramService {
     // Source app-level credentials from the shared Meta App connection unless
     // overridden on this form. The Page access token is derived below.
     const meta = await getMetaConnection(workspaceId);
-    // Precedence: operator input → THIS ROW'S OWN stored secret → the shared Meta
-    // App. The middle term protects an account deliberately living on a DIFFERENT
-    // Meta app: the webhook HMAC check already tries every account's own secret for
-    // that reason, and without this any re-save silently replaced it with the shared
-    // app's — after which Meta signs that account's webhooks with a secret we no
-    // longer hold and every inbound is dropped as forged.
-    const ownSecrets = ((
-      await this.db.channelConnection.findUnique({
-        where: {
-          workspaceId_channel_externalAccountId: {
-            workspaceId,
-            channel: CHANNEL,
-            externalAccountId: pageId ?? "",
-          },
-        },
-        select: { secrets: true },
-      })
-    )?.secrets ?? {}) as InstagramChannelSecrets;
-    const ownAppSecret = this.tryDecrypt(ownSecrets.appSecret ?? null, "appSecret");
-    const appSecret = input.appSecret?.trim() || ownAppSecret || meta?.appSecret || null;
     const sourceToken = input.igAccessToken?.trim() || meta?.systemUserToken || null;
     const appId = input.appId?.trim() || meta?.appId || undefined;
-    if (!appSecret || !sourceToken) {
+    // Checked BEFORE the Graph call that resolves `igId` — that call needs the
+    // token. The app-secret half of this guard runs after, for the reason in the
+    // `ownAppSecret` note below.
+    if (!sourceToken) {
       throw new BadRequestException({
         error: "meta_not_configured",
         detail:
@@ -300,9 +311,35 @@ export class InstagramService {
         channel: CHANNEL,
         externalAccountId: igId ?? "",
       },
-      select: { config: true },
+      select: { config: true, secrets: true },
     });
     const existingConfig = (existing?.config ?? {}) as InstagramChannelConfig;
+
+    // Precedence: operator input → THIS ROW'S OWN stored secret → the shared Meta
+    // App. The middle term protects an account deliberately living on a DIFFERENT
+    // Meta app: the webhook HMAC check already tries every account's own secret for
+    // that reason, and without this any re-save silently replaced it with the shared
+    // app's — after which Meta signs that account's webhooks with a secret we no
+    // longer hold and every inbound is dropped as forged.
+    //
+    // Read HERE, keyed on `igId`, not earlier keyed on `pageId`. An Instagram row's
+    // `externalAccountId` is the IG professional-account id — that is what Meta puts
+    // in `entry[].id` on an `object:"instagram"` webhook, so it is what the row is
+    // keyed on. This lookup was copied from `messenger.service`, where the Page id
+    // IS the account key; on Instagram it matched nothing, so `ownAppSecret` was
+    // permanently null and the middle term of the precedence above did not exist.
+    // The failure it was written to prevent therefore still happened in full.
+    const ownSecrets = (existing?.secrets ?? {}) as InstagramChannelSecrets;
+    const ownAppSecret = this.tryDecrypt(ownSecrets.appSecret ?? null, "appSecret");
+    const appSecret = input.appSecret?.trim() || ownAppSecret || meta?.appSecret || null;
+    if (!appSecret) {
+      throw new BadRequestException({
+        error: "meta_not_configured",
+        detail:
+          "Set up your Meta App connection first (Settings → Meta App: App secret + system-user token), then connect the channel.",
+      });
+    }
+
     const verifyToken =
       input.verifyToken?.trim() ||
       meta?.verifyToken ||
@@ -366,6 +403,7 @@ export class InstagramService {
       tokenToStore,
       GRAPH_VERSION,
       appId,
+      appSecret,
     );
     if (!sub.ok) {
       this.logger.warn(
@@ -378,11 +416,169 @@ export class InstagramService {
     return { config: { igId, igUsername: igUsername ?? null, pageId, verifyToken } };
   }
 
+  /**
+   * Read this account's conversation entry points straight from Meta.
+   *
+   * Deliberately NOT cached or mirrored into our DB. Meta is the authority here —
+   * the ice breakers can also be edited in Business Suite, and a local copy would
+   * start lying the moment someone did. The panel reads through, writes through,
+   * and re-reads; there is no state for the two to disagree about.
+   *
+   * `null` means we could not ask (not connected, or Graph refused) — the caller
+   * renders "couldn't load" rather than an empty editor that would silently CLEAR
+   * a live configuration on its next save.
+   */
+  async getEntryPoints(
+    workspaceId: string,
+    accountId?: string,
+  ): Promise<ChannelEntryPoints | null> {
+    const read = instagramProvider.getEntryPoints;
+    if (!read) return null;
+    try {
+      const config = await getInstagramSendConfig(workspaceId, accountId ?? null);
+      return await read(config);
+    } catch (err) {
+      if (err instanceof ProviderNotConfiguredError) return null;
+      this.logger.warn(
+        `[${workspaceId}] could not read instagram entry points: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return null;
+    }
+  }
+
+  /** Replace this account's entry points. An empty list CLEARS that field. */
+  async setEntryPoints(
+    workspaceId: string,
+    input: UpdateEntryPointsInput,
+  ): Promise<ChannelEntryPoints | null> {
+    const write = instagramProvider.setEntryPoints;
+    if (!write) {
+      throw new BadRequestException({
+        error: "entry_points_not_supported",
+        detail: "This channel has no ice breakers or persistent menu.",
+      });
+    }
+    let config;
+    try {
+      config = await getInstagramSendConfig(workspaceId, input.accountId ?? null);
+    } catch (err) {
+      if (err instanceof ProviderNotConfiguredError) {
+        throw new BadRequestException({
+          error: "instagram_not_connected",
+          detail: "Connect this Instagram account before setting its entry points.",
+        });
+      }
+      throw err;
+    }
+    try {
+      await write(
+        { iceBreakers: input.iceBreakers, menuItems: input.menuItems },
+        config,
+      );
+    } catch (err) {
+      // Meta's own rejection is the useful message here (a bad URL, a missing
+      // permission) — surface it rather than a generic 500.
+      throw new BadGatewayException({
+        error: "entry_points_update_failed",
+        detail: err instanceof Error ? err.message.slice(0, 300) : String(err),
+      });
+    }
+    // Re-read rather than echo the intent: Meta silently ignores parts it will
+    // not apply, and the panel must show what is actually live.
+    return this.getEntryPoints(workspaceId, input.accountId);
+  }
+
+  /**
+   * Set which NON-DM sources one account lets into the inbox.
+   *
+   * The whole set is replaced, so an absent member is turned OFF — the caller
+   * states the desired world rather than a delta, which is the only shape a
+   * checkbox list can send without a read-modify-write race between two admins.
+   *
+   * Stored on `ChannelConnection.config` (no migration, same place every other
+   * per-account channel preference lives) and MERGED into the existing object, so
+   * this can never drop the igId/pageId/verifyToken sitting beside it.
+   */
+  async setInboxSources(
+    workspaceId: string,
+    input: UpdateInboxSourcesInput,
+  ): Promise<{ sources: InboxSource[] }> {
+    const row = await this.db.channelConnection.findFirst({
+      where: input.accountId
+        ? { id: input.accountId, workspaceId, channel: CHANNEL }
+        : { workspaceId, channel: CHANNEL, isDefault: true },
+      select: { id: true, config: true },
+    });
+    if (!row) {
+      throw new BadRequestException({
+        error: "instagram_not_connected",
+        detail: "Connect an Instagram account first.",
+      });
+    }
+    // Only sources this CHANNEL can actually offer. The schema already rejects
+    // unknown values; this rejects a known source that Instagram has no surface
+    // for, so the stored set can never promise something the gate ignores.
+    const offered = new Set(channelInboxSources(CHANNEL));
+    const sources = [...new Set(input.sources)].filter((s) => offered.has(s));
+    const config = (row.config ?? {}) as InstagramChannelConfig;
+    await this.db.channelConnection.update({
+      where: { id: row.id },
+      data: {
+        config: pruneUndefined({ ...config, inboxSources: sources }) as Prisma.InputJsonValue,
+      },
+    });
+    invalidateInstagramConfig(workspaceId);
+    return { sources };
+  }
+
   async disconnect(workspaceId: string, confirmAll?: boolean): Promise<void> {
     // Refuse an ambiguous blast radius; see the helper.
     await assertChannelDisconnectConfirmed(workspaceId, CHANNEL, confirmAll);
+    // Read before deleting — the Page id and the token both die with the row.
+    const rows = await this.db.channelConnection.findMany({
+      where: { workspaceId, channel: CHANNEL },
+      select: { config: true, secrets: true },
+    });
     await this.db.channelConnection.deleteMany({ where: { workspaceId, channel: CHANNEL } });
     invalidateInstagramConfig(workspaceId);
+    // Same gap as the Messenger channel-wide disconnect: the per-account removal
+    // path releases the Page subscription, this route never did, so Meta kept
+    // delivering a disconnected account's DMs and ingest dropped them as
+    // `unknown_account`.
+    await this.releasePages(workspaceId, rows);
     await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "channels" });
+  }
+
+  /**
+   * Best-effort `DELETE /{page-id}/subscribed_apps` for every Page this channel
+   * held. KEPT when the Messenger channel still uses that Page: the subscription
+   * is one shared union of fields across both channels (see meta-page-subscription
+   * property 1), so releasing it would take Messenger's inbound dark. Never throws.
+   */
+  private async releasePages(
+    workspaceId: string,
+    rows: { config: Prisma.JsonValue; secrets: Prisma.JsonValue }[],
+  ): Promise<void> {
+    const seen = new Set<string>();
+    for (const row of rows) {
+      const pageId = ((row.config ?? {}) as InstagramChannelConfig).pageId;
+      const cipher = ((row.secrets ?? {}) as InstagramChannelSecrets).igAccessToken;
+      if (!pageId || !cipher || seen.has(pageId)) continue;
+      seen.add(pageId);
+      const token = this.tryDecrypt(cipher, "igAccessToken");
+      if (!token) continue;
+      const stillInUse =
+        (await this.db.channelConnection.count({
+          where: { workspaceId, channel: "messenger", config: { path: ["pageId"], equals: pageId } },
+        })) > 0;
+      const res = await releasePageSubscription(pageId, token, GRAPH_VERSION, { stillInUse });
+      if (!res.ok) {
+        this.logger.warn(
+          `[${workspaceId}] could not release page subscription for page=${pageId}: ${res.error}`,
+        );
+      }
+    }
   }
 }

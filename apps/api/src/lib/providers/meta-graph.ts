@@ -151,6 +151,38 @@ export async function graphDelete(
 }
 
 /**
+ * DELETE a Graph edge with a JSON BODY.
+ *
+ * Distinct from {@link graphDelete} because a few Meta endpoints take their
+ * argument in the body of a DELETE rather than the query string — the
+ * `messenger_profile` node is the one this repo needs: its documented clear is
+ * `DELETE /{page-id}/messenger_profile` with `{"fields":["ice_breakers"]}`.
+ * Sending that as a query param silently deletes nothing.
+ */
+export async function graphDeleteJson(
+  url: string,
+  accessToken: string,
+  body: unknown,
+  appSecret?: string,
+): Promise<Record<string, unknown>> {
+  const res = await fetch(withAppsecretProof(url, accessToken, appSecret), {
+    method: "DELETE",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(GRAPH_TIMEOUT_MS),
+  });
+  const text = await res.text().catch(() => "");
+  wireOut("DELETE", redactUrl(url), body, res.status, text);
+  if (!res.ok) {
+    throw new Error(`graph DELETE ${res.status} ${redactUrl(url)}: ${text.slice(0, 500)}`);
+  }
+  return text ? (JSON.parse(text) as Record<string, unknown>) : {};
+}
+
+/**
  * POST JSON to a Graph endpoint with a Bearer token. Throws on a non-2xx with
  * a truncated body so the caller (send path) surfaces a clean error to the
  * agent instead of a cryptic Meta blob. No retry — see file header.

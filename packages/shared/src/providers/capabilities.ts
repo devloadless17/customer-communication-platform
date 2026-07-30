@@ -41,7 +41,9 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     ctaUrlButton: true,
     interactiveCarousel: true,
     // Provider-level user blocking (Block Users API on the business number).
-    // WhatsApp-only: Messenger/Instagram expose no equivalent messaging API.
+    // NOT WhatsApp-only, as this note used to claim: Instagram has had the
+    // Moderate Conversations API since 2025-10-21. Messenger still has no
+    // equivalent messaging-API blocklist.
     blockUsers: true,
     calling: true,
   },
@@ -67,6 +69,25 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     calling: false,
     profileSync: true,
     contactShareChips: true,
+    // Ice breakers + persistent menu, on the same `messenger_profile` node
+    // Instagram uses (Messenger needs no `platform=` disambiguator).
+    entryPoints: true,
+    // Get Started button + greeting + commands menu. Messenger-ONLY — Instagram's
+    // profile node rejects all three, which is why this is a separate flag from
+    // `entryPoints` rather than the same panel.
+    welcomeScreen: true,
+    // Sticker API (GA 2026-06-01): ~105 first-party packs, browse/search/send.
+    stickers: true,
+    // Handover Protocol — take / request / pass / release thread control. NOT
+    // set on Instagram: Meta replaced Handover Protocol there with Conversation
+    // Routing on 2025-10-23, and these four verbs don't describe that model.
+    threadControl: true,
+    // Inline button + generic (carousel) message templates. NOT `templates`,
+    // which means an approved catalog — Messenger's utility templates are a
+    // separate, unbuilt surface. See messenger-templates.ts.
+    structuredTemplates: true,
+    // Personas: "Adam from Jasper's Market" instead of the bare Page name.
+    personas: true,
   },
   // Instagram DM: same 24h + 7-day human-agent window as Messenger. No templates.
   // Calling stays FALSE: Meta ships NO Instagram calling API (only Messenger
@@ -88,10 +109,50 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     deliveryReceipts: false,
     typingIndicators: true,
     interactive: true,
-    // Business reactions via the unified social messaging endpoint.
+    // Business reactions via the unified social messaging endpoint. Instagram
+    // accepts exactly ONE outbound reaction value — the documented `love` heart —
+    // which `sendSocialReaction` coerces to and the composer offers alone.
     sendReaction: true,
     calling: false,
-    // Instagram media send is URL-based (payload.url), not upload/attachment_id.
+    // Provider-level blocklist: `POST /{page-id}/moderate_conversations` with
+    // `block_user` / `unblock_user` (Moderate Conversations API, 2025-10-21).
+    blockUsers: true,
+    // `move_to_spam`, the third Moderate Conversations action. Files the thread
+    // as spam in Business Suite WITHOUT severing contact — the right answer for
+    // junk that doesn't warrant a permanent block.
+    moderateSpam: true,
+    // Conversation Routing. Meta discontinued Instagram's Handover Protocol on
+    // 2025-10-23 and migrated everyone to routing, which runs on the same
+    // Page-node endpoints Messenger uses.
+    threadControl: true,
+    // Meta's structured templates. Instagram has no APPROVED-template catalog the
+    // way WhatsApp does (`templates: false` above means exactly that), but it does
+    // have these three send-time shapes, and they are core outbound here: the
+    // button template behind `cta_url`, the generic template (1-10 cards), and
+    // the product template (1-10 catalog items).
+    genericTemplate: true,
+    productTemplate: true,
+    // Public replies on the comment thread (`POST /<comment-id>/replies`) — the
+    // complement to the private reply: visible to everyone, no per-comment cap,
+    // starts no conversation.
+    publicCommentReply: true,
+    // Private replies to comments — the only send allowed to someone who has
+    // commented but never messaged (`recipient: { comment_id }`, one per
+    // comment, 7 days). Requires `instagram_manage_comments` + `pages_messaging`.
+    commentPrivateReply: true,
+    // Ice breakers (≤4) + persistent menu (≤5) on
+    // `/{page-id}/messenger_profile?platform=instagram`.
+    entryPoints: true,
+    // The single URL-opening button, sent as Meta's BUTTON TEMPLATE (`text` +
+    // one `web_url` button). Instagram has no interactive `cta_url` type the way
+    // WhatsApp does; the button template is the documented equivalent, capped at
+    // 640 characters of text and 1-3 buttons.
+    ctaUrlButton: true,
+    templateTextMaxChars: 640,
+    // Instagram media send goes out by URL (`payload.url`). Meta added
+    // `attachment_id` support on 2026-03-13 as an ALTERNATIVE for re-sending the
+    // same large image to many people; a URL send remains fully supported and is
+    // what a one-off agent reply wants, so this stays URL-based.
     mediaSendByUrl: true,
     profileSync: true,
     contactShareChips: true,
@@ -230,6 +291,136 @@ export const EPHEMERAL_CONTACT_CHANNELS: ReadonlySet<Channel> = new Set<Channel>
 
 export function isEphemeralChannel(channel: Channel): boolean {
   return EPHEMERAL_CONTACT_CHANNELS.has(channel);
+}
+
+/**
+ * Channels whose CONTACT IDENTITY is scoped to the receiving account.
+ *
+ * Meta is explicit that an Instagram-scoped ID is "specific to the person AND
+ * the Instagram account they are interacting with" — and a Messenger PSID is
+ * page-scoped the same way. The id a customer has on account A is therefore not
+ * a valid recipient for account B: Meta cannot resolve it, and the send fails.
+ *
+ * This is the opposite of WhatsApp, where a phone number is globally valid. There,
+ * messaging a contact from a second number WORKS — it just migrates thread
+ * ownership, which is a product tradeoff the broadcast composer exposes as the
+ * `includeOtherAccounts` opt-in.
+ *
+ * On a scoped-identity channel that opt-in is not a tradeoff, it is an error: it
+ * would queue a whole audience of sends that cannot succeed, burn the campaign,
+ * and fill the failure report with opaque Meta errors that look like a delivery
+ * problem rather than an impossible request. So the audience is ALWAYS the
+ * sending account's own contacts here, and the opt-in is refused rather than
+ * honoured.
+ */
+export const ACCOUNT_SCOPED_IDENTITY_CHANNELS: ReadonlySet<Channel> = new Set<Channel>([
+  "instagram",
+  "messenger",
+]);
+
+/** True when a contact's id on this channel only works for the account that issued it. */
+export function isAccountScopedIdentity(channel: Channel): boolean {
+  return ACCOUNT_SCOPED_IDENTITY_CHANNELS.has(channel);
+}
+
+/**
+ * NON-DM INBOX SOURCES — everything that can reach the inbox that is not a
+ * direct message.
+ *
+ * The product's core is DMs. A direct message IS the inbox and is never gated:
+ * it is why the channel was connected. Anything else a platform can push at us —
+ * public comments today, @mentions and review-style surfaces later — is a
+ * DIFFERENT kind of work with different reply rules, different volume, and a
+ * different answer per team. On a busy Instagram account comments outnumber DMs
+ * heavily, so a team that connected Instagram to answer messages must not have
+ * that decided for them by a deploy.
+ *
+ * So: every non-DM source is OFF until an admin turns it on, per account, and
+ * this is the list of what can be turned on. Adding a future source means adding
+ * it here and mapping it in `inboxSourceOfStructuredKind` — the gate itself, the
+ * settings UI and the `/v1` surface then pick it up with no further change.
+ */
+export const INBOX_SOURCES = ["comments"] as const;
+export type InboxSource = (typeof INBOX_SOURCES)[number];
+
+/**
+ * Which non-DM sources each channel can even offer. A channel absent here has
+ * none — its inbox is DMs and nothing else, and its settings page shows no
+ * toggles rather than an empty section.
+ *
+ * Instagram is the only one today. Messenger's Page feed comments are the
+ * obvious next entry; WhatsApp has no non-DM surface at all.
+ */
+export const CHANNEL_INBOX_SOURCES: Partial<Record<Channel, readonly InboxSource[]>> = {
+  instagram: ["comments"],
+};
+
+export function channelInboxSources(channel: Channel): readonly InboxSource[] {
+  return CHANNEL_INBOX_SOURCES[channel] ?? [];
+}
+
+/**
+ * The non-DM source a stored message came from, or null when it is an ordinary
+ * direct message.
+ *
+ * Keyed off `Message.structured.kind` because that is what actually distinguishes
+ * them on the wire — a comment rides the ordinary inbound-message shape on
+ * purpose, so it can reuse contacts, conversations, realtime and workflows with
+ * no second entity. This is the one function that knows the mapping, so the
+ * ingest gate and any future reader cannot disagree about what a source is.
+ */
+export function inboxSourceOfStructuredKind(kind: string | undefined): InboxSource | null {
+  return kind === "comment" ? "comments" : null;
+}
+
+/**
+ * Meta's private-reply window: "within 7 days from when the comment was created".
+ */
+export const COMMENT_PRIVATE_REPLY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** The minimum a caller must know about a thread message to answer this. */
+export interface PrivateReplyCandidate {
+  id: string;
+  direction: "in" | "out";
+  /** ISO instant. */
+  timestamp: string;
+  structuredKind?: string;
+  /** For outbound: the message id it answers. */
+  replyToMessageId?: string | null;
+}
+
+/**
+ * Is there a comment on this thread we may still answer PRIVATELY?
+ *
+ * The rule, straight from Meta: a comment grants exactly ONE reply addressed at
+ * the comment, within 7 days, and no 24-hour conversation until the person
+ * answers it. So an agent looking at a comment-only thread is not "outside the
+ * window" — there is no window yet, and refusing to let them type would make the
+ * one legal reply unreachable.
+ *
+ * Shared because BOTH ends need the same answer and must not drift: the server
+ * resolves the actual comment to address (against every message, from the DB),
+ * and the composer decides whether to unlock (against the messages it has
+ * loaded). The server stays authoritative — it re-resolves before sending and
+ * refuses if the comment is spent — so the client being optimistic on a partial
+ * page costs at worst the error the agent would have got anyway.
+ */
+export function hasAnswerableComment(
+  messages: readonly PrivateReplyCandidate[],
+  now: number = Date.now(),
+): boolean {
+  const answered = new Set(
+    messages.flatMap((m) =>
+      m.direction === "out" && m.replyToMessageId ? [m.replyToMessageId] : [],
+    ),
+  );
+  return messages.some(
+    (m) =>
+      m.direction === "in" &&
+      inboxSourceOfStructuredKind(m.structuredKind) === "comments" &&
+      !answered.has(m.id) &&
+      now - new Date(m.timestamp).getTime() <= COMMENT_PRIVATE_REPLY_WINDOW_MS,
+  );
 }
 
 /**

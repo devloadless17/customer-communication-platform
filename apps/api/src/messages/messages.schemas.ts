@@ -227,7 +227,15 @@ export const SendInteractiveSchema = z
     // options, so `options` is optional and must stay EMPTY for it (refined
     // below); buttons/list keep requiring at least one. `cta_url` likewise:
     // one vendor-drawn URL button, configured via `ctaUrl` below.
-    kind: z.enum(["buttons", "list", "location_request", "cta_url", "carousel"]),
+    kind: z.enum([
+      "buttons",
+      "list",
+      "location_request",
+      "cta_url",
+      "carousel",
+      "generic",
+      "product",
+    ]),
     options: z
       .array(
         z.object({
@@ -250,6 +258,68 @@ export const SendInteractiveSchema = z
         footerText: z.string().trim().min(1).max(60).optional(),
       })
       .optional(),
+    // `generic` only — Meta's GENERIC TEMPLATE: 1-10 cards (a carousel beyond
+    // one). Per the reference: `title` 80 chars, `subtitle` 80, at most 3
+    // buttons per card, and "Only postback and web_url buttons are supported".
+    // Meta also requires at least one property BEYOND `title` — a title-only
+    // card renders empty — so that is refined rather than left to produce a
+    // useless bubble.
+    genericCards: z
+      .array(
+        z
+          .object({
+            title: z.string().trim().min(1).max(80),
+            subtitle: z.string().trim().min(1).max(80).optional(),
+            imageUrl: z
+              .string()
+              .trim()
+              .url()
+              .max(2048)
+              .regex(/^https?:\/\//i, "must be http(s)")
+              .optional(),
+            defaultActionUrl: z
+              .string()
+              .trim()
+              .url()
+              .max(2000)
+              .regex(/^https?:\/\//i, "must be http(s)")
+              .optional(),
+            buttons: z
+              .array(
+                z.discriminatedUnion("type", [
+                  z.object({
+                    type: z.literal("web_url"),
+                    title: z.string().trim().min(1).max(20),
+                    url: z
+                      .string()
+                      .trim()
+                      .url()
+                      .max(2000)
+                      .regex(/^https?:\/\//i, "must be http(s)"),
+                  }),
+                  z.object({
+                    type: z.literal("postback"),
+                    title: z.string().trim().min(1).max(20),
+                    payload: z.string().trim().min(1).max(1000),
+                  }),
+                ]),
+              )
+              .min(1)
+              .max(3)
+              .optional(),
+          })
+          .refine(
+            (c) => Boolean(c.subtitle || c.imageUrl || c.defaultActionUrl || c.buttons?.length),
+            { message: "a card needs more than a title (subtitle, image, link or buttons)" },
+          ),
+      )
+      .min(1)
+      .max(10)
+      .optional(),
+    // `product` only — 1-10 catalog product ids (Catalog API / Commerce
+    // Manager). Meta draws the card from the catalog entry, so there is nothing
+    // else to send.
+    productIds: z.array(z.string().trim().min(1).max(200)).min(1).max(10).optional(),
     listCtaLabel: z.string().min(1).max(20).optional(),
     // `carousel` only — 2-10 media cards (interactive-carousel doc). Card
     // rules: image/video header LINK required (Meta fetches it); body ≤160
@@ -339,12 +409,29 @@ export const SendInteractiveSchema = z
     (b) => b.kind !== "list" || b.options.every((o) => o.id.length <= 200),
     { message: "list row ids are limited to 200 characters (button ids allow 256)" },
   )
-  .refine((b) => ["location_request", "cta_url", "carousel"].includes(b.kind) || b.options.length >= 1, {
-    message: "at least one option is required",
-  })
-  .refine((b) => !["location_request", "cta_url", "carousel"].includes(b.kind) || b.options.length === 0, {
-    message: "this kind carries no options — WhatsApp renders the button",
-  })
+  // The kinds that carry NO authored options: the vendor draws the affordance
+  // (location_request), or the content lives in a dedicated field (cta_url,
+  // carousel, generic, product). Adding a kind without listing it here rejects
+  // every send of it with "at least one option is required" — which is exactly
+  // what happened to `generic`/`product` until a schema test caught it, because
+  // the provider-level tests bypass this gate entirely.
+  .refine(
+    (b) =>
+      ["location_request", "cta_url", "carousel", "generic", "product"].includes(b.kind) ||
+      b.options.length >= 1,
+    {
+      message: "at least one option is required",
+    },
+  )
+  .refine(
+    (b) =>
+      !["location_request", "cta_url", "carousel", "generic", "product"].includes(b.kind) ||
+      b.options.length === 0,
+    {
+      message:
+        "this kind carries no options — the vendor or a dedicated field supplies the content",
+    },
+  )
   .refine(
     // LIST row ids cap at 200 (interactive-list-messages doc) vs 256 for
     // button reply ids. Enforced at authoring time — the provider refuses to
@@ -385,6 +472,18 @@ export const SendInteractiveSchema = z
     },
     { message: "quick-reply ids must be unique across all cards", },
   )
+  .refine((b) => b.kind !== "generic" || b.genericCards !== undefined, {
+    message: "generic requires genericCards",
+  })
+  .refine((b) => b.kind === "generic" || b.genericCards === undefined, {
+    message: "genericCards is only valid with kind generic",
+  })
+  .refine((b) => b.kind !== "product" || b.productIds !== undefined, {
+    message: "product requires productIds",
+  })
+  .refine((b) => b.kind === "product" || b.productIds === undefined, {
+    message: "productIds is only valid with kind product",
+  })
   .refine((b) => b.kind !== "cta_url" || b.ctaUrl !== undefined, {
     message: "cta_url requires ctaUrl { displayText, url }",
   })
@@ -463,3 +562,221 @@ export const ForwardMessagesSchema = z
     },
   );
 export type ForwardMessagesInput = z.infer<typeof ForwardMessagesSchema>;
+
+/**
+ * POST /api/messages/sticker — send a first-party sticker.
+ *
+ * `imageUrl` is the catalog image. It is OPTIONAL and is only used to capture
+ * the picture into R2 at send time; the send itself needs nothing but the id.
+ * Restricted to Meta's own CDN host because it is fetched server-side — an
+ * arbitrary caller-supplied URL here would be a request-forgery vector even with
+ * the SSRF gate behind it, and there is no legitimate reason for a sticker image
+ * to live anywhere else.
+ */
+export const SendStickerSchema = z.object({
+  conversationId: z.string().trim().min(1),
+  stickerId: z.string().trim().min(1).max(64).regex(/^\d+$/, "sticker ids are numeric"),
+  imageUrl: z
+    .string()
+    .trim()
+    .url()
+    .refine(
+      (u) => {
+        try {
+          const host = new URL(u).hostname;
+          return host.endsWith(".fbcdn.net") || host.endsWith(".facebook.com");
+        } catch {
+          return false;
+        }
+      },
+      { message: "must be a Meta CDN url" },
+    )
+    .optional(),
+  clientTempId: z.string().trim().min(1).max(128).optional(),
+});
+export type SendStickerInput = z.infer<typeof SendStickerSchema>;
+
+/**
+ * POST /api/messages/messenger-template — send a Messenger template.
+ *
+ * TWO modes, because Meta has two things called a template and they behave
+ * differently:
+ *
+ *   structured — authored inline, no approval, window-gated like a text reply.
+ *   utility    — an APPROVED template, sent with `messaging_type: "UTILITY"`.
+ *                The ONLY send that reaches a customer outside the 24-hour
+ *                window since Meta retired the three update tags on 2026-04-27.
+ *
+ * The per-template caps (button counts, E.164 call buttons, 2-6 grid images,
+ * Facebook-only media URLs, spaceless coupon codes) are enforced by the payload
+ * builder, which owns them next to the doc quotes they come from — validating
+ * them a second time here would be two copies of Meta's rules that can drift.
+ * The schema's job is shape, not policy.
+ */
+const MessengerButtonSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("web_url"),
+    title: z.string().trim().min(1),
+    url: z.string().trim().url(),
+    webviewHeightRatio: z.enum(["compact", "tall", "full"]).optional(),
+    messengerExtensions: z.boolean().optional(),
+    fallbackUrl: z.string().trim().url().optional(),
+    hideShareButton: z.boolean().optional(),
+  }),
+  z.object({
+    type: z.literal("postback"),
+    title: z.string().trim().min(1),
+    payload: z.string().trim().min(1),
+  }),
+  z.object({
+    type: z.literal("phone_number"),
+    title: z.string().trim().min(1),
+    payload: z.string().trim().min(1),
+  }),
+]);
+
+const MessengerStructuredTemplateSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("button"),
+    text: z.string().trim().min(1),
+    buttons: z.array(MessengerButtonSchema).min(1),
+  }),
+  z.object({
+    kind: z.literal("generic"),
+    elements: z
+      .array(
+        z.object({
+          title: z.string().trim().min(1),
+          subtitle: z.string().trim().optional(),
+          imageUrl: z.string().trim().url().optional(),
+          defaultActionUrl: z.string().trim().url().optional(),
+          buttons: z.array(MessengerButtonSchema).optional(),
+        }),
+      )
+      .min(1),
+    sharable: z.boolean().optional(),
+  }),
+  z.object({
+    kind: z.literal("media"),
+    mediaType: z.enum(["image", "video"]),
+    attachmentId: z.string().trim().min(1).optional(),
+    url: z.string().trim().url().optional(),
+    buttons: z.array(MessengerButtonSchema).optional(),
+  }),
+  z.object({
+    kind: z.literal("image_grid"),
+    images: z
+      .array(
+        z.object({
+          url: z.string().trim().url(),
+          isHeroImage: z.boolean().optional(),
+          action: z
+            .discriminatedUnion("type", [
+              z.object({ type: z.literal("web_url"), url: z.string().trim().url() }),
+              z.object({
+                type: z.literal("postback"),
+                payload: z.string().trim().min(1),
+                // Required by Meta: it is what gets posted into the thread as the
+                // recipient's reply, so without it the tap looks inert.
+                text: z.string().trim().min(1),
+              }),
+            ])
+            .optional(),
+        }),
+      )
+      .min(2)
+      .max(6),
+    title: z.string().trim().optional(),
+    subtitle: z.string().trim().optional(),
+    buttons: z.array(MessengerButtonSchema).optional(),
+  }),
+  z.object({
+    kind: z.literal("receipt"),
+    recipientName: z.string().trim().min(1),
+    orderNumber: z.string().trim().min(1),
+    currency: z.string().trim().min(1),
+    paymentMethod: z.string().trim().min(1),
+    summary: z.object({
+      subtotal: z.number().optional(),
+      shippingCost: z.number().optional(),
+      totalTax: z.number().optional(),
+      totalCost: z.number(),
+    }),
+    merchantName: z.string().trim().optional(),
+    orderUrl: z.string().trim().url().optional(),
+    orderedAt: z.coerce.date().optional(),
+    elements: z
+      .array(
+        z.object({
+          title: z.string().trim().min(1),
+          subtitle: z.string().trim().optional(),
+          quantity: z.number().optional(),
+          price: z.number(),
+          currency: z.string().trim().optional(),
+          imageUrl: z.string().trim().url().optional(),
+        }),
+      )
+      .max(100)
+      .optional(),
+    address: z
+      .object({
+        street1: z.string().trim().min(1),
+        street2: z.string().trim().optional(),
+        city: z.string().trim().min(1),
+        postalCode: z.string().trim().min(1),
+        state: z.string().trim().min(1),
+        country: z.string().trim().min(1),
+      })
+      .optional(),
+    adjustments: z
+      .array(z.object({ name: z.string().trim().min(1), amount: z.number() }))
+      .optional(),
+    sharable: z.boolean().optional(),
+  }),
+  z.object({
+    kind: z.literal("coupon"),
+    title: z.string().trim().min(1),
+    subtitle: z.string().trim().optional(),
+    couponCode: z.string().trim().optional(),
+    couponUrl: z.string().trim().url().optional(),
+    couponUrlButtonTitle: z.string().trim().optional(),
+    couponPreMessage: z.string().trim().optional(),
+    imageUrl: z.string().trim().url().optional(),
+    payload: z.string().trim().optional(),
+  }),
+]);
+
+export const SendMessengerTemplateSchema = z.union([
+  z.object({
+    conversationId: z.string().trim().min(1),
+    mode: z.literal("structured"),
+    template: MessengerStructuredTemplateSchema,
+    clientTempId: z.string().trim().min(1).max(128).optional(),
+  }),
+  z.object({
+    conversationId: z.string().trim().min(1),
+    mode: z.literal("utility"),
+    template: z.object({
+      templateName: z.string().trim().min(1),
+      languageCode: z.string().trim().min(2).max(10),
+      // Read from the TEMPLATE, never inferred from its body text — a template
+      // whose copy contains a literal {{word}} would otherwise be misread as
+      // NAMED and fail every recipient.
+      parameterFormat: z.enum(["POSITIONAL", "NAMED"]).optional(),
+      bodyParameters: z
+        .array(z.object({ text: z.string(), name: z.string().trim().optional() }))
+        .optional(),
+      buttonParameters: z
+        .array(
+          z.discriminatedUnion("type", [
+            z.object({ type: z.literal("POSTBACK"), payload: z.string().trim().min(1) }),
+            // The SUFFIX substituted into the template's own URL, not a full URL.
+            z.object({ type: z.literal("URL"), urlSuffix: z.string().trim().min(1) }),
+          ]),
+        )
+        .optional(),
+    }),
+    clientTempId: z.string().trim().min(1).max(128).optional(),
+  }),
+]);
+export type SendMessengerTemplateInput = z.infer<typeof SendMessengerTemplateSchema>;

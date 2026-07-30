@@ -83,8 +83,12 @@ function reactionGlyph(raw: string): string {
 }
 
 function AdAttributionChip({ attribution }: { attribution: MessageAttribution }) {
-  const label =
-    attribution.source === "post"
+  // A `productId` means an Instagram Shop product referral — the customer opened
+  // this thread from a product, which is a materially different lead than "your
+  // post" and is the single most useful thing an agent can know before replying.
+  const label = attribution.productId
+    ? "From a shop product"
+    : attribution.source === "post"
       ? "From your post"
       : attribution.source === "ref"
         ? "From a link"

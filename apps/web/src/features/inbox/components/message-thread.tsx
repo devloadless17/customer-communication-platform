@@ -516,6 +516,23 @@ function MessageThreadImpl({
   );
   const { conversation, contact, assignedUser, messages, notes } = data;
 
+  // Just enough of the thread for the composer's private-reply rule (see
+  // `hasAnswerableComment`). Projected here rather than handing the composer the
+  // whole message list: a second full copy would be one more thing that can go
+  // stale against what is actually rendered, and this recomputes only when the
+  // messages do.
+  const privateReplyCandidates = useMemo(
+    () =>
+      messages.map((m) => ({
+        id: m.id,
+        direction: m.direction,
+        timestamp: m.timestamp,
+        ...(m.structured?.kind ? { structuredKind: m.structured.kind } : {}),
+        ...(m.replyToMessageId ? { replyToMessageId: m.replyToMessageId } : {}),
+      })),
+    [messages],
+  );
+
   // Stable reference: `data.events ?? []` would allocate a fresh array on every
   // render when events is nullish, making the timeline useMemo below recompute
   // each pass. Memo on `data.events` so it only changes when events actually do.
@@ -2036,6 +2053,7 @@ function MessageThreadImpl({
             onOptimisticFail={markOptimisticFailed}
             onOptimisticRetry={removeOptimistic}
             prefill={composerPrefill}
+            privateReplyCandidates={privateReplyCandidates}
           />
         </div>
       )}
