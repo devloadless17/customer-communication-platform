@@ -1382,12 +1382,36 @@ export async function checkSocialCallPermission(
   const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messenger_call_permissions?psid=${encodeURIComponent(psid)}`;
   const res = await graphGetJson(url, opts.accessToken, { retry: true });
   const permission = (res.permission ?? {}) as { status?: string; expiration_time?: number };
-  const actions = Array.isArray(res.actions) ? (res.actions as Array<{ action_name?: string; can_perform?: boolean }>) : [];
-  const can = (name: string) => actions.find((a) => a.action_name === name)?.can_perform === true;
+  // The field is `can_perform_action`, NOT `can_perform`. This read used to be the
+  // short spelling, which is present on no documented response — so both flags were
+  // hard-false for every consumer, permanently. `can_perform` is kept only as a
+  // tolerated alias.
+  //
+  // The WhatsApp twin of this resolver (`getCallPermission` in meta.ts) has always
+  // had the right key; the two copies of one lookup drifted. Latent today only
+  // because `CHANNEL_CAPABILITIES.messenger.calling` is false — this must be
+  // correct before that flag is flipped.
+  const actions = Array.isArray(res.actions)
+    ? (res.actions as Array<{
+        action_name?: string;
+        can_perform_action?: boolean;
+        can_perform?: boolean;
+      }>)
+    : [];
+  const action = (name: string) => actions.find((a) => a.action_name === name);
+  // Mirror the WhatsApp side's fail-OPEN default. `=== true` made an ABSENT action
+  // entry indistinguishable from an explicit denial, which is the wrong direction:
+  // Meta omits the array in responses where the action is simply unconstrained, and
+  // treating that as "you may not call" hides the affordance with no way to recover.
+  const can = (name: string, fallback: boolean) => {
+    const a = action(name);
+    return a?.can_perform_action ?? a?.can_perform ?? fallback;
+  };
+  const status = permission.status;
   return {
-    hasPermission: permission.status === "has_permission",
-    canStartCall: can("start_call"),
-    canRequestPermission: can("send_call_permission_request"),
+    hasPermission: status === "has_permission",
+    canStartCall: can("start_call", status === "has_permission"),
+    canRequestPermission: can("send_call_permission_request", true),
     expiresAt: typeof permission.expiration_time === "number" ? new Date(permission.expiration_time * 1000) : null,
   };
 }

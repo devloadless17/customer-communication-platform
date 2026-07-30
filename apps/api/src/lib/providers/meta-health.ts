@@ -595,6 +595,31 @@ export async function persistWhatsappHealth(
         data: { ...wabaScoped, messagingHealthUpdatedAt: new Date() },
       });
       wrote ||= res.count > 0;
+      if (res.count === 0) {
+        // Matched NOTHING despite having a scope to write to. The common cause is
+        // a WABA that holds ZERO phone numbers — Embedded Signup's
+        // `FINISH_ONLY_WABA` is a completed onboarding with no number, and its
+        // template and account webhooks start arriving immediately. Every
+        // WABA-scoped enforcement field is denormalized onto `ChannelConnection`
+        // rows, so with no rows there is nowhere for the restriction to land.
+        //
+        // This used to be silent: `wrote` stayed false and the `else` warn below
+        // could not fire, because it is gated on `wabaId` being ABSENT and here it
+        // is present. So an ACCOUNT_RESTRICTION / DISABLED_UPDATE /
+        // ACCOUNT_VIOLATION for such a WABA was discarded with no DB row and no
+        // log line, and a number later added under it was born looking healthy
+        // while Meta was already refusing its sends.
+        //
+        // Warning rather than persisting is deliberate for now: giving these
+        // fields their true home is a column move onto `WhatsappBusinessAccount`,
+        // i.e. a schema change. Until then the loss is at least visible.
+        console.warn(
+          `[whatsapp-health] account-level fields matched NO connection ` +
+            `(${Object.keys(wabaScoped).join(", ")}) for team=${workspaceId}` +
+            `${wabaId ? ` waba=${wabaId}` : ""} — the WABA has no phone number rows ` +
+            `to hold them (FINISH_ONLY_WABA), so this enforcement state is LOST`,
+        );
+      }
     } else {
       console.warn(
         `[whatsapp-health] dropped unattributable account-level fields ` +

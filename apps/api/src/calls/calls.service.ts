@@ -92,6 +92,11 @@ export type InitiateCallFailure =
   // or a low pickup rate). Distinct from rate_limited, which is per-customer:
   // this blocks every call until it lifts.
   | { ok: false; reason: "calling_restricted"; retryAt: string }
+  // Coexistence: the number is in use with BOTH the WhatsApp Business app and
+  // Cloud API, and Meta's feature table lists voice/video calls as unsupported for
+  // that configuration. Permanent for as long as the number stays on the business
+  // app — no retryAt, because nothing lapses.
+  | { ok: false; reason: "calling_unsupported_coexistence" }
   | { ok: false; reason: "daily_cap_reached" }
   | { ok: false; reason: "provider_not_configured" }
   | { ok: false; reason: "provider_rejected" };
@@ -264,8 +269,22 @@ export class CallsService {
       where: conversation.channelConnectionId
         ? { id: conversation.channelConnectionId, workspaceId: session.workspaceId }
         : { workspaceId: session.workspaceId, channel: channelForCall, isDefault: true },
-      select: { callingRestrictedUntil: true, callingRestrictionType: true },
+      select: {
+        callingRestrictedUntil: true,
+        callingRestrictionType: true,
+        isOnBusinessApp: true,
+      },
     });
+    // A Coexistence number cannot call at all. Meta's business-app feature table
+    // lists "Voice and video calls" as NOT supported on Cloud API for a number in
+    // use with both the WhatsApp Business app and Cloud API. Nothing checked this:
+    // `isOnBusinessApp` was read only by the rate limiter and the health sweeper,
+    // so an agent on such a number got a Call button that always failed — and a
+    // call-permission request is a BILLED template send, so the failure cost money
+    // for a capability that cannot exist.
+    if (restriction?.isOnBusinessApp) {
+      return { ok: false, reason: "calling_unsupported_coexistence" };
+    }
     // Only a restriction that pauses OUR direction blocks here. Meta pauses
     // each direction independently: RESTRICTED_USER_INITIATED_CALLING (and the
     // low-pickup _CALL_BUTTON_HIDDEN variant) stop inbound calls + the call
@@ -273,11 +292,22 @@ export class CallsService {
     // one would tighten beyond Meta's own rule. Unknown/legacy types (null,
     // or anything not clearly user-initiated-only) still block, matching the
     // conservative behavior this gate always had.
+    //
+    // BEWARE the prefix split in Meta's own enum: the restriction that blocks BOTH
+    // directions is spelled `RESTRICTED_BIZ_INITIATED_AND_USER_INITIATED_CALLING`
+    // ("Business cannot make or receive calls"), while the outbound-only one is
+    // `RESTRICTED_BUSINESS_INITIATED_CALLING`. Matching only "BUSINESS_INITIATED"
+    // meant the combined form satisfied neither clause — it contains
+    // "USER_INITIATED" so it looked inbound-only — and outbound calls sailed
+    // through a restriction Meta applies to both directions. Check both spellings.
     const restrictionType = restriction?.callingRestrictionType;
+    const blocksOutboundExplicitly =
+      restrictionType?.includes("BIZ_INITIATED") ||
+      restrictionType?.includes("BUSINESS_INITIATED");
     const pausesOutbound =
       !restrictionType ||
       !restrictionType.includes("USER_INITIATED") ||
-      restrictionType.includes("BUSINESS_INITIATED");
+      Boolean(blocksOutboundExplicitly);
     if (
       pausesOutbound &&
       restriction?.callingRestrictedUntil &&
