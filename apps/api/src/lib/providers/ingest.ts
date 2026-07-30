@@ -94,10 +94,20 @@ export async function ingestEvents(
   channel: Channel,
   events: NormalizedEvent[],
   /**
-   * The ChannelConnection that RECEIVED this batch. Stamped onto the
+   * The ChannelConnection that RECEIVED these events. Stamped onto the
    * conversation so replies go back out the same account — re-stamped on every
    * inbound, because a customer who messages a different number of yours has
    * moved the live thread (and its 24h window) to THAT account.
+   *
+   * ONE account for the whole array, so callers MUST partition a webhook batch
+   * first — `groupEventsByInboundAccount` — and call once per group. Meta batches
+   * changes for several of a workspace's accounts into a single POST, and passing
+   * one account for a mixed batch re-pointed the sibling's threads at the wrong
+   * number.
+   *
+   * `undefined`/null means the events name no receiving account: WhatsApp's
+   * account-level notification class, whose subject each branch below resolves
+   * per-event from the payload's own hints.
    */
   channelConnectionId?: string | null,
 ): Promise<void> {
@@ -202,14 +212,20 @@ export async function ingestEvents(
         // Display-name review concluded. Resolve WHICH number the same way
         // channel-health does; an unresolvable update is dropped with a warn
         // rather than stamped on an arbitrary sibling.
+        // Payload hints FIRST, the arriving account only as a fallback. Each
+        // hint (an exact display number, or a WABA holding exactly one of our
+        // numbers) names this event's own subject, which is strictly more
+        // specific than "the account this group arrived on". With the old order
+        // a POST batching a `messages` change together with a name update wrote
+        // the MESSAGE's number as the name-update subject.
         const nameTarget =
-          channelConnectionId ??
           (await resolveWhatsappHealthAccount(workspaceId, {
             ...(evt.displayPhoneNumber
               ? { displayPhoneNumber: evt.displayPhoneNumber }
               : {}),
             ...(evt.wabaId ? { wabaId: evt.wabaId } : {}),
-          }));
+          })) ??
+          channelConnectionId;
         if (nameTarget) {
           // Meta's DECISION vocabulary (phone-number-name-update reference:
           // APPROVED | REJECTED | PENDING | DEFERRED) maps onto name_status's
@@ -251,6 +267,33 @@ export async function ingestEvents(
                     } as Prisma.InputJsonValue,
                   }
                 : {}),
+              // An APPROVAL is not the end of the flow, which is the part that is
+              // easy to miss. Meta's display-name doc: "After the display name
+              // change is approved, you must re-register the phone number… Wait for
+              // the phone_number_name_update webhook with decision set to APPROVED.
+              // Call POST /<PHONE_NUMBER_ID>/register." Until that happens the new
+              // name is approved but NOT live on WhatsApp — and the operator has no
+              // way to know, because every surface we render says APPROVED.
+              //
+              // Worse, it expires: "you have 14 days to re-register… If the 14-day
+              // window expires without re-registration, you must submit the display
+              // name for review again." So this is a deadline, not a nicety. Stamped
+              // as the account alert (same slot as a rejection) so the settings
+              // panel shows it beside the number, next to the Register action that
+              // completes it.
+              ...(approved
+                ? {
+                    lastAccountAlert: {
+                      source: "phone_number_name_update",
+                      event: "APPROVED_PENDING_REREGISTER",
+                      detail:
+                        `Display name "${evt.requestedVerifiedName ?? "(unknown)"}" was APPROVED, but it is ` +
+                        `not live until this number is re-registered. Re-register it within 14 days — after ` +
+                        `that the name has to go through review again.`,
+                      observedAt: new Date().toISOString(),
+                    } as Prisma.InputJsonValue,
+                  }
+                : {}),
             },
           });
         } else {
@@ -267,15 +310,18 @@ export async function ingestEvents(
         // exactly one of our numbers) before persisting. An unresolvable
         // per-number signal is dropped inside persistWhatsappHealth rather
         // than stamped onto an arbitrary sibling.
+        // Hints FIRST (same reasoning as number_name_update above): a mixed
+        // batch used to write number B's quality/tier onto number A because the
+        // arriving account short-circuited this lookup.
         const healthTarget =
-          channelConnectionId ??
           (await resolveWhatsappHealthAccount(workspaceId, {
             ...(evt.phoneNumberId ? { phoneNumberId: evt.phoneNumberId } : {}),
             ...(evt.displayPhoneNumber
               ? { displayPhoneNumber: evt.displayPhoneNumber }
               : {}),
             ...(evt.wabaId ? { wabaId: evt.wabaId } : {}),
-          }));
+          })) ??
+          channelConnectionId;
         await persistWhatsappHealth(workspaceId, {
           ...(evt.messagingTier !== undefined ? { messagingTier: evt.messagingTier } : {}),
           ...(evt.qualityRating !== undefined ? { qualityRating: evt.qualityRating } : {}),
@@ -1234,42 +1280,41 @@ async function ingestTemplateStatusUpdate(
   // Prefer matching on Meta's template id (externalId); fall back to the
   // natural (name, language) key. Build the narrowest WHERE we can.
   const where: Prisma.MessageTemplateWhereInput = { workspaceId };
-  // Templates are WABA-scoped, and two WABAs in one workspace can hold
-  // same-named templates — without this bound, WABA B's rejection would flip
-  // WABA A's row on the (name, language) fallback and halt A's campaigns.
-  // `""` is the legacy sentinel for rows synced before wabaId existed; they
-  // must stay matchable or a pre-multi-account catalog never updates again.
-  // Kept on the externalId arm too: Meta template ids are globally unique, so
-  // there it is free belt-and-braces.
+  // Templates are WABA-scoped, and two WABAs in one workspace can hold same-named
+  // templates — without this bound, WABA B's rejection would flip WABA A's row on
+  // the (name, language) fallback and halt A's campaigns. Kept on the externalId
+  // arm too: Meta template ids are globally unique, so there it is free
+  // belt-and-braces.
+  //
+  // EXACT match now. This used to be `{ in: [evt.wabaId, ""] }` because rows synced
+  // before multi-account carried a `""` "unknown WABA" sentinel — so a real WABA's
+  // webhook also flipped every unattributed row. The sentinel is gone (the FK is
+  // NOT NULL), so the match is simply "this WABA".
   if (evt.wabaId) {
-    where.wabaId = { in: [evt.wabaId, ""] };
+    where.wabaAccount = { externalWabaId: evt.wabaId };
   }
   if (evt.externalId) {
     where.externalId = evt.externalId;
   } else if (evt.name) {
     where.name = evt.name;
     if (evt.language) where.language = evt.language;
-    // NEITHER a globally-unique externalId NOR a WABA in the payload, so the
-    // only identity left is (name, language) — which is unique PER WABA, not
-    // per workspace. Unbounded, one WABA's rejection would flip every
-    // same-named row in the workspace and halt all of their campaigns via the
-    // pause below. Restrict to the legacy `""` rows (which belong to no WABA
-    // in particular) and say so, rather than guess which real WABA meant it.
+    // NEITHER a globally-unique externalId NOR a WABA in the payload, so the only
+    // identity left is (name, language) — which is unique PER WABA, not per
+    // workspace. Unbounded, one WABA's rejection would flip every same-named row in
+    // the workspace and halt all of their campaigns via the pause below.
+    //
+    // This used to narrow to the legacy `""` rows. That sentinel no longer exists,
+    // and there is no honest way to pick between two real WABAs, so DROP the event
+    // with a warn instead of guessing. Meta always carries `entry[].id` (the WABA)
+    // on template webhooks, so this is a degenerate payload, not a routine case.
     if (!evt.wabaId) {
-      const wabas = await db.channelConnection.findMany({
-        where: { workspaceId, channel: "whatsapp" },
-        select: { wabaId: true },
-        distinct: ["wabaId"],
-      });
-      const distinctWabas = wabas
-        .map((w) => w.wabaId)
-        .filter((w): w is string => typeof w === "string" && w.length > 0);
-      if (distinctWabas.length > 1) {
-        where.wabaId = "";
+      const wabaCount = await db.whatsappBusinessAccount.count({ where: { workspaceId } });
+      if (wabaCount > 1) {
         console.warn(
-          `[ingest] template status for "${evt.name}" carried no WABA in a ` +
-            `${distinctWabas.length}-WABA workspace ${workspaceId}; limited to legacy rows`,
+          `[ingest] dropped template status for "${evt.name}" — no WABA in the payload ` +
+            `and workspace ${workspaceId} holds ${wabaCount} WABAs; refusing to guess`,
         );
+        return;
       }
     }
   } else {

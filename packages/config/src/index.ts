@@ -355,6 +355,39 @@ export function validateEnv(label: "api" | "web" = "api"): void {
     }
   }
 
+  // PLATFORM Meta app credentials, for the APP-LEVEL webhook callback
+  // (`POST /webhooks/meta`, no workspaceId in the path).
+  //
+  // Optional until you are a Tech Provider: today every workspace brings its own
+  // Meta app and its webhooks arrive on the per-workspace callback. Under Embedded
+  // Signup all onboarded customers' webhooks go to the APP's callback URL, and
+  // Meta's docs are explicit that template webhooks
+  // (`message_template_status_update`, `_quality_update`, `_components_update`,
+  // `template_category_update`) and account webhooks (`account_update`,
+  // `account_review_update`, `account_alerts`) do NOT support
+  // `override_callback_uri` — they are ALWAYS delivered there. So the app-level
+  // route cannot be avoided by per-WABA overrides.
+  //
+  // `META_APP_SECRET` accepts a comma-separated list so a secret rotation can run
+  // both values at once (same shape as the per-connection fallbacks).
+  if (label === "api" && process.env.META_APP_ID) {
+    if (!process.env.META_APP_SECRET) {
+      console.error(
+        `${tag} fatal: META_APP_ID is set but META_APP_SECRET is not. The app-level ` +
+          `webhook route cannot verify a signature without it, and an unverified ` +
+          `webhook route is an open ingest endpoint.`,
+      );
+      process.exit(1);
+    }
+    if (!process.env.META_APP_VERIFY_TOKEN) {
+      console.error(
+        `${tag} fatal: META_APP_ID is set but META_APP_VERIFY_TOKEN is not. Meta's ` +
+          `GET verification handshake would fail and the callback could never be saved.`,
+      );
+      process.exit(1);
+    }
+  }
+
   // Numeric tunables (api process): validate-if-present. A typo like "5x"
   // silently becomes NaN downstream (NaN BullMQ concurrency, a server bound
   // to port 0, a sweeper that never fires), so fail loudly at boot instead.

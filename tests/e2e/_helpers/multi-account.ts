@@ -224,6 +224,18 @@ export async function seedMultiAccountTeam(): Promise<MultiAccountTeam> {
           data: { isDefault: false },
         });
       }
+      // The WABA is a first-class row now (Meta: portfolio → WABA → number), and
+      // `externalWabaId` is GLOBALLY unique, so upsert on it rather than create.
+      const wabaAccountId = c.wabaId
+        ? (
+            await tx.whatsappBusinessAccount.upsert({
+              where: { externalWabaId: c.wabaId },
+              create: { workspaceId: MA_TEAM_ID, externalWabaId: c.wabaId },
+              update: {},
+              select: { id: true },
+            })
+          ).id
+        : null;
       await tx.channelConnection.upsert({
         where: {
           workspaceId_channel_externalAccountId: {
@@ -243,7 +255,7 @@ export async function seedMultiAccountTeam(): Promise<MultiAccountTeam> {
           externalAccountId: c.accountId,
           isDefault: c.isDefault,
           label: c.label,
-          ...(c.wabaId ? { wabaId: c.wabaId } : {}),
+          ...(wabaAccountId ? { wabaAccountId } : {}),
           config: c.config,
           secrets: c.secrets,
           isActive: true,
@@ -251,7 +263,7 @@ export async function seedMultiAccountTeam(): Promise<MultiAccountTeam> {
         update: {
           isDefault: c.isDefault,
           label: c.label,
-          ...(c.wabaId ? { wabaId: c.wabaId } : {}),
+          ...(wabaAccountId ? { wabaAccountId } : {}),
           config: c.config,
           secrets: c.secrets,
           isActive: true,
@@ -357,15 +369,27 @@ export async function seedBoundConversation(o: {
   return { contactId: contact.id, conversationId: conversation.id };
 }
 
-/** An APPROVED, zero-variable template in a specific WABA's catalog. */
+/**
+ * An APPROVED, zero-variable template in a specific WABA's catalog.
+ *
+ * Takes META's `wabaId` (what the specs read) and resolves it to the
+ * `WhatsappBusinessAccount` FK, upserting the WABA row if the caller is seeding a
+ * catalog for a WABA with no connection.
+ */
 export async function seedTemplate(o: {
   name: string;
   wabaId: string;
 }): Promise<{ id: string }> {
+  const waba = await db().whatsappBusinessAccount.upsert({
+    where: { externalWabaId: o.wabaId },
+    create: { workspaceId: MA_TEAM_ID, externalWabaId: o.wabaId },
+    update: {},
+    select: { id: true },
+  });
   return db().messageTemplate.create({
     data: {
       workspaceId: MA_TEAM_ID,
-      wabaId: o.wabaId,
+      wabaAccountId: waba.id,
       name: o.name,
       language: "en_US",
       status: "approved",
@@ -376,6 +400,66 @@ export async function seedTemplate(o: {
     },
     select: { id: true },
   });
+}
+
+/**
+ * ONE WhatsApp webhook POST carrying inbounds for SEVERAL of the workspace's numbers.
+ *
+ * Meta's contract: "multiple changes from different objects that are of the same type
+ * may be batched together" (up to 1000 updates, and batching is guaranteed in neither
+ * direction). The route used to resolve a single account for the whole body, so the
+ * second number's thread was re-pointed at the first — and the agent's reply then went
+ * out a number with no open 24h customer-service window.
+ */
+export function waInboundBatch(
+  items: Array<{ phoneNumberId: string; wabaId: string; from: string; mid: string; text: string }>,
+): unknown {
+  return {
+    object: "whatsapp_business_account",
+    entry: items.map((o) => ({
+      id: o.wabaId,
+      changes: [
+        {
+          field: "messages",
+          value: {
+            messaging_product: "whatsapp",
+            metadata: { phone_number_id: o.phoneNumberId },
+            contacts: [{ wa_id: o.from, profile: { name: `WA ${o.from}` } }],
+            messages: [
+              {
+                from: o.from,
+                id: o.mid,
+                timestamp: String(Math.floor(Date.now() / 1000)),
+                type: "text",
+                text: { body: o.text },
+              },
+            ],
+          },
+        },
+      ],
+    })),
+  };
+}
+
+/** The Messenger equivalent: one POST, several Pages. */
+export function fbInboundBatch(
+  items: Array<{ pageId: string; psid: string; mid: string; text: string }>,
+): unknown {
+  return {
+    object: "page",
+    entry: items.map((o) => ({
+      id: o.pageId,
+      time: Date.now(),
+      messaging: [
+        {
+          sender: { id: o.psid },
+          recipient: { id: o.pageId },
+          timestamp: Date.now(),
+          message: { mid: o.mid, text: o.text },
+        },
+      ],
+    })),
+  };
 }
 
 /** A WhatsApp inbound webhook envelope addressed to a SPECIFIC number. */

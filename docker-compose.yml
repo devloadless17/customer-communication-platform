@@ -385,6 +385,14 @@ services:
       MAIL_SMTP_PASSWORD: ${MAIL_SMTP_PASSWORD:-}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v25.0}
+      # Sign every Meta Graph call with `appsecret_proof` (HMAC of the access
+      # token, keyed by that account's own app secret) so a stolen token cannot be
+      # replayed from elsewhere. Additive: Meta accepts a correct proof whether or
+      # not the app's "Require App Secret" toggle is on, so turning this on is safe
+      # BEFORE flipping that toggle — and that is the required order, since
+      # flipping the toggle first fails every call that is not yet signed.
+      # Default EMPTY (off) — the code only enables on the exact string "1".
+      META_APPSECRET_PROOF: ${META_APPSECRET_PROOF:-}
       # Cloudflare R2 (private bucket) — all media + avatar uploads/serving.
       # The api uploads bytes, presigns GETs, and lists/deletes objects.
       R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}

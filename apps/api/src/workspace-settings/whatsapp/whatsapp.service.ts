@@ -155,8 +155,14 @@ export class WhatsappService {
         config: true,
         secrets: true,
         needsReconnect: true,
-        // Messaging limit is portfolio-scoped (Meta, 2025-10-07).
-        portfolio: { select: { messagingTier: true, messagingDailyCap: true } },
+        // Messaging limit is portfolio-scoped (Meta, 2025-10-07), and the portfolio
+        // hangs off the WABA (`owner_business_info` is a field on the WABA node).
+        wabaAccount: {
+          select: {
+            externalWabaId: true,
+            portfolio: { select: { messagingTier: true, messagingDailyCap: true } },
+          },
+        },
         qualityRating: true,
         throughputLevel: true,
       },
@@ -199,7 +205,14 @@ export class WhatsappService {
             workspaceId,
             channel: META_PROVIDER,
             externalAccountId: config.phoneNumberId ?? "",
-            isDefault: true,
+            // NOT hardcoded true. `ChannelConnection_one_default_per_channel` is a
+            // partial unique index on (workspaceId, channel) WHERE isDefault, so
+            // pre-minting a second default collides — the failure was swallowed as
+            // a warn and the verify token silently never appeared. Only the FIRST
+            // row on the channel claims the flag.
+            isDefault: !(await this.db.channelConnection.count({
+              where: { workspaceId, channel: META_PROVIDER },
+            })),
             config: mergedConfig as Prisma.InputJsonValue,
             secrets: {},
             isActive: false,
@@ -217,15 +230,18 @@ export class WhatsappService {
     return {
       phoneNumberId: config.phoneNumberId ?? null,
       displayPhoneNumber: config.displayPhoneNumber ?? null,
-      wabaId: config.wabaId ?? "",
+      // Meta's own WABA id, never our internal cuid — this is a public DTO.
+      // `null` (not `""`) when unlinked: the empty string used to mean "unknown"
+      // and made every downstream guard treat it as "no opinion".
+      wabaId: conn?.wabaAccount?.externalWabaId ?? null,
       appId: config.appId ?? null,
       verifyToken,
       accessToken,
       appSecret,
       credentialsUndecryptable,
       needsReconnect: conn?.needsReconnect ?? false,
-      messagingTier: conn?.portfolio?.messagingTier ?? null,
-      messagingDailyCap: conn?.portfolio?.messagingDailyCap ?? null,
+      messagingTier: conn?.wabaAccount?.portfolio?.messagingTier ?? null,
+      messagingDailyCap: conn?.wabaAccount?.portfolio?.messagingDailyCap ?? null,
       qualityRating: conn?.qualityRating ?? null,
       throughputLevel: conn?.throughputLevel ?? null,
     };
@@ -281,8 +297,34 @@ export class WhatsappService {
     // Source the access token (system-user) + App secret from the shared Meta
     // App connection unless overridden on this form.
     const meta = await getMetaConnection(workspaceId);
-    const accessToken = input.accessToken?.trim() || meta?.systemUserToken || null;
-    const appSecret = input.appSecret?.trim() || meta?.appSecret || null;
+    // Precedence: what the operator typed → THIS ROW'S OWN stored credentials →
+    // the shared Meta App.
+    //
+    // The middle term is load-bearing for multi-app workspaces. A workspace may
+    // hold one number on the shared Meta app and another on a DIFFERENT app (the
+    // webhook HMAC check already tries every account's own secret for exactly that
+    // reason). Without it, ANY re-save of that second number — changing a label,
+    // re-running the WABA check — silently overwrote its own app secret and token
+    // with the shared app's. Meta then signs that account's webhooks with a secret
+    // we no longer hold, so every inbound is dropped as forged, and its sends fail
+    // on a token issued by the wrong app.
+    const ownSecrets = ((
+      await this.db.channelConnection.findUnique({
+        where: {
+          workspaceId_channel_externalAccountId: {
+            workspaceId,
+            channel: META_PROVIDER,
+            externalAccountId: phoneNumberId,
+          },
+        },
+        select: { secrets: true },
+      })
+    )?.secrets ?? {}) as MetaChannelSecrets;
+    const ownAccessToken = this.tryDecrypt(ownSecrets.accessToken ?? null, "accessToken");
+    const ownAppSecret = this.tryDecrypt(ownSecrets.appSecret ?? null, "appSecret");
+    const accessToken =
+      input.accessToken?.trim() || ownAccessToken || meta?.systemUserToken || null;
+    const appSecret = input.appSecret?.trim() || ownAppSecret || meta?.appSecret || null;
     if (!accessToken || !appSecret) {
       throw new BadRequestException({
         error: "meta_not_configured",
@@ -382,11 +424,14 @@ export class WhatsappService {
             externalAccountId: phoneNumberId,
           },
         },
-        select: { config: true },
+        select: { config: true, wabaAccount: { select: { externalWabaId: true } } },
       }),
     ]);
     const existingConfig = (existing?.config ?? {}) as MetaChannelConfig;
-    const selfConfig = (self?.config ?? {}) as MetaChannelConfig;
+    // "Leave unchanged" must read the row we are ABOUT TO WRITE, never the
+    // default's — re-saving number B with only its phoneNumberId would otherwise
+    // stamp number A's WABA onto B and point B's template catalog at A's catalog.
+    const selfWabaId = self?.wabaAccount?.externalWabaId ?? null;
 
     // Verify-token resolution order:
     //   1. Explicit value from input (legacy callers / future re-rotate UI).
@@ -454,11 +499,11 @@ export class WhatsappService {
     // wabaId can also survive a phone-number/token change untouched, so we
     // validate the RESOLVED value on every save that carries one, not just when
     // the field itself changed.
-    // `selfConfig`, not `existingConfig` — see the two-read note above. On a
-    // first connect `self` is null, so an omitted wabaId correctly stays unset
-    // rather than inheriting a sibling number's.
+    // `selfWabaId`, not the default's — see the two-read note above. On a first
+    // connect `self` is null, so an omitted wabaId correctly stays unset rather
+    // than inheriting a sibling number's.
     const nextWabaId =
-      input.wabaId === undefined ? selfConfig.wabaId : input.wabaId || undefined;
+      input.wabaId === undefined ? (selfWabaId ?? undefined) : input.wabaId || undefined;
     if (nextWabaId) {
       const wabaWarning = await this.assertWabaOwnsNumber(
         nextWabaId,
@@ -468,12 +513,62 @@ export class WhatsappService {
       if (wabaWarning) warnings.push(wabaWarning);
     }
 
+    // Upsert the WABA row and point this number at it. `externalWabaId` is
+    // GLOBALLY unique — Meta delivers a WABA's webhooks to whichever app is
+    // subscribed, so two workspaces claiming one WABA means one silently receives
+    // nothing, and under the app-level callback it would route one tenant's
+    // messages into another tenant's inbox. So a cross-workspace claim is refused
+    // outright rather than silently accepted.
+    let wabaAccountId: string | null = null;
+    if (nextWabaId) {
+      const foreign = await this.db.whatsappBusinessAccount.findUnique({
+        where: { externalWabaId: nextWabaId },
+        select: { id: true, workspaceId: true },
+      });
+      if (foreign && foreign.workspaceId !== workspaceId) {
+        throw new ConflictException({
+          error: "waba_already_connected",
+          detail:
+            "This WhatsApp Business Account is already connected to another workspace. " +
+            "Meta delivers a WABA's webhooks to a single subscribed app, so it cannot be " +
+            "shared — disconnect it there first.",
+        });
+      }
+      wabaAccountId =
+        foreign?.id ??
+        (
+          await this.db.whatsappBusinessAccount.create({
+            data: { workspaceId, externalWabaId: nextWabaId },
+            select: { id: true },
+          })
+        ).id;
+
+      // Meta's REGISTERED-NUMBER CAP. A new business portfolio may register 2
+      // business phone numbers; business verification (or reaching a 2,000
+      // messaging limit) raises it to 20, announced on `business_capability_update`.
+      //
+      // Refusing (rather than warning) is right here even though the standing rule
+      // is "a stale local copy must never block a send Meta would accept": our
+      // count is a LOWER bound on Meta's registered numbers, so `count >= cap` is
+      // provable, not estimated — those numbers exist and we send on them. The
+      // (cap+1)th registration is a guaranteed Meta failure, so refusing with the
+      // documented remedy beats failing opaquely later.
+      const capWarning = await this.assertPortfolioNumberCap(
+        workspaceId,
+        wabaAccountId,
+        phoneNumberId,
+      );
+      if (capWarning) warnings.push(capWarning);
+    }
+
     const newConfig = pruneUndefined<MetaChannelConfig>({
       phoneNumberId,
       verifyToken,
       displayPhoneNumber: displayNumber ?? undefined,
-      // wabaId keeps optional-update semantics (WhatsApp-specific, for templates).
-      wabaId: nextWabaId,
+      // NO wabaId here. It used to live in this JSON *and* in a column, with the
+      // send-config loader reading the JSON while template scoping read the column
+      // — two copies of one fact that could drift. The `wabaAccountId` FK is the
+      // single authority and the loader joins it.
       // appId is shared — source it from the Meta App connection (used for
       // template header-media upload); a pasted value or existing one overrides.
       appId: input.appId?.trim() || meta?.appId || existingConfig.appId || undefined,
@@ -500,7 +595,7 @@ export class WhatsappService {
         workspaceId,
         channel: META_PROVIDER,
         externalAccountId: phoneNumberId,
-        wabaId: newConfig.wabaId ?? null,
+        wabaAccountId,
         // The number's Meta-verified identity, captured by the node read above.
         verifiedName: verifiedName ?? null,
         nameStatus: nameStatus ?? null,
@@ -513,7 +608,7 @@ export class WhatsappService {
         isActive: true,
       },
       update: {
-        wabaId: newConfig.wabaId ?? null,
+        wabaAccountId,
         // Refresh identity on every save; only overwrite with real values so a
         // Meta hiccup can't blank a stored name (the webhook keeps it live).
         ...(verifiedName !== undefined ? { verifiedName } : {}),
@@ -584,7 +679,14 @@ export class WhatsappService {
     // POST+GET) because its warning belongs in THIS response: the admin at the
     // connect form is the person who can fix it.
     if (nextWabaId) {
-      const sub = await ensureWabaSubscribed(nextWabaId, accessToken, GRAPH_VERSION);
+      const sub = await ensureWabaSubscribed(
+        nextWabaId,
+        accessToken,
+        GRAPH_VERSION,
+        // Scoped to OUR app: a WABA shared with another BSP reads back non-empty
+        // whether or not our subscription stuck. See isAppSubscribedToWaba.
+        newConfig.appId,
+      );
       if (!sub.ok) {
         warnings.push(
           `Couldn't confirm this app is subscribed to the WABA's webhooks (${sub.error}). ` +
@@ -686,10 +788,14 @@ export class WhatsappService {
   private async templateRef(
     workspaceId: string,
     templateId: string,
-  ): Promise<{ externalId: string; wabaId: string | null }> {
+  ): Promise<{ externalId: string; wabaId: string; wabaAccountId: string }> {
     const row = await this.db.messageTemplate.findFirst({
       where: { id: templateId, workspaceId },
-      select: { externalId: true, wabaId: true },
+      select: {
+        externalId: true,
+        wabaAccountId: true,
+        wabaAccount: { select: { externalWabaId: true } },
+      },
     });
     if (!row) throw new NotFoundException({ error: "template_not_found" });
     if (!row.externalId) {
@@ -698,14 +804,20 @@ export class WhatsappService {
       // empty series that reads as "nobody engaged".
       throw new BadRequestException({ error: "template_not_synced" });
     }
-    // `""` is the legacy/unknown-WABA sentinel; treat it as "no opinion" so the
-    // default account is used, which is right for a single-account workspace.
-    return { externalId: row.externalId, wabaId: row.wabaId || null };
+    // Both ids: Meta's `wabaId` for the user-facing analytics copy, our FK for
+    // resolving the account that owns this catalog. Neither can be absent — the FK
+    // is NOT NULL, which is what retired the old `""` "no opinion" sentinel that
+    // let any account operate on any template.
+    return {
+      externalId: row.externalId,
+      wabaId: row.wabaAccount.externalWabaId,
+      wabaAccountId: row.wabaAccountId,
+    };
   }
 
   /** Stored daily rollup for one template. No Graph call. */
   async templateAnalytics(workspaceId: string, templateId: string, daysRaw?: string) {
-    const { externalId, wabaId } = await this.templateRef(workspaceId, templateId);
+    const { externalId, wabaAccountId } = await this.templateRef(workspaceId, templateId);
     const { start, end } = this.analyticsWindow(daysRaw);
     const result = await readTemplateAnalytics(workspaceId, externalId, start, end);
     // Meta records NOTHING before the insights switch was flipped (no
@@ -713,7 +825,7 @@ export class WhatsappService {
     // the campaign report carries, resolved by the same function — the drawer
     // says them too, or an empty chart on an old template reads as a broken
     // feature.
-    return { ...result, ...(await templateAnalyticsAccountContext(workspaceId, wabaId)) };
+    return { ...result, ...(await templateAnalyticsAccountContext(workspaceId, wabaAccountId)) };
   }
 
   /** Pull fresh figures from Meta for one template, then store them. */
@@ -722,13 +834,13 @@ export class WhatsappService {
     templateId: string,
     daysRaw?: string,
   ) {
-    const { externalId, wabaId } = await this.templateRef(workspaceId, templateId);
+    const { externalId, wabaAccountId } = await this.templateRef(workspaceId, templateId);
     const { start, end } = this.analyticsWindow(daysRaw);
     return refreshTemplateAnalytics(workspaceId, {
       templateExternalIds: [externalId],
       start,
       end,
-      wabaId,
+      wabaAccountId,
     });
   }
 
@@ -749,14 +861,20 @@ export class WhatsappService {
   ): Promise<{ linkTrackingOptedOut: boolean }> {
     const row = await this.db.messageTemplate.findFirst({
       where: { id: templateId, workspaceId },
-      select: { externalId: true, wabaId: true, category: true },
+      select: {
+        externalId: true,
+        wabaAccountId: true,
+        category: true,
+      },
     });
     if (!row) throw new NotFoundException({ error: "template_not_found" });
     if (!row.externalId) {
       throw new BadRequestException({ error: "template_not_synced" });
     }
 
-    const config = await this.templateOpConfig(workspaceId, { wabaId: row.wabaId || null });
+    const config = await this.templateOpConfig(workspaceId, {
+      wabaAccountId: row.wabaAccountId,
+    });
     const provider = getMetaProvider();
     if (!provider.setTemplateLinkTracking) {
       throw new HttpException({ error: "provider_does_not_support_link_tracking" }, 501);
@@ -830,7 +948,7 @@ export class WhatsappService {
     ]);
     // Comparison is a WABA-scoped operation: Meta cannot compare across
     // accounts, and asking it to just yields an empty result.
-    if ((a.wabaId ?? "") !== (b.wabaId ?? "")) {
+    if (a.wabaAccountId !== b.wabaAccountId) {
       throw new BadRequestException({
         error: "different_waba",
         detail:
@@ -842,7 +960,9 @@ export class WhatsappService {
     // above) — the default account's edge is the wrong one on a two-WABA
     // workspace, and Meta answers a wrong-WABA compare with an empty result
     // that reads as "these perform identically".
-    const config = await this.templateOpConfig(workspaceId, { wabaId: a.wabaId });
+    const config = await this.templateOpConfig(workspaceId, {
+      wabaAccountId: a.wabaAccountId,
+    });
     const provider = getMetaProvider();
     if (!provider.compareTemplates) {
       throw new HttpException({ error: "provider_does_not_support_comparison" }, 501);
@@ -891,6 +1011,69 @@ export class WhatsappService {
         .filter((r): r is { templateId: string; reason: string } => r.templateId !== undefined),
       enoughData: result.sends.length > 0,
     };
+  }
+
+  /**
+   * Enforce Meta's REGISTERED-NUMBER CAP for the portfolio this WABA belongs to.
+   *
+   * Meta caps a NEW business portfolio at 2 registered business phone numbers;
+   * becoming verified — or reaching a 2,000 messaging limit — raises it to 20, and
+   * the new value arrives on the `business_capability_update` webhook as
+   * `max_phone_numbers_per_business`.
+   *
+   * Returns a WARNING string when the portfolio is one number from its cap, throws
+   * 409 when it is already at it, and returns null otherwise. An unknown cap means
+   * UNGATED — the same posture `messagingDailyCap` takes.
+   *
+   * Why this one REFUSES rather than warns, when the standing rule is "a stale
+   * local copy must never block a send Meta would accept": our count is a LOWER
+   * bound on the numbers Meta has registered (it cannot see numbers registered
+   * outside this app), so `count >= cap` is provable rather than estimated. The
+   * (cap+1)th registration is a guaranteed Meta failure, and refusing with the
+   * documented remedy is more actionable than letting it fail opaquely.
+   */
+  private async assertPortfolioNumberCap(
+    workspaceId: string,
+    wabaAccountId: string,
+    phoneNumberId: string,
+  ): Promise<string | null> {
+    const waba = await this.db.whatsappBusinessAccount.findFirst({
+      where: { id: wabaAccountId, workspaceId },
+      select: { portfolio: { select: { id: true, maxPhoneNumbers: true } } },
+    });
+    const cap = waba?.portfolio?.maxPhoneNumbers ?? null;
+    const portfolioId = waba?.portfolio?.id;
+    if (!cap || !portfolioId) return null;
+
+    // Count REGISTERED numbers across every WABA in the portfolio (the cap is
+    // portfolio-scoped, not WABA-scoped). Exclude the credential-less placeholder
+    // and — critically — this very number: a re-save is not a new registration.
+    const registered = await this.db.channelConnection.count({
+      where: {
+        workspaceId,
+        channel: META_PROVIDER,
+        isActive: true,
+        externalAccountId: { not: "" },
+        NOT: { externalAccountId: phoneNumberId },
+        wabaAccount: { portfolioId },
+      },
+    });
+    if (registered >= cap) {
+      throw new ConflictException({
+        error: "number_cap_reached",
+        detail:
+          `This business portfolio has reached Meta's cap of ${cap} registered phone ` +
+          `numbers. Get the business verified (or reach a 2,000 messaging limit) and ` +
+          `Meta raises the cap to 20 automatically.`,
+      });
+    }
+    if (registered === cap - 1) {
+      return (
+        `This is the last phone number this business portfolio can register ` +
+        `(Meta's cap is ${cap}). Business verification raises it to 20.`
+      );
+    }
+    return null;
   }
 
   private async assertWabaOwnsNumber(
@@ -1056,26 +1239,33 @@ export class WhatsappService {
     // The WABA id is resolved HERE rather than sent by the client: the account
     // directory deliberately withholds it (it is account metadata, not display
     // data), and resolving it server-side keeps that boundary intact.
-    let scopeWabaId: string | null = null;
+    let scopeWabaAccountId: string | null = null;
     if (accountId) {
       const account = await this.db.channelConnection.findFirst({
         where: { id: accountId, workspaceId, channel: META_PROVIDER },
-        select: { wabaId: true },
+        select: { wabaAccountId: true },
       });
       if (!account) {
         throw new NotFoundException({ error: "account_not_found" });
       }
-      // `""` is the legacy/unknown sentinel — treat it as "no opinion" and show
-      // everything, rather than silently returning an empty catalogue.
-      scopeWabaId = account.wabaId || null;
+      // An account with NO WABA linked has NO catalog, so it gets an empty list —
+      // not "show everything". The old code treated the `""` sentinel as "no
+      // opinion" and fell through to the whole workspace, which is how a number
+      // ended up offering another WABA's templates in the picker.
+      scopeWabaAccountId = account.wabaAccountId;
+      if (!scopeWabaAccountId) {
+        return { templates: [], hasWabaId: false, hasAppId: false, connected: true };
+      }
     }
 
     const [rows, conn] = await Promise.all([
       this.db.messageTemplate.findMany({
         where: {
           workspaceId,
-          ...(scopeWabaId ? { wabaId: scopeWabaId } : {}),
+          ...(scopeWabaAccountId ? { wabaAccountId: scopeWabaAccountId } : {}),
         },
+        // Meta's own WABA id for the DTO — never our internal cuid.
+        include: { wabaAccount: { select: { externalWabaId: true } } },
         orderBy: [{ status: "asc" }, { name: "asc" }, { language: "asc" }],
       }),
       this.db.channelConnection.findFirst({
@@ -1084,13 +1274,13 @@ export class WhatsappService {
           channel: META_PROVIDER,
           ...(accountId ? { id: accountId } : { isDefault: true }),
         },
-        select: { config: true },
+        select: { config: true, wabaAccountId: true },
       }),
     ]);
     const config = (conn?.config ?? {}) as MetaChannelConfig;
     return {
       templates: rows.map(toTemplateDto),
-      hasWabaId: Boolean(config.wabaId),
+      hasWabaId: Boolean(conn?.wabaAccountId),
       hasAppId: Boolean(config.appId),
       connected: Boolean(config.phoneNumberId),
     };
@@ -1145,8 +1335,7 @@ export class WhatsappService {
               workspaceId,
               channel: META_PROVIDER,
               isActive: true,
-              wabaId: { not: null },
-              NOT: { wabaId: "" },
+              wabaAccountId: { not: null },
             },
           });
       if (anyWaba === 0) {
@@ -1187,11 +1376,19 @@ export class WhatsappService {
       where: {
         workspaceId,
         // An account-scoped sync answers with that account's catalogue — the
-        // caller (reply box, composer) feeds this straight into its picker, so
-        // an unscoped list would suddenly show another WABA's templates. `""`
-        // is the legacy/unknown-WABA sentinel, matchable as everywhere else.
-        ...(accountId && config.wabaId ? { wabaId: { in: [config.wabaId, ""] } } : {}),
+        // caller (reply box, composer) feeds this straight into its picker, so an
+        // unscoped list would suddenly show another WABA's templates.
+        //
+        // EXACT account scoping. This used to be `{ in: [config.wabaId, ""] }`,
+        // which folded every legacy/unknown-WABA row into whichever account was
+        // asked about. The `""` sentinel is gone and the FK is NOT NULL, so the
+        // scope is simply "this account's WABA".
+        ...(accountId && config.wabaAccountId
+          ? { wabaAccountId: config.wabaAccountId }
+          : {}),
       },
+      // Meta's own WABA id for the DTO — never our internal cuid.
+      include: { wabaAccount: { select: { externalWabaId: true } } },
       orderBy: [{ status: "asc" }, { name: "asc" }, { language: "asc" }],
     });
 
@@ -1333,7 +1530,7 @@ export class WhatsappService {
       const twins = await this.db.messageTemplate.findMany({
         where: {
           workspaceId,
-          wabaId: config.wabaId ?? "",
+          wabaAccountId: requireWabaAccount(config),
           bodyText: body.text,
           status: { notIn: ["rejected", "archived"] },
           NOT: { name },
@@ -1376,7 +1573,7 @@ export class WhatsappService {
     }
 
     const now = new Date();
-    const wabaId = config.wabaId ?? "";
+    const wabaAccountId = requireWabaAccount(config);
     // The category META ASSIGNED, not the one we asked for. Since 2025-04-09 a
     // UTILITY submission whose content reads as promotional is approved as
     // MARKETING outright, and storing our request instead left the row claiming
@@ -1385,7 +1582,12 @@ export class WhatsappService {
     const assignedCategory = created.category ?? category;
     const saved = await this.db.messageTemplate.upsert({
       where: {
-        workspaceId_wabaId_name_language: { workspaceId, wabaId, name, language },
+        workspaceId_wabaAccountId_name_language: {
+          workspaceId,
+          wabaAccountId,
+          name,
+          language,
+        },
       },
       create: {
         workspaceId,
@@ -1393,7 +1595,7 @@ export class WhatsappService {
         // while the WHERE matched on the real WABA meant every create under a
         // connected WABA missed its own row on the next lookup and stranded a
         // duplicate that no per-WABA sync would ever reconcile.
-        wabaId,
+        wabaAccountId,
         externalId: created.externalId,
         name,
         language,
@@ -1771,14 +1973,19 @@ export class WhatsappService {
     }
 
     const now = new Date();
-    const wabaId = config.wabaId ?? "";
+    const wabaAccountId = requireWabaAccount(config);
     const saved = await this.db.messageTemplate.upsert({
       where: {
-        workspaceId_wabaId_name_language: { workspaceId, wabaId, name, language },
+        workspaceId_wabaAccountId_name_language: {
+          workspaceId,
+          wabaAccountId,
+          name,
+          language,
+        },
       },
       create: {
         workspaceId,
-        wabaId,
+        wabaAccountId,
         externalId: created.externalId,
         name,
         language,
@@ -1932,7 +2139,9 @@ export class WhatsappService {
     }
 
     // Credentials for the WABA that OWNS this template — see templateOpConfig.
-    const config = await this.templateOpConfig(workspaceId, { wabaId: template.wabaId });
+    const config = await this.templateOpConfig(workspaceId, {
+      wabaAccountId: template.wabaAccountId,
+    });
     const provider = getMetaProvider();
     if (!provider.editTemplate) {
       throw new HttpException({ error: "provider_cannot_edit_templates" }, 501);
@@ -2021,7 +2230,7 @@ export class WhatsappService {
       const siblings = await this.db.messageTemplate.count({
         where: {
           workspaceId,
-          wabaId: template.wabaId,
+          wabaAccountId: template.wabaAccountId,
           name: template.name,
           NOT: { id: template.id },
         },
@@ -2040,7 +2249,9 @@ export class WhatsappService {
     // Credentials for the WABA that OWNS this template — see templateOpConfig.
     // The default account's edge answered a wrong-WABA delete with a 404 that
     // the provider treats as "already gone", while the real template survived.
-    const config = await this.templateOpConfig(workspaceId, { wabaId: template.wabaId });
+    const config = await this.templateOpConfig(workspaceId, {
+      wabaAccountId: template.wabaAccountId,
+    });
     const provider = getMetaProvider();
     if (!provider.deleteTemplate) {
       throw new HttpException(
@@ -2092,7 +2303,13 @@ export class WhatsappService {
   async unpauseTemplate(workspaceId: string, id: string): Promise<void> {
     const template = await this.db.messageTemplate.findFirst({
       where: { id, workspaceId },
-      select: { id: true, externalId: true, status: true, name: true, wabaId: true },
+      select: {
+        id: true,
+        externalId: true,
+        status: true,
+        name: true,
+        wabaAccountId: true,
+      },
     });
     if (!template) throw new NotFoundException({ error: "template_not_found" });
     if (template.status !== "paused") {
@@ -2110,7 +2327,9 @@ export class WhatsappService {
     }
 
     // Credentials for the WABA that OWNS this template — see templateOpConfig.
-    const config = await this.templateOpConfig(workspaceId, { wabaId: template.wabaId });
+    const config = await this.templateOpConfig(workspaceId, {
+      wabaAccountId: template.wabaAccountId,
+    });
     const provider = getMetaProvider();
     if (!provider.unpauseTemplate) {
       throw new HttpException({ error: "provider_does_not_support_unpause" }, 501);
@@ -2394,17 +2613,19 @@ export class WhatsappService {
     // depending on a query param surviving every entry point into the form —
     // the Edit link dropped it, so a header asset was minted through the
     // DEFAULT account's app and then attached to another WABA's template.
-    const templateWabaId = templateId
+    const templateWabaAccountId = templateId
       ? (
           await this.db.messageTemplate.findFirst({
             where: { id: templateId, workspaceId },
-            select: { wabaId: true },
+            select: { wabaAccountId: true },
           })
-        )?.wabaId ?? null
+        )?.wabaAccountId ?? null
       : null;
     const config = await this.templateOpConfig(
       workspaceId,
-      templateWabaId ? { wabaId: templateWabaId } : { accountId },
+      templateWabaAccountId
+        ? { wabaAccountId: templateWabaAccountId }
+        : { accountId },
     );
     const provider = getMetaProvider();
     if (!provider.uploadHeaderMedia) {
@@ -2478,23 +2699,26 @@ export class WhatsappService {
    *     survives, silently diverging the local catalog.
    *
    * Resolution: an explicit `accountId` (the operator's pick) wins; else the
-   * first active connection under the template's `wabaId`; else the default
-   * account (correct for single-WABA workspaces and for rows carrying the
-   * legacy "" wabaId sentinel).
+   * first active connection under the template's WABA; else the default account.
+   *
+   * The old third arm also caught rows carrying the legacy `""` wabaId sentinel —
+   * "no WABA, so any account will do". That is gone: `wabaAccountId` is a NOT NULL
+   * FK, so a template always names its WABA and the fallback now only fires when
+   * every number under that WABA is inactive.
    */
   private async templateOpConfig(
     workspaceId: string,
-    opts: { wabaId?: string | null; accountId?: string | null } = {},
+    opts: { wabaAccountId?: string | null; accountId?: string | null } = {},
   ) {
     let targetId = opts.accountId ?? null;
-    if (!targetId && opts.wabaId) {
+    if (!targetId && opts.wabaAccountId) {
       targetId =
         (
           await this.db.channelConnection.findFirst({
             where: {
               workspaceId,
               channel: META_PROVIDER,
-              wabaId: opts.wabaId,
+              wabaAccountId: opts.wabaAccountId,
               isActive: true,
             },
             orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
@@ -2539,10 +2763,37 @@ export class WhatsappService {
 // Pure helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * The WABA that owns the catalog we're about to write to — or a hard refusal.
+ *
+ * Templates are WABA-scoped in Meta, so a number with no WABA linked has no
+ * catalog and cannot create, edit or send one. This used to fall back to the `""`
+ * sentinel, which made the row belong to "unknown WABA" and — because the
+ * cross-account send guard only refuses when both sides are known and differ —
+ * left it sendable from ANY account. Refusing here is the whole point.
+ */
+function requireWabaAccount(config: { wabaAccountId?: string }): string {
+  if (!config.wabaAccountId) {
+    throw new BadRequestException({
+      error: "waba_unknown",
+      detail:
+        "This WhatsApp number has no WhatsApp Business Account linked, so it has no " +
+        "template catalog. Add its WABA ID in WhatsApp settings first.",
+    });
+  }
+  return config.wabaAccountId;
+}
+
+/**
+ * Row → public DTO. NOTE the `wabaId` it emits is META's `externalWabaId`, joined
+ * from the WABA relation — never our internal `wabaAccountId` cuid. Every outward
+ * surface (`/v1`, the templates page, the broadcast composer) keys on Meta's id,
+ * so the entity refactor is invisible across the API boundary.
+ */
 function toTemplateDto(row: {
   id: string;
   externalId: string | null;
-  wabaId: string;
+  wabaAccount: { externalWabaId: string };
   name: string;
   language: string;
   category: string;
@@ -2566,7 +2817,7 @@ function toTemplateDto(row: {
   return {
     id: row.id,
     externalId: row.externalId,
-    wabaId: row.wabaId,
+    wabaId: row.wabaAccount.externalWabaId,
     name: row.name,
     language: row.language,
     category: row.category,

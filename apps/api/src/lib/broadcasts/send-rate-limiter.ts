@@ -114,7 +114,30 @@ function envInt(name: string, def: number, min: number, max: number): number {
  * inbox — replies queue behind a blast, which is precisely when a customer is
  * most likely to be answering one. The gap is reserved headroom, not caution.
  */
-export function resolveSendRate(throughputLevel: string | null | undefined): number {
+export function resolveSendRate(
+  throughputLevel: string | null | undefined,
+  /**
+   * COEXISTENCE (`ChannelConnection.isOnBusinessApp`): the number is used in the
+   * WhatsApp Business app alongside Cloud API.
+   *
+   * Meta caps those at a FIXED 20 messages/second, outside the 80 (default) /
+   * 1,000 (upgraded) ladder that `throughput.level` reports. Meta still reports a
+   * level for them, so pacing off the level alone ran a Coexistence number at 75/s
+   * (STANDARD) or 40/s (unknown) — 2-4x over a hard ceiling. That earns sustained
+   * 130429s mid-campaign and damages the quality rating of exactly the fragile
+   * numbers Coexistence serves: a small business's own handset, still carrying
+   * personal traffic on the same line.
+   *
+   * The cap WINS over the level rather than being blended with it — a
+   * simultaneously-app-used number does not get the ladder at all.
+   */
+  isOnBusinessApp?: boolean | null,
+): number {
+  if (isOnBusinessApp === true) {
+    // 18, deliberately under Meta's 20, matching how HIGH/STANDARD sit under
+    // 1,000/80 — the margin is what protects the quality rating.
+    return envInt("BROADCAST_RATE_COEXISTENCE", 18, 1, 20);
+  }
   if (throughputLevel === "HIGH") return envInt("BROADCAST_RATE_HIGH", 900, 1, 5_000);
   if (throughputLevel === "STANDARD") return envInt("BROADCAST_RATE_STANDARD", 75, 1, 5_000);
   // Unknown throughput — Meta hasn't told us yet. Assume the slower tier: being

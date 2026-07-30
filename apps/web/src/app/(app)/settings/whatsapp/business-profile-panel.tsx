@@ -48,6 +48,37 @@ const ADDRESS_MAX = 256;
 const ABOUT_MAX = 139;
 const DESCRIPTION_MAX = 512;
 
+/**
+ * Meta's published `vertical` members (Business Profiles reference), with the
+ * labels Meta itself shows in the WhatsApp client. `""` clears the category, which
+ * the doc allows explicitly. Graph rejects anything unlisted, so this list IS the
+ * validation — the same enum the API schema enforces.
+ */
+const VERTICALS: ReadonlyArray<{ value: string; label: string }> = [
+  { value: "", label: "Not set" },
+  { value: "ALCOHOL", label: "Alcoholic Beverages" },
+  { value: "APPAREL", label: "Clothing and Apparel" },
+  { value: "AUTO", label: "Automotive" },
+  { value: "BEAUTY", label: "Beauty, Spa and Salon" },
+  { value: "EDU", label: "Education" },
+  { value: "ENTERTAIN", label: "Entertainment" },
+  { value: "EVENT_PLAN", label: "Event Planning and Service" },
+  { value: "FINANCE", label: "Finance and Banking" },
+  { value: "GOVT", label: "Public Service" },
+  { value: "GROCERY", label: "Food and Grocery" },
+  { value: "HEALTH", label: "Medical and Health" },
+  { value: "HOTEL", label: "Hotel and Lodging" },
+  { value: "NONPROFIT", label: "Non-profit" },
+  { value: "ONLINE_GAMBLING", label: "Online Gambling & Gaming" },
+  { value: "OTC_DRUGS", label: "Over-the-Counter Drugs" },
+  { value: "OTHER", label: "Other" },
+  { value: "PHYSICAL_GAMBLING", label: "Non-Online Gambling & Gaming" },
+  { value: "PROF_SERVICES", label: "Professional Services" },
+  { value: "RESTAURANT", label: "Restaurant" },
+  { value: "RETAIL", label: "Shopping and Retail" },
+  { value: "TRAVEL", label: "Travel and Transportation" },
+];
+
 export function BusinessProfilePanel({
   canManage,
   /** Which number's profile. Omitted = the workspace's default number. */
@@ -110,8 +141,22 @@ export function BusinessProfilePanel({
       // field", so posting the whole form would rewrite every field on every
       // save — turning a typo in one input into a wipe of another.
       const patch: Record<string, unknown> = {};
-      for (const key of ["about", "address", "description", "email"] as const) {
+      for (const key of ["address", "description", "email"] as const) {
         if ((form[key] ?? "") !== (profile?.[key] ?? "")) patch[key] = form[key] ?? "";
+      }
+      // `about` is the ONE field an empty string does not clear — Meta rejects it
+      // ("String cannot be empty"), so sending "" would just fail the whole save
+      // and take the other edits down with it. Tell the operator instead.
+      const nextAbout = form.about ?? "";
+      if (nextAbout !== (profile?.about ?? "")) {
+        if (nextAbout === "") {
+          toast.error("About can't be empty — WhatsApp requires at least one character.");
+          return;
+        }
+        patch.about = nextAbout;
+      }
+      if ((form.vertical ?? "") !== (profile?.vertical ?? "")) {
+        patch.vertical = form.vertical ?? "";
       }
       const before = (profile?.websites ?? []).join(",");
       const after = (form.websites ?? []).filter(Boolean).join(",");
@@ -284,15 +329,30 @@ export function BusinessProfilePanel({
                 }
               />
 
-              {/* Read-only. Meta doesn't publish the WhatsAppVertical members in
-                  the profile reference, and writing a guessed value would either
-                  be rejected or silently set the wrong industry. */}
-              {profile.vertical && (
-                <p className="text-2xs text-muted-foreground">
-                  Industry: <span className="font-medium">{profile.vertical}</span> —
-                  change it in WhatsApp Manager.
-                </p>
-              )}
+              {/* Editable against Meta's published member list — this used to be
+                  read-only because those members weren't documented, which sent
+                  operators to WhatsApp Manager to set their own industry. */}
+              <div className="space-y-1">
+                <label className="text-2xs font-medium" htmlFor="wa-vertical">
+                  Industry
+                </label>
+                <select
+                  id="wa-vertical"
+                  className={cn(
+                    "h-9 w-full rounded-md border bg-background px-2 text-sm",
+                    "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                  )}
+                  value={form.vertical ?? ""}
+                  disabled={!canManage}
+                  onChange={(e) => setForm((f) => ({ ...f, vertical: e.target.value }))}
+                >
+                  {VERTICALS.map((v) => (
+                    <option key={v.value || "none"} value={v.value}>
+                      {v.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
 
               {canManage && (
                 <div className="flex items-center gap-2 pt-1">

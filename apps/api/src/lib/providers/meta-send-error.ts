@@ -48,7 +48,8 @@ export type MetaErrorCode =
   | "marketing_opt_out"     // WA 131050 — this recipient stopped marketing messages FROM US
   | "duplicate_person"      // OURS, not Meta's — customer-mode: this contact merged
                             // into a person the campaign had already reached
-  | "portfolio_paced_drop"  // WA 135000 — dropped by a business-portfolio pacing review
+  | "portfolio_paced_drop"  // WA 135000 on a STATUS WEBHOOK only — dropped by a portfolio pacing review
+                            // (the SAME code on a synchronous response is Meta's "Generic user error")
   | "template_unavailable" // WA 132001/132007/132015/132016 — template paused/disabled/not-approved (run-fatal)
   | "auth_expired"         // 190 — access token expired
   | "recipient_unavailable" // social 551/1545041 — person can't be messaged (blocked / deactivated)
@@ -222,28 +223,25 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
       httpStatus,
     };
   }
-  // ── Business-portfolio pacing ────────────────────────────────────────────
-  // WhatsApp 135000 — this message was HELD by portfolio pacing and then
-  // DROPPED, because the feedback gathered between batches suggested suspicious
-  // activity. Arrives as a `failed` status webhook, not as a send rejection: the
-  // send itself succeeded and returned a wamid hours earlier.
+  // ── 135000 is NOT handled here, on purpose ───────────────────────────────
   //
-  // Deliberately its own code rather than the generic bucket, because the cause
-  // and the fix are unlike every other failure here. Nothing about THIS
-  // recipient is wrong — retrying them changes nothing, and the whole portfolio
-  // is now blocked from sending or creating templates pending review. It is an
-  // account-level event that happens to be reported per message.
-  if (numericCode === 135000) {
-    return {
-      code: "portfolio_paced_drop",
-      message:
-        "WhatsApp dropped this message during a business-portfolio review. Your portfolio " +
-        "is paused from sending and creating templates while Meta reviews recent activity — " +
-        "check Business Suite and email for the notification, and appeal there if needed.",
-      detail,
-      httpStatus,
-    };
-  }
+  // The code means two different things depending on where it arrives, and this
+  // function only ever sees one of them:
+  //
+  //   - On a STATUS WEBHOOK it is a business-portfolio pacing DROP — the send
+  //     succeeded and returned a wamid, the message sat `held`, and a review then
+  //     dropped it. That reading lives in `classifyMetaStatusError`, which is the
+  //     only path a webhook code travels.
+  //   - On a SYNCHRONOUS send response it is Meta's "Generic user error" (error
+  //     codes reference, HTTP 400): "Message failed to send because of an unknown
+  //     error with your request parameters."
+  //
+  // This function is called only on send EXCEPTIONS, so mapping it to the pacing
+  // reading here told an operator with a malformed request that their portfolio
+  // was "paused from sending and creating templates pending Meta review" and sent
+  // them to Business Suite to appeal an enforcement that never happened — while
+  // the actual bad parameter went undiagnosed. It now falls through to
+  // `provider_rejected`, which surfaces Meta's own `details` text.
   // ── Calling permission ───────────────────────────────────────────────────
   // WhatsApp 138006 — the customer hasn't granted this business number
   // permission to call them. Terminal for THIS attempt and separately

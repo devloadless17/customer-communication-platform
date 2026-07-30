@@ -25,6 +25,7 @@ import { createTestPrismaClient } from "./_prisma";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { setSharedDb } from "@/lib/db";
+import { seedWabaAccount } from "./_waba";
 import { checkBroadcastEligibility } from "@/lib/providers/meta-health";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
@@ -88,6 +89,11 @@ beforeAll(async () => {
       },
     })
   ).id;
+  // Portfolio → WABA → number. Both numbers sit under ONE WABA, which is what
+  // makes them share the portfolio's 24h budget.
+  const wabaAccountId = await seedWabaAccount(prisma, workspaceId, `${S}_waba`, {
+    portfolioId,
+  });
   numberA = (
     await prisma.channelConnection.create({
       data: {
@@ -95,7 +101,7 @@ beforeAll(async () => {
         channel: "whatsapp",
         externalAccountId: `${S}_a`,
         isDefault: true,
-        portfolioId,
+        wabaAccountId,
         config: { phoneNumberId: `${S}_a` },
         secrets: {},
       },
@@ -107,7 +113,7 @@ beforeAll(async () => {
         workspaceId,
         channel: "whatsapp",
         externalAccountId: `${S}_b`,
-        portfolioId,
+        wabaAccountId,
         config: { phoneNumberId: `${S}_b` },
         secrets: {},
       },
@@ -164,7 +170,10 @@ describe("portfolio budget", () => {
         workspaceId,
         channel: "whatsapp",
         externalAccountId: `${S}_c`,
-        portfolioId: otherPortfolio.id,
+        // Its own WABA under the OTHER portfolio — the link lives on the WABA.
+        wabaAccountId: await seedWabaAccount(prisma, workspaceId, `${S}_waba_other`, {
+          portfolioId: otherPortfolio.id,
+        }),
         config: { phoneNumberId: `${S}_c` },
         secrets: {},
       },

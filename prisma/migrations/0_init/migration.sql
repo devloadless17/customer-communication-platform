@@ -2675,6 +2675,7 @@ CREATE UNIQUE INDEX "InboxView_shared_name_key" ON public."InboxView" USING btre
 CREATE INDEX "Message_broadcastId_idx" ON public."Message" USING btree ("broadcastId") WHERE ("broadcastId" IS NOT NULL);
 CREATE INDEX "Message_conversationId_timestamp_inbound_idx" ON public."Message" USING btree ("conversationId", "timestamp" DESC) WHERE (direction = 'in'::"MessageDirection");
 CREATE INDEX "Message_inbound_media_pending_idx" ON public."Message" USING btree ("createdAt") WHERE ((direction = 'in'::"MessageDirection") AND ("mediaKind" IS NOT NULL) AND ("mediaUrl" IS NULL));
+CREATE INDEX "Message_template_send_budget_idx" ON public."Message" USING btree ("channelConnectionId", "createdAt" DESC) WHERE ((direction = 'out'::"MessageDirection") AND ("templateName" IS NOT NULL) AND ("broadcastId" IS NULL));
 CREATE INDEX "Organization_isPlatform_idx" ON public."Organization" USING btree ("isPlatform") WHERE "isPlatform";
 CREATE INDEX "OutboundEvent_drainer_pending_idx" ON public."OutboundEvent" USING btree ("createdAt") WHERE (("publishedAt" IS NULL) AND ("failedAt" IS NULL));
 CREATE INDEX "OutboundEvent_retention_idx" ON public."OutboundEvent" USING btree ("publishedAt") WHERE (("publishedAt" IS NOT NULL) AND ("failedAt" IS NULL));

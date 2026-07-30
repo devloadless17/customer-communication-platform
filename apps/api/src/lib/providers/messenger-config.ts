@@ -40,6 +40,13 @@ export interface MessengerSendConfig {
   graphVersion: string;
   /** This channel's app secret, for appsecret_proof on Graph calls. */
   appSecret?: string;
+  /**
+   * The Meta app this Page is connected through. Not needed to SEND — it is here
+   * because `/{page-id}/subscribed_apps` lists every app on the Page, so reading
+   * "are we subscribed" requires knowing which node is ours. Optional: rows
+   * stored before the id was captured have none.
+   */
+  appId?: string;
 }
 
 export interface MessengerWebhookConfig {
@@ -54,6 +61,9 @@ const DEFAULT_GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
 
 interface SendCipher {
   pageId: string;
+  /** Not a secret — cached alongside them so the subscription check needs no
+   *  second read. See MessengerSendConfig.appId. */
+  appId?: string;
   pageAccessTokenCipher: string;
   /** This channel's OWN app secret cipher — for appsecret_proof on send. The
    *  proof must use the secret of the app that issued the token; each channel
@@ -116,6 +126,7 @@ async function loadSendCipher(
     kind: "ok",
     cipher: {
       pageId: config.pageId!,
+      ...(config.appId ? { appId: config.appId } : {}),
       pageAccessTokenCipher: secrets.pageAccessToken!,
       ...(secrets.appSecret ? { appSecretCipher: secrets.appSecret } : {}),
     },
@@ -149,6 +160,7 @@ function materialize(workspaceId: string, cipher: SendCipher): MessengerSendConf
     pageAccessToken,
     graphVersion: DEFAULT_GRAPH_VERSION,
     ...(appSecret ? { appSecret } : {}),
+    ...(cipher.appId ? { appId: cipher.appId } : {}),
   };
 }
 

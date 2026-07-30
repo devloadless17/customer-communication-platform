@@ -79,6 +79,9 @@ export interface WhatsappHealthSnapshot {
   messagingDailyCap: number | null;
   qualityRating: string | null;
   throughputLevel: string | null;
+  /** COEXISTENCE: Meta hard-caps this number at 20 messages/second, outside the
+   *  80/1000 throughput ladder. Null = not polled yet (treated as not-coexistence). */
+  isOnBusinessApp: boolean | null;
   messagingHealthUpdatedAt: Date | null;
   /** The portfolio the cap belongs to — the scope its 24h budget is shared over. */
   portfolioId: string | null;
@@ -91,6 +94,14 @@ export interface WhatsappHealthSnapshot {
   /** Meta's raw `verification_status` for the portfolio. Drives the TEMPLATE
    *  limit (see {@link portfolioTemplateLimit}), not the messaging limit. */
   verificationStatus: string | null;
+  /** Meta's `max_phone_numbers_per_business` for the portfolio: how many business
+   *  phone numbers it may have REGISTERED. New portfolios start at 2 and go to 20
+   *  on business verification (or a 2,000 messaging limit). Null = unknown, which
+   *  means ungated — same posture as `messagingDailyCap`. */
+  maxPhoneNumbers: number | null;
+  /** Where the portfolio's identity came from. `local` means "not linked to a
+   *  real Meta portfolio yet" — the UI says so instead of showing a null id. */
+  portfolioSource: "embedded_signup" | "graph_discovered" | "local" | null;
   /** A WhatsApp Business policy violation Meta reported, and when we saw it. */
   policyViolationType?: string | null;
   policyViolationAt?: Date | null;
@@ -129,6 +140,13 @@ export interface WhatsappHealthUpdate {
   messagingTier?: string | null;
   qualityRating?: string | null;
   throughputLevel?: string | null;
+  /**
+   * COEXISTENCE marker (`is_on_biz_app`): the number is used in the WhatsApp
+   * Business app alongside Cloud API, which Meta hard-caps at 20 messages/second.
+   * Per-NUMBER, like quality and throughput. `undefined` leaves it untouched — an
+   * absent field must never clear a real marker.
+   */
+  isOnBusinessApp?: boolean | null;
   /**
    * Calling enforcement. `null` clears a stored restriction/warning (the
    * provider lifted it); `undefined` leaves it untouched, because these events
@@ -276,7 +294,12 @@ export async function resolveWhatsappHealthAccount(
   // (the display number needs digit-normalization Prisma can't express).
   const connections = await db.channelConnection.findMany({
     where: { workspaceId, channel: "whatsapp" },
-    select: { id: true, wabaId: true, config: true, externalAccountId: true },
+    select: {
+      id: true,
+      config: true,
+      externalAccountId: true,
+      wabaAccount: { select: { externalWabaId: true } },
+    },
   });
   if (connections.length === 0) return null;
 
@@ -300,7 +323,9 @@ export async function resolveWhatsappHealthAccount(
     }
   }
   if (hints.wabaId) {
-    const underWaba = connections.filter((c) => c.wabaId === hints.wabaId);
+    const underWaba = connections.filter(
+      (c) => c.wabaAccount?.externalWabaId === hints.wabaId,
+    );
     if (underWaba.length === 1) return underWaba[0]!.id;
   }
   return null;
@@ -345,6 +370,7 @@ export async function persistWhatsappHealth(
   const perNumber: {
     qualityRating?: string | null;
     throughputLevel?: string | null;
+    isOnBusinessApp?: boolean | null;
   } = {};
   const wabaScoped: {
     callingRestrictedUntil?: Date | null;
@@ -365,6 +391,9 @@ export async function persistWhatsappHealth(
   let portfolioTier: string | null | undefined;
   if (update.messagingTier !== undefined) {
     portfolioTier = update.messagingTier ? normalizeMessagingTier(update.messagingTier) : null;
+  }
+  if (update.isOnBusinessApp !== undefined) {
+    perNumber.isOnBusinessApp = update.isOnBusinessApp;
   }
   if (update.qualityRating !== undefined) {
     perNumber.qualityRating = update.qualityRating
@@ -436,43 +465,56 @@ export async function persistWhatsappHealth(
       // the one owning the WABA's numbers). Unscoped, a tier update for one
       // portfolio would overwrite every other portfolio in the workspace —
       // each of which has its own independent 24h budget.
+      // Portfolio → WABA → number is Meta's real hierarchy, so the portfolio is
+      // reached through its WABAs. Unscoped, a tier update for one portfolio
+      // would overwrite every other portfolio in the workspace — each of which
+      // has its own independent 24h budget.
       where: {
-        connections: {
+        wabaAccounts: {
           some: {
             workspaceId,
-            channel: "whatsapp",
-            ...(channelConnectionId ? { id: channelConnectionId } : wabaId ? { wabaId } : {}),
+            ...(channelConnectionId
+              ? { connections: { some: { id: channelConnectionId, workspaceId } } }
+              : wabaId
+                ? { externalWabaId: wabaId }
+                : {}),
           },
         },
       },
       data: portfolioData,
     });
-    // Self-healing: a workspace whose WhatsApp account predates the portfolio
-    // table (or was connected without one) has nothing to update, and silently
-    // dropping the tier here would leave the pre-send gate permanently ungated.
-    // Mint a local container — but ONLY for rows this event can be attributed
-    // to. The old attach ("every WhatsApp connection with portfolioId null")
-    // merged numbers from genuinely DIFFERENT Meta portfolios into one shared
-    // budget: over-blocking both, and letting one portfolio's tier clobber the
-    // other's. Attribution order: the event's own connection → the WABA's
-    // connections → the sole connection. With none, drop the tier: the next
-    // per-connection Graph poll resolves the REAL portfolio id and
-    // `linkWhatsappPortfolio`'s upsert converges siblings onto it.
+    // Self-healing: a workspace whose WABA has no portfolio linked yet (no
+    // `business_management` scope, or connected before the portfolio table) has
+    // nothing to update, and silently dropping the tier would leave the pre-send
+    // gate permanently ungated. Mint a local container — but ONLY for a WABA this
+    // event can be attributed to.
+    //
+    // The attribution used to need three tiers (connection → WABA's connections →
+    // sole connection) because `portfolioId` hung off the NUMBER, so the DB could
+    // express "two numbers of one WABA in different portfolios" — a state Meta
+    // cannot produce. Now that the link lives on the WABA, and a WABA has exactly
+    // one portfolio by construction, ONE tier is enough: find the WABA. With none,
+    // drop the tier — the next Graph poll resolves the real portfolio id and
+    // `linkWhatsappPortfolio`'s upsert converges.
     if (updated.count === 0) {
-      const attachWhere = channelConnectionId
-        ? { workspaceId, channel: "whatsapp" as const, id: channelConnectionId, portfolioId: null }
+      const wabaWhere = channelConnectionId
+        ? {
+            workspaceId,
+            portfolioId: null,
+            connections: { some: { id: channelConnectionId, workspaceId } },
+          }
         : wabaId
-          ? { workspaceId, channel: "whatsapp" as const, wabaId, portfolioId: null }
+          ? { workspaceId, portfolioId: null, externalWabaId: wabaId }
           : soleConnection
-            ? { workspaceId, channel: "whatsapp" as const, portfolioId: null }
+            ? { workspaceId, portfolioId: null }
             : null;
-      if (attachWhere) {
+      if (wabaWhere) {
         const created = await db.whatsappPortfolio.create({
-          data: { workspaceId, ...portfolioData },
+          data: { workspaceId, source: "local", ...portfolioData },
           select: { id: true },
         });
-        const attached = await db.channelConnection.updateMany({
-          where: attachWhere,
+        const attached = await db.whatsappBusinessAccount.updateMany({
+          where: wabaWhere,
           data: { portfolioId: created.id },
         });
         // A race (another writer attached the rows first) would leave this
@@ -485,7 +527,7 @@ export async function persistWhatsappHealth(
       } else {
         console.warn(
           `[whatsapp-health] dropped unattributable tier for team=${workspaceId} — ` +
-            `several numbers, no connection/WABA in payload; next Graph poll links the real portfolio`,
+            `several WABAs, no connection/WABA in payload; next Graph poll links the real portfolio`,
         );
       }
     }
@@ -527,7 +569,7 @@ export async function persistWhatsappHealth(
           workspaceId,
           channel: "whatsapp",
           ...(wabaId
-            ? { wabaId }
+            ? { wabaAccount: { externalWabaId: wabaId } }
             : channelConnectionId
               ? { id: channelConnectionId }
               : {}),
@@ -596,13 +638,19 @@ const BROADCAST_LOOKBACK_HOURS = 72;
  * Count the UNIQUE customers this team has messaged on WhatsApp in the trailing
  * rolling window, as counted against the number's messaging limit.
  *
- * SCOPE, stated honestly: this counts BROADCAST recipients only. Template sends
- * driven by a workflow or the /v1 API also consume Meta's real budget but are
- * not counted here, so this is a LOWER BOUND — it can under-report, never
- * over-report. That's the safe direction for a gate (it will not block a send
- * Meta would have accepted), and broadcasts are the dominant source of
- * business-initiated volume by orders of magnitude. Widening it to all template
- * sends needs a template marker on `Message`, which does not exist today.
+ * SCOPE: broadcast recipients UNION every other outbound template send
+ * (`Message.templateName != null`). It used to count broadcasts alone and
+ * self-documented as a LOWER BOUND — workflow, inbox-composer and `/v1` template
+ * sends spend Meta's real budget while being invisible to the gate. That marker
+ * column now exists, so they are counted.
+ *
+ * WHICH DIRECTION THIS CAN ERR IN, and why it's acceptable: a template sent
+ * INSIDE an already-open customer-service window arguably doesn't consume the
+ * business-initiated budget, so the count can now slightly OVER-report. For a
+ * hard block that would be the unsafe direction (refusing a send Meta would
+ * accept), which is why `checkBroadcastEligibility` stays ADVISORY — it warns and
+ * shows headroom rather than hard-refusing, and a missing snapshot is still
+ * ungated.
  *
  * Two-step rather than one join so it rides existing indexes: `[workspaceId,
  * createdAt desc]` on Broadcast, then the `broadcastId`-leading indexes on
@@ -651,7 +699,7 @@ async function recentUniqueRecipientIds(
       ...(portfolioId
         ? {
             OR: [
-              { channelConnection: { portfolioId } },
+              { channelConnection: { wabaAccount: { portfolioId } } },
               { channelConnectionId: null },
             ],
           }
@@ -678,7 +726,71 @@ async function recentUniqueRecipientIds(
       sentAt: { gte: new Date(now - ROLLING_WINDOW_HOURS * 3_600_000) },
     },
   });
-  return new Set(rows.map((r) => r.contactId));
+  const contacts = new Set(rows.map((r) => r.contactId));
+  for (const id of await recentTemplateSendContactIds(workspaceId, portfolioId, now)) {
+    contacts.add(id);
+  }
+  return contacts;
+}
+
+/**
+ * Contacts reached by a NON-broadcast outbound template send in the window —
+ * workflow steps, the inbox composer, and `/v1`.
+ *
+ * UNION with the broadcast set, never a replacement for it. The broadcast runner
+ * writes its per-recipient `Message` row inside a best-effort try/catch whose own
+ * comment says a failure "must NEVER flip the recipient back to failed… Worst case
+ * the inbox is missing the row" — so a recipient can be `sent` (Meta charged,
+ * budget spent) with no Message row at all. Counting from Message alone would
+ * therefore under-report in exactly the place the old count already did. Set union
+ * is idempotent, so overlap cannot double-count.
+ *
+ * `broadcastId: null` keeps this set small — these paths produce tens to hundreds
+ * of sends per day, not 100k — so the `conversationId → contactId` resolution
+ * stays a bounded second query with no unbounded `IN` list. Server-side `groupBy`
+ * for the same heap reason as the broadcast leg. Rides
+ * `Message_template_send_budget_idx`.
+ */
+async function recentTemplateSendContactIds(
+  workspaceId: string,
+  portfolioId: string | null | undefined,
+  now: number,
+): Promise<Set<string>> {
+  // `Message.channelConnectionId` is deliberately a PLAIN id with no relation —
+  // the conversation's FK is `onDelete: SetNull`, which would erase a historical
+  // stamp — so the portfolio scope can't be expressed as a nested filter here.
+  // Resolve the portfolio's numbers first: a portfolio holds a handful of them, so
+  // this is a small bounded `in` list, not an unbounded one.
+  let accountIds: string[] | null = null;
+  if (portfolioId) {
+    const conns = await db.channelConnection.findMany({
+      where: { workspaceId, channel: "whatsapp", wabaAccount: { portfolioId } },
+      select: { id: true },
+    });
+    if (conns.length === 0) return new Set();
+    accountIds = conns.map((c) => c.id);
+  }
+
+  const grouped = await db.message.groupBy({
+    by: ["conversationId"],
+    where: {
+      workspaceId,
+      channel: "whatsapp",
+      direction: "out",
+      templateName: { not: null },
+      broadcastId: null,
+      createdAt: { gte: new Date(now - ROLLING_WINDOW_HOURS * 3_600_000) },
+      // Exact scoping: the stamp is written at the idempotent-create choke point,
+      // so unlike the broadcast leg this needs no null-account escape hatch.
+      ...(accountIds ? { channelConnectionId: { in: accountIds } } : {}),
+    },
+  });
+  if (grouped.length === 0) return new Set();
+  const convos = await db.conversation.findMany({
+    where: { workspaceId, id: { in: grouped.map((g) => g.conversationId) } },
+    select: { contactId: true },
+  });
+  return new Set(convos.map((c) => c.contactId));
 }
 
 /**
@@ -829,6 +941,7 @@ export async function getWhatsappHealth(
     select: {
       qualityRating: true,
       throughputLevel: true,
+      isOnBusinessApp: true,
       messagingHealthUpdatedAt: true,
       policyViolationType: true,
       policyViolationAt: true,
@@ -838,27 +951,42 @@ export async function getWhatsappHealth(
       bizMessagingRestrictedUntil: true,
       customerMessagingRestrictionType: true,
       customerMessagingRestrictedUntil: true,
-      portfolioId: true,
       // The 24h messaging limit is PORTFOLIO-scoped since 2025-10-07 (shared by
-      // every number in the portfolio), so tier + cap come off the portfolio,
-      // not this number. Quality + throughput above stay per-number.
-      portfolio: {
+      // every number in the portfolio), so tier + cap come off the portfolio, not
+      // this number. Quality + throughput above stay per-number.
+      //
+      // Reached THROUGH the WABA: Meta records portfolio ownership on the WABA
+      // node (`owner_business_info`), so portfolio → WABA → number is the real
+      // hierarchy. `portfolioAccountCount` counts the numbers sharing this budget
+      // across ALL of the portfolio's WABAs, which is what makes "7,850 of 10,000
+      // remaining" legible when the budget isn't just this number's.
+      wabaAccount: {
         select: {
-          messagingTier: true,
-          messagingDailyCap: true,
-          externalPortfolioId: true,
-          verificationStatus: true,
-          _count: { select: { connections: true } },
+          portfolioId: true,
+          portfolio: {
+            select: {
+              messagingTier: true,
+              messagingDailyCap: true,
+              externalPortfolioId: true,
+              verificationStatus: true,
+              maxPhoneNumbers: true,
+              source: true,
+              _count: { select: { wabaAccounts: true } },
+              wabaAccounts: { select: { _count: { select: { connections: true } } } },
+            },
+          },
         },
       },
     },
   });
   if (!row) return null;
+  const portfolio = row.wabaAccount?.portfolio ?? null;
   return {
-    messagingTier: row.portfolio?.messagingTier ?? null,
-    messagingDailyCap: row.portfolio?.messagingDailyCap ?? null,
+    messagingTier: portfolio?.messagingTier ?? null,
+    messagingDailyCap: portfolio?.messagingDailyCap ?? null,
     qualityRating: row.qualityRating,
     throughputLevel: row.throughputLevel,
+    isOnBusinessApp: row.isOnBusinessApp,
     policyViolationType: row.policyViolationType,
     policyViolationAt: row.policyViolationAt,
     utilityRestrictionType: row.utilityRestrictionType,
@@ -868,10 +996,13 @@ export async function getWhatsappHealth(
     customerMessagingRestrictionType: row.customerMessagingRestrictionType,
     customerMessagingRestrictedUntil: row.customerMessagingRestrictedUntil,
     messagingHealthUpdatedAt: row.messagingHealthUpdatedAt,
-    portfolioId: row.portfolioId,
-    externalPortfolioId: row.portfolio?.externalPortfolioId ?? null,
-    portfolioAccountCount: row.portfolio?._count.connections ?? 0,
-    verificationStatus: row.portfolio?.verificationStatus ?? null,
+    portfolioId: row.wabaAccount?.portfolioId ?? null,
+    externalPortfolioId: portfolio?.externalPortfolioId ?? null,
+    portfolioAccountCount:
+      portfolio?.wabaAccounts.reduce((n, w) => n + w._count.connections, 0) ?? 0,
+    verificationStatus: portfolio?.verificationStatus ?? null,
+    maxPhoneNumbers: portfolio?.maxPhoneNumbers ?? null,
+    portfolioSource: portfolio?.source ?? null,
   };
 }
 
@@ -898,7 +1029,13 @@ export async function getWhatsappHealth(
  */
 export async function linkWhatsappPortfolio(
   workspaceId: string,
-  channelConnectionId: string,
+  /**
+   * OUR `WhatsappBusinessAccount.id`. The portfolio link lives on the WABA, not
+   * on a phone number — Meta records it as `owner_business_info` on the WABA
+   * node — so a WABA with ZERO numbers (Embedded Signup's `FINISH_ONLY_WABA`)
+   * still gets attributed.
+   */
+  wabaAccountId: string,
   wabaId: string,
   accessToken: string,
   graphVersion: string,
@@ -953,6 +1090,9 @@ export async function linkWhatsappPortfolio(
     create: {
       workspaceId,
       externalPortfolioId,
+      // Graph-verified: we read this id back off the WABA node, as opposed to an
+      // Embedded Signup `business_id` the customer merely selected in the flow.
+      source: "graph_discovered",
       ...(tier ? { messagingTier: tier, messagingDailyCap: tierDailyCap(tier) } : {}),
       ...(verificationStatus ? { verificationStatus } : {}),
       messagingHealthUpdatedAt: new Date(),
@@ -961,6 +1101,9 @@ export async function linkWhatsappPortfolio(
     // otherwise wipe the cap on every sweep and leave the gate permanently open.
     // Same rule for verificationStatus, for the same reason.
     update: {
+      // Reading the id back off Graph upgrades an ES-asserted row to verified;
+      // it never downgrades one.
+      source: "graph_discovered",
       ...(tier ? { messagingTier: tier, messagingDailyCap: tierDailyCap(tier) } : {}),
       ...(verificationStatus ? { verificationStatus } : {}),
       messagingHealthUpdatedAt: new Date(),
@@ -968,8 +1111,8 @@ export async function linkWhatsappPortfolio(
     select: { id: true },
   });
 
-  await db.channelConnection.updateMany({
-    where: { id: channelConnectionId, workspaceId },
+  await db.whatsappBusinessAccount.updateMany({
+    where: { id: wabaAccountId, workspaceId },
     data: { portfolioId: portfolio.id },
   });
   invalidateProviderConfig(workspaceId);
@@ -984,14 +1127,19 @@ export async function linkWhatsappPortfolio(
 }
 
 /**
- * Delete portfolio rows no connection points at anymore. Called after a
- * portfolio re-point and from the account-removal paths (`Conversation`-style
- * SetNull FKs mean deleting the last connection strands the row silently).
- * Workspace-scoped, idempotent, best-effort.
+ * Delete portfolio rows no WABA points at anymore. Called after a portfolio
+ * re-point and from the account-removal paths (SetNull FKs mean deleting the last
+ * WABA strands the row silently). Workspace-scoped, idempotent, best-effort.
+ *
+ * Gated on `source: "local"`: those are the containers the health self-heal minted
+ * to hold a tier, and they are pure derived state. A `graph_discovered` or
+ * `embedded_signup` row records a REAL Meta portfolio — including its tier, cap
+ * and `maxPhoneNumbers` — and momentarily having no WABA (mid re-point, or an ES
+ * install whose WABA hasn't landed yet) must not destroy that.
  */
 export async function gcOrphanWhatsappPortfolios(workspaceId: string): Promise<void> {
   await db.whatsappPortfolio
-    .deleteMany({ where: { workspaceId, connections: { none: {} } } })
+    .deleteMany({ where: { workspaceId, source: "local", wabaAccounts: { none: {} } } })
     .catch(() => undefined);
 }
 
@@ -1027,7 +1175,12 @@ export async function fetchWhatsappHealthFromGraph(
   const url =
     `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}` +
     `?fields=whatsapp_business_manager_messaging_limit,messaging_limit_tier,` +
-    `quality_rating,throughput`;
+    // `is_on_biz_app` marks a COEXISTENCE number (still used in the WhatsApp
+    // Business app alongside Cloud API). Meta hard-caps those at 20 messages/second
+    // — a fixed ceiling outside the 80/1000 throughput ladder — so the broadcast
+    // runner has to know, or it paces them ~4x too fast. `platform_type` rides along
+    // because Meta's Coexistence doc pairs the two for exactly this check.
+    `quality_rating,throughput,is_on_biz_app,platform_type`;
   // Idempotent GET — one retry on a 5xx blip. No appsecret_proof (matches the
   // send path default); the token alone authorizes a read of the number's own node.
   const node = await graphGetJson(url, config.accessToken, { retry: true });
@@ -1037,24 +1190,32 @@ export async function fetchWhatsappHealthFromGraph(
     throughput && typeof throughput === "object"
       ? (throughput as { level?: unknown }).level
       : undefined;
+  // Only a definite boolean is recorded — an absent field must NOT be read as
+  // `false`, or one field-less response would clear a real Coexistence marker and
+  // silently restore the 4x-too-fast pacing.
+  const isOnBusinessApp =
+    typeof node.is_on_biz_app === "boolean" ? node.is_on_biz_app : undefined;
 
   // Resolve the owning portfolio FIRST, so the tier written just below lands on
   // the right portfolio row rather than on whatever local container the
   // self-healing path last minted. Best-effort: a token without
   // `business_management` returns null and we fall through to the old
   // behaviour, which is correct for a single-portfolio workspace.
-  // When the caller named the connection, `getMetaSendConfig` already proved it
-  // belongs to this workspace+channel and is active — no re-lookup needed.
+  // The portfolio link lives on the WABA (Meta records `owner_business_info` on the
+  // WABA node), so what this needs is the WABA row's id — NOT the connection's.
+  // `getSendConfig` already joined it, so there is nothing extra to look up.
+  // Still needed for the per-NUMBER half of the snapshot below (quality,
+  // throughput), which is scoped to the polled connection.
   const connection = channelConnectionId
     ? { id: channelConnectionId }
     : await db.channelConnection.findFirst({
         where: { workspaceId, channel: "whatsapp", externalAccountId: config.phoneNumberId },
         select: { id: true },
       });
-  if (connection && config.wabaId) {
+  if (config.wabaAccountId && config.wabaId) {
     await linkWhatsappPortfolio(
       workspaceId,
-      connection.id,
+      config.wabaAccountId,
       config.wabaId,
       config.accessToken,
       config.graphVersion,
@@ -1072,6 +1233,7 @@ export async function fetchWhatsappHealthFromGraph(
         null,
       qualityRating: (node.quality_rating as string | undefined) ?? null,
       throughputLevel: (throughputLevel as string | undefined) ?? null,
+      ...(isOnBusinessApp === undefined ? {} : { isOnBusinessApp }),
     },
     // Scope to the polled number — see the param doc on persistWhatsappHealth.
     connection?.id ?? null,

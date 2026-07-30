@@ -81,10 +81,10 @@ test("same-named templates on two WABAs are two DISTINCT rows", async () => {
 
   const rows = await db().messageTemplate.findMany({
     where: { workspaceId: MA_TEAM_ID, name: "order_update" },
-    select: { wabaId: true },
+    select: { wabaAccount: { select: { externalWabaId: true } } },
   });
   expect(rows).toHaveLength(2);
-  expect(new Set(rows.map((r) => r.wabaId))).toEqual(
+  expect(new Set(rows.map((r) => r.wabaAccount.externalWabaId))).toEqual(
     new Set([MA.whatsapp.a.waba, MA.whatsapp.b.waba]),
   );
 });
@@ -150,24 +150,35 @@ test("the thread account's OWN template sends from that number", async () => {
   expect(await sendAccountIds()).toEqual([MA.whatsapp.a.account]);
 });
 
-test('a LEGACY ""-WABA template stays sendable from either number', async () => {
-  // `""` predates multi-account and belongs to no WABA in particular. Scoping
-  // it out would make every pre-multi-account catalog unsendable.
-  await seedTemplate({ name: "legacy_notice", wabaId: "" });
+test("a template on a THIRD WABA is refused from either number", async () => {
+  // INVERTED from the test this replaces. That one pinned the legacy `""` WABA
+  // sentinel — a template belonging to "no WABA in particular", sendable from any
+  // account. That sentinel is gone (`MessageTemplate.wabaAccountId` is a NOT NULL
+  // FK), because it made the cross-account guard a NO-OP: the guard only refused
+  // when both sides were known and differed, so an unknown WABA on either side
+  // passed silently and a WABA-less number could send any template in the workspace.
+  //
+  // A template only ever belongs to ONE catalog now, and a number can only send
+  // from its own — so a third WABA's template is refused, whichever number asks.
+  await seedTemplate({ name: "third_waba_notice", wabaId: "e2e_ma_waba_third" });
   const { contactId } = await seedBoundConversation({
     channel: "whatsapp",
     channelConnectionId: MA_CONN.whatsappB,
-    name: "MA Legacy",
+    name: "MA Third WABA",
     phoneNumber: "9612000003",
   });
 
   const res = await v1SendTemplateByName({
     contactId,
-    name: "legacy_notice",
-    idempotencyKey: "ma-legacy-1",
+    name: "third_waba_notice",
+    idempotencyKey: "ma-third-waba-1",
   });
-  expect(res.status, res.text).toBe(201);
-  expect(await sendAccountIds()).toEqual([MA.whatsapp.b.account]);
+  // 404: `/v1` scopes the name lookup to the thread account's OWN catalog, so the
+  // template genuinely is not in reach — a clearer answer for a partner than
+  // accepting it and failing at send time.
+  expect(res.status, res.text).toBe(404);
+  // NEGATIVE half: nothing was handed to Meta.
+  expect(await sendAccountIds()).toEqual([]);
 });
 
 test("a broadcast binds to the account it was created with", async () => {

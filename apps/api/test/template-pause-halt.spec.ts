@@ -19,6 +19,7 @@ import { createTestPrismaClient } from "./_prisma";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { setSharedDb } from "@/lib/db";
+import { seedWabaAccount } from "./_waba";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
 if (existsSync("../../.env")) process.loadEnvFile("../../.env");
@@ -54,6 +55,9 @@ beforeAll(async () => {
     await prisma.messageTemplate.create({
       data: {
         workspaceId,
+        // Templates are WABA-scoped in Meta, so the FK is required — a template
+        // belonging to "no WABA" is what the retired `""` sentinel represented.
+        wabaAccountId: await seedWabaAccount(prisma, workspaceId, `ph_waba_${S}`),
         name: `promo_${S}`,
         language: "en_US",
         category: "marketing",

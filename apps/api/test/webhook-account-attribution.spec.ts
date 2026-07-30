@@ -22,6 +22,8 @@ import { createTestPrismaClient } from "./_prisma";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { setSharedDb } from "@/lib/db";
+import { seedWabaAccount } from "./_waba";
+
 
 // Ingest publishes `team.catalog_changed` after a template flip; the bus is
 // irrelevant to what's under test, so stub publish alone.
@@ -54,7 +56,7 @@ let portfolioB = "";
 let portfolioShared = "";
 let tplA = "";
 let tplB = "";
-let tplLegacy = "";
+let tplOtherWaba = "";
 
 /** Wrap one change the way Meta delivers it. */
 function webhook(entryId: string, field: string, value: Record<string, unknown>) {
@@ -113,9 +115,8 @@ beforeAll(async () => {
           externalAccountId: phoneId,
           isDefault,
           isActive: true,
-          wabaId,
-          portfolioId,
-          config: { phoneNumberId: phoneId, displayPhoneNumber: display, wabaId },
+          wabaAccountId: await seedWabaAccount(prisma, workspaceId, wabaId, { portfolioId }),
+          config: { phoneNumberId: phoneId, displayPhoneNumber: display },
           secrets: {},
         },
         select: { id: true },
@@ -132,7 +133,7 @@ beforeAll(async () => {
       await prisma.messageTemplate.create({
         data: {
           workspaceId,
-          wabaId,
+          wabaAccountId: await seedWabaAccount(prisma, workspaceId, wabaId),
           name,
           language: "en",
           status: "approved",
@@ -144,7 +145,9 @@ beforeAll(async () => {
     ).id;
   tplA = await mkTpl(WABA_A, `${S}_promo`);
   tplB = await mkTpl(WABA_B, `${S}_promo`); // same (name, language), different WABA
-  tplLegacy = await mkTpl("", `${S}_legacy_promo`); // pre-multi-account sentinel
+  // A template on a THIRD WABA that has no connection of its own — stands in for
+  // "a catalog this webhook has no business touching".
+  tplOtherWaba = await mkTpl(WABA_SHARED, `${S}_other_waba_promo`);
 });
 
 afterAll(async () => {
@@ -219,7 +222,11 @@ describe("channel-health attribution", () => {
 
     // Neither number under the shared WABA got the unattributable RED.
     const tainted = await prisma.channelConnection.count({
-      where: { workspaceId, wabaId: WABA_SHARED, qualityRating: { not: null } },
+      where: {
+        workspaceId,
+        wabaAccount: { externalWabaId: WABA_SHARED },
+        qualityRating: { not: null },
+      },
     });
     expect(tainted).toBe(0);
     // The tier is portfolio-scoped and the WABA pins the portfolio — it lands.
@@ -350,6 +357,31 @@ describe("phone_number_name_update", () => {
     });
     expect(a.nameStatus).toBeNull();
   });
+
+  it("an APPROVAL flags that the number must be RE-REGISTERED to apply it", async () => {
+    // The step that is easy to miss, and that every surface used to hide. Meta:
+    // "After the display name change is approved, you must re-register the phone
+    // number… Wait for the phone_number_name_update webhook with decision set to
+    // APPROVED. Call POST /<PHONE_NUMBER_ID>/register." Until then the name is
+    // approved but NOT live — and there is a 14-day window after which it has to go
+    // through review all over again.
+    await deliver(
+      webhook(WABA_A, "phone_number_name_update", {
+        display_phone_number: "+1 555-010-0001",
+        decision: "APPROVED",
+        requested_verified_name: "Sales Line",
+      }),
+    );
+    const row = await prisma.channelConnection.findUniqueOrThrow({
+      where: { id: connA },
+      select: { nameStatus: true, lastAccountAlert: true },
+    });
+    expect(row.nameStatus).toBe("APPROVED");
+    const alert = row.lastAccountAlert as { event?: string; detail?: string } | null;
+    expect(alert?.event).toBe("APPROVED_PENDING_REREGISTER");
+    expect(alert?.detail).toMatch(/re-register/i);
+    expect(alert?.detail).toMatch(/14 days/);
+  });
 });
 
 describe("template-status attribution (W2)", () => {
@@ -378,19 +410,30 @@ describe("template-status attribution (W2)", () => {
     expect(a.status).toBe("approved"); // untouched — the old bug flipped this too
   });
 
-  it("still matches a legacy row synced before wabaId existed (the \"\" sentinel)", async () => {
+  it("does NOT flip a same-named template on a DIFFERENT WABA", async () => {
+    // The inverse of the test this replaces. That one pinned the legacy `""`
+    // sentinel: a template belonging to "no WABA in particular" was matched by ANY
+    // WABA's webhook, because the match was `wabaId: { in: [evt.wabaId, ""] }`.
+    // The sentinel is gone (the FK is NOT NULL), so a WABA's webhook now touches
+    // only its OWN catalog — which is the property that actually matters, since a
+    // template PAUSE halts every campaign using it.
+    const before = await prisma.messageTemplate.findUniqueOrThrow({
+      where: { id: tplOtherWaba },
+      select: { status: true },
+    });
     await deliver(
       webhook(WABA_B, "message_template_status_update", {
-        message_template_name: `${S}_legacy_promo`,
+        message_template_name: `${S}_other_waba_promo`,
         message_template_language: "en",
         event: "PAUSED",
       }),
     );
-    const legacy = await prisma.messageTemplate.findUniqueOrThrow({
-      where: { id: tplLegacy },
+    const after = await prisma.messageTemplate.findUniqueOrThrow({
+      where: { id: tplOtherWaba },
       select: { status: true },
     });
-    expect(legacy.status).toBe("paused");
+    expect(after.status).toBe(before.status);
+    expect(after.status).not.toBe("paused");
   });
 });
 

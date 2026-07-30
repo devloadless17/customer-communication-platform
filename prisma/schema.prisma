@@ -719,6 +719,7 @@ model Workspace {
   outboundSendAttempts    OutboundSendAttempt[]
   channelConnections      ChannelConnection[]
   whatsappPortfolios      WhatsappPortfolio[]
+  whatsappBusinessAccounts WhatsappBusinessAccount[]
   webchatWidgets          WebchatWidget[]
   metaConnection          MetaConnection?
   calls                   Call[]
@@ -793,26 +794,40 @@ model ChannelConnection {
   // The account outbound-initiated sends and broadcasts default to when the
   // workspace has several on this channel. Exactly one per (workspace, channel).
   isDefault         Boolean   @default(false)
-  // WhatsApp only. The WABA scopes the TEMPLATE catalog (numbers under one WABA
-  // share templates); the portfolio scopes the 24h MESSAGING LIMIT (Meta moved
-  // it from per-number to per-portfolio on 2025-10-07).
-  wabaId            String?
-  portfolioId       String?
+  // WhatsApp only. The WhatsappBusinessAccount (WABA) this number belongs to —
+  // Meta's real hierarchy is portfolio → WABA → phone number, so the portfolio
+  // link lives on the WABA, NOT here.
+  //
+  // Nullable because (a) Messenger/Instagram rows have no WABA and (b) the
+  // settings pre-mint creates a credential-less placeholder before any WABA is
+  // known. It is NOT "no opinion": every WhatsApp send guard treats a null WABA
+  // as a hard refusal (`waba_unknown`), never as permission. Connecting a number
+  // requires `wabaId` in the request.
+  wabaAccountId     String?
   config            Json      @default("{}")
   secrets           Json      @default("{}")
   isActive          Boolean   @default(true)
-  // When template analytics were switched on for this account's WABA.
-  //
-  // IRREVERSIBLE and one-time: Meta's `is_enabled_for_insights=true` cannot be
-  // undone, so it is never fired implicitly by a fetch attempt — an admin
-  // confirms it explicitly. Stamped so the UI can offer the action exactly once
-  // and every later "why is there no data" question has a dated answer.
-  insightsEnabledAt DateTime?
   // Set when a send fails with Graph error 190 (access token expired/revoked) so
   // Settings can surface a "reconnect" banner and admins are prompted to re-issue
   // the token — per Meta's access-token best practice. Cleared on reconnect.
   needsReconnect    Boolean   @default(false)
   lastAuthErrorAt   DateTime?
+
+  // WhatsApp COEXISTENCE: this business phone number is registered for Cloud API
+  // AND still in use in the WhatsApp Business app (Meta's `is_on_biz_app` on the
+  // phone-number node; `platform_type` reads CLOUD_API for both).
+  //
+  // Load-bearing for BROADCAST PACING, not decoration. Meta hard-caps a
+  // simultaneously-app-used number at 20 messages/second — a fixed ceiling, not the
+  // 80/1000 throughput ladder every other number follows. Pacing such a number at
+  // the STANDARD target (75/s) is ~4x over it, which earns sustained 130429s
+  // mid-campaign and drags down the quality rating of exactly the fragile numbers
+  // Coexistence exists for (a small business's own handset).
+  //
+  // Null = not yet polled → treated as NOT coexistence, because the ordinary
+  // ladder is the common case and `resolveSendRate`'s unknown-throughput baseline
+  // already errs slow.
+  isOnBusinessApp   Boolean?
 
   // ── WhatsApp messaging-health snapshot (whatsapp channel only) ────────────
   // Cached from Meta so large broadcasts can be gated BEFORE sending: WhatsApp
@@ -923,8 +938,8 @@ model ChannelConnection {
 
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
-  workspace     Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  portfolio     WhatsappPortfolio? @relation(fields: [portfolioId], references: [id], onDelete: SetNull)
+  workspace     Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  wabaAccount   WhatsappBusinessAccount? @relation(fields: [wabaAccountId], references: [id], onDelete: SetNull)
   // Threads bound to this account. SetNull on the far side, so removing an
   // account never deletes conversation history.
   conversations Conversation[]
@@ -948,6 +963,79 @@ model ChannelConnection {
   @@index([workspaceId, channel])
   // Inbound resolution: payload account id → the owning connection.
   @@index([channel, externalAccountId])
+  // "every number under this WABA" — the fan-out target for WABA-scoped
+  // enforcement writes, and the credential fallback for a WABA whose own token
+  // isn't set. Also backs the FK's SetNull scan on WABA delete.
+  @@index([wabaAccountId])
+}
+
+/// A WhatsApp Business Account (WABA).
+///
+/// Meta's hierarchy is business portfolio → WABA → business phone number, and
+/// this is the middle term that used to be a bare string column repeated on every
+/// number (plus a duplicate copy inside `ChannelConnection.config`). It is the:
+///   - TEMPLATE CATALOG boundary — numbers under one WABA share templates, so two
+///     WABAs in one workspace may each hold a template of the same
+///     (name, language);
+///   - WEBHOOK SUBJECT for every `object:"whatsapp_business_account"` topic;
+///   - unit a customer-scoped business token is issued for under Embedded Signup
+///     (ONE per customer/WABA install, not one per phone number).
+///
+/// IT EXISTS WITH ZERO PHONE NUMBERS. Embedded Signup's `FINISH_ONLY_WABA` finish
+/// event is a completed onboarding with no number attached, and that WABA's
+/// template + account-level webhooks start arriving immediately. Any code that
+/// assumes a WABA implies a ChannelConnection is wrong.
+model WhatsappBusinessAccount {
+  id                String    @id @default(cuid())
+  workspaceId       String
+  /// Meta's WABA id. NOT NULL and GLOBALLY unique — not merely unique per
+  /// workspace.
+  ///
+  /// TENANCY GUARD, not a tidiness constraint. Meta delivers a WABA's webhooks to
+  /// whichever app is subscribed to it, so two workspaces both claiming one WABA
+  /// means one of them silently receives nothing — and under the app-level
+  /// callback (where the workspace is resolved FROM the payload, not the URL) it
+  /// would route one tenant's messages into another tenant's inbox. This index is
+  /// what makes payload → workspace a single indexed read, and what makes the
+  /// second workspace's connect attempt fail loudly instead of quietly.
+  externalWabaId    String    @unique
+  /// The business portfolio that owns this WABA. Meta puts `owner_business_info`
+  /// on the WABA node, so this is where the link belongs — hanging it off the
+  /// phone number let the DB express a state Meta cannot produce (two numbers of
+  /// one WABA in different portfolios) and forced a three-tier attribution
+  /// heuristic to defend against it.
+  ///
+  /// Null until a token with `business_management` resolves it, or until Embedded
+  /// Signup hands us `business_id` directly.
+  portfolioId       String?
+  /// Operator-facing label, for a workspace holding several WABAs.
+  label             String?
+  /// Envelope-encrypted (AES-256-GCM, ENCRYPTION_KEY) — same crypto boundary as
+  /// ChannelConnection.secrets, never plaintext. Holds `{ accessToken }`: the
+  /// customer-scoped business token Embedded Signup issues per (customer, WABA).
+  /// Preferred over the per-connection token when present, so an ES tenant stores
+  /// and rotates ONE token instead of one copy per number.
+  secrets           Json      @default("{}")
+  /// When `POST /{WABA_ID}/subscribed_apps` was last confirmed. Meta only
+  /// delivers `object:"whatsapp_business_account"` webhooks for WABAs the app is
+  /// explicitly subscribed to, and a dashboard re-save can silently reset it.
+  subscribedAt      DateTime?
+  /// When template analytics were switched on (`is_enabled_for_insights=true`).
+  ///
+  /// IRREVERSIBLE and one-time, so it is never fired implicitly by a fetch — an
+  /// admin confirms it explicitly. Lives HERE because it is a field on the WABA
+  /// node; it was previously stored per phone number, which meant N rows recording
+  /// one WABA-wide fact.
+  insightsEnabledAt DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  workspace   Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  portfolio   WhatsappPortfolio?  @relation(fields: [portfolioId], references: [id], onDelete: SetNull)
+  connections ChannelConnection[]
+  templates   MessageTemplate[]
+
+  @@index([workspaceId])
   @@index([portfolioId])
 }
 
@@ -974,15 +1062,42 @@ model WhatsappPortfolio {
   /// the same reason as `messagingTier`: Meta's vocabulary churns and we never
   /// want a migration to track a new vendor value.
   verificationStatus       String?
+  /// Where this row's identity came from. `local` is already derivable from a null
+  /// `externalPortfolioId`, but the ES-vs-Graph split is not: Embedded Signup hands
+  /// us `business_id` UNVERIFIED (the customer picked it in the flow), whereas
+  /// `graph_discovered` was read back from `owner_business_info` on the WABA node.
+  /// Also lets the UI say "not linked yet — grant business_management and re-save"
+  /// instead of showing a null external id, which reads as a bug.
+  source                   WhatsappPortfolioSource @default(local)
+  /// Meta's `max_phone_numbers_per_business`. A NEW business portfolio is capped
+  /// at 2 REGISTERED business phone numbers; business verification (or reaching a
+  /// 2,000 messaging limit) raises it to 20, announced on the
+  /// `business_capability_update` webhook. Null = unknown, which means UNGATED —
+  /// same posture as `messagingDailyCap`.
+  maxPhoneNumbers          Int?
   messagingHealthUpdatedAt DateTime?
   createdAt                DateTime  @default(now())
   updatedAt                DateTime  @updatedAt
 
-  workspace   Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  connections ChannelConnection[]
+  workspace    Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  /// Portfolio → WABA → phone number. Numbers reach their portfolio through the
+  /// WABA, which is where Meta actually records the ownership.
+  wabaAccounts WhatsappBusinessAccount[]
 
   @@unique([workspaceId, externalPortfolioId])
   @@index([workspaceId])
+}
+
+/// How a WhatsappPortfolio row learned its identity. See `WhatsappPortfolio.source`.
+enum WhatsappPortfolioSource {
+  /// Embedded Signup returned `business_id` directly. Customer-asserted, not yet
+  /// verified against Graph.
+  embedded_signup
+  /// Read back from `owner_business_info` on the WABA node.
+  graph_discovered
+  /// A local container minted by the health self-heal so a tier has somewhere to
+  /// live; carries no external id and is garbage-collected when orphaned.
+  local
 }
 
 // A single embeddable website chat widget. Unlike the Meta channels — where a
@@ -2049,8 +2164,11 @@ model Message {
   // fix. Readers fall back to the conversation pointer when null, which is
   // exactly the old behaviour — so nothing regresses.
   //
-  // No index yet: nothing filters Message by account today (§7 — add one when
-  // a real query needs it, i.e. when per-account reporting ships).
+  // Indexed as of the 24h-budget widening below: the portfolio budget query and
+  // the per-account reports now DO filter Message by account, and without an
+  // index that is a sequential scan of the largest table in the schema. The
+  // partial index for the budget query itself lives in its own migration (see
+  // `Message_template_send_budget_idx`).
   channelConnectionId   String?
   status                MessageStatus    @default(sent)
   // Delivery-failure diagnostics from Meta's async `status: "failed"` webhook.
@@ -2078,6 +2196,20 @@ model Message {
   // — already the @@unique on BroadcastRecipient — so the propagation needs no
   // new index and no lookup by wamid.
   broadcastId           String?
+  // The TEMPLATE this outbound message was sent from — null for every free-form
+  // send and every inbound.
+  //
+  // Exists to make the portfolio 24h messaging budget honest. That budget counts
+  // UNIQUE recipients messaged outside a customer-service window, and it used to
+  // read `BroadcastRecipient` alone — so template sends driven by a workflow, the
+  // inbox composer or the `/v1` API consumed Meta's real budget while being
+  // invisible to our gate, which therefore only ever reported a LOWER BOUND.
+  //
+  // A name rather than a boolean: it costs the same, and it makes a per-template
+  // "last used" reconcilable later. `rawPayload` cannot serve — the
+  // message-rawpayload-retention sweeper collapses that blob, which is exactly why
+  // `broadcastId` above became a real column too.
+  templateName          String?
   // The structured button / list-row tap behind an inbound message. `body`
   // holds the user-facing TITLE, which an operator can rename in a template at
   // any time; this holds the STABLE machine id the template defined. Reporting
@@ -2200,6 +2332,9 @@ model Message {
   // conversationId + an ASC/range timestamp scan too). Both dropped as pure
   // write overhead on the hottest-write table — migration 20260611130000.
   @@index([replyToMessageId])
+  // Per-account reporting + the portfolio 24h budget both filter Message by the
+  // account that carried it. Unindexed this was a seq scan of the biggest table.
+  @@index([channelConnectionId])
   // FK index for the ticket relation's SetNull, and for the ticket detail
   // page's "the messages that belong to THIS piece of work" read.
   @@index([ticketId, timestamp])
@@ -2338,11 +2473,16 @@ model Invite {
 model MessageTemplate {
   id                    String            @id @default(cuid())
   workspaceId           String
-  // The WABA whose catalog this template belongs to. Part of the uniqueness key,
-  // so it is NOT NULL: Postgres treats NULLs as distinct, which would have let
-  // two templates with the same name+language coexist under an unknown WABA.
-  // Empty string = legacy/unknown WABA (rows synced before multi-account).
-  wabaId                String            @default("")
+  // The WABA whose catalog this template belongs to — a REQUIRED FK, not a
+  // string.
+  //
+  // It used to be `wabaId String @default("")`, where `""` meant "unknown WABA".
+  // That sentinel made the cross-account send guard a NO-OP: the guard only
+  // refuses when both sides are known and differ, so a legacy template was
+  // sendable from ANY account, and a connection whose WABA was never pasted could
+  // send ANY of the workspace's templates. A NOT NULL FK makes the hole
+  // unrepresentable rather than merely discouraged.
+  wabaAccountId         String
   externalId            String?
   name                  String
   language              String
@@ -2458,13 +2598,17 @@ model MessageTemplate {
   parameterFormat       String            @default("positional")
   syncedAt              DateTime          @default(now())
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace   Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  // Cascade: a WABA's catalog has no meaning without the WABA. Disconnecting a
+  // phone NUMBER never reaches this — numbers hang off the WABA, not the reverse.
+  wabaAccount WhatsappBusinessAccount @relation(fields: [wabaAccountId], references: [id], onDelete: Cascade)
 
   // Templates live on a WABA, and numbers under one WABA SHARE a catalog, so
   // two WABAs in the same workspace may each hold a template of the same
   // (name, language). Keying on the workspace alone collided them.
-  @@unique([workspaceId, wabaId, name, language])
+  @@unique([workspaceId, wabaAccountId, name, language])
   @@index([workspaceId, status])
+  @@index([wabaAccountId])
 }
 
 // Free-form label applied to contacts for segmentation ("VIP", "Ramadan

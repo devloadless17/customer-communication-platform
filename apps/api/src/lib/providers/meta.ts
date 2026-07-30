@@ -7,6 +7,7 @@ import {
   isPairRateLimitBody,
   isPairRateLimitError,
 } from "./meta-send-error";
+import { withAppsecretProof } from "./appsecret-proof";
 import { metaWireEnabled, wireOut } from "./meta-wire";
 
 // Meta error responses are tiny in practice (JSON envelope, a few KB).
@@ -140,6 +141,19 @@ const GRAPH_BASE = process.env.META_GRAPH_BASE_URL || "https://graph.facebook.co
  */
 interface MetaFetchOptions extends RequestInit {
   retry?: boolean;
+  /**
+   * This ACCOUNT'S OWN app secret, to sign the call with `appsecret_proof`.
+   *
+   * Passed per call rather than read from a module global because the correct
+   * secret is per-account: the secret must belong to the app that issued the
+   * bearer token on this very request, and an account onboarted under a
+   * different Meta app has its own. `metaFetch` reads the token straight out of
+   * the Authorization header, so this is the only extra input it needs.
+   *
+   * Omit it and the call goes out exactly as before — the proof is additive, and
+   * the whole feature is gated off by default anyway.
+   */
+  appSecret?: string;
 }
 
 /**
@@ -157,6 +171,37 @@ function redactUrlForError(input: string | URL): string {
   }
 }
 
+/**
+ * Pull the bearer token out of whatever `HeadersInit` shape a caller used.
+ *
+ * `metaFetch` signs with `appsecret_proof`, which is the HMAC of the ACCESS
+ * TOKEN — and the token is already on the request as `Authorization: Bearer …`.
+ * Reading it back here is what lets the proof be applied in ONE place instead of
+ * threading the token through 50+ call sites alongside the secret it pairs with.
+ *
+ * All three header forms are handled because this file uses the plain
+ * object form while a future caller may not, and a missed shape would silently
+ * mean "no proof" — the failure mode that looks fine until Meta starts requiring
+ * one. Returns undefined when there is no bearer token, which correctly disables
+ * the proof rather than hashing an empty string.
+ */
+function bearerFromHeaders(headers: RequestInit["headers"]): string | undefined {
+  if (!headers) return undefined;
+  const raw =
+    headers instanceof Headers
+      ? headers.get("authorization")
+      : Array.isArray(headers)
+        ? headers.find(([k]) => k.toLowerCase() === "authorization")?.[1]
+        : Object.entries(headers).find(([k]) => k.toLowerCase() === "authorization")?.[1];
+  if (typeof raw !== "string") return undefined;
+  // BOTH schemes: Meta's resumable-upload endpoint authenticates with
+  // `OAuth <token>` rather than `Bearer <token>`, and it needs a proof just the
+  // same — matching only Bearer would leave template media uploads unsigned, i.e.
+  // failing the moment "Require App Secret" is switched on.
+  const m = /^(?:Bearer|OAuth)\s+(.+)$/i.exec(raw.trim());
+  return m?.[1]?.trim() || undefined;
+}
+
 async function metaFetch(
   input: string | URL,
   init?: MetaFetchOptions,
@@ -168,14 +213,30 @@ async function metaFetch(
   // missing, bad auth) where retrying just hides the real problem.
   const retry = init?.retry === true;
   const maxAttempts = retry ? META_FETCH_MAX_ATTEMPTS : 1;
-  // Don't pass our own `retry` flag through to fetch's RequestInit.
-  const { retry: _retry, ...fetchInit } = init ?? {};
+  // Don't pass our own `retry` / `appSecret` flags through to fetch's RequestInit.
+  const { retry: _retry, appSecret, ...fetchInit } = init ?? {};
+  // `appsecret_proof` — ONE place for every WhatsApp Graph call.
+  //
+  // Meta: "an access token can be stolen… then used from an entirely different
+  // system", so the proof binds a call to knowledge of the app secret. It is a
+  // query parameter, and the token it hashes is already on this request in the
+  // Authorization header — so signing centrally here needs nothing threaded
+  // through except the secret, and no call site can forget it.
+  //
+  // Additive and gated: `withAppsecretProof` returns the URL untouched unless
+  // META_APPSECRET_PROOF=1 AND both inputs are present, so the wire is
+  // byte-identical until someone opts in.
+  const target = withAppsecretProof(
+    typeof input === "string" ? input : input.toString(),
+    bearerFromHeaders(fetchInit.headers),
+    appSecret,
+  );
   let lastErr: unknown;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), META_FETCH_TIMEOUT_MS);
     try {
-      const res = await fetch(input, { ...fetchInit, signal: ac.signal });
+      const res = await fetch(target, { ...fetchInit, signal: ac.signal });
       // 5xx is transient by Meta convention. Retry once with backoff. The
       // request body is whatever the caller passed in `init.body` — fetch
       // re-uses it on retry without re-streaming concerns because all our
@@ -791,6 +852,14 @@ function contactCardName(c: MetaContactsPayload): string {
 
 interface MetaMessage {
   from?: string;
+  /**
+   * GROUPS API: present ONLY on a group message, and the sole marker separating
+   * one from a 1:1 inbound — `from` and `contacts[].wa_id` are both the sending
+   * PARTICIPANT either way. Group posts arrive on the same `messages` field as
+   * direct messages, so the parser must gate on this or it invents a direct
+   * conversation with someone who never messaged the business.
+   */
+  group_id?: string;
   // NOTE: BSUID / @username do NOT live here. Meta stamps them on `contacts[]`
   // as `user_id` / `username` (see MetaContact) — the parser reads them from
   // there. `messages[].from` carries the phone (or the BSUID once Meta stops
@@ -2156,6 +2225,7 @@ async function sendLocationRequest(
   const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
   const res = await metaFetch(url, {
     method: "POST",
+    appSecret: config.appSecret,
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${config.accessToken}`,
@@ -2217,6 +2287,7 @@ async function sendInteractiveCarousel(
   const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
   const res = await metaFetch(url, {
     method: "POST",
+    appSecret: config.appSecret,
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${config.accessToken}`,
@@ -2297,6 +2368,7 @@ async function sendCtaUrlButton(
   const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
   const res = await metaFetch(url, {
     method: "POST",
+    appSecret: config.appSecret,
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${config.accessToken}`,
@@ -2368,6 +2440,7 @@ async function sendVoiceCallButton(
   }
   const res = await metaFetch(url, {
     method: "POST",
+    appSecret: config.appSecret,
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${config.accessToken}`,
@@ -2482,6 +2555,7 @@ async function blockUsersCall(
   const res = await metaFetch(url, {
     method,
     retry: true,
+    appSecret: config.appSecret,
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${config.accessToken}`,
@@ -2512,6 +2586,51 @@ async function blockUsersCall(
   };
 }
 
+/**
+ * One cheap top-level walk of a WhatsApp webhook envelope, for the two decisions
+ * the webhook route has to make BEFORE parsing.
+ *
+ * `hasHistory` — a Coexistence `history` chunk is diverted to the background
+ * worker UNPARSED (it can carry thousands of messages, and parsing it inline
+ * would blow the 5s webhook budget). Meta delivers history in its own webhook,
+ * never mixed with live messages, so one match means the whole POST is backfill.
+ *
+ * `accountIds` — the distinct receiving numbers named anywhere in the body, in
+ * payload order. The route uses this only to decide whether a payload is worth
+ * enqueuing at all (does this workspace own ANY of these numbers?). Real
+ * attribution is per-event, off `NormalizedEvent.externalAccountId`.
+ *
+ * Wire shape only: no DB, no policy. Resolving these ids to `ChannelConnection`
+ * rows is the domain layer's job (`lib/providers/inbound-accounts.ts`).
+ */
+export function scanWhatsappEnvelope(payload: unknown): {
+  hasHistory: boolean;
+  accountIds: string[];
+} {
+  const p = payload as {
+    entry?: Array<{
+      changes?: Array<{
+        field?: string;
+        value?: { metadata?: { phone_number_id?: string } };
+      }>;
+    }>;
+  };
+  let hasHistory = false;
+  const accountIds: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of Array.isArray(p?.entry) ? p.entry : []) {
+    for (const change of Array.isArray(entry?.changes) ? entry.changes : []) {
+      if (change?.field === "history") hasHistory = true;
+      const id = change?.value?.metadata?.phone_number_id;
+      if (id && !seen.has(id)) {
+        seen.add(id);
+        accountIds.push(id);
+      }
+    }
+  }
+  return { hasHistory, accountIds };
+}
+
 export const metaProvider: MessagingProvider<MetaSendConfig> = {
   name: "whatsapp",
 
@@ -2539,6 +2658,25 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         const value = change.value;
         if (!value) continue;
 
+        // Every event produced from THIS change arrived on THIS business phone
+        // number. Meta batches changes for SEVERAL of a workspace's numbers into
+        // one POST ("multiple changes from different objects that are of the same
+        // type may be batched together"), so the receiving account is stamped per
+        // change and never resolved once for the whole body — doing the latter
+        // bound a second number's threads to the first number, and the reply then
+        // went out a number with no open 24h window.
+        //
+        // Account-level changes (template lifecycle, quality, capability,
+        // account_update) carry no `metadata`, so they stay UNSTAMPED on purpose:
+        // their subject is the WABA or a number named in the body, which ingest
+        // resolves per-event from `wabaId` / `display_phone_number`.
+        const receivingAccountId = value.metadata?.phone_number_id;
+        const emit = <E extends NormalizedEvent>(evt: E): void => {
+          events.push(
+            receivingAccountId ? ({ ...evt, externalAccountId: receivingAccountId } as E) : evt,
+          );
+        };
+
         // Template lifecycle: Meta sends `message_template_status_update` when a
         // template is approved, paused for quality, disabled, or rejected. These
         // arrive under their own `field` (NOT "messages") with flat value fields.
@@ -2548,7 +2686,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         // until someone clicks the manual "Sync" button.
         if (change.field === "message_template_status_update") {
           const evt = parseTemplateStatusUpdate(value, payload as Record<string, unknown>);
-          if (evt) events.push({ ...evt, ...(wabaId ? { wabaId } : {}) });
+          if (evt) emit({ ...evt, ...(wabaId ? { wabaId } : {}) });
           continue;
         }
 
@@ -2561,7 +2699,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         // The webhook body doesn't carry enough to rebuild a row safely, so this
         // event asks for a catalog refetch rather than trying to patch in place.
         if (change.field === "message_template_components_update") {
-          events.push({
+          emit({
             kind: "template_components_changed",
             ...(value.message_template_id != null
               ? { externalId: String(value.message_template_id) }
@@ -2578,7 +2716,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         // than showing a stale category until the next manual Sync.
         if (change.field === "template_category_update") {
           const evt = parseTemplateCategoryUpdate(value, payload as Record<string, unknown>);
-          if (evt) events.push({ ...evt, ...(wabaId ? { wabaId } : {}) });
+          if (evt) emit({ ...evt, ...(wabaId ? { wabaId } : {}) });
           continue;
         }
 
@@ -2609,7 +2747,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
               );
               continue;
             }
-            events.push({
+            emit({
               kind: "marketing_preference",
               contactPhone: waId.replace(/\D/g, ""),
               optedOut: val === "stop",
@@ -2655,7 +2793,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             payload as Record<string, unknown>,
           );
           if (evt) {
-            events.push({
+            emit({
               ...evt,
               ...(wabaId ? { wabaId } : {}),
               // Per-number webhooks name their subject flat on `value` — the
@@ -2676,7 +2814,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         if (change.field === "phone_number_name_update") {
           const decision = value.decision?.trim();
           if (decision) {
-            events.push({
+            emit({
               kind: "number_name_update",
               decision: decision.toUpperCase(),
               ...(value.display_phone_number
@@ -2705,7 +2843,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             value,
             payload as Record<string, unknown>,
           );
-          if (evt) events.push({ ...evt, ...(wabaId ? { wabaId } : {}) });
+          if (evt) emit({ ...evt, ...(wabaId ? { wabaId } : {}) });
           continue;
         }
 
@@ -2732,7 +2870,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             // as customer-side revokes, pinned to OUTBOUND rows only.
             if (m.type === "edit" && m.edit?.original_message_id) {
               const newBody = editBody(m.edit.message);
-              events.push({
+              emit({
                 kind: "message_correction",
                 action: "edit",
                 targetExternalId: m.edit.original_message_id,
@@ -2744,7 +2882,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
               continue;
             }
             if (m.type === "revoke" && m.revoke?.original_message_id) {
-              events.push({
+              emit({
                 kind: "message_correction",
                 action: "delete",
                 targetExternalId: m.revoke.original_message_id,
@@ -2756,7 +2894,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             }
             const content = extractMetaMessageContent(m);
             if (!content) continue;
-            events.push({
+            emit({
               kind: "echo",
               externalId,
               contactPhone,
@@ -2848,7 +2986,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
                 if (!contactPhone) continue;
                 if (isBusinessSent) {
                   const historyStatus = mapHistoryStatus(m.history_context?.status);
-                  events.push({
+                  emit({
                     kind: "echo",
                     externalId,
                     contactPhone,
@@ -2859,7 +2997,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
                     rawPayload: payload as Record<string, unknown>,
                   } satisfies NormalizedOutboundEcho);
                 } else {
-                  events.push({
+                  emit({
                     kind: "message",
                     externalId,
                     contactPhone,
@@ -2896,7 +3034,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             if (!contactPhone) continue;
             if (isBusinessSent) {
               const historyStatus = mapHistoryStatus(m.history_context?.status);
-              events.push({
+              emit({
                 kind: "echo",
                 externalId,
                 contactPhone,
@@ -2907,7 +3045,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
                 rawPayload: payload as Record<string, unknown>,
               } satisfies NormalizedOutboundEcho);
             } else {
-              events.push({
+              emit({
                 kind: "message",
                 externalId,
                 contactPhone,
@@ -2929,7 +3067,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             if (s.type !== "contact" || !s.contact) continue;
             const phone = digitsOnly(s.contact.phone_number);
             if (!phone) continue;
-            events.push({
+            emit({
               kind: "contact_sync",
               phone,
               fullName: s.contact.full_name?.trim() || null,
@@ -3018,7 +3156,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           // metadata hint below. 131035 gets an operator sentence; other
           // codes carry Meta's own title/detail.
           const first = value.errors[0]!;
-          events.push({
+          emit({
             kind: "channel_health",
             phoneNumberId: value.metadata?.phone_number_id,
             displayPhoneNumber: value.metadata?.display_phone_number,
@@ -3048,6 +3186,43 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         }
 
         for (const m of Array.isArray(value.messages) ? value.messages : []) {
+          // GROUP message — not a 1:1 conversation, and not ours to ingest.
+          //
+          // Meta's Groups API delivers group posts on the SAME `messages` field as
+          // direct messages, and the ONLY thing that distinguishes them is
+          // `messages[].group_id`: `from` is the participant's phone and
+          // `contacts[0].wa_id` is that same participant ("The from field in the
+          // message object and the contact object point to the same participant"),
+          // so a group post is byte-indistinguishable from a DM unless this field
+          // is read.
+          //
+          // Unread, ingesting one fabricated a direct conversation with a person
+          // who never messaged us: it opened their 24h window, raised unread,
+          // fired assignment/SLA/workflows, and an agent answering the group's
+          // question would have replied PRIVATELY (we always send
+          // `recipient_type: "individual"`) while the group saw nothing. On a
+          // Coexistence number — still used in the WhatsApp Business app, so
+          // typically already in groups — that is ordinary group chatter flooding
+          // the inbox as customer inquiries.
+          //
+          // Dropped rather than modelled: a group is a different conversation
+          // primitive (many participants, no per-person window) and we have no
+          // Group entity. Logged, not silent, so this becomes visible the moment
+          // it starts happening — same treatment as social `standby[]`.
+          // TRIGGER to revisit: a pilot asks for group inboxes, which means a
+          // Group entity + the four `group_*` metadata subscriptions.
+          if (typeof m.group_id === "string" && m.group_id.length > 0) {
+            console.warn(
+              JSON.stringify({
+                event: "meta.webhook.group_message_dropped",
+                severity: "info",
+                groupId: m.group_id,
+                messageId: m.id ?? null,
+                note: "WhatsApp group message; no Group model — not ingested as a 1:1 thread",
+              }),
+            );
+            continue;
+          }
           const externalId = m.id;
           const rawFrom = typeof m.from === "string" ? m.from.trim() : "";
           // A wa_id is digits-only by spec; a BSUID is prefixed and dotted
@@ -3091,7 +3266,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           if (m.type === "system" && m.system?.type === "user_changed_number") {
             const newPhone = m.system.wa_id?.replace(/^\+/, "").trim();
             if (phone && newPhone && /^\d+$/.test(newPhone) && newPhone !== phone) {
-              events.push({
+              emit({
                 kind: "contact_number_change",
                 oldPhone: phone,
                 newPhone,
@@ -3108,7 +3283,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           // when delivered — mirrors the Messenger/IG `is_deleted` path.)
           if (m.type === "edit" && m.edit?.original_message_id) {
             const newBody = editBody(m.edit.message);
-            events.push({
+            emit({
               kind: "message_correction",
               action: "edit",
               targetExternalId: m.edit.original_message_id,
@@ -3119,7 +3294,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             continue;
           }
           if (m.type === "revoke" && m.revoke?.original_message_id) {
-            events.push({
+            emit({
               kind: "message_correction",
               action: "delete",
               targetExternalId: m.revoke.original_message_id,
@@ -3137,7 +3312,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           if (m.type === "text") {
             const body = m.text?.body;
             if (!body) continue;
-            events.push({
+            emit({
               kind: "message",
               externalId,
               ...identity,
@@ -3178,7 +3353,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
                 ts,
                 payload as Record<string, unknown>,
               );
-              if (permEvent) events.push(permEvent);
+              if (permEvent) emit(permEvent);
               continue;
             }
             if (inner?.type === "button_reply" && inner.button_reply) {
@@ -3189,7 +3364,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
               const optId = inner.button_reply.id?.trim() || inner.button_reply.title?.trim();
               const title = inner.button_reply.title?.trim() || inner.button_reply.id?.trim();
               if (!optId || !title) continue;
-              events.push({
+              emit({
                 kind: "message",
                 externalId,
                 ...identity,
@@ -3210,7 +3385,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
               const optId = inner.list_reply.id?.trim() || inner.list_reply.title?.trim();
               const title = inner.list_reply.title?.trim() || inner.list_reply.id?.trim();
               if (!optId || !title) continue;
-              events.push({
+              emit({
                 kind: "message",
                 externalId,
                 ...identity,
@@ -3239,7 +3414,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             // (`response_json`) stays recoverable in rawPayload.
             const nfmBody =
               inner?.type === "nfm_reply" ? inner.nfm_reply?.body?.trim() : undefined;
-            events.push({
+            emit({
               kind: "message",
               externalId,
               ...identity,
@@ -3268,7 +3443,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             const payloadId = m.button?.payload?.trim() || m.button?.text?.trim();
             const title = m.button?.text?.trim() || m.button?.payload?.trim() || "";
             if (!payloadId) continue;
-            events.push({
+            emit({
               kind: "message",
               externalId,
               ...identity,
@@ -3294,7 +3469,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             const targetExternalId = m.reaction?.message_id;
             if (!targetExternalId) continue;
             const rawEmoji = m.reaction?.emoji;
-            events.push({
+            emit({
               kind: "reaction",
               externalId,
               targetExternalId,
@@ -3321,7 +3496,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             // for a dedicated bubble (map pin / vCard). The placeholder body
             // stays for search / list preview / unread.
             const structured = structuredForMessage(m);
-            events.push({
+            emit({
               kind: "message",
               externalId,
               ...identity,
@@ -3352,7 +3527,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             ...(mediaKind === "audio" && mediaPayload.voice ? { voice: true } : {}),
           };
 
-          events.push({
+          emit({
             kind: "message",
             externalId,
             ...identity,
@@ -3377,7 +3552,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             Array.isArray(value.errors) ? value.errors : undefined,
           );
           if (!evt) continue;
-          events.push(evt);
+          emit(evt);
         }
 
         for (const s of Array.isArray(value.statuses) ? value.statuses : []) {
@@ -3391,7 +3566,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
               s,
               payload as Record<string, unknown>,
             );
-            if (callEvt) events.push(callEvt);
+            if (callEvt) emit(callEvt);
             continue;
           }
           const status = mapMetaStatus(s.status);
@@ -3465,7 +3640,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             timestamp: ts,
             rawPayload: payload as Record<string, unknown>,
           };
-          events.push(evt);
+          emit(evt);
         }
       }
     }
@@ -3483,6 +3658,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // sendTemplate below and placeCall.
     const res = await metaFetch(url, {
       method: "POST",
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -3648,6 +3824,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
     const res = await metaFetch(url, {
       method: "POST",
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -3686,6 +3863,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
     const res = await metaFetch(url, {
       method: "POST",
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -3762,6 +3940,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     });
     const res = await metaFetch(url, {
       method: "POST",
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -3801,6 +3980,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
     const res = await metaFetch(url, {
       method: "POST",
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -3850,6 +4030,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const res = await metaFetch(url, {
       method: "POST",
       retry: true,
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -3882,6 +4063,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const res = await metaFetch(url, {
       method: "POST",
       retry: true,
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -3920,6 +4102,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // hot path where a Meta CDN hiccup shouldn't drop an inbound attachment).
     const metaRes = await metaFetch(metaUrl, {
       retry: true,
+      appSecret: config.appSecret,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     if (!metaRes.ok) {
@@ -3939,6 +4122,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // — undocumented gotcha, requests without it 401. GET — idempotent, retry on.
     const binRes = await metaFetch(meta.url, {
       retry: true,
+      appSecret: config.appSecret,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     if (!binRes.ok) {
@@ -4014,6 +4198,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const res = await metaFetch(url, {
       method: "POST",
       retry: true,
+      appSecret: config.appSecret,
       headers: { authorization: `Bearer ${config.accessToken}` },
       body: fd,
     });
@@ -4054,6 +4239,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
     const res = await metaFetch(url, {
       method: "POST",
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -4156,6 +4342,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       // GET — idempotent; keep the transient-blip retry.
       const res = await metaFetch(next, {
         retry: true,
+        appSecret: config.appSecret,
         headers: { authorization: `Bearer ${config.accessToken}` },
       });
       if (!res.ok) {
@@ -4189,6 +4376,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const url = `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(config.wabaId)}/message_templates`;
     const res = await metaFetch(url, {
       method: "POST",
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -4271,6 +4459,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const res = await metaFetch(url, {
       method: "GET",
       retry: true,
+      appSecret: config.appSecret,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     if (!res.ok) {
@@ -4315,6 +4504,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const url = `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(config.wabaId)}/message_templates`;
     const res = await metaFetch(url, {
       method: "POST",
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -4405,6 +4595,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const res = await metaFetch(url, {
       method: "GET",
       retry: true,
+      appSecret: config.appSecret,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     if (!res.ok) {
@@ -4453,6 +4644,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const url = `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(externalId)}/unpause`;
     const res = await metaFetch(url, {
       method: "POST",
+      appSecret: config.appSecret,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     if (!res.ok) {
@@ -4483,6 +4675,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
     const res = await metaFetch(url, {
       method: "POST",
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -4554,6 +4747,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const url = `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(args.externalId)}`;
     const res = await metaFetch(url, {
       method: "POST",
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -4592,6 +4786,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const res = await metaFetch(url, {
       method: "DELETE",
       retry: true,
+      appSecret: config.appSecret,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     if (!res.ok) {
@@ -4625,6 +4820,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // an ambiguous timeout. The caller re-checks state instead.
     const res = await metaFetch(url, {
       method: "POST",
+      appSecret: config.appSecret,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     if (!res.ok) {
@@ -4660,6 +4856,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // category edit; the caller re-syncs state instead.
     const res = await metaFetch(url, {
       method: "POST",
+      appSecret: config.appSecret,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     if (!res.ok) {
@@ -4721,6 +4918,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       const res = await metaFetch(url, {
         method: "GET",
         retry: true,
+        appSecret: config.appSecret,
         headers: { authorization: `Bearer ${config.accessToken}` },
       });
       if (!res.ok) {
@@ -4792,6 +4990,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const res = await metaFetch(url, {
       method: "GET",
       retry: true,
+      appSecret: config.appSecret,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     if (!res.ok) {
@@ -4830,6 +5029,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       method: "POST",
       // Staging upload session — no customer-visible effect, safe to retry.
       retry: true,
+      appSecret: config.appSecret,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     if (!startRes.ok) {
@@ -4856,6 +5056,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       method: "POST",
       // Staging upload (resumable from offset 0) — safe to retry on a blip.
       retry: true,
+      appSecret: config.appSecret,
       headers: {
         authorization: `OAuth ${config.accessToken}`,
         file_offset: "0",
@@ -4887,6 +5088,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
     const res = await metaFetch(url, {
       method: "POST",
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -4943,6 +5145,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const res = await metaFetch(new URL(url), {
       method: "GET",
       retry: true,
+      appSecret: config.appSecret,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     if (!res.ok) {
@@ -4986,6 +5189,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/whatsapp_business_profile`;
     const res = await metaFetch(new URL(url), {
       method: "POST",
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -4999,6 +5203,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         ...(args.address !== undefined ? { address: args.address } : {}),
         ...(args.description !== undefined ? { description: args.description } : {}),
         ...(args.email !== undefined ? { email: args.email } : {}),
+        ...(args.vertical !== undefined ? { vertical: args.vertical } : {}),
         ...(args.profilePictureHandle
           ? { profile_picture_handle: args.profilePictureHandle }
           : {}),
@@ -5037,6 +5242,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const numberRes = await metaFetch(new URL(numberUrl), {
       method: "GET",
       retry: true,
+      appSecret: config.appSecret,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     if (!numberRes.ok) {
@@ -5063,6 +5269,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         const wabaRes = await metaFetch(new URL(wabaUrl), {
           method: "GET",
           retry: true,
+          appSecret: config.appSecret,
           headers: { authorization: `Bearer ${config.accessToken}` },
         });
         if (wabaRes.ok) {
@@ -5117,6 +5324,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const res = await metaFetch(new URL(url), {
       method: "GET",
       retry: true,
+      appSecret: config.appSecret,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     if (!res.ok) {
@@ -5134,6 +5342,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/message_qrdls`;
     const res = await metaFetch(new URL(url), {
       method: "POST",
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -5159,6 +5368,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/message_qrdls`;
     const res = await metaFetch(new URL(url), {
       method: "POST",
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -5182,6 +5392,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const res = await metaFetch(new URL(url), {
       method: "DELETE",
       retry: true,
+      appSecret: config.appSecret,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     // Already gone is success — a repeat delete of a code someone removed in
@@ -5236,6 +5447,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
     const res = await metaFetch(url, {
       method: "POST",
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -5311,6 +5523,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       // Idempotent read — safe to replay on a transient 5xx, unlike the
       // non-idempotent call/send POSTs.
       retry: true,
+      appSecret: config.appSecret,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     if (!res.ok) {
@@ -5375,6 +5588,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/calls`;
     const res = await metaFetch(url, {
       method: "POST",
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -5462,6 +5676,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const res = await metaFetch(url, {
       method: "POST",
       retry: true,
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -5498,6 +5713,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const res = await metaFetch(url, {
       method: "POST",
       retry: true,
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -5555,6 +5771,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const res = await metaFetch(url, {
       method: "POST",
       retry: true,
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -5589,6 +5806,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const res = await metaFetch(url, {
       method: "POST",
       retry: true,
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -5636,6 +5854,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // GET — idempotent diagnostic read, keep the retry.
     const res = await metaFetch(url, {
       retry: true,
+      appSecret: config.appSecret,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     const text = await safeMetaText(res);
@@ -5779,6 +5998,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const res = await metaFetch(url, {
       method: "POST",
       retry: true,
+      appSecret: config.appSecret,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -5803,6 +6023,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     const res = await metaFetch(url, {
       method: "GET",
       retry: true,
+      appSecret: config.appSecret,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     const text = await safeMetaText(res);
@@ -6168,15 +6389,36 @@ function isHeldForQualityAssessment(json: {
 /**
  * `messaging_account_id` for a Messages API call — or nothing at all.
  *
- * Meta's account-model split lets one phone number carry several Messaging
- * Accounts (one per partner), and this names the one to bill. It is OPTIONAL at
- * Phase 1 and only required when a single app holds more than one of them,
- * which a single-integration workspace never does.
+ * Meta's account-model split turns the legacy WABA into a **Messaging Account**
+ * (templates + billing + webhook subscriptions, same id) plus a **WAAC** (the
+ * phone number, 1:1). One phone number can carry several Messaging Accounts, one
+ * per partner, and this names the one to BILL: "the charge goes to the Messaging
+ * Account associated with your app".
  *
- * Returning `{}` when unset is the whole design: the parameter belongs to a
- * beta that is "subject to change", and Graph rejects an unrecognised body
- * field with `#100` — failing the entire send, for every tenant. So the wire is
- * byte-identical to today until someone who actually needs it opts in.
+ * ⚠️ TWO NAMES EXIST, and the guide pages lag the changelog. Read this before
+ * "fixing" the spelling:
+ *
+ *   - The account-model-evolution overview still reads *"a
+ *     `paid_messaging_account_id` parameter becomes available on Messages API
+ *     calls"*.
+ *   - The **changelog entry of 2026-06-16 supersedes it**: *"Added
+ *     `messaging_account_id` as the preferred Cloud API parameter, with
+ *     `paid_messaging_account_id` kept as a deprecated backward-compatible alias."*
+ *
+ * So `messaging_account_id` is correct and `paid_messaging_account_id` is the
+ * deprecated alias — the opposite of what the guide page implies. This was renamed
+ * to the guide's spelling on 2026-07-30 and reverted the same day once the changelog
+ * was checked. Graph rejects an unrecognised body field with `#100`, which fails the
+ * ENTIRE send for every tenant, so the name is only safe to change against the
+ * changelog, never against a guide page alone.
+ *
+ * Timeline (verified 2026-07-30): OPTIONAL at Phase 1 (H2 2026) — "no code changes
+ * required, except for multiple Messaging Account scenarios"; REQUIRED from Phase 2
+ * (H1 2027) for multi-Messaging-Account setups; required on ALL Messages API
+ * versions at Phase 3 (H1 2028), when phone-number-id paths must become WAAC ids too.
+ *
+ * Returning `{}` when unset is the whole design: the wire stays byte-identical to
+ * today until someone who actually needs it opts in.
  */
 export function messagingAccountField(
   config: MetaSendConfig,
@@ -6561,6 +6803,7 @@ async function fetchTemplateAnalyticsViaFieldExpansion(
   const res = await metaFetch(url, {
     method: "GET",
     retry: true,
+    appSecret: config.appSecret,
     headers: { authorization: `Bearer ${config.accessToken}` },
   });
   if (!res.ok) {

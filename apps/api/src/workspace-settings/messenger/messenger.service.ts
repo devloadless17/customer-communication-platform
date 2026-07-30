@@ -151,7 +151,12 @@ export class MessengerService {
     let webhookSubscription: MessengerConfigView["webhookSubscription"] = null;
     if (config.pageId && pageAccessToken) {
       try {
-        const status = await getPageSubscription(config.pageId, pageAccessToken, GRAPH_VERSION);
+        const status = await getPageSubscription(
+          config.pageId,
+          pageAccessToken,
+          GRAPH_VERSION,
+          config.appId,
+        );
         webhookSubscription = {
           receivesMessages: status.receivesMessages,
           subscribedFields: status.subscribedFields,
@@ -187,7 +192,26 @@ export class MessengerService {
     // unless the admin overrode them on this form. The Page access token is
     // derived below from whichever token we resolve here.
     const meta = await getMetaConnection(workspaceId);
-    const appSecret = input.appSecret?.trim() || meta?.appSecret || null;
+    // Precedence: operator input → THIS ROW'S OWN stored secret → the shared Meta
+    // App. The middle term protects an account deliberately living on a DIFFERENT
+    // Meta app: the webhook HMAC check already tries every account's own secret for
+    // that reason, and without this any re-save silently replaced it with the shared
+    // app's — after which Meta signs that account's webhooks with a secret we no
+    // longer hold and every inbound is dropped as forged.
+    const ownSecrets = ((
+      await this.db.channelConnection.findUnique({
+        where: {
+          workspaceId_channel_externalAccountId: {
+            workspaceId,
+            channel: CHANNEL,
+            externalAccountId: pageId ?? "",
+          },
+        },
+        select: { secrets: true },
+      })
+    )?.secrets ?? {}) as MessengerChannelSecrets;
+    const ownAppSecret = this.tryDecrypt(ownSecrets.appSecret ?? null, "appSecret");
+    const appSecret = input.appSecret?.trim() || ownAppSecret || meta?.appSecret || null;
     const sourceToken = input.pageAccessToken?.trim() || meta?.systemUserToken || null;
     const appId = input.appId?.trim() || meta?.appId || undefined;
     if (!appSecret || !sourceToken) {
@@ -251,8 +275,18 @@ export class MessengerService {
 
     // Verify token: prefer the shared Meta App token (one callback for all
     // channels), then the channel's existing one, else mint.
+    // The row we are ABOUT TO WRITE, not the channel default. Reading the
+    // default's config meant connecting a SECOND Page/account inherited the
+    // first one's verify token instead of keeping its own — the same class of bug
+    // the WhatsApp path already fixed and commented (see whatsapp.service's
+    // two-read note). `??` on the account key so a first connect (no row yet)
+    // correctly falls through to minting a fresh token.
     const existing = await this.db.channelConnection.findFirst({
-      where: { workspaceId, channel: CHANNEL, isDefault: true },
+      where: {
+        workspaceId,
+        channel: CHANNEL,
+        externalAccountId: pageId ?? "",
+      },
       select: { config: true },
     });
     const existingConfig = (existing?.config ?? {}) as MessengerChannelConfig;
@@ -313,7 +347,12 @@ export class MessengerService {
     // failure. Best-effort: the credentials are already persisted and valid, so a
     // Graph hiccup or a missing permission must not fail the connect. `getConfig`
     // re-reads the real subscription and warns if `messages` is still absent.
-    const sub = await ensurePageSubscribedToMessaging(pageId, tokenToStore, GRAPH_VERSION);
+    const sub = await ensurePageSubscribedToMessaging(
+      pageId,
+      tokenToStore,
+      GRAPH_VERSION,
+      appId,
+    );
     if (!sub.ok) {
       this.logger.warn(
         `[${workspaceId}] messenger connected but page subscription failed for page=${pageId}: ${sub.error}`,

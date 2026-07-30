@@ -48,7 +48,7 @@ async function runTick(): Promise<void> {
   if (inFlight) return;
   inFlight = true;
   try {
-    await withSweeperMutex("template-analytics-capture", sweepOnce);
+    await withSweeperMutex("template-analytics-capture", sweepTemplateAnalyticsCaptureOnce);
   } catch (err) {
     // The pool is gone (hot-reload / shutdown) — stop rather than logging a
     // stack trace on every tick forever. Same contract as every sibling sweeper.
@@ -78,7 +78,12 @@ export function stopTemplateAnalyticsCaptureSweeper(): void {
   }
 }
 
-async function sweepOnce(): Promise<void> {
+/**
+ * Exported for tests, matching the sibling sweepers' convention. The scheduler uses
+ * the mutex-wrapped call above; a spec drives this directly so the per-WABA insights
+ * gate can be asserted without waiting on a timer.
+ */
+export async function sweepTemplateAnalyticsCaptureOnce(): Promise<void> {
   const since = new Date(Date.now() - CAPTURE_WINDOW_DAYS * 86_400_000);
 
   // Campaigns that finished inside the window, grouped by workspace. Only
@@ -114,40 +119,57 @@ async function sweepOnce(): Promise<void> {
   });
   if (recent.length === 0) return;
 
-  // Only workspaces that have actually TURNED ANALYTICS ON. Meta refuses the
-  // read otherwise, so sweeping the rest would be a guaranteed error per tick —
-  // noisy logs and wasted Graph budget for a workspace that opted out.
+  // Only accounts that have actually TURNED ANALYTICS ON. Meta refuses the read
+  // otherwise, so sweeping the rest would be a guaranteed error per tick — noisy
+  // logs and wasted Graph budget for an account that opted out.
+  //
+  // Gated PER WABA, matching the granularity of the fetch below. Insights are a
+  // WABA-level switch at Meta and this used to gate per WORKSPACE, so a workspace
+  // with WABA-A enabled and WABA-B not swept B every tick and earned a guaranteed
+  // Meta refusal for it — exactly the waste the gate exists to prevent, just moved
+  // down a level when the flag became a WABA property.
   const candidates = [...new Set(recent.map((b) => b.workspaceId))];
-  const enabled = new Set(
+  const enabledWabaIds = new Set(
     (
-      await db.channelConnection.findMany({
+      await db.whatsappBusinessAccount.findMany({
         where: {
-          channel: "whatsapp",
-          isActive: true,
           insightsEnabledAt: { not: null },
           workspaceId: { in: candidates },
         },
-        select: { workspaceId: true },
+        select: { id: true },
       })
-    ).map((c) => c.workspaceId),
+    ).map((w) => w.id),
   );
 
   // `insightsEnabledAt` is stamped ONLY by our own enable button, but Meta
-  // documents WhatsApp Manager as an equally valid way to confirm insights —
-  // so a workspace switched on there reads as opted-out here and was skipped
-  // forever. That is the one failure this sweeper exists to prevent: read and
-  // click counts are perishable at ~7 days and recoverable from no other
-  // source. A stored rollup row is proof Meta served this workspace analytics
-  // (a manual Fetch or the report's auto-fetch got through), so it counts as
-  // enablement regardless of which switch was flipped.
-  for (const row of await db.templateAnalyticsDaily.findMany({
-    where: { workspaceId: { in: candidates.filter((id) => !enabled.has(id)) } },
-    select: { workspaceId: true },
-    distinct: ["workspaceId"],
-  })) {
-    enabled.add(row.workspaceId);
+  // documents WhatsApp Manager as an equally valid way to confirm insights — so an
+  // account switched on there reads as opted-out here and was skipped forever. That
+  // is the one failure this sweeper exists to prevent: read and click counts are
+  // perishable at ~7 days and recoverable from no other source. A stored rollup row
+  // is proof Meta served analytics for that template (a manual Fetch or the
+  // report's auto-fetch got through), so it counts as enablement regardless of which
+  // switch was flipped.
+  //
+  // Resolved to the WABA through the template that owns the rollup, so the escape
+  // hatch keeps the same per-WABA granularity as the gate above rather than
+  // re-widening it to the whole workspace.
+  const provenIds = (
+    await db.templateAnalyticsDaily.findMany({
+      where: { workspaceId: { in: candidates } },
+      select: { templateExternalId: true },
+      distinct: ["templateExternalId"],
+    })
+  ).map((r) => r.templateExternalId);
+  if (provenIds.length > 0) {
+    for (const t of await db.messageTemplate.findMany({
+      where: { workspaceId: { in: candidates }, externalId: { in: provenIds } },
+      select: { wabaAccountId: true },
+      distinct: ["wabaAccountId"],
+    })) {
+      enabledWabaIds.add(t.wabaAccountId);
+    }
   }
-  if (enabled.size === 0) return;
+  if (enabledWabaIds.size === 0) return;
 
   // Per workspace: which templates, and the widest window their campaigns
   // covered. One Graph call per workspace instead of one per campaign — Meta
@@ -163,7 +185,7 @@ async function sweepOnce(): Promise<void> {
   const end = new Date();
   const byWorkspace = new Map<string, { names: Set<string>; start: Date }>();
   for (const b of recent) {
-    if (!enabled.has(b.workspaceId) || !b.templateName) continue;
+    if (!b.templateName) continue;
     const start = b.startedAt ?? b.createdAt;
     const entry = byWorkspace.get(b.workspaceId);
     if (!entry) {
@@ -190,9 +212,13 @@ async function sweepOnce(): Promise<void> {
           name: { in: [...entry.names] },
           externalId: { not: null },
         },
-        select: { externalId: true, wabaId: true },
+        select: { externalId: true, wabaAccountId: true },
       });
-      if (templates.length === 0) continue;
+      // Drop templates whose WABA has NOT enabled insights — Meta refuses those
+      // reads, and including them turned one opted-out account into a guaranteed
+      // per-tick error for the whole workspace.
+      const eligible = templates.filter((t) => enabledWabaIds.has(t.wabaAccountId));
+      if (eligible.length === 0) continue;
 
       // Group by WABA before fetching. `template_analytics` is a field on the
       // WABA node, so one request per workspace would query every template
@@ -201,28 +227,28 @@ async function sweepOnce(): Promise<void> {
       // would then store as "nothing to capture". On a single-WABA workspace
       // this is one group and behaves exactly as before.
       const byWaba = new Map<string, string[]>();
-      for (const t of templates) {
+      for (const t of eligible) {
         if (!t.externalId) continue;
-        // `""` is the legacy/unknown-WABA sentinel — one group, default account.
-        const key = t.wabaId || "";
-        const list = byWaba.get(key);
+        // Grouped by the WABA FK. There is no "unknown WABA" bucket any more —
+        // `wabaAccountId` is NOT NULL, so every template names its own catalog.
+        const list = byWaba.get(t.wabaAccountId);
         if (list) list.push(t.externalId);
-        else byWaba.set(key, [t.externalId]);
+        else byWaba.set(t.wabaAccountId, [t.externalId]);
       }
 
-      for (const [wabaId, ids] of byWaba) {
+      for (const [wabaAccountId, ids] of byWaba) {
         try {
           await refreshTemplateAnalytics(workspaceId, {
             templateExternalIds: ids,
             start: entry.start,
             end,
-            wabaId: wabaId || null,
+            wabaAccountId,
           });
         } catch (err) {
           // Isolated per WABA too: an expired token on WABA-1 must not abort
           // WABA-2's capture this tick — its data is equally perishable.
           console.warn(
-            `[template-analytics-capture] failed for workspace=${workspaceId} waba=${wabaId || "default"}:`,
+            `[template-analytics-capture] failed for workspace=${workspaceId} waba=${wabaAccountId}:`,
             err instanceof Error ? err.message : err,
           );
         }

@@ -614,7 +614,7 @@ async function loadMetaAnalytics(
   // flipped (no backfill), and it excludes EU/Japan accounts from template
   // analytics entirely. Both are carried so the panel can state them plainly
   // instead of presenting a zero as a measurement.
-  const account = await templateAnalyticsAccountContext(workspaceId, template.wabaId);
+  const account = await templateAnalyticsAccountContext(workspaceId, template.wabaAccountId);
 
   const { summary } = await readTemplateAnalytics(
     workspaceId,

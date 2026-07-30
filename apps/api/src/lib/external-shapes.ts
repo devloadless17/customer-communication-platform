@@ -421,10 +421,16 @@ export interface ExternalTemplate {
   syncedAt: string;
 }
 
+/**
+ * NOTE the emitted `wabaId` is META's `externalWabaId`, joined from the WABA
+ * relation — never our internal `wabaAccountId` cuid. `/v1` is a public contract:
+ * partners key on Meta's id, so the entity refactor must not leak across it. The
+ * `ExternalTemplate` interface above is deliberately unchanged.
+ */
 export function externalTemplate(t: {
   id: string;
   externalId: string | null;
-  wabaId: string;
+  wabaAccount: { externalWabaId: string };
   name: string;
   language: string;
   category: string;
@@ -446,7 +452,7 @@ export function externalTemplate(t: {
   return {
     id: t.id,
     externalId: t.externalId,
-    wabaId: t.wabaId,
+    wabaId: t.wabaAccount.externalWabaId,
     name: t.name,
     language: t.language,
     category: t.category,

@@ -22,6 +22,7 @@ import { createTestPrismaClient } from "./_prisma";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { setSharedDb } from "@/lib/db";
+import { seedWabaAccount } from "./_waba";
 import { encryptSecret } from "@/lib/crypto/envelope";
 import { invalidateProviderConfig } from "@/lib/providers/config";
 import {
@@ -44,20 +45,22 @@ let workspaceId = "";
 let convOnAId = "";
 let templateAId = "";
 let templateBId = "";
-let templateLegacyId = "";
+let accountNoWabaId = "";
 
-async function mkAccount(suffix: string, wabaId: string, isDefault: boolean) {
+async function mkAccount(suffix: string, wabaId: string | null, isDefault: boolean) {
   return (
     await prisma.channelConnection.create({
       data: {
         workspaceId,
         channel: "whatsapp",
         externalAccountId: `${S}_${suffix}`,
-        wabaId,
+        wabaAccountId: wabaId ? await seedWabaAccount(prisma, workspaceId, wabaId) : null,
         isDefault,
         isActive: true,
-        config: { phoneNumberId: `${S}_${suffix}`, wabaId },
+        config: { phoneNumberId: `${S}_${suffix}` },
         secrets: { accessToken: encryptSecret("tok"), appSecret: encryptSecret("sec") },
+        // Not stale — see the note in webhook-batched-entries.spec.ts.
+        messagingHealthUpdatedAt: new Date(),
       },
       select: { id: true },
     })
@@ -70,7 +73,7 @@ async function mkTemplate(name: string, wabaId: string) {
     await prisma.messageTemplate.create({
       data: {
         workspaceId,
-        wabaId,
+        wabaAccountId: await seedWabaAccount(prisma, workspaceId, wabaId),
         name,
         language: "en_US",
         status: "approved",
@@ -133,7 +136,10 @@ beforeAll(async () => {
 
   templateAId = await mkTemplate("order_update", WABA_A);
   templateBId = await mkTemplate("order_update", WABA_B);
-  templateLegacyId = await mkTemplate("legacy_notice", "");
+  // A number with NO WABA linked. This is the hole the old `""` sentinel opened:
+  // the guard only refused when both sides were known and DIFFERED, so a
+  // WABA-less account could send any template in the workspace.
+  accountNoWabaId = await mkAccount("nowaba", null, false);
 });
 
 afterAll(async () => {
@@ -162,12 +168,42 @@ describe("template ↔ account WABA guard", () => {
     ).toBe(0);
   });
 
-  it("does NOT refuse a legacy `\"\"`-WABA template", async () => {
-    // `""` means "synced before wabaId existed" — no opinion, not a mismatch.
-    // Refusing these would make every pre-multi-account catalog unsendable.
-    await expect(sendFromThreadOnA(templateLegacyId)).rejects.not.toMatchObject({
-      code: "template_wrong_account",
+  it("REFUSES a send from a number with no WABA linked", async () => {
+    // THE point of retiring the `""` sentinel. The guard used to read
+    // `accountWaba && templateWaba && accountWaba !== templateWaba`, so an unknown
+    // WABA on either side passed silently — a number whose WABA was never pasted
+    // could send ANY of the workspace's templates. Now it is a hard refusal.
+    const convOnNoWaba = await prisma.conversation.create({
+      data: {
+        workspaceId,
+        contactId: (
+          await prisma.contact.create({
+            data: {
+              workspaceId,
+              name: "No-WABA contact",
+              phoneNumber: `${S}998`,
+              identityChannel: "whatsapp",
+            },
+            select: { id: true },
+          })
+        ).id,
+        channel: "whatsapp",
+        channelConnectionId: accountNoWabaId,
+        status: "open",
+        lastMessagePreview: "",
+      },
+      select: { id: true },
     });
+    await expect(
+      sendTemplateInternal({
+        workspaceId,
+        conversationId: convOnNoWaba.id,
+        templateId: templateAId,
+        variables: { body: [] },
+        senderUserId: null,
+        sentVia: "test",
+      }),
+    ).rejects.toMatchObject({ code: "waba_unknown" });
   });
 
   it("does NOT refuse the thread account's OWN template", async () => {

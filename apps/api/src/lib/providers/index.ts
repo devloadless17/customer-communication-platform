@@ -52,36 +52,6 @@ export interface ProviderBinding<C = unknown> {
   getSendConfig(workspaceId: string, accountId?: string | null): Promise<C>;
 }
 
-/**
- * The account a conversation sends from.
- *
- * Throws rather than falling back to "the channel's default account". A wrong
- * account is not a cosmetic bug: WhatsApp thread affinity and the 24h customer
- * service window both belong to the ACCOUNT, so replying from a sibling number
- * breaks the thread and can push a free-form reply outside the window that was
- * opened on the other number (Meta then rejects it, or bills a template).
- * Refusing loudly gives the composer something actionable to show instead.
- */
-export class SendAccountUnresolvedError extends Error {
-  constructor(readonly conversationId: string) {
-    super(
-      `Conversation ${conversationId} is not bound to a channel account; ` +
-        `refusing to guess which account to send from.`,
-    );
-    this.name = "SendAccountUnresolvedError";
-  }
-}
-
-export function resolveSendAccount(conversation: {
-  id: string;
-  channelConnectionId: string | null;
-}): string {
-  if (!conversation.channelConnectionId) {
-    throw new SendAccountUnresolvedError(conversation.id);
-  }
-  return conversation.channelConnectionId;
-}
-
 /** Thrown when a send is routed to a channel that has no registered provider. */
 export class UnsupportedProviderError extends Error {
   readonly provider: string;

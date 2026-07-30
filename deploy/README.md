@@ -197,6 +197,24 @@ R2_SECRET_ACCESS_KEY  (R2 S3 API token secret)
 R2_BUCKET             (e.g. central-ccp)
 ```
 
+**Optional, and only once you are a Meta Tech Provider** — the app-level webhook
+callback (`POST /webhooks/meta`, no workspaceId in the path):
+
+```
+META_APP_ID           (the platform Meta app id)
+META_APP_SECRET       (its app secret; comma-separated to run a rotation window)
+META_APP_VERIFY_TOKEN (openssl rand -hex 24)
+```
+
+Leave all three unset until then: the route answers `200 {dropped:
+"app_level_not_configured"}` and the GET handshake 403s, so nothing breaks. Setting
+`META_APP_ID` without the other two is a **boot failure** by design — an app-level
+ingest route that cannot verify a signature is an open endpoint, and a callback with
+no verify token could never be saved in Meta's dashboard. Why the route has to exist
+at all: Meta delivers every onboarded customer's webhooks to the app's callback URL,
+and `override_callback_uri` cannot redirect template or account webhooks. See
+CLAUDE.md §12.
+
 17 secrets. ENCRYPTION_KEY and INTERNAL_BUS_SECRET are **hard-validated** by the
 deploy workflow's `changes` job (empty → the deploy fails fast), so missing
 either breaks the very first deploy — they belong in this list. The superAdmin

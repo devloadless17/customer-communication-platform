@@ -120,6 +120,37 @@ export async function graphPostForm(
 }
 
 /**
+ * DELETE a Graph edge with a Bearer token.
+ *
+ * Used to RELEASE a webhook subscription when an account is disconnected — the
+ * missing half of the lifecycle `ensureWabaSubscribed` / `ensurePageSubscribedToMessaging`
+ * open. Without it Meta keeps POSTing a removed account's customer messages to us
+ * forever: we drop them fail-soft as `unknown_account`, but we are still receiving
+ * and parsing the message content of a business we no longer serve.
+ *
+ * Throws on a non-2xx like the other helpers; every caller here is best-effort and
+ * catches, because failing to unsubscribe must never block a removal the operator
+ * asked for.
+ */
+export async function graphDelete(
+  url: string,
+  accessToken: string,
+  appSecret?: string,
+): Promise<Record<string, unknown>> {
+  const res = await fetch(withAppsecretProof(url, accessToken, appSecret), {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(GRAPH_TIMEOUT_MS),
+  });
+  const text = await res.text().catch(() => "");
+  wireOut("DELETE", redactUrl(url), "", res.status, text);
+  if (!res.ok) {
+    throw new Error(`graph DELETE ${res.status} ${redactUrl(url)}: ${text.slice(0, 500)}`);
+  }
+  return text ? (JSON.parse(text) as Record<string, unknown>) : {};
+}
+
+/**
  * POST JSON to a Graph endpoint with a Bearer token. Throws on a non-2xx with
  * a truncated body so the caller (send path) surfaces a clean error to the
  * agent instead of a cryptic Meta blob. No retry — see file header.

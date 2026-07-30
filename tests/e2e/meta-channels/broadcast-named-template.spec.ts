@@ -78,7 +78,14 @@ async function makeTemplate(opts: {
   return db().messageTemplate.create({
     data: {
       workspaceId: META_TEST_TEAM_ID,
-      wabaId: WA_WABA_ID,
+      // The WABA row is seeded by `seedMetaTestTeam`; look up its FK rather than
+      // a nested connect, which Prisma rejects on an unchecked create input.
+      wabaAccountId: (
+        await db().whatsappBusinessAccount.findUniqueOrThrow({
+          where: { externalWabaId: WA_WABA_ID },
+          select: { id: true },
+        })
+      ).id,
       externalId: `tpl_${opts.name}`,
       name: opts.name,
       language: "en_US",

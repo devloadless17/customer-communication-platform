@@ -27,9 +27,10 @@
 import { existsSync } from "node:fs";
 
 import type { PrismaClient } from "@prisma/client";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { setSharedDb } from "@/lib/db";
+import { seedWabaAccount } from "./_waba";
 
 vi.mock("@/lib/providers/meta-graph", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/providers/meta-graph")>();
@@ -56,6 +57,9 @@ setSharedDb(prisma as unknown as PrismaClient);
 const S = `whs${Date.now().toString().slice(-8)}`;
 const PHONE = `${S}_phone`;
 const WABA = `${S}_waba`;
+/** OUR Meta app. `subscribed_apps` lists every app on the WABA, so the check is
+ *  "is this id present", not "is the list non-empty" — see the scoping block. */
+const APP = `${S}_app`;
 
 let orgId = "";
 let workspaceId = "";
@@ -95,13 +99,13 @@ beforeAll(async () => {
         externalAccountId: PHONE,
         isDefault: true,
         isActive: true,
-        // The COLUMN, not just config — the sweeper selects `wabaId` off the
+        // The FK, not just config — the sweeper joins the WABA off the
         // row and skips the connection outright when it is null. Setting only
         // `config.wabaId` made every case here skip, which passed the
         // negative assertions VACUOUSLY. Kept in both places because the
         // provider config loader reads the config copy.
-        wabaId: WABA,
-        config: { phoneNumberId: PHONE, wabaId: WABA },
+        wabaAccountId: await seedWabaAccount(prisma, workspaceId, WABA),
+        config: { phoneNumberId: PHONE, appId: APP },
         // Plaintext rides decryptSecret's legacy passthrough, as elsewhere.
         secrets: { accessToken: `${S}_token` },
       },
@@ -125,7 +129,7 @@ afterAll(async () => {
 describe("webhook subscription health", () => {
   it("leaves a healthy subscription alone", async () => {
     mockedGraph.mockImplementation(async (url: string) => {
-      if (url.includes(WABA)) return { data: [{ whatsapp_business_api_data: { id: "app_1" } }] };
+      if (url.includes(WABA)) return { data: [{ whatsapp_business_api_data: { id: APP } }] };
       throw new Error(`unexpected graph call: ${url}`);
     });
 
@@ -141,7 +145,12 @@ describe("webhook subscription health", () => {
     ).toBe(true);
     expect(await needsReconnect()).toBe(false);
     // No heal attempted — the subscription was already there.
-    expect(mockedEnsure).not.toHaveBeenCalledWith(WABA, expect.anything(), expect.anything());
+    expect(mockedEnsure).not.toHaveBeenCalledWith(
+      WABA,
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it("SELF-HEALS a dropped subscription instead of alerting", async () => {
@@ -157,7 +166,12 @@ describe("webhook subscription health", () => {
 
     await sweepWebhookSubscriptionHealthOnce();
 
-    expect(mockedEnsure).toHaveBeenCalledWith(WABA, expect.any(String), expect.any(String));
+    expect(mockedEnsure).toHaveBeenCalledWith(
+      WABA,
+      expect.any(String),
+      expect.any(String),
+      APP,
+    );
     expect(await needsReconnect()).toBe(false);
   });
 
@@ -187,7 +201,12 @@ describe("webhook subscription health", () => {
     ).toBe(true);
     expect(await needsReconnect()).toBe(false);
     // And it must not "heal" something it could not even read.
-    expect(mockedEnsure).not.toHaveBeenCalledWith(WABA, expect.anything(), expect.anything());
+    expect(mockedEnsure).not.toHaveBeenCalledWith(
+      WABA,
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it("classifies a DEAD TOKEN as broken, not transient", async () => {
@@ -219,5 +238,174 @@ describe("webhook subscription health", () => {
       where: { id: connId },
       data: { isActive: true },
     });
+  });
+});
+
+/**
+ * "Is anyone subscribed" is a DIFFERENT question from "are we subscribed", and
+ * the check used to ask the first one (`data.length > 0`).
+ *
+ * `GET /{waba-id}/subscribed_apps` returns every app subscribed to the WABA —
+ * Meta's reference ships a "Multiple apps subscribed to WABA" example, and a WABA
+ * shared with another BSP (Coexistence, partner onboarding, a vendor the customer
+ * never detached) is the ordinary way that happens. Our app could be absent, so
+ * receiving NOTHING, while the detector reported healthy: the exact silent hole
+ * this sweeper exists to close, reopened inside the sweeper itself.
+ *
+ * Pinned here because nothing else can catch it — the shape is valid, Graph
+ * returns 200, and no type says which id is ours.
+ */
+describe("the subscription has to be OURS", () => {
+  const OTHER = { whatsapp_business_api_data: { id: "some_other_bsp_app" } };
+
+  it("does NOT count another app's subscription as ours", async () => {
+    mockedGraph.mockImplementation(async (url: string) => {
+      if (url.includes(WABA)) return { data: [OTHER] };
+      throw new Error(`unexpected graph call: ${url}`);
+    });
+    mockedEnsure.mockResolvedValue({ ok: true });
+
+    await sweepWebhookSubscriptionHealthOnce();
+
+    // The old `data.length > 0` read this as healthy and never attempted a heal.
+    expect(mockedEnsure).toHaveBeenCalledWith(
+      WABA,
+      expect.any(String),
+      expect.any(String),
+      APP,
+    );
+  });
+
+  it("raises the banner when we are absent and the re-subscribe fails", async () => {
+    mockedGraph.mockImplementation(async (url: string) => {
+      if (url.includes(WABA)) return { data: [OTHER] };
+      throw new Error(`unexpected graph call: ${url}`);
+    });
+    mockedEnsure.mockResolvedValue({ ok: false, error: "no permission on this WABA" });
+
+    await sweepWebhookSubscriptionHealthOnce();
+
+    expect(await needsReconnect()).toBe(true);
+  });
+
+  it("still counts a subscription among OTHERS when ours is there too", async () => {
+    // The realistic shared-WABA shape: two BSPs, both subscribed. Nothing to fix.
+    mockedGraph.mockImplementation(async (url: string) => {
+      if (url.includes(WABA)) {
+        return { data: [OTHER, { whatsapp_business_api_data: { id: APP } }] };
+      }
+      throw new Error(`unexpected graph call: ${url}`);
+    });
+
+    await sweepWebhookSubscriptionHealthOnce();
+
+    expect(await needsReconnect()).toBe(false);
+    expect(mockedEnsure).not.toHaveBeenCalled();
+  });
+
+  it("falls back to any-app when the connection has no appId", async () => {
+    // A row stored before the id was captured cannot answer "are WE subscribed".
+    // Refusing to answer would take the detector down for those rows, so the
+    // pre-existing any-app reading stands — a weaker check, never a false alarm.
+    await prisma.channelConnection.update({
+      where: { id: connId },
+      data: { config: { phoneNumberId: PHONE } },
+    });
+    invalidateProviderConfig(workspaceId);
+    mockedGraph.mockImplementation(async (url: string) => {
+      if (url.includes(WABA)) return { data: [OTHER] };
+      throw new Error(`unexpected graph call: ${url}`);
+    });
+
+    try {
+      await sweepWebhookSubscriptionHealthOnce();
+
+      expect(await needsReconnect()).toBe(false);
+      expect(mockedEnsure).not.toHaveBeenCalled();
+    } finally {
+      await prisma.channelConnection.update({
+        where: { id: connId },
+        data: { config: { phoneNumberId: PHONE, appId: APP } },
+      });
+      invalidateProviderConfig(workspaceId);
+    }
+  });
+});
+
+/**
+ * A WhatsApp webhook subscription lives on the WABA, and every number under it
+ * shares that ONE subscription — so the check is per WABA, not per number.
+ *
+ * The loop used to iterate connections, asking Graph the same question once per
+ * number for an answer that cannot differ. Four numbers under one WABA burned
+ * four calls a tick against a rate-limited API.
+ *
+ * Both halves are pinned here, because the fix is only safe if the result still
+ * reaches every number: dedupe the CALL, fan out the RESULT. If a WABA's
+ * subscription is gone, every number under it lost inbound together, so each one
+ * needs its own reconnect banner.
+ */
+describe("the WABA is the subscription unit, not the number", () => {
+  let siblingId = "";
+
+  beforeEach(async () => {
+    siblingId = (
+      await prisma.channelConnection.create({
+        data: {
+          workspaceId,
+          channel: "whatsapp",
+          externalAccountId: `${PHONE}_sib`,
+          isDefault: false,
+          isActive: true,
+          wabaAccountId: (
+            await prisma.channelConnection.findUniqueOrThrow({
+              where: { id: connId },
+              select: { wabaAccountId: true },
+            })
+          ).wabaAccountId,
+          config: { phoneNumberId: `${PHONE}_sib` },
+          secrets: { accessToken: `${S}_token` },
+          messagingHealthUpdatedAt: new Date(),
+        },
+        select: { id: true },
+      })
+    ).id;
+    invalidateProviderConfig(workspaceId);
+  });
+
+  afterEach(async () => {
+    await prisma.channelConnection.delete({ where: { id: siblingId } }).catch(() => undefined);
+    invalidateProviderConfig(workspaceId);
+  });
+
+  it("asks Graph about the WABA ONCE for two numbers under it", async () => {
+    mockedGraph.mockImplementation(async (url: string) => {
+      if (url.includes(WABA)) return { data: [{ whatsapp_business_api_data: { id: APP } }] };
+      throw new Error(`unexpected graph call: ${url}`);
+    });
+
+    await sweepWebhookSubscriptionHealthOnce();
+
+    // Scoped to OUR waba id — the sweep covers every connection on the platform,
+    // so a global call count would be another fixture's business.
+    const ours = mockedGraph.mock.calls.filter(([url]) => String(url).includes(WABA));
+    expect(ours).toHaveLength(1);
+  });
+
+  it("still flags BOTH numbers when that one subscription is broken", async () => {
+    mockedGraph.mockImplementation(async (url: string) => {
+      if (url.includes(WABA)) return { data: [] };
+      throw new Error(`unexpected graph call: ${url}`);
+    });
+    mockedEnsure.mockResolvedValue({ ok: false, error: "no permission" });
+
+    await sweepWebhookSubscriptionHealthOnce();
+
+    expect(await needsReconnect(), "probe number").toBe(true);
+    const sibling = await prisma.channelConnection.findUniqueOrThrow({
+      where: { id: siblingId },
+      select: { needsReconnect: true },
+    });
+    expect(sibling.needsReconnect, "sibling number under the same WABA").toBe(true);
   });
 });

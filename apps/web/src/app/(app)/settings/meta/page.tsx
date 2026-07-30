@@ -1,8 +1,10 @@
 import { headers } from "next/headers";
 
 import { getSession } from "@/lib/auth/current-user";
-import { getTeamMetaConfig } from "@/lib/api/queries";
+import { getTeamMetaConfig, listChannelAccounts, type ChannelAccountView } from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
+import { soft } from "@/lib/api/soft";
+import { MetaAppAccounts } from "@/features/channels/components/meta-app-accounts";
 
 import { MetaSettings, type MetaCurrent } from "./meta-settings";
 
@@ -17,6 +19,10 @@ export default async function MetaSettingsPage() {
   const canManage = canManageUsers(user.role);
 
   let current: MetaCurrent;
+  // Every Meta-backed account, so the page can state which ones this app actually
+  // serves. Each channel degrades independently — one unreachable channel must not
+  // blank the panel or the credentials form above it.
+  let metaAccounts: ChannelAccountView[] = [];
   if (canManage) {
     const config = await getTeamMetaConfig();
     current = {
@@ -27,6 +33,12 @@ export default async function MetaSettingsPage() {
       systemUserToken: config.systemUserToken,
       credentialsUndecryptable: config.credentialsUndecryptable,
     };
+    const [wa, msgr, ig] = await Promise.all([
+      soft("whatsapp accounts", [], () => listChannelAccounts("whatsapp")),
+      soft("messenger accounts", [], () => listChannelAccounts("messenger")),
+      soft("instagram accounts", [], () => listChannelAccounts("instagram")),
+    ]);
+    metaAccounts = [...wa, ...msgr, ...ig];
   } else {
     current = {
       connected: false,
@@ -43,11 +55,16 @@ export default async function MetaSettingsPage() {
   const webhookBaseUrl = `${proto}://${host}`;
 
   return (
-    <MetaSettings
-      current={current}
-      webhookBaseUrl={webhookBaseUrl}
-      workspaceId={workspaceId}
-      canManage={canManage}
-    />
+    <div className="flex flex-col gap-6">
+      <MetaSettings
+        current={current}
+        webhookBaseUrl={webhookBaseUrl}
+        workspaceId={workspaceId}
+        canManage={canManage}
+      />
+      {canManage && (
+        <MetaAppAccounts accounts={metaAccounts} hasSharedApp={current.connected} />
+      )}
+    </div>
   );
 }

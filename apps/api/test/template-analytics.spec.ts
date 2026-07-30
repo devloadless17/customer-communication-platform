@@ -30,6 +30,7 @@ import {
   templateAnalyticsAccountContext,
 } from "@/lib/analytics/template-analytics";
 import { setSharedDb } from "@/lib/db";
+import { seedWabaAccount } from "./_waba";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
 if (existsSync("../../.env")) process.loadEnvFile("../../.env");
@@ -506,19 +507,30 @@ describe("resolveCampaignTemplate", () => {
   beforeAll(async () => {
     connA = (
       await prisma.channelConnection.create({
-        data: { workspaceId, channel: "whatsapp", externalAccountId: `pnA_${S}`, wabaId: `wabaA_${S}`, isDefault: true },
+        data: {
+          workspaceId,
+          channel: "whatsapp",
+          externalAccountId: `pnA_${S}`,
+          wabaAccountId: await seedWabaAccount(prisma, workspaceId, `wabaA_${S}`),
+          isDefault: true,
+        },
       })
     ).id;
     connB = (
       await prisma.channelConnection.create({
-        data: { workspaceId, channel: "whatsapp", externalAccountId: `pnB_${S}`, wabaId: `wabaB_${S}` },
+        data: {
+          workspaceId,
+          channel: "whatsapp",
+          externalAccountId: `pnB_${S}`,
+          wabaAccountId: await seedWabaAccount(prisma, workspaceId, `wabaB_${S}`),
+        },
       })
     ).id;
     await prisma.messageTemplate.createMany({
       data: [
         {
           workspaceId,
-          wabaId: `wabaA_${S}`,
+          wabaAccountId: await seedWabaAccount(prisma, workspaceId, `wabaA_${S}`),
           name: NAME,
           language: "en",
           externalId: `ext_A_${S}`,
@@ -530,7 +542,7 @@ describe("resolveCampaignTemplate", () => {
         },
         {
           workspaceId,
-          wabaId: `wabaB_${S}`,
+          wabaAccountId: await seedWabaAccount(prisma, workspaceId, `wabaB_${S}`),
           name: NAME,
           language: "en",
           externalId: `ext_B_${S}`,
@@ -551,7 +563,9 @@ describe("resolveCampaignTemplate", () => {
     });
     // Not the most recently synced — the one whose WABA actually served the send.
     expect(ref?.externalId).toBe(`ext_A_${S}`);
-    expect(ref?.wabaId).toBe(`wabaA_${S}`);
+    expect(ref?.wabaAccountId).toBe(
+      await seedWabaAccount(prisma, workspaceId, `wabaA_${S}`),
+    );
 
     const other = await resolveCampaignTemplate(workspaceId, {
       templateName: NAME,
@@ -599,15 +613,31 @@ describe("resolveCampaignTemplate", () => {
  */
 describe("templateAnalyticsAccountContext", () => {
   const waba = (n: string) => `ctx_${n}_${S}`;
+  // `templateAnalyticsAccountContext` takes OUR `WhatsappBusinessAccount.id`, not
+  // Meta's `externalWabaId` — the internal FK never crosses an API boundary, but it
+  // is what internal callers hand it.
+  const wabaAccountIds = new Map<string, string>();
 
   async function connect(n: string, phone: string | null, enabledAt: Date | null) {
+    const wabaAccountId = (
+      await prisma.whatsappBusinessAccount.create({
+        data: {
+          workspaceId,
+          externalWabaId: waba(n),
+          ...(enabledAt ? { insightsEnabledAt: enabledAt } : {}),
+        },
+        select: { id: true },
+      })
+    ).id;
+    wabaAccountIds.set(n, wabaAccountId);
     await prisma.channelConnection.create({
       data: {
         workspaceId,
         channel: "whatsapp",
         externalAccountId: `ctx_pn_${n}_${S}`,
-        wabaId: waba(n),
-        insightsEnabledAt: enabledAt,
+        // The insights flag lives on the WABA now — it is a per-WABA switch at
+        // Meta, and storing it per number meant N rows recording one WABA-wide fact.
+        wabaAccountId,
         config: phone ? { displayPhoneNumber: phone } : {},
       },
     });
@@ -621,19 +651,19 @@ describe("templateAnalyticsAccountContext", () => {
   });
 
   it("flags an EU number as unsupported, and carries the enablement date", async () => {
-    const ctx = await templateAnalyticsAccountContext(workspaceId, waba("de"));
+    const ctx = await templateAnalyticsAccountContext(workspaceId, wabaAccountIds.get("de")!);
     expect(ctx.regionUnsupported).toBe(true);
     expect(ctx.analyticsSince).toBe(new Date(Date.UTC(2026, 0, 15)).toISOString());
   });
 
   it("flags a Japanese number as unsupported", async () => {
-    expect((await templateAnalyticsAccountContext(workspaceId, waba("jp"))).regionUnsupported).toBe(
+    expect((await templateAnalyticsAccountContext(workspaceId, wabaAccountIds.get("jp")!)).regionUnsupported).toBe(
       true,
     );
   });
 
   it("leaves a supported region alone", async () => {
-    const ctx = await templateAnalyticsAccountContext(workspaceId, waba("lb"));
+    const ctx = await templateAnalyticsAccountContext(workspaceId, wabaAccountIds.get("lb")!);
     expect(ctx.regionUnsupported).toBe(false);
     expect(ctx.analyticsSince).not.toBeNull();
   });
@@ -642,7 +672,7 @@ describe("templateAnalyticsAccountContext", () => {
     // An unparseable or absent number must not produce "Meta doesn't cover
     // your region" — a wrong explanation is worse than the bare zero it
     // replaces, because it sends the operator to Meta support for nothing.
-    const ctx = await templateAnalyticsAccountContext(workspaceId, waba("unknown"));
+    const ctx = await templateAnalyticsAccountContext(workspaceId, wabaAccountIds.get("unknown")!);
     expect(ctx.regionUnsupported).toBe(false);
     expect(ctx.analyticsSince).toBeNull();
   });

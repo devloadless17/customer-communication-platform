@@ -42,6 +42,13 @@ export interface InstagramSendConfig {
   graphVersion: string;
   /** This channel's app secret, for appsecret_proof on Graph calls. */
   appSecret?: string;
+  /**
+   * The Meta app this account is connected through. Not needed to SEND — it is
+   * here because `/{page-id}/subscribed_apps` lists every app on the Page, so
+   * reading "are we subscribed" requires knowing which node is ours. Optional:
+   * rows stored before the id was captured have none.
+   */
+  appId?: string;
 }
 
 export interface InstagramWebhookConfig {
@@ -57,6 +64,9 @@ const DEFAULT_GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
 interface SendCipher {
   igId: string;
   pageId: string;
+  /** Not a secret — cached alongside them so the subscription check needs no
+   *  second read. See InstagramSendConfig.appId. */
+  appId?: string;
   igAccessTokenCipher: string;
   /** This channel's OWN app secret cipher — for appsecret_proof (IG may be a
    *  DIFFERENT app than the shared one). Optional: proof skipped if absent. */
@@ -122,6 +132,7 @@ async function loadSendCipher(
     cipher: {
       igId: config.igId!,
       pageId: config.pageId!,
+      ...(config.appId ? { appId: config.appId } : {}),
       igAccessTokenCipher: secrets.igAccessToken!,
       ...(secrets.appSecret ? { appSecretCipher: secrets.appSecret } : {}),
     },
@@ -156,6 +167,7 @@ function materialize(workspaceId: string, cipher: SendCipher): InstagramSendConf
     igAccessToken,
     graphVersion: DEFAULT_GRAPH_VERSION,
     ...(appSecret ? { appSecret } : {}),
+    ...(cipher.appId ? { appId: cipher.appId } : {}),
   };
 }
 

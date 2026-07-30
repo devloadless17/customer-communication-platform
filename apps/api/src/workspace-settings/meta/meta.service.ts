@@ -1,10 +1,15 @@
 import { randomBytes } from "node:crypto";
+import type { Channel } from "@ccp/shared/types";
 
 import { Prisma } from "@prisma/client";
 import { BadGatewayException, BadRequestException, Injectable, Logger } from "@nestjs/common";
 
 import { decryptSecret, encryptSecret } from "@/lib/crypto/envelope";
-import { invalidateMetaConnection } from "@/lib/providers/meta-connection";
+import { classifyMetaAppBinding } from "@/lib/providers/meta-app-binding";
+import {
+  getMetaConnection,
+  invalidateMetaConnection,
+} from "@/lib/providers/meta-connection";
 
 import { DbService } from "../../db/db.service";
 import { InstagramService } from "../instagram/instagram.service";
@@ -64,21 +69,91 @@ export class MetaService {
    * error never blocks the others or the save. Returns the channels that
    * re-synced, so the UI can confirm ("Updated WhatsApp, Messenger").
    */
-  private async resyncChannels(workspaceId: string): Promise<string[]> {
+  private async resyncChannels(
+    workspaceId: string,
+    /**
+     * The shared app secret as it was BEFORE this save.
+     *
+     * A row whose own stored secret equals this was using the shared Meta app, so
+     * a rotation should carry through to it. A row whose secret DIFFERS is
+     * deliberately on its own Meta app — re-saving it would overwrite that with
+     * the shared app's secret, and Meta would then sign its webhooks with a secret
+     * we no longer hold, dropping every inbound for that account as forged. Those
+     * rows are skipped and reported.
+     */
+    previousSharedAppSecret: string | null,
+  ): Promise<{ resynced: string[]; skippedOwnApp: string[] }> {
     const conns = await this.db.channelConnection.findMany({
       where: { workspaceId, isActive: true },
-      select: { channel: true, config: true },
+      select: {
+        channel: true,
+        config: true,
+        label: true,
+        externalAccountId: true,
+        secrets: true,
+        // The row's OWN WABA. `wabaId` is required on the connect DTO now, and a
+        // resync that omitted it would either fail validation or (before that)
+        // stamp the DEFAULT account's WABA onto every number — the exact bug the
+        // two-read note in whatsapp.service.updateConfig describes.
+        wabaAccount: { select: { externalWabaId: true } },
+      },
     });
+    // The NEW shared credentials, passed EXPLICITLY below. Each channel's
+    // `updateConfig` now prefers a row's own stored secret over the shared one (so
+    // an own-app account survives an unrelated re-save) — which means a rotation
+    // has to state the new values outright, or every row would just re-preserve its
+    // stale copy and the rotation would silently do nothing.
+    const shared = await getMetaConnection(workspaceId);
     const resynced: string[] = [];
+    const skippedOwnApp: string[] = [];
     for (const conn of conns) {
       const config = (conn.config ?? {}) as { phoneNumberId?: string; pageId?: string };
+      // Does this account live on its OWN Meta app? Compare against the PREVIOUS
+      // shared secret — by now the new one is already stored, so comparing against
+      // the current value would call every row "own app" and skip the rotation
+      // entirely.
+      const ownSecret = this.tryDecrypt(
+        ((conn.secrets ?? {}) as { appSecret?: string }).appSecret ?? null,
+        "appSecret",
+      );
+      // `previousSharedAppSecret &&` is deliberate and rotation-specific: with no
+      // PREVIOUS shared app there was nothing for an account to have inherited, so
+      // this save is the workspace ADOPTING a shared app and every account should
+      // take it. Only once a shared app existed can an account be said to have
+      // diverged from it. The comparison itself is `classifyMetaAppBinding` so the
+      // rotation and the settings UI can never disagree about who is on what.
+      if (
+        previousSharedAppSecret &&
+        classifyMetaAppBinding(ownSecret, previousSharedAppSecret) === "own_app"
+      ) {
+        skippedOwnApp.push(conn.label ?? conn.externalAccountId ?? conn.channel);
+        continue;
+      }
       try {
         if (conn.channel === "whatsapp" && config.phoneNumberId) {
-          await this.whatsapp.updateConfig(workspaceId, { phoneNumberId: config.phoneNumberId });
+          const wabaId = conn.wabaAccount?.externalWabaId;
+          if (!wabaId) {
+            // No WABA linked, so there is nothing coherent to re-save: the connect
+            // path now requires one. Skip rather than throw — one unlinked number
+            // must not abort the whole workspace's resync.
+            continue;
+          }
+          await this.whatsapp.updateConfig(workspaceId, {
+            phoneNumberId: config.phoneNumberId,
+            wabaId,
+            ...(shared?.appSecret ? { appSecret: shared.appSecret } : {}),
+            ...(shared?.systemUserToken ? { accessToken: shared.systemUserToken } : {}),
+          });
         } else if (conn.channel === "messenger" && config.pageId) {
-          await this.messenger.updateConfig(workspaceId, { pageId: config.pageId });
+          await this.messenger.updateConfig(workspaceId, {
+            pageId: config.pageId,
+            ...(shared?.appSecret ? { appSecret: shared.appSecret } : {}),
+          });
         } else if (conn.channel === "instagram" && config.pageId) {
-          await this.instagram.updateConfig(workspaceId, { pageId: config.pageId });
+          await this.instagram.updateConfig(workspaceId, {
+            pageId: config.pageId,
+            ...(shared?.appSecret ? { appSecret: shared.appSecret } : {}),
+          });
         } else {
           continue;
         }
@@ -91,7 +166,7 @@ export class MetaService {
         );
       }
     }
-    return resynced;
+    return { resynced, skippedOwnApp };
   }
 
   private tryDecrypt(cipher: string | null, label: string): string | null {
@@ -185,7 +260,13 @@ export class MetaService {
       appId?.trim() || null,
       appSecret,
       systemUserToken,
+      workspaceId,
     );
+
+    // Captured BEFORE the upsert below: `resyncChannels` needs the OLD shared
+    // secret to tell "this row was on the shared app" from "this row has its own".
+    const previousShared = await getMetaConnection(workspaceId);
+    const previousSharedAppSecret = previousShared?.appSecret ?? null;
 
     const existing = await this.db.metaConnection.findUnique({
       where: { workspaceId },
@@ -223,7 +304,18 @@ export class MetaService {
 
     // Re-apply the new shared creds to every connected channel so a token
     // rotation takes effect everywhere immediately (no per-channel reconnect).
-    const resynced = await this.resyncChannels(workspaceId);
+    const { resynced, skippedOwnApp } = await this.resyncChannels(
+      workspaceId,
+      previousSharedAppSecret,
+    );
+    if (skippedOwnApp.length > 0) {
+      // Not a failure — a deliberate one. Say so, or an operator rotating the shared
+      // app would assume every account picked up the new secret.
+      warnings.push(
+        `${skippedOwnApp.length} account(s) were left untouched because they use their own Meta app, ` +
+          `not the shared one: ${skippedOwnApp.join(", ")}. Update each from its own channel settings.`,
+      );
+    }
     return { verifyToken, resynced, warnings };
   }
 
@@ -258,6 +350,7 @@ export class MetaService {
     appId: string | null,
     appSecret: string,
     systemUserToken: string,
+    workspaceId: string,
   ): Promise<string[]> {
     if (!appId) {
       return [
@@ -293,7 +386,20 @@ export class MetaService {
       return [];
     }
 
-    const outcome = evaluateDebugTokenData(data);
+    // A missing scope for a channel that is ALREADY connected is a live breakage;
+    // for one that isn't, it is only "you can't connect this yet". Passing the set
+    // keeps the warnings specific instead of handing a WhatsApp-only workspace a
+    // wall of Instagram advice it will learn to skim past.
+    const connected = new Set(
+      (
+        await this.db.channelConnection.findMany({
+          where: { workspaceId, isActive: true, externalAccountId: { not: "" } },
+          select: { channel: true },
+          distinct: ["channel"],
+        })
+      ).map((c) => c.channel),
+    );
+    const outcome = evaluateDebugTokenData(data, connected);
     if (outcome.invalidDetail) {
       throw new BadRequestException({
         error: "meta_token_invalid",
@@ -319,12 +425,72 @@ export class MetaService {
  * blocks: the credential is shared by WhatsApp / Messenger / Instagram and a
  * Messenger-only workspace legitimately has no `whatsapp_*` scopes.
  */
-export function evaluateDebugTokenData(data: {
-  is_valid?: unknown;
-  type?: unknown;
-  expires_at?: unknown;
-  scopes?: unknown;
-}): { invalidDetail: string | null; warnings: string[] } {
+/**
+ * The scopes each Meta channel needs, straight from Meta's own docs. Warned on
+ * (never blocked) because ONE credential serves all three channels and a
+ * single-channel workspace legitimately holds a token scoped only for its own.
+ *
+ *   - WhatsApp (Permissions): `whatsapp_business_messaging` sends messages and
+ *     receives message/status webhooks; `whatsapp_business_management` covers
+ *     WABA metadata, TEMPLATE management, listing phone numbers and ALL
+ *     ANALYTICS.
+ *   - Messenger (Webhooks for Pages / Messenger webhooks): `pages_messaging` for
+ *     the `messages` fields, `pages_manage_metadata` to POST the Page's
+ *     `subscribed_apps` edge — without which inbound never arrives at all.
+ *   - Instagram (Webhooks for Instagram Messaging): `instagram_basic`,
+ *     `instagram_manage_messages` and `pages_manage_metadata`. IG here is
+ *     Instagram-via-Facebook-Login, so it subscribes through the linked PAGE —
+ *     which is why it shares `pages_manage_metadata` with Messenger.
+ */
+const CHANNEL_SCOPES: ReadonlyArray<{
+  channel: Channel;
+  label: string;
+  scopes: readonly string[];
+  consequence: string;
+}> = [
+  {
+    channel: "whatsapp",
+    label: "WhatsApp",
+    scopes: ["whatsapp_business_messaging", "whatsapp_business_management"],
+    consequence:
+      "sending, template sync and account webhooks fail with Meta code 200",
+  },
+  {
+    channel: "messenger",
+    label: "Messenger",
+    scopes: ["pages_messaging", "pages_manage_metadata"],
+    consequence:
+      "the Page can't be subscribed, so no inbound message ever arrives",
+  },
+  {
+    channel: "instagram",
+    label: "Instagram",
+    scopes: ["instagram_basic", "instagram_manage_messages", "pages_manage_metadata"],
+    consequence:
+      "the linked Page can't be subscribed, so no inbound DM ever arrives",
+  },
+];
+
+export function evaluateDebugTokenData(
+  data: {
+    is_valid?: unknown;
+    type?: unknown;
+    expires_at?: unknown;
+    data_access_expires_at?: unknown;
+    scopes?: unknown;
+  },
+  /**
+   * Channels this workspace has already connected. A missing scope for a
+   * CONNECTED channel is a live breakage; for one that isn't connected yet it is
+   * only a "you won't be able to connect it" note. Distinguishing them keeps the
+   * warning list short enough that people still read it — a WhatsApp-only
+   * workspace should not be handed three Instagram warnings.
+   *
+   * Empty/omitted (the first paste, before anything is connected) means every
+   * channel is treated as prospective.
+   */
+  connectedChannels: ReadonlySet<Channel> = new Set(),
+): { invalidDetail: string | null; warnings: string[] } {
   if (data.is_valid === false) {
     return {
       invalidDetail:
@@ -335,13 +501,15 @@ export function evaluateDebugTokenData(data: {
   const warnings: string[] = [];
   if (Array.isArray(data.scopes)) {
     const scopes = data.scopes.filter((s): s is string => typeof s === "string");
-    const missingWhatsapp = [
-      "whatsapp_business_messaging",
-      "whatsapp_business_management",
-    ].filter((s) => !scopes.includes(s));
-    if (missingWhatsapp.length > 0) {
+    for (const spec of CHANNEL_SCOPES) {
+      const missing = spec.scopes.filter((sc) => !scopes.includes(sc));
+      if (missing.length === 0) continue;
+      const connected = connectedChannels.has(spec.channel);
       warnings.push(
-        `The token is missing ${missingWhatsapp.join(" + ")} — WhatsApp sending, template sync and account webhooks will fail until the system user regenerates it with ${missingWhatsapp.length > 1 ? "those permissions" : "that permission"}.`,
+        `The token is missing ${missing.join(" + ")} — ` +
+          (connected
+            ? `${spec.label} is connected, so ${spec.consequence}.`
+            : `${spec.label} can't be connected until the token is regenerated with ${missing.length > 1 ? "those permissions" : "that permission"}.`),
       );
     }
     if (!scopes.includes("business_management")) {
@@ -358,6 +526,18 @@ export function evaluateDebugTokenData(data: {
   if (typeof data.expires_at === "number" && data.expires_at > 0) {
     warnings.push(
       `This token expires ${new Date(data.expires_at * 1000).toISOString().slice(0, 10)} — every Meta channel stops working that day. Prefer a never-expiring system-user token.`,
+    );
+  }
+  // DISTINCT from `expires_at`: data access can lapse (Meta's 90-day data-access
+  // expiry) while the token itself stays valid, and the failure then looks like a
+  // permissions error rather than an auth error. A system-user token reports 0 for
+  // both, so this only ever fires on the token types that genuinely decay.
+  if (
+    typeof data.data_access_expires_at === "number" &&
+    data.data_access_expires_at > 0
+  ) {
+    warnings.push(
+      `This token's DATA ACCESS expires ${new Date(data.data_access_expires_at * 1000).toISOString().slice(0, 10)} — reads start failing as permission errors that day even though the token itself still looks valid. Prefer a never-expiring system-user token.`,
     );
   }
   return { invalidDetail: null, warnings };

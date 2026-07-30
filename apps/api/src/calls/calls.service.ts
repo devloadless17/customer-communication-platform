@@ -1038,14 +1038,19 @@ export class CallsService {
         ? { id: accountId, workspaceId: session.workspaceId }
         : { workspaceId: session.workspaceId, channel, isDefault: true },
       select: {
-        // Messaging limit is portfolio-scoped (Meta, 2025-10-07).
-        portfolio: { select: { messagingDailyCap: true, messagingTier: true } },
+        // Messaging limit is portfolio-scoped (Meta, 2025-10-07), reached through
+        // the WABA — Meta records portfolio ownership on the WABA node.
+        wabaAccount: {
+          select: {
+            portfolio: { select: { messagingDailyCap: true, messagingTier: true } },
+          },
+        },
         callingRestrictedUntil: true,
         callingRestrictionReason: true,
         callingQualityWarning: true,
       },
     });
-    const cap = connection?.portfolio?.messagingDailyCap ?? null;
+    const cap = connection?.wabaAccount?.portfolio?.messagingDailyCap ?? null;
     // Unknown tier is reported as met rather than failed: we'd rather not block
     // a working setup on a stat we haven't synced yet, and the provider
     // enforces it regardless.
@@ -1056,7 +1061,7 @@ export class CallsService {
       label: "Messaging limit of 2,000+ unique recipients",
       detail: tierOk
         ? null
-        : `Your number is on ${connection?.portfolio?.messagingTier ?? "a lower tier"}. Calling requires a 2,000/day messaging limit — this rises automatically as your quality and volume grow.`,
+        : `Your number is on ${connection?.wabaAccount?.portfolio?.messagingTier ?? "a lower tier"}. Calling requires a 2,000/day messaging limit — this rises automatically as your quality and volume grow.`,
     });
 
     // The provider's own view: is calling on, and is anything restricted?

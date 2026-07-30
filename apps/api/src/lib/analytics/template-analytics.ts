@@ -63,7 +63,11 @@ export async function enableTemplateInsights(
     where: accountId
       ? { id: accountId, workspaceId, channel: "whatsapp" }
       : { workspaceId, channel: "whatsapp", isDefault: true },
-    select: { id: true, insightsEnabledAt: true },
+    select: {
+      id: true,
+      wabaAccountId: true,
+      wabaAccount: { select: { insightsEnabledAt: true } },
+    },
   });
   if (!connection) {
     // A NAMED account that doesn't exist is a caller error worth distinguishing
@@ -73,10 +77,25 @@ export async function enableTemplateInsights(
       error: accountId ? "account_not_found" : "whatsapp_not_connected",
     });
   }
-  if (connection.insightsEnabledAt) {
+  // Insights are a WABA-level switch at Meta, so the flag lives on the WABA row.
+  // It used to be stored per phone number, which meant N rows recording one
+  // WABA-wide fact — and a second number under the same WABA reported "not
+  // enabled" while Meta had already irreversibly enabled it.
+  if (!connection.wabaAccountId) {
+    throw new BadRequestException({
+      error: "waba_unknown",
+      detail:
+        "This number has no WhatsApp Business Account linked. Template insights are a " +
+        "per-WABA setting, so link its WABA first.",
+    });
+  }
+  if (connection.wabaAccount?.insightsEnabledAt) {
     // Not an error the caller must handle — idempotent success, because the
     // desired state is already reached and Meta offers no way to undo it.
-    return { enabledAt: connection.insightsEnabledAt.toISOString(), alreadyEnabled: true };
+    return {
+      enabledAt: connection.wabaAccount.insightsEnabledAt.toISOString(),
+      alreadyEnabled: true,
+    };
   }
 
   const binding = getProviderBinding("whatsapp");
@@ -96,14 +115,14 @@ export async function enableTemplateInsights(
 
   const enabledAt = new Date();
   // CAS on still-null so two admins pressing at once record one timestamp.
-  const written = await db.channelConnection.updateMany({
-    where: { id: connection.id, insightsEnabledAt: null },
+  const written = await db.whatsappBusinessAccount.updateMany({
+    where: { id: connection.wabaAccountId, insightsEnabledAt: null },
     data: { insightsEnabledAt: enabledAt },
   });
   invalidateProviderConfig(workspaceId);
   if (written.count === 0) {
-    const fresh = await db.channelConnection.findUnique({
-      where: { id: connection.id },
+    const fresh = await db.whatsappBusinessAccount.findUnique({
+      where: { id: connection.wabaAccountId },
       select: { insightsEnabledAt: true },
     });
     return {
@@ -127,12 +146,13 @@ export async function getInsightsStatus(
     where: accountId
       ? { id: accountId, workspaceId, channel: "whatsapp" }
       : { workspaceId, channel: "whatsapp", isDefault: true },
-    select: { insightsEnabledAt: true },
+    select: { wabaAccount: { select: { insightsEnabledAt: true } } },
   });
+  const enabledAt = connection?.wabaAccount?.insightsEnabledAt ?? null;
   return {
     connected: !!connection,
-    enabled: !!connection?.insightsEnabledAt,
-    enabledAt: connection?.insightsEnabledAt?.toISOString() ?? null,
+    enabled: !!enabledAt,
+    enabledAt: enabledAt?.toISOString() ?? null,
   };
 }
 
@@ -155,9 +175,11 @@ export async function refreshTemplateAnalytics(
      * field on the WABA node, so querying with the DEFAULT account's WABA
      * returns nothing for a template that lives under a second one — and an
      * empty result is indistinguishable from "this template sent nothing".
-     * Resolved from the template rows by the callers below.
+     * Resolved from the template rows by the callers below. REQUIRED — templates
+     * carry a NOT NULL `wabaAccountId`, so there is no longer an "unknown WABA"
+     * case to disambiguate.
      */
-    wabaId?: string | null;
+    wabaAccountId: string;
   },
 ): Promise<{ rows: number; costWithheld: boolean }> {
   const ids = opts.templateExternalIds.filter(Boolean);
@@ -175,55 +197,38 @@ export async function refreshTemplateAnalytics(
   // That was the real bug behind the report's unexplained "Couldn't fetch
   // from Meta".
   //
-  // A legacy `""`-WABA template names no catalog, so there is nothing to
-  // resolve the owning account FROM. Passing `null` straight through made
-  // `getSendConfig` refuse with ACCOUNT_UNRESOLVED on any multi-account
-  // workspace — and the capture sweeper's per-WABA catch turned that throw into
-  // a console line, so read/click counts for every pre-multi-account template
-  // expired UNFETCHED at Meta's ~7-day horizon. That loss is permanent.
+  // ONE lookup: any active number under the template's WABA can read that WABA's
+  // analytics, since `template_analytics` is a field on the WABA node.
   //
-  // So resolve it whenever the answer is unambiguous, and when it genuinely
-  // isn't, say THAT — not "whatsapp not configured", which sends an admin to
-  // reconnect a healthy integration.
-  let accountId: string | null = null;
-  if (opts.wabaId) {
-    accountId =
-      (
-        await db.channelConnection.findFirst({
-          where: { workspaceId, channel: "whatsapp", wabaId: opts.wabaId },
-          select: { id: true },
-        })
-      )?.id ?? null;
-  } else {
-    const active = await db.channelConnection.findMany({
-      where: { workspaceId, channel: "whatsapp", isActive: true },
-      select: { id: true, wabaId: true, isDefault: true },
+  // This replaces ~40 lines that existed only to disambiguate the legacy `""`-WABA
+  // sentinel — a template that named no catalog, where the code had to guess the
+  // owning account from "is there exactly one number", "do all numbers share one
+  // WABA", else throw `template_waba_unresolved`. The sentinel is gone (the FK is
+  // NOT NULL), so the guess is gone with it.
+  const accountId =
+    (
+      await db.channelConnection.findFirst({
+        where: {
+          workspaceId,
+          channel: "whatsapp",
+          wabaAccountId: opts.wabaAccountId,
+          isActive: true,
+        },
+        orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+        select: { id: true },
+      })
+    )?.id ?? null;
+  if (!accountId) {
+    // The WABA exists but every number under it is inactive (or it has none yet —
+    // an Embedded Signup `FINISH_ONLY_WABA` install). There is no token to fetch
+    // with. Say that, rather than "whatsapp not configured", which would send an
+    // admin to reconnect a healthy integration.
+    throw new BadRequestException({
+      error: "waba_has_no_active_number",
+      detail:
+        "This template's WhatsApp Business Account has no active phone number, so there " +
+        "are no credentials to read its analytics with.",
     });
-    const distinctWabas = new Set(
-      active.map((a) => a.wabaId).filter((w): w is string => typeof w === "string" && w !== ""),
-    );
-    if (active.length === 1) {
-      // One number: it owns every legacy row by construction.
-      accountId = active[0]!.id;
-    } else if (distinctWabas.size <= 1) {
-      // Several numbers sharing ONE catalog — any of them reads the same
-      // analytics, so the default is not a guess.
-      accountId = (active.find((a) => a.isDefault) ?? active[0])?.id ?? null;
-    } else {
-      console.warn(
-        `[template-analytics] cannot attribute ${ids.length} legacy ""-WABA template(s) ` +
-          `for workspace=${workspaceId}: ${distinctWabas.size} WABAs connected. ` +
-          `Run a template catalog sync to stamp their wabaId, or their metrics ` +
-          `expire unfetched at Meta's ~7-day horizon.`,
-      );
-      throw new BadRequestException({
-        error: "template_waba_unresolved",
-        detail:
-          "These templates were synced before this workspace had more than one WhatsApp " +
-          "Business Account, so we can't tell which catalog they belong to. Run a template " +
-          "sync to stamp them, then retry.",
-      });
-    }
   }
   // Config resolution fails for reasons the operator can fix (missing WABA id
   // on the connection, undecryptable token) — but ProviderNotConfiguredError is
@@ -393,8 +398,10 @@ async function upsertRollup(
  * (`Broadcast.channelConnectionId` → `ChannelConnection.wabaId`). That is not a
  * heuristic: templates live on a WABA's catalog, `template_analytics` is scoped to
  * the WABA node, so the sending account's WABA is the only one whose figures can
- * hold this campaign at all. `syncedAt desc` survives only as the fallback for
- * pre-multi-account rows that carry no connection.
+ * hold this campaign at all. `syncedAt desc` survives ONLY for a campaign carrying
+ * no connection at all; when the sending WABA is known and its catalog no longer
+ * holds the template this returns null, because an empty panel is honest and
+ * another WABA's figures are not.
  */
 export async function resolveCampaignTemplate(
   workspaceId: string,
@@ -403,18 +410,18 @@ export async function resolveCampaignTemplate(
     templateLanguage: string | null;
     channelConnectionId: string | null;
   },
-): Promise<{ externalId: string; wabaId: string | null } | null> {
+): Promise<{ externalId: string; wabaAccountId: string } | null> {
   if (!campaign.templateName) return null;
 
-  const sendingWabaId = campaign.channelConnectionId
+  const sendingWabaAccountId = campaign.channelConnectionId
     ? (
         await db.channelConnection.findFirst({
           // workspaceId even though the id is unique — the row is reached from
           // request-derived state and tenancy is manual everywhere in this app.
           where: { id: campaign.channelConnectionId, workspaceId },
-          select: { wabaId: true },
+          select: { wabaAccountId: true },
         })
-      )?.wabaId || null
+      )?.wabaAccountId ?? null
     : null;
 
   const where = {
@@ -423,22 +430,33 @@ export async function resolveCampaignTemplate(
     ...(campaign.templateLanguage ? { language: campaign.templateLanguage } : {}),
     externalId: { not: null },
   };
-  const select = { externalId: true, wabaId: true };
+  const select = { externalId: true, wabaAccountId: true };
 
-  const row =
-    (sendingWabaId
-      ? await db.messageTemplate.findFirst({ where: { ...where, wabaId: sendingWabaId }, select })
-      : null) ??
-    // Fallback only: no sending account recorded, or its catalog no longer holds
-    // the template. Most-recently-synced beats an arbitrary pick, and every
-    // caller now lands on the SAME arbitrary pick, which is the property that
-    // was actually missing.
-    (await db.messageTemplate.findFirst({ where, orderBy: { syncedAt: "desc" }, select }));
+  // When the campaign's sending WABA is KNOWN, that catalog is the only one whose
+  // figures can hold this campaign — so scope strictly and return null when it no
+  // longer has the template. Falling back to a same-named template on a DIFFERENT
+  // WABA would report another account's numbers under this campaign, silently: both
+  // halves succeed, the panel fills, and nothing says the figures belong elsewhere.
+  // That is worse than an empty panel, which at least prompts a re-sync.
+  //
+  // The unscoped `syncedAt desc` pick survives ONLY for a campaign with no account
+  // recorded at all (`Broadcast.channelConnectionId` is nullable for pre-multi-account
+  // rows). Both callers share this resolver, so they still land on the SAME pick —
+  // the property whose absence made Fetch write one externalId while the report read
+  // another.
+  const row = sendingWabaAccountId
+    ? await db.messageTemplate.findFirst({
+        where: { ...where, wabaAccountId: sendingWabaAccountId },
+        select,
+      })
+    : await db.messageTemplate.findFirst({ where, orderBy: { syncedAt: "desc" }, select });
 
   if (!row?.externalId) return null;
-  // `""` is the legacy/unknown-WABA sentinel — normalise it to "no opinion" so
-  // callers pass null and get the workspace's default account.
-  return { externalId: row.externalId, wabaId: row.wabaId || null };
+  // No normalisation needed any more: `wabaAccountId` is a NOT NULL FK, so a
+  // template always names the catalog it belongs to. The `""` sentinel this used to
+  // flatten into "no opinion" is what let callers fall back to the default account
+  // and read another WABA's (empty) analytics.
+  return { externalId: row.externalId, wabaAccountId: row.wabaAccountId };
 }
 
 /**
@@ -457,6 +475,20 @@ export async function resolveCampaignTemplate(
  * ownership half — an EU/JP Meta Business Account behind a non-EU number — is
  * not knowable from any field we hold, so this detects most of the rule and
  * never claims to detect all of it.
+ */
+/*
+ * ⚠️ META EDITS THIS LIST — re-verify against the CHANGELOG, not just the guide.
+ *
+ * Last verified 2026-07-30. The changelog entry of 2026-06-11 ("Removed the United
+ * Kingdom from the unsupported regions for template analytics") is why this warning
+ * exists: the excluded set is not a constant, and every wrong entry here prints
+ * "Meta doesn't cover your region, this will stay zero forever" over an account
+ * whose analytics actually work — telling an operator to stop investigating a real
+ * problem. GB is correctly ABSENT (it is not an EU member, so the EU-27 formulation
+ * already excluded it).
+ *
+ * Feed to re-check:
+ *   https://developers.facebook.com/documentation/business-messaging/whatsapp/changelog/rss/
  */
 const TEMPLATE_ANALYTICS_BLOCKED_COUNTRIES = new Set([
   // EU 27
@@ -487,22 +519,27 @@ export interface TemplateAnalyticsAccountContext {
  */
 export async function templateAnalyticsAccountContext(
   workspaceId: string,
-  wabaId: string | null,
+  wabaAccountId: string | null,
 ): Promise<TemplateAnalyticsAccountContext> {
   const connection = await db.channelConnection.findFirst({
     where: {
       workspaceId,
       channel: "whatsapp",
-      // `""`/null WABA = a pre-multi-account row; fall back to the default
-      // account, which is the only one it could have meant.
-      ...(wabaId ? { wabaId } : { isDefault: true }),
+      // A named WABA scopes to its own numbers; with none named (a caller that
+      // genuinely has no template in hand) the default account is the only
+      // sensible answer for the region/`analyticsSince` copy.
+      ...(wabaAccountId ? { wabaAccountId } : { isDefault: true }),
     },
-    select: { insightsEnabledAt: true, config: true },
+    select: {
+      config: true,
+      // Insights are a WABA-level switch, so the timestamp lives on the WABA.
+      wabaAccount: { select: { insightsEnabledAt: true } },
+    },
   });
   const config = (connection?.config ?? {}) as { displayPhoneNumber?: string };
   const country = getCountryFromPhone(config.displayPhoneNumber ?? null);
   return {
-    analyticsSince: connection?.insightsEnabledAt?.toISOString() ?? null,
+    analyticsSince: connection?.wabaAccount?.insightsEnabledAt?.toISOString() ?? null,
     // An unparseable or absent number leaves `country` null — treat that as
     // supported. Claiming "Meta doesn't cover your region" on a guess is worse
     // than the unexplained zero it was meant to explain.

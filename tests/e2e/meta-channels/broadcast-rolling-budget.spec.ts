@@ -104,13 +104,22 @@ test.beforeAll(async () => {
       channel: "whatsapp",
       config: {},
       secrets: {},
-      // The 24h limit is PORTFOLIO-scoped now, so the tier/cap live there.
-      portfolio: {
+      // The 24h limit is PORTFOLIO-scoped, and the portfolio hangs off the WABA
+      // (Meta records `owner_business_info` on the WABA node), so the nesting is
+      // connection → WABA → portfolio.
+      wabaAccount: {
         create: {
           workspace: { connect: { id: TEAM_ID } },
-          messagingTier: "TIER_250",
-          messagingDailyCap: CAP,
-          messagingHealthUpdatedAt: new Date(),
+          externalWabaId: `${TEAM_ID}_waba`,
+          portfolio: {
+            create: {
+              workspace: { connect: { id: TEAM_ID } },
+              source: "graph_discovered",
+              messagingTier: "TIER_250",
+              messagingDailyCap: CAP,
+              messagingHealthUpdatedAt: new Date(),
+            },
+          },
         },
       },
       workspace: { connect: { id: TEAM_ID } },

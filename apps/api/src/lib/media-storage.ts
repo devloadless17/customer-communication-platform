@@ -25,7 +25,13 @@ import { mediaSizeCaps } from "@ccp/shared/providers/media-caps";
 export const MEDIA_SIZE_CAPS: Record<MediaKind, number> = mediaSizeCaps("whatsapp");
 
 /**
- * OUTBOUND document allowlist — Meta's documented supported document types.
+ * OUTBOUND document allowlist.
+ *
+ * Meta's documented set is: pdf, doc, docx, xls, xlsx, ppt, pptx, txt. `text/csv`
+ * is ours on top of that — it is not in Meta's table, but CSV is common in
+ * business messaging and Meta's list has not proven exhaustive in practice. If a
+ * CSV send ever starts failing with a media-type error, this is the line that
+ * explains why it was ever attempted.
  * `kindFromMime` falls back to "document" for ANY unrecognized mime, so without
  * this gate an agent could upload an arbitrary file (executable, html) and have
  * it stored in shared blob storage before Meta's send-side rejection. Enforced

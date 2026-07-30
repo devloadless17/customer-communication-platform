@@ -599,12 +599,20 @@ jobs:
           MAIL_SMTP_PORT: ${{ secrets.MAIL_SMTP_PORT }}
           MAIL_SMTP_USER: ${{ secrets.MAIL_SMTP_USER }}
           MAIL_SMTP_PASSWORD: ${{ secrets.MAIL_SMTP_PASSWORD }}
+          # Sign every Meta Graph call with `appsecret_proof` (HMAC of the access
+          # token, keyed by that account's OWN app secret) so a stolen token cannot
+          # be replayed from another machine. ADDITIVE — Meta accepts a correct
+          # proof whether or not the app's "Require App Secret" toggle is on — so
+          # shipping this is safe BEFORE flipping that toggle, which is the
+          # required order: flipping first fails every not-yet-signed call.
+          # Empty = off; the code enables only on the exact string "1".
+          META_APPSECRET_PROOF: ${{ secrets.META_APPSECRET_PROOF }}
         run: |
           set -euo pipefail
           umask 077
           cat > _deploy/.env <<EOF
           DOCKER_USERNAME=${DOCKER_USERNAME}
-          APP_IMAGE_NAME=${APP_IMAGE_NAME}
+          APP_IMAGE_NAME=${APP_IMAGE_NAME:-}
           # Pull the tags THIS run published (ci-main-* on main, latest-* on
           # production) so a main run smoke-tests its own images, not the ones
           # currently live in production.
@@ -625,12 +633,13 @@ jobs:
           R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
           R2_BUCKET=${R2_BUCKET}
           MAIL_FROM=${MAIL_FROM}
-          MAIL_FROM_NAME=${MAIL_FROM_NAME}
+          MAIL_FROM_NAME=${MAIL_FROM_NAME:-}
           MAIL_SMTP_HOST=${MAIL_SMTP_HOST}
-          MAIL_SMTP_PORT=${MAIL_SMTP_PORT}
+          MAIL_SMTP_PORT=${MAIL_SMTP_PORT:-}
           MAIL_SMTP_USER=${MAIL_SMTP_USER}
           MAIL_SMTP_PASSWORD=${MAIL_SMTP_PASSWORD}
           META_GRAPH_VERSION=v25.0
+          META_APPSECRET_PROOF=${META_APPSECRET_PROOF:-}
           NEXT_PUBLIC_API_URL=
           EOF
 
@@ -863,11 +872,19 @@ jobs:
           # not rendered, so this degrades to password-only rather than breaking.
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          # Sign every Meta Graph call with `appsecret_proof` (HMAC of the access
+          # token, keyed by that account's OWN app secret) so a stolen token cannot
+          # be replayed from another machine. ADDITIVE — Meta accepts a correct
+          # proof whether or not the app's "Require App Secret" toggle is on — so
+          # shipping this is safe BEFORE flipping that toggle, which is the
+          # required order: flipping first fails every not-yet-signed call.
+          # Empty = off; the code enables only on the exact string "1".
+          META_APPSECRET_PROOF: ${{ secrets.META_APPSECRET_PROOF }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: APP_DOMAIN,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,BETTER_AUTH_SECRET,ENCRYPTION_KEY,INTERNAL_BUS_SECRET,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET,OPENAI_API_KEY,ANTHROPIC_API_KEY,AI_ANTHROPIC_MODEL_REPLY,AZURE_SPEECH_KEY,AZURE_SPEECH_REGION,DOCKER_USERNAME,DOCKER_PASSWORD,MAIL_FROM,MAIL_FROM_NAME,MAIL_SMTP_HOST,MAIL_SMTP_PORT,MAIL_SMTP_USER,MAIL_SMTP_PASSWORD,GOOGLE_CLIENT_ID,GOOGLE_CLIENT_SECRET
+          envs: APP_DOMAIN,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,BETTER_AUTH_SECRET,ENCRYPTION_KEY,INTERNAL_BUS_SECRET,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET,OPENAI_API_KEY,ANTHROPIC_API_KEY,AI_ANTHROPIC_MODEL_REPLY,AZURE_SPEECH_KEY,AZURE_SPEECH_REGION,DOCKER_USERNAME,DOCKER_PASSWORD,MAIL_FROM,MAIL_FROM_NAME,MAIL_SMTP_HOST,MAIL_SMTP_PORT,MAIL_SMTP_USER,MAIL_SMTP_PASSWORD,GOOGLE_CLIENT_ID,GOOGLE_CLIENT_SECRET,META_APPSECRET_PROOF
           script: |
             set -euo pipefail
             rm -rf /tmp/ccp-deploy
@@ -907,17 +924,24 @@ jobs:
             # Unauthorized IP address\` means this server's IP is not on the
             # Brevo allowlist.
             MAIL_FROM=${MAIL_FROM}
-            MAIL_FROM_NAME=${MAIL_FROM_NAME}
+            MAIL_FROM_NAME=${MAIL_FROM_NAME:-}
             MAIL_SMTP_HOST=${MAIL_SMTP_HOST}
-            MAIL_SMTP_PORT=${MAIL_SMTP_PORT}
+            MAIL_SMTP_PORT=${MAIL_SMTP_PORT:-}
             MAIL_SMTP_USER=${MAIL_SMTP_USER}
             MAIL_SMTP_PASSWORD=${MAIL_SMTP_PASSWORD}
             # Google sign-in (web only). The authorized redirect URI in the
             # Google console must be exactly
             # https://${APP_DOMAIN}/api/auth/callback/google.
-            GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
-            GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+            GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+            GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
             META_GRAPH_VERSION=v25.0
+            # `:-` is deliberate and NOT cosmetic. This heredoc runs under
+            # `set -u`, and ssh-action's `envs:` does not necessarily export a
+            # variable whose value is empty — so a blanked/removed secret would
+            # abort the deploy with "META_APPSECRET_PROOF: unbound variable"
+            # rather than simply leaving the feature off. An optional secret must
+            # never be able to break a deploy.
+            META_APPSECRET_PROOF=${META_APPSECRET_PROOF:-}
             # Raw webhook-body retention (days). Message.rawPayload keeps the
             # ORIGINAL provider payload for debugging; the sweeper that clears it
             # is opt-in and was unset, i.e. we kept every raw body FOREVER. At a
@@ -933,7 +957,7 @@ jobs:
             # /opt/ccp/.env without a redeploy. AI_ASSISTANT_ENABLED=0 is the
             # global kill switch. This block is rendered on EVERY deploy, so
             # edit it here (not by hand on the VPS — hand edits get overwritten).
-            OPENAI_API_KEY=${OPENAI_API_KEY}
+            OPENAI_API_KEY=${OPENAI_API_KEY:-}
             # Claude powers the reply-TEXT step (much better Lebanese/Arabizi
             # than gpt-4o) and the composer Translate feature. When this key is
             # present, AI_TEXT_PROVIDER auto-selects Claude for text; empty =
@@ -963,8 +987,8 @@ jobs:
             # why a typo'd secret name is invisible. If Claude replies look
             # wrong after a deploy, check the rendered value with:
             #   docker compose exec api printenv | grep ANTHROPIC
-            ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-            AI_ANTHROPIC_MODEL_REPLY=${AI_ANTHROPIC_MODEL_REPLY}
+            ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+            AI_ANTHROPIC_MODEL_REPLY=${AI_ANTHROPIC_MODEL_REPLY:-}
             AI_ASSISTANT_ENABLED=1
             AI_MODEL_REPLY=gpt-4o
             AI_MODEL_SUMMARY=gpt-4o-mini
@@ -974,8 +998,8 @@ jobs:
             # Optional: empty = OpenAI voices only. Rendered every deploy, so set
             # the values via the AZURE_SPEECH_KEY / AZURE_SPEECH_REGION GH secrets
             # (not by hand on the VPS — hand edits get overwritten).
-            AZURE_SPEECH_KEY=${AZURE_SPEECH_KEY}
-            AZURE_SPEECH_REGION=${AZURE_SPEECH_REGION}
+            AZURE_SPEECH_KEY=${AZURE_SPEECH_KEY:-}
+            AZURE_SPEECH_REGION=${AZURE_SPEECH_REGION:-}
             # NEXT_PUBLIC_API_URL intentionally empty — Caddy fronts both
             # processes on a single origin so the browser falls back to
             # window.location for Socket.io.

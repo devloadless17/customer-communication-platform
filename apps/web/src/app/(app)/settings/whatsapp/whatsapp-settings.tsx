@@ -121,6 +121,14 @@ export function WhatsappSettings({
       // so this form no longer submits them (sending appSecret:null from the
       // deleted field would 400 against the string|undefined schema).
       accessToken: form.get("accessToken") || undefined,
+      // Per-account Meta app override. `|| undefined` (never null/"") is
+      // load-bearing twice over: the schema is `string | undefined`, so an empty
+      // field must be ABSENT rather than empty — and absent is also what the
+      // server reads as "keep whatever this row already has", so re-saving a
+      // number that is already on its own app doesn't silently reset it to the
+      // shared app just because the admin left the secret box blank.
+      appSecret: form.get("appSecret") || undefined,
+      appId: form.get("appId") || undefined,
       // Pass through wabaId even when empty so the server can clear a stale id.
       wabaId: form.get("wabaId") ?? "",
     };
@@ -649,6 +657,31 @@ function ManualForm({
               secret
               defaultValue=""
               hint="Only to override the shared Meta App system-user token for WhatsApp."
+            />
+            {/* PUT THIS NUMBER ON A DIFFERENT META APP.
+                Meta's model is one app ↔ many accounts, and the data model has
+                always allowed an account to carry another app's credentials — but
+                this form stopped submitting them, so the capability existed
+                everywhere except where an admin could reach it. That is why "what
+                if I want to add another Meta app?" had no answer in-product.
+                Both fields together, because a secret from app A with app B's id
+                is not a coherent account. */}
+            <Field
+              name="appSecret"
+              label="App secret (different Meta app, optional)"
+              placeholder="Leave blank to use your shared Meta App"
+              mono
+              secret
+              defaultValue=""
+              hint="Only if this number lives under a DIFFERENT Meta app than the rest of your workspace. Meta signs this number's webhooks with this secret, and rotating the shared app's secret will no longer affect it."
+            />
+            <Field
+              name="appId"
+              label="App ID (different Meta app, optional)"
+              placeholder="Leave blank to use your shared Meta App"
+              mono
+              defaultValue={addMode ? "" : (current.appId ?? "")}
+              hint="The App ID that goes with the secret above — shown next to this number in Settings → Meta App so you can tell your apps apart."
             />
           </div>
         </details>

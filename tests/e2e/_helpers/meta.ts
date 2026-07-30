@@ -213,6 +213,18 @@ export async function seedMetaTestTeam(): Promise<MetaTestTeam> {
           data: { isDefault: false },
         });
       }
+      // The WABA is a first-class row (Meta: portfolio → WABA → number), and
+      // `externalWabaId` is GLOBALLY unique, so upsert rather than create.
+      const wabaAccountId = c.wabaId
+        ? (
+            await tx.whatsappBusinessAccount.upsert({
+              where: { externalWabaId: c.wabaId },
+              create: { workspaceId: META_TEST_TEAM_ID, externalWabaId: c.wabaId },
+              update: {},
+              select: { id: true },
+            })
+          ).id
+        : null;
       await tx.channelConnection.upsert({
         where: {
           workspaceId_channel_externalAccountId: {
@@ -237,7 +249,7 @@ export async function seedMetaTestTeam(): Promise<MetaTestTeam> {
           externalAccountId: c.accountId,
           isDefault: c.isDefault,
           label: c.label,
-          ...(c.wabaId ? { wabaId: c.wabaId } : {}),
+          ...(wabaAccountId ? { wabaAccountId } : {}),
           config: c.config,
           secrets: c.secrets,
           isActive: true,
@@ -245,7 +257,7 @@ export async function seedMetaTestTeam(): Promise<MetaTestTeam> {
         update: {
           isDefault: c.isDefault,
           label: c.label,
-          ...(c.wabaId ? { wabaId: c.wabaId } : {}),
+          ...(wabaAccountId ? { wabaAccountId } : {}),
           config: c.config,
           secrets: c.secrets,
           isActive: true,

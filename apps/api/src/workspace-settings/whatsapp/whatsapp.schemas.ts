@@ -3,14 +3,19 @@ import { z } from "zod";
 /**
  * POST /api/workspace/whatsapp — connect / update the team's Meta credentials.
  *
- * `wabaId` and `appId` use optional-update semantics:
+ * `appId` uses optional-update semantics:
  *   - undefined → leave column unchanged
  *   - ""        → clear the column
  *   - non-empty → set to the new value
  *
- * Both use `.optional()` (not just defaulted to empty) so the
- * "leave alone" vs "clear" distinction survives serialization through
- * partially-filled UI forms.
+ * It uses `.optional()` (not just defaulted to empty) so the "leave alone" vs
+ * "clear" distinction survives serialization through partially-filled UI forms.
+ *
+ * `wabaId` is REQUIRED. It used to be optional, and a connection saved without it
+ * had no WABA at all — which made the cross-account template guard a no-op (the
+ * guard only refuses when both sides are known and differ), so that number could
+ * send ANY template in the workspace. Templates are WABA-scoped in Meta, so a
+ * number with no WABA has no catalog and cannot meaningfully send one.
  */
 export const UpdateWhatsappConfigSchema = z.object({
   phoneNumberId: z.string().trim().min(1),
@@ -20,7 +25,7 @@ export const UpdateWhatsappConfigSchema = z.object({
   accessToken: z.string().trim().optional(),
   appSecret: z.string().trim().optional(),
   verifyToken: z.string().trim().optional(),
-  wabaId: z.string().trim().optional(),
+  wabaId: z.string().trim().min(1, "wabaId is required — templates are per-WABA"),
   appId: z.string().trim().optional(),
 });
 export type UpdateWhatsappConfigInput = z.infer<typeof UpdateWhatsappConfigSchema>;
@@ -68,9 +73,12 @@ export type UpdateTemplateBindingsInput = z.infer<typeof UpdateTemplateBindingsS
  * Sending `""` for an untouched field would wipe it, which is why the provider
  * spreads on `!== undefined` rather than on truthiness.
  *
- * `vertical` is deliberately absent: Meta's `WhatsAppVertical` members aren't
- * published in the profile reference, so we display what Meta returns and leave
- * changing it to WhatsApp Manager rather than guessing an enum.
+ * `vertical` IS supported, with Meta's published member list. It used to be
+ * omitted on the grounds that the members "aren't published in the profile
+ * reference" — they are, in full, in Business Profiles, so the reason no longer
+ * holds and an operator had to leave our UI for WhatsApp Manager to set their own
+ * business category. `""` clears it, which the doc allows explicitly ("This can be
+ * either an empty string or one of the accepted values").
  */
 /** Body-click tracking toggle: `enabled` is the operator's mental model
  *  ("track clicks?"), inverted to Meta's opt-OUT flag in the service. */
@@ -81,16 +89,33 @@ export type SetLinkTrackingInput = z.infer<typeof SetLinkTrackingSchema>;
 
 export const UpdateBusinessProfileSchema = z
   .object({
-    // WhatsApp's own limits for `about` and `description` aren't stated in the
-    // profile reference, so these bounds are ours: generous enough never to
-    // refuse something Meta accepts, tight enough to reject an accident.
-    about: z.string().max(139).optional(),
+    // Meta's stated bound: "Strings must be between 1 and 139 characters."
+    //
+    // `.min(1)` matters, and is the one field where the "empty string clears it"
+    // rule above does NOT apply: the doc says outright "String cannot be empty".
+    // Accepting `""` here just forwarded a request Meta rejects, so an operator
+    // trying to clear their About text got an opaque Meta error instead of either
+    // working or being told why.
+    about: z.string().min(1).max(139).optional(),
     // 256 IS documented ("maximum 256 characters"), and Meta does not validate
     // the address against any geographic database — it is freeform text.
     address: z.string().max(256).optional(),
+    // Documented: "Character limit 512."
     description: z.string().max(512).optional(),
     email: z.union([z.string().email().max(128), z.literal("")]).optional(),
     websites: z.array(z.string().url().max(256)).max(2).optional(),
+    /**
+     * Business category. Meta's published `vertical` members, verbatim — an
+     * unlisted value is rejected by Graph, so the enum is the validation.
+     */
+    vertical: z
+      .enum([
+        "ALCOHOL", "APPAREL", "AUTO", "BEAUTY", "EDU", "ENTERTAIN", "EVENT_PLAN",
+        "FINANCE", "GOVT", "GROCERY", "HEALTH", "HOTEL", "NONPROFIT",
+        "ONLINE_GAMBLING", "OTC_DRUGS", "OTHER", "PHYSICAL_GAMBLING",
+        "PROF_SERVICES", "RESTAURANT", "RETAIL", "TRAVEL", "",
+      ])
+      .optional(),
     /** Handle from the resumable upload route, not a URL — Meta hosts the image. */
     profilePictureHandle: z.string().min(1).max(1024).optional(),
   })

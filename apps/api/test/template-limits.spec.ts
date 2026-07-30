@@ -2483,13 +2483,20 @@ describe("unknown account_update events are surfaced, not swallowed", () => {
 
 describe("messaging_account_id is opt-in", () => {
   // Meta's account-model split lets one number carry several Messaging
-  // Accounts. The parameter names which to bill — optional at Phase 1, required
-  // only when ONE app holds more than one on the same number.
+  // Accounts. The parameter names which to bill — optional at Phase 1 (H2 2026),
+  // required for multi-Messaging-Account setups from Phase 2 (H1 2027).
   //
-  // The reason it defaults off is not caution for its own sake: it belongs to a
-  // beta that is "subject to change", and Graph rejects an unrecognised body
-  // field with #100 — which fails the whole send, for every tenant. So an
-  // unset config must produce a byte-identical wire to today.
+  // The reason it defaults off is not caution for its own sake: Graph rejects an
+  // unrecognised body field with #100 — which fails the whole send, for every
+  // tenant. So an unset config must produce a byte-identical wire to today.
+  //
+  // NAME: two spellings exist and the GUIDE PAGES LAG THE CHANGELOG. The
+  // account-model-evolution guide still says `paid_messaging_account_id`, but the
+  // changelog of 2026-06-16 made `messaging_account_id` the preferred parameter
+  // and `paid_messaging_account_id` a deprecated alias. This spec was briefly
+  // "corrected" to the guide's spelling on 2026-07-30 and put back the same day.
+  // Deeper reasoning + the phase table live on `messagingAccountField`; the
+  // dedicated cases are in test/messaging-account-field.spec.ts.
   const base = {
     phoneNumberId: "pn",
     accessToken: "t",

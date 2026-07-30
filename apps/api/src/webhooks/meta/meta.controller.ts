@@ -20,6 +20,7 @@ import { Prisma } from "@prisma/client";
 import type { Request, Response } from "express";
 
 import { runWithConcurrency } from "@/common/concurrency";
+import { createTokenBucket } from "@/common/token-bucket";
 import { blobStorage } from "@/lib/blob-storage";
 import { reconcileInboundMediaMime } from "@/lib/blob-storage/mime-guard";
 import { publish } from "@/lib/events/bus";
@@ -30,7 +31,18 @@ import {
   probeMediaDurationMs,
 } from "@/lib/media-thumbnail";
 import { getMetaProvider } from "@/lib/providers";
-import { MediaTooLargeError } from "@/lib/providers/meta";
+import { MediaTooLargeError, scanWhatsappEnvelope } from "@/lib/providers/meta";
+import {
+  appLevelWebhookEnabled,
+  platformAppSecrets,
+  platformVerifyToken,
+  resolveAppLevelWorkspace,
+} from "@/lib/providers/app-level-webhook";
+import {
+  groupEventsByInboundAccount,
+  resolveInboundAccounts,
+} from "@/lib/providers/inbound-accounts";
+import type { InboundAccountGroup } from "@/lib/providers/inbound-accounts";
 import { metaWireEnabled, wireIn } from "@/lib/providers/meta-wire";
 import {
   getMetaSendConfig,
@@ -128,6 +140,17 @@ import { WebhookRateLimitGuard } from "../webhook-rate-limit.guard";
  * origin. The HMAC against the team's per-tenant `metaAppSecret` is the
  * actual authentication.
  */
+/**
+ * Per-WORKSPACE bucket for the app-level callback.
+ *
+ * The route guard keys on the `workspaceId` PATH PARAM and falls back to the client
+ * IP. On this route there is no path param and every tenant shares Meta's IP set,
+ * so that fallback would put all traffic in ONE bucket — a cross-tenant self-DoS.
+ * The workspace is only knowable after signature verification + payload resolution,
+ * so the fair bucket is consumed inside the handler instead.
+ */
+const appLevelWorkspaceBucket = createTokenBucket({ perMin: 600, maxKeys: 5_000 });
+
 @Controller("webhooks/meta")
 @UseGuards(WebhookRateLimitGuard)
 export class MetaWebhookController implements OnModuleDestroy {
@@ -158,6 +181,137 @@ export class MetaWebhookController implements OnModuleDestroy {
       Promise.allSettled([...this.inFlightMedia]),
       new Promise<void>((resolve) => setTimeout(resolve, DRAIN_TIMEOUT_MS).unref()),
     ]);
+  }
+
+  /**
+   * APP-LEVEL verification handshake (`GET /webhooks/meta`, no workspaceId).
+   *
+   * Declared BEFORE the `:workspaceId` routes on purpose: Nest matches in
+   * declaration order, and a `:workspaceId` param route would otherwise swallow the
+   * bare path.
+   */
+  @Get()
+  async verifyAppLevel(
+    @Query("hub.mode") mode: string | undefined,
+    @Query("hub.verify_token") token: string | undefined,
+    @Query("hub.challenge") challenge: string | undefined,
+    @Res() res: Response,
+  ): Promise<void> {
+    const expected = platformVerifyToken();
+    if (!expected || !appLevelWebhookEnabled()) {
+      // Not a Tech Provider yet — the platform app isn't configured. Silent 403
+      // rather than "not configured", which would confirm the endpoint exists.
+      res.status(403).type("text/plain").send("forbidden");
+      return;
+    }
+    if (
+      mode === "subscribe" &&
+      typeof token === "string" &&
+      typeof challenge === "string" &&
+      challenge.length > 0 &&
+      // Same length cap as the per-workspace handshake: Meta's challenge is a short
+      // opaque string, so refusing >255 chars stops a misrouted client coaxing us
+      // into echoing arbitrary text.
+      challenge.length <= 255 &&
+      timingSafeEqualString(token, expected)
+    ) {
+      res.status(200).type("text/plain").send(challenge);
+      return;
+    }
+    res.status(403).type("text/plain").send("forbidden");
+  }
+
+  /**
+   * APP-LEVEL inbound (`POST /webhooks/meta`, no workspaceId in the path).
+   *
+   * Required for Embedded Signup, not optional: Meta delivers every onboarded
+   * customer's webhooks to the APP's callback URL, and per-WABA / per-number
+   * `override_callback_uri` cannot cover template webhooks
+   * (`message_template_status_update`, `_quality_update`, `_components_update`,
+   * `template_category_update`) or account webhooks (`account_update`,
+   * `account_review_update`, `account_alerts`) — those are ALWAYS sent here.
+   *
+   * ORDER IS LOAD-BEARING: verify the HMAC against the platform app secret FIRST,
+   * then resolve the tenant from the now-trusted payload. Resolving first would let
+   * an unauthenticated body drive DB lookups — a workspace-enumeration oracle and a
+   * DoS lever. The per-workspace route can lean on its path param as a routing
+   * signal; here there is no path, so the signature is the only authority.
+   */
+  @Post()
+  @HttpCode(200)
+  async receiveAppLevel(
+    @Headers("x-hub-signature-256") signature: string | undefined,
+    @Req() req: Request,
+  ): Promise<{ ok: boolean; ingested?: number; dropped?: string }> {
+    if (!appLevelWebhookEnabled()) {
+      // Unconfigured platform app. 200-drop rather than 403: if Meta ever points
+      // here before we're ready, a non-2xx would start a retry storm.
+      return { ok: true, ingested: 0, dropped: "app_level_not_configured" };
+    }
+
+    const channel = channelForMetaObject(req.body);
+    if (!channel) return { ok: true, ingested: 0, dropped: "unsupported_object" };
+
+    const rawBody = (req as unknown as { rawBody?: Buffer }).rawBody;
+    if (!rawBody) {
+      this.logger.error(
+        "[app-level] webhook missing rawBody — returning 200 to avoid retry storm",
+      );
+      return { ok: true, ingested: 0, dropped: "missing_raw_body" };
+    }
+
+    // ── AUTHENTICATION. Nothing above this line touched the database. ────────
+    if (!insecureSkipVerify(this.logger)) {
+      if (!signature) {
+        throw new HttpException({ error: "forbidden", detail: "no_signature" }, 403);
+      }
+      if (!verifySignature(rawBody, signature, platformAppSecrets())) {
+        this.logger.warn("[app-level] bad signature — dropping");
+        throw new HttpException({ error: "forbidden", detail: "bad_signature" }, 403);
+      }
+    }
+
+    wireIn(channel, rawBody.toString("utf8"));
+    const payload = req.body as unknown;
+
+    // ── The payload is now trusted; resolve the tenant from it. ──────────────
+    const resolved = await resolveAppLevelWorkspace(channel, payload);
+    if (resolved.kind !== "ok") {
+      // Never guess. An ambiguous payload silently attributed to one of two
+      // candidate workspaces is a cross-tenant leak, which is strictly worse than
+      // a dropped webhook we can see in the logs.
+      this.logger.warn(
+        `[app-level] dropped ${channel} payload: ` +
+          (resolved.kind === "ambiguous" ? resolved.detail : "no matching workspace"),
+      );
+      return {
+        ok: true,
+        ingested: 0,
+        dropped: resolved.kind === "ambiguous" ? "workspace_ambiguous" : "unknown_workspace",
+      };
+    }
+    const { workspaceId } = resolved;
+
+    // PER-WORKSPACE rate limiting, consumed HERE rather than in the guard. The
+    // guard keys on the `workspaceId` path param and falls back to the client IP —
+    // and on this route every tenant shares Meta's IP set, so that fallback would
+    // collapse every workspace into ONE global bucket: a cross-tenant self-DoS
+    // where one busy customer throttles everybody. The tenant isn't knowable until
+    // now, so the fair bucket has to be consumed after resolution.
+    const rate = appLevelWorkspaceBucket.consume(`team:${workspaceId}`);
+    if (!rate.ok) {
+      throw new HttpException(
+        {
+          error: "rate_limited",
+          detail: "Too many webhooks for this workspace in the last minute.",
+        },
+        429,
+      );
+    }
+
+    return channel === "whatsapp"
+      ? this.ingestWhatsappPayload(workspaceId, payload)
+      : this.ingestSocialPayload(workspaceId, channel, payload);
   }
 
   @Get(":workspaceId")
@@ -253,49 +407,62 @@ export class MetaWebhookController implements OnModuleDestroy {
     wireIn(channel, rawBody.toString("utf8"));
 
     // Body is already parsed by main.ts's bodyParser.json — req.body has it.
-    const payload = req.body as unknown;
+    return this.ingestWhatsappPayload(workspaceId, req.body as unknown);
+  }
 
-    // Defense-in-depth: HMAC against the per-team appSecret is the primary
-    // authentication, but every legitimate Meta webhook also carries the
-    // team's `phone_number_id` in metadata. A mismatch means either:
-    //   (a) the appSecret was somehow accepted for a payload signed by a
-    //       different team (would imply a Meta-side bug or our team-id
-    //       routing being attacker-controlled), or
-    //   (b) a misconfigured webhook subscription on Meta's side is
-    //       pointing at the wrong team's URL.
-    // Both warrant dropping the batch rather than ingesting messages
-    // attributed to the wrong tenant. We only check if `metaPhoneNumberId`
-    // is configured for the team — newly-onboarded teams that haven't
-    // wired the field yet still receive events (the appSecret check is
-    // the gate, and Meta won't sign anything to a non-onboarded team).
-    // Which of this workspace's WhatsApp numbers received it? A workspace may
-    // now hold several, so this RESOLVES the account rather than checking the
-    // payload against a single configured number.
-    const inboundAccount = await resolveInboundAccount(this.db, workspaceId, "whatsapp", payload);
-    if (!inboundAccount) {
-      this.logger.warn(
-        `[${workspaceId}] webhook payload phone_number_id matches no connected account — dropping`,
-      );
-      return { ok: true, ingested: 0, dropped: "unknown_account" };
-    }
-    // Account-level payload (no receiving number): ingest resolves the subject
-    // per-event from the hints the payload carries, rather than this batch
-    // being attributed wholesale to one connection.
-    const inboundAccountId =
-      "accountLevel" in inboundAccount ? undefined : inboundAccount.id;
+  /**
+   * Ingest a VERIFIED WhatsApp payload for a known workspace.
+   *
+   * Split out from the route so the per-workspace callback
+   * (`/webhooks/meta/:workspaceId`) and the app-level callback (`/webhooks/meta`,
+   * where the tenant is resolved from the payload) share ONE implementation.
+   * Everything load-bearing lives here — dedup, the Coexistence history diversion,
+   * per-account grouping, media download, and the transient-503 vs permanent-200
+   * split — so the two routes cannot drift into disagreeing about any of it
+   * (CLAUDE.md §17: don't invent a parallel pattern).
+   *
+   * Callers MUST have verified the HMAC first. This function trusts the payload.
+   */
+  private async ingestWhatsappPayload(
+    workspaceId: string,
+    payload: unknown,
+  ): Promise<{ ok: boolean; ingested?: number; dropped?: string }> {
+
+    // One cheap wire-shape walk for the two decisions we make BEFORE parsing:
+    // is this a (potentially huge) Coexistence history chunk, and does this
+    // workspace own any of the numbers it names?
+    //
+    // Note what is NOT here any more: a single account resolved for the whole
+    // body. Meta batches changes for SEVERAL of a workspace's numbers into one
+    // POST, so attribution happens per event, after the parse
+    // (`groupEventsByInboundAccount`). HMAC against the workspace's account
+    // secrets remains the only authentication; these ids are a routing signal.
+    const { hasHistory, accountIds } = scanWhatsappEnvelope(payload);
 
     // WhatsApp Coexistence history backfill. The `history` webhook can carry
     // thousands of past messages across chunked deliveries — far too much to
     // ingest inline within the fail-soft budget. Detect it, hand the RAW payload
     // to the coexistence-history BullMQ worker, and 200 immediately. The worker
-    // re-parses + ingests quietly (no unread bump / no automation fanout). Live
-    // message/echo/state-sync webhooks fall through to the fast inline path
-    // below. A history webhook is its own delivery (Meta doesn't mix history
-    // with live messages), so treating any history-bearing payload as a backfill
-    // chunk is safe.
-    if (containsHistory(payload)) {
+    // re-parses + ingests quietly (no unread bump / no automation fanout), and
+    // resolves each event's OWN account. Live message/echo/state-sync webhooks
+    // fall through to the fast inline path below. A history webhook is its own
+    // delivery (Meta doesn't mix history with live messages), so treating any
+    // history-bearing payload as a backfill chunk is safe.
+    if (hasHistory) {
+      // Keep the pre-enqueue gate: a payload naming only numbers we don't hold
+      // never enters Redis. If it names SOME we hold, enqueue — the worker drops
+      // the unknown events per-event rather than losing the known ones.
+      if (accountIds.length > 0) {
+        const known = await resolveInboundAccounts(workspaceId, "whatsapp", accountIds);
+        if (known.size === 0) {
+          this.logger.warn(
+            `[${workspaceId}] history payload names no connected account — dropping`,
+          );
+          return { ok: true, ingested: 0, dropped: "unknown_account" };
+        }
+      }
       try {
-        await enqueueHistoryChunk(workspaceId, payload, inboundAccountId);
+        await enqueueHistoryChunk(workspaceId, payload);
         return { ok: true, ingested: 0 };
       } catch (err) {
         // Redis down / enqueue failed → 503 so Meta redelivers the chunk (the
@@ -320,6 +487,27 @@ export class MetaWebhookController implements OnModuleDestroy {
     }
     if (events.length === 0) return { ok: true, ingested: 0 };
 
+    // Partition by the account each event ACTUALLY arrived on. One POST can
+    // legitimately carry traffic for several of this workspace's numbers, and
+    // stamping all of it with one account re-pointed the sibling's threads (so
+    // the next reply went out a number with no open 24h window). Groups are
+    // ingested sequentially — see the module docstring for why that matters.
+    const { groups, dropped } = await groupEventsByInboundAccount(
+      workspaceId,
+      "whatsapp",
+      events,
+    );
+    for (const d of dropped) {
+      this.logger.warn(
+        `[${workspaceId}] dropped ${d.count} whatsapp event(s): ${d.reason}` +
+          (d.externalAccountId ? ` (phone_number_id=${d.externalAccountId})` : ""),
+      );
+    }
+    if (groups.length === 0) {
+      // Nothing attributable — same wire shape the single-account check returned.
+      return { ok: true, ingested: 0, dropped: "unknown_account" };
+    }
+
     // Fully-async media flow. Kick off binary downloads in background and
     // commit the rows immediately as `mediaPending`. The bubble appears in
     // the agent's inbox in <100ms with a shimmer; `completePendingMedia`
@@ -337,13 +525,17 @@ export class MetaWebhookController implements OnModuleDestroy {
     // Outcomes live in `downloadOutcomes` (NOT on `evt.media`). The download
     // task writes outcomes as each event completes; `completePendingMedia`
     // reads the map after `downloadPromise` settles.
+    //
+    // One download task PER GROUP: a Meta media id is scoped to the account that
+    // received it, so each group's binaries must be fetched with that account's
+    // token. Outcomes share one map — keys are `externalId`, which is globally
+    // unique — so `completePendingMedia` still sees every event's result.
     const downloadOutcomes = new Map<string, DownloadOutcome>();
-    const downloadPromise = this.downloadInboundMedia(
-      workspaceId,
-      events,
-      downloadOutcomes,
-      inboundAccountId,
-    );
+    const downloadPromise = Promise.all(
+      groups.map((g) =>
+        this.downloadInboundMedia(workspaceId, g.events, downloadOutcomes, g.channelConnectionId),
+      ),
+    ).then(() => undefined);
     // The ingest-failure branches below return/throw WITHOUT ever consuming
     // `downloadPromise` (only the success path threads it into
     // `completePendingMedia`). A rejection on that orphaned promise would
@@ -354,40 +546,17 @@ export class MetaWebhookController implements OnModuleDestroy {
       this.logger.error(`[${workspaceId}] inbound media download failed`, err),
     );
 
-    try {
-      await ingestEvents(workspaceId, "whatsapp", events, inboundAccountId);
-    } catch (err) {
-      // Meta retries on any non-2xx. Map error classes to the response that
-      // actually matches the intent:
-      //   - Transient DB pressure (pool timeout / serialization) → 503 so
-      //     Meta retries the same batch after backoff. Re-ingest is safe
-      //     because every event is deduped on (workspaceId, provider, externalId).
-      //   - Anything else (parse drift, invariant violations) → 200 with
-      //     `dropped`. Meta retrying a permanently-bad payload forever
-      //     drains both our and their resources; logging + swallowing here
-      //     leaves the row dropped, recoverable by replaying the raw payload
-      //     manually if it matters.
-      if (isTransientDbError(err)) {
-        // Label the actual cause: driver-level faults (pool exhaustion, socket
-        // resets) are neither a Prisma error code nor an init error, and calling
-        // them "init" sent incident triage down the wrong path.
-        const code =
-          err instanceof Prisma.PrismaClientKnownRequestError
-            ? err.code
-            : err instanceof Prisma.PrismaClientInitializationError
-              ? "init"
-              : `driver:${String((err as { code?: unknown })?.code ?? "timeout")}`;
-        this.logger.warn(
-          `[${workspaceId}] transient ingest failure (${code}); asking Meta to retry`,
-        );
-        throw new ServiceUnavailableException("transient ingest failure");
+    // Sequential, in payload order. A transient DB fault throws 503 from inside
+    // `ingestGroup` so Meta redelivers the whole POST — safe because every event
+    // is deduped on (workspaceId, channel, externalId), so already-landed groups
+    // re-run as no-ops.
+    let ingested = 0;
+    for (const group of groups) {
+      if (await this.ingestGroup(workspaceId, "whatsapp", group)) {
+        ingested += group.events.length;
       }
-      this.logger.error(
-        `[${workspaceId}] permanent ingest failure; dropping batch of ${events.length}`,
-        err,
-      );
-      return { ok: true, ingested: 0, dropped: "ingest_failed" };
     }
+    if (ingested === 0) return { ok: true, ingested: 0, dropped: "ingest_failed" };
 
     // Background-only: every media-bearing event waits for downloadPromise
     // then patches + emits. No-op when the batch has no media (the helper
@@ -404,7 +573,67 @@ export class MetaWebhookController implements OnModuleDestroy {
     this.inFlightMedia.add(completion);
     void completion.finally(() => this.inFlightMedia.delete(completion));
 
-    return { ok: true, ingested: events.length };
+    return {
+      ok: true,
+      ingested,
+      // Some groups landed, others named accounts we don't hold. Distinct from
+      // the all-unknown case above so an operator can tell "wrong tenant" from
+      // "one stale number still subscribed at Meta".
+      ...(dropped.length > 0 ? { dropped: "partial_unknown_account" } : {}),
+    };
+  }
+
+  /**
+   * Ingest ONE account group.
+   *
+   * Returns false when the group was permanently dropped; throws
+   * ServiceUnavailable on a transient DB fault so Meta redelivers the whole POST.
+   * Redelivery is safe: every event is deduped on
+   * (workspaceId, channel, externalId), so groups that already landed re-run as
+   * no-ops.
+   *
+   * Both inbound paths funnel through here so the fail-soft contract — 503 for
+   * transient, 200-dropped for permanent — has exactly one definition instead of
+   * being copied per channel.
+   */
+  private async ingestGroup(
+    workspaceId: string,
+    channel: Channel,
+    group: InboundAccountGroup,
+  ): Promise<boolean> {
+    try {
+      await ingestEvents(workspaceId, channel, group.events, group.channelConnectionId);
+      return true;
+    } catch (err) {
+      // Meta retries on any non-2xx. Map error classes to the response that
+      // actually matches the intent:
+      //   - Transient DB pressure (pool timeout / serialization) → 503 so
+      //     Meta retries after backoff.
+      //   - Anything else (parse drift, invariant violations) → drop. Meta
+      //     retrying a permanently-bad payload forever drains both sides;
+      //     the raw payload can be replayed manually if it matters.
+      if (isTransientDbError(err)) {
+        // Label the actual cause: driver-level faults (pool exhaustion, socket
+        // resets) are neither a Prisma error code nor an init error, and calling
+        // them "init" sent incident triage down the wrong path.
+        const code =
+          err instanceof Prisma.PrismaClientKnownRequestError
+            ? err.code
+            : err instanceof Prisma.PrismaClientInitializationError
+              ? "init"
+              : `driver:${String((err as { code?: unknown })?.code ?? "timeout")}`;
+        this.logger.warn(
+          `[${workspaceId}] transient ${channel} ingest failure (${code}); asking Meta to retry`,
+        );
+        throw new ServiceUnavailableException("transient ingest failure");
+      }
+      this.logger.error(
+        `[${workspaceId}] permanent ${channel} ingest failure; dropping ${group.events.length} event(s)` +
+          (group.externalAccountId ? ` for account ${group.externalAccountId}` : ""),
+        err,
+      );
+      return false;
+    }
   }
 
   /**
@@ -422,7 +651,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     req: Request,
     channel: "messenger" | "instagram",
   ): Promise<{ ok: boolean; ingested?: number; dropped?: string }> {
-    const { provider, getWebhookConfig } = SOCIAL[channel];
+    const { getWebhookConfig } = SOCIAL[channel];
     const config = await getWebhookConfig(workspaceId);
     if (!config) throw webhookForbidden(this.logger, workspaceId, channel, req, "no_config");
 
@@ -445,21 +674,19 @@ export class MetaWebhookController implements OnModuleDestroy {
     // Dev wire log (DEBUG_META_WIRE): the authentic raw social webhook.
     wireIn(channel, rawBody.toString("utf8"));
 
-    const payload = req.body as unknown;
+    return this.ingestSocialPayload(workspaceId, channel, req.body as unknown);
+  }
 
-    // Which of this workspace's accounts received it? `entry[].id` is the Page
-    // id (Messenger) or the IG account id (Instagram). Resolving beats the old
-    // match-against-the-one-configured-account check, which dropped payloads for
-    // every account after the first.
-    const inboundAccount = await resolveInboundAccount(this.db, workspaceId, channel, payload);
-    // The account-level sentinel is WhatsApp-only; for social channels a
-    // payload without entry.id is degenerate, so treat it like no match.
-    if (!inboundAccount || "accountLevel" in inboundAccount) {
-      this.logger.warn(
-        `[${workspaceId}] ${channel} webhook entry.id matches no connected account — dropping`,
-      );
-      return { ok: true, ingested: 0, dropped: "unknown_account" };
-    }
+  /**
+   * Ingest a VERIFIED Messenger/Instagram payload for a known workspace. Shared by
+   * the per-workspace and app-level callbacks — see `ingestWhatsappPayload`.
+   */
+  private async ingestSocialPayload(
+    workspaceId: string,
+    channel: "messenger" | "instagram",
+    payload: unknown,
+  ): Promise<{ ok: boolean; ingested?: number; dropped?: string }> {
+    const { provider } = SOCIAL[channel];
 
     let events: NormalizedEvent[];
     try {
@@ -469,6 +696,28 @@ export class MetaWebhookController implements OnModuleDestroy {
       return { ok: true, ingested: 0, dropped: "parse_failed" };
     }
     if (events.length === 0) return { ok: true, ingested: 0 };
+
+    // Partition by the receiving Page / IG account. The parser stamps
+    // `entry[].id` per entry, and Meta may batch entries for several of this
+    // workspace's accounts into one POST — the old single-account resolve bound
+    // the second Page's threads to the first.
+    //
+    // A payload carrying no `entry[].id` no longer falls back to the DEFAULT
+    // account: that is a SEND preference, and using it to attribute inbound bound
+    // a thread to a Page the customer never messaged. Account-bound events fall
+    // back only to a SOLE active account; account-agnostic ones (read/delivery
+    // watermarks, reactions, edits, unsends) still apply, because they resolve
+    // their target by message id and never needed an account.
+    const { groups, dropped } = await groupEventsByInboundAccount(workspaceId, channel, events);
+    for (const d of dropped) {
+      this.logger.warn(
+        `[${workspaceId}] dropped ${d.count} ${channel} event(s): ${d.reason}` +
+          (d.externalAccountId ? ` (entry.id=${d.externalAccountId})` : ""),
+      );
+    }
+    if (groups.length === 0) {
+      return { ok: true, ingested: 0, dropped: "unknown_account" };
+    }
 
     // Kick off social media downloads (direct CDN URL → R2) concurrently with
     // ingest, which commits the rows as media-pending. Non-consuming catch so
@@ -485,37 +734,33 @@ export class MetaWebhookController implements OnModuleDestroy {
       this.logger.error(`[${workspaceId}] ${channel} media download failed`, err),
     );
 
-    try {
-      await ingestEvents(workspaceId, channel, events, inboundAccount.id);
-    } catch (err) {
-      // Same transient-vs-permanent split as WhatsApp: 503 → Meta retries the
-      // (deduped) batch on transient DB pressure; 200-dropped otherwise so a
-      // permanently-bad payload doesn't retry-storm.
-      if (isTransientDbError(err)) {
-        throw new ServiceUnavailableException("transient ingest failure");
+    // Sequential per group, same fail-soft contract as WhatsApp.
+    let ingested = 0;
+    for (const group of groups) {
+      if (await this.ingestGroup(workspaceId, channel, group)) {
+        ingested += group.events.length;
       }
-      this.logger.error(
-        `[${workspaceId}] permanent ${channel} ingest failure; dropping batch of ${events.length}`,
-        err,
-      );
-      return { ok: true, ingested: 0, dropped: "ingest_failed" };
     }
+    if (ingested === 0) return { ok: true, ingested: 0, dropped: "ingest_failed" };
 
     // Detached: give brand-new social contacts a real display name (the webhook
     // carries none, so ingest named them by their opaque id). Never blocks the
     // 200; fail-soft. Non-consuming catch so the fire-and-forget can't float.
-    const senderIds = events.flatMap((e) =>
-      e.kind === "message" && e.externalContactId ? [e.externalContactId] : [],
-    );
-    if (senderIds.length > 0) {
-      // Same account the batch was attributed to (and that ingestEvents was
-      // given): a PSID/IGSID only resolves against the Page/IG account that
-      // issued it.
+    //
+    // Per GROUP, because a PSID/IGSID only resolves against the Page/IG account
+    // that issued it — enriching a second Page's senders with the first Page's
+    // token returns nothing (or the wrong person).
+    for (const group of groups) {
+      if (!group.channelConnectionId) continue;
+      const senderIds = group.events.flatMap((e) =>
+        e.kind === "message" && e.externalContactId ? [e.externalContactId] : [],
+      );
+      if (senderIds.length === 0) continue;
       void enrichSocialContactNames(
         workspaceId,
         channel,
         senderIds,
-        inboundAccount.id,
+        group.channelConnectionId,
       ).catch((err) =>
         this.logger.error(`[${workspaceId}] ${channel} name enrichment failed`, err),
       );
@@ -537,7 +782,11 @@ export class MetaWebhookController implements OnModuleDestroy {
     this.inFlightMedia.add(completion);
     void completion.finally(() => this.inFlightMedia.delete(completion));
 
-    return { ok: true, ingested: events.length };
+    return {
+      ok: true,
+      ingested,
+      ...(dropped.length > 0 ? { dropped: "partial_unknown_account" } : {}),
+    };
   }
 
   /**
@@ -722,15 +971,25 @@ export class MetaWebhookController implements OnModuleDestroy {
   private hadMedia(
     evt: Extract<NormalizedEvent, { kind: "message" | "echo" }>,
   ): boolean {
-    // `rawPayload` is Meta's verbatim webhook body. `messages[0].type` is
-    // one of "text" | "image" | "video" | "audio" | "document" | "sticker"
-    // when this event came from Meta. Any non-text type means the parser
-    // originally produced an evt.media that may have since been deleted.
-    const m = (evt.rawPayload as {
+    // `rawPayload` is Meta's verbatim webhook body. `messages[].type` is one of
+    // "text" | "image" | "video" | "audio" | "document" | "sticker" when this
+    // event came from Meta. Any non-text type means the parser originally
+    // produced an evt.media that may have since been deleted.
+    //
+    // Search EVERY entry/change, not `entry[0].changes[0]`: Meta batches changes
+    // for several accounts into one POST, so this event's own message can sit in
+    // any entry — reading only the first silently reported "no media" for
+    // everything after it, collapsing those bubbles to a bare label.
+    const payload = evt.rawPayload as {
       entry?: { changes?: { value?: { messages?: { id?: string; type?: string }[] } }[] }[];
-    }).entry?.[0]?.changes?.[0]?.value?.messages;
-    const meta = m?.find((x) => x.id === evt.externalId);
-    return !!meta && meta.type !== "text";
+    };
+    for (const entry of payload.entry ?? []) {
+      for (const change of entry?.changes ?? []) {
+        const found = change?.value?.messages?.find((x) => x.id === evt.externalId);
+        if (found) return found.type !== "text";
+      }
+    }
+    return false;
   }
 
   /**
@@ -1364,98 +1623,6 @@ async function readBodyCapped(
     offset += c.length;
   }
   return out;
-}
-
-/**
- * Resolve the ChannelConnection an inbound payload belongs to.
- *
- * Replaces the old "validate against the workspace's single configured account
- * and drop on mismatch" check. That check was correct only while a workspace
- * could hold exactly one account per channel — with several, a payload for the
- * SECOND number matched nothing and was silently dropped as a mismatch.
- *
- * Returns the connection, or null when the payload NAMES an account no
- * connection in this workspace claims (caller drops fail-soft, exactly as the
- * old mismatch check did).
- *
- * When a WHATSAPP payload names no receiving number, this returns the
- * `accountLevel` sentinel instead of a connection. Message webhooks always
- * carry `metadata.phone_number_id`; the ones that don't are account-level
- * notifications (`phone_number_quality_update`, `business_capability_update`,
- * `account_update`, `account_alerts`, template lifecycle) whose subject is a
- * WABA or a number named inside the payload body — NOT the workspace default.
- * The old default-account fallback wrote number B's quality/tier/restrictions
- * onto number A in every multi-number workspace; the sentinel makes ingest
- * resolve the subject per-event (`resolveWhatsappHealthAccount`, and the
- * WABA-scoped template match) from `entry[].id` / `display_phone_number`.
- *
- * Messenger/Instagram keep the default fallback: every legitimate social
- * webhook carries `entry[].id`, so their no-id case is a degenerate payload,
- * not a distinct webhook class.
- */
-async function resolveInboundAccount(
-  db: DbService,
-  workspaceId: string,
-  channel: "whatsapp" | "messenger" | "instagram",
-  payload: unknown,
-): Promise<{ id: string; externalAccountId: string } | { accountLevel: true } | null> {
-  const externalAccountId =
-    channel === "whatsapp"
-      ? whatsappPayloadAccountId(payload)
-      : socialPayloadAccountId(payload);
-  if (!externalAccountId) {
-    if (channel === "whatsapp") return { accountLevel: true };
-    return db.channelConnection.findFirst({
-      where: { workspaceId, channel, isDefault: true },
-      select: { id: true, externalAccountId: true },
-    });
-  }
-  return db.channelConnection.findFirst({
-    where: { workspaceId, channel, externalAccountId },
-    select: { id: true, externalAccountId: true },
-  });
-}
-
-/** `entry[].changes[].value.metadata.phone_number_id` — the receiving number. */
-function whatsappPayloadAccountId(payload: unknown): string | null {
-  const p = payload as {
-    entry?: Array<{ changes?: Array<{ value?: { metadata?: { phone_number_id?: string } } }> }>;
-  };
-  for (const entry of p?.entry ?? []) {
-    for (const change of entry?.changes ?? []) {
-      const id = change?.value?.metadata?.phone_number_id;
-      if (id) return id;
-    }
-  }
-  return null;
-}
-
-/** `entry[].id` — the Page id (Messenger) or IG account id (Instagram). */
-function socialPayloadAccountId(payload: unknown): string | null {
-  const p = payload as { entry?: Array<{ id?: string }> };
-  for (const entry of p?.entry ?? []) if (entry?.id) return entry.id;
-  return null;
-}
-
-
-/**
- * True if any change in the payload is a Coexistence `history` backfill. Cheap
- * top-level scan so the controller can divert the (potentially huge) chunk to
- * the background worker instead of ingesting it inline. Meta delivers history in
- * its own webhook (never mixed with live messages), so one match ⇒ backfill.
- */
-function containsHistory(payload: unknown): boolean {
-  const p = payload as { entry?: Array<{ changes?: Array<{ field?: string }> }> };
-  const entries = p?.entry;
-  if (!Array.isArray(entries)) return false;
-  for (const entry of entries) {
-    const changes = entry?.changes;
-    if (!Array.isArray(changes)) continue;
-    for (const change of changes) {
-      if (change?.field === "history") return true;
-    }
-  }
-  return false;
 }
 
 function verifySignature(

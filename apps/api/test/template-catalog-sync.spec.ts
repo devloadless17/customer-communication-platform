@@ -23,6 +23,7 @@ import { createTestPrismaClient } from "./_prisma";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { setSharedDb } from "@/lib/db";
+import { seedWabaAccount } from "./_waba";
 import { encryptSecret } from "@/lib/crypto/envelope";
 import { invalidateProviderConfig } from "@/lib/providers/config";
 import type { ProviderTemplate } from "@ccp/shared/providers/types";
@@ -78,10 +79,10 @@ async function connectAccount(phoneNumberId: string, wabaId: string, isDefault: 
       workspaceId,
       channel: "whatsapp",
       externalAccountId: phoneNumberId,
-      wabaId,
+      wabaAccountId: await seedWabaAccount(prisma, workspaceId, wabaId),
       isDefault,
       isActive: true,
-      config: { phoneNumberId, wabaId },
+      config: { phoneNumberId },
       secrets: { accessToken: encryptSecret("test-token") },
     },
   });
@@ -91,10 +92,10 @@ async function connectAccount(phoneNumberId: string, wabaId: string, isDefault: 
 const rows = () =>
   prisma.messageTemplate.findMany({
     where: { workspaceId },
-    orderBy: [{ wabaId: "asc" }, { name: "asc" }],
+    orderBy: [{ wabaAccount: { externalWabaId: "asc" } }, { name: "asc" }],
     select: {
       name: true,
-      wabaId: true,
+      wabaAccount: { select: { externalWabaId: true } },
       status: true,
       category: true,
       correctCategory: true,
@@ -129,7 +130,7 @@ describe("multi-WABA scoping", () => {
     expect(out.failed).toEqual([]);
 
     const all = await rows();
-    expect(all.map((r) => [r.wabaId, r.name])).toEqual([
+    expect(all.map((r) => [r.wabaAccount.externalWabaId, r.name])).toEqual([
       [WABA_A, `a_one_${S}`],
       [WABA_B, `b_one_${S}`],
     ]);

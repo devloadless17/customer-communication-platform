@@ -41,6 +41,21 @@ drops in without touching ingest, send orchestration, or business logic.
    `/webhooks/telegram/:workspaceId` that verifies the channel's signature, calls
    `telegramProvider.parseWebhook(payload)`, and hands off to the SAME
    `ingestEvents(workspaceId, "telegram", events)`. Nothing in ingest changes.
+6. **Stamp the receiving account per event.** `parseWebhook` MUST set
+   `NormalizedEvent.externalAccountId` (the vendor's own account id, matching
+   `ChannelConnection.externalAccountId`) on every event it emits, and the route MUST
+   partition with `groupEventsByInboundAccount` and call `ingestEvents` once per
+   group — never once per body.
+
+   This is not boilerplate. Meta's webhook contract is that "multiple changes from
+   different objects that are of the same type may be batched together", so one POST
+   can carry traffic for several of a workspace's accounts. Resolving a single
+   account for the whole body re-stamped the second account's conversations onto the
+   first, and the agent's next reply then went out a number with no open 24-hour
+   customer-service window. Assume any provider that multiplexes accounts onto one
+   callback behaves the same way; leave the field undefined only for genuinely
+   account-agnostic events (a status/watermark resolves its target by message id,
+   and account-level notifications name their own subject).
 
 That's it. The send paths already select the provider from the contact's
 channel via `resolveContactChannel` + `getProviderBinding`, gate the free-form

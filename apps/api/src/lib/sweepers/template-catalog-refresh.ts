@@ -70,10 +70,11 @@ export function stopTemplateCatalogRefreshSweeper(): void {
 }
 
 export async function sweepOnce(): Promise<void> {
-  // Candidates are workspaces with a live WhatsApp connection that carries a
-  // WABA — without one there is no catalog to read.
-  const connections = await db.channelConnection.findMany({
-    where: { channel: "whatsapp", isActive: true, NOT: { wabaId: null } },
+  // Candidates are workspaces holding at least one WABA — the WABA is the catalog
+  // boundary. Driven off WABA rows rather than connections so a WABA with no phone
+  // number yet (Embedded Signup's `FINISH_ONLY_WABA`) still gets its catalog
+  // refreshed; `syncTemplateCatalog` decides per WABA whether it can authenticate.
+  const connections = await db.whatsappBusinessAccount.findMany({
     select: { workspaceId: true },
     distinct: ["workspaceId"],
   });

@@ -21,8 +21,10 @@ import {
   MA_CONN,
   MA_TEAM_ID,
   clearMultiAccountData,
+  fbInboundBatch,
   seedBoundConversation,
   seedMultiAccountTeam,
+  waInboundBatch,
   waInboundTo,
 } from "../_helpers/multi-account";
 
@@ -226,4 +228,173 @@ test("the account directory reports BOTH accounts per channel", async () => {
 
   // Labels are distinct, so an agent can actually tell the two apart.
   expect(new Set(accounts.map((a) => a.name)).size).toBe(accounts.length);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BATCHED POSTS. Meta's own contract: "multiple changes from different objects
+// that are of the same type may be batched together", up to 1000 updates, and
+// batching is guaranteed in neither direction. So ONE POST can carry traffic for
+// several of a workspace's accounts.
+//
+// The route used to resolve ONE account for the whole body — the first
+// `metadata.phone_number_id` / `entry[].id` it found — and stamp every event with
+// it. In a two-number workspace that re-pointed the second number's conversations
+// at the FIRST number, so the agent's next reply went out an account with no open
+// 24-hour customer-service window, and every `Message` row carried the wrong
+// account for analytics and exports.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("ONE POST for TWO numbers binds each thread to its own number", async () => {
+  const fromA = "9611000101";
+  const fromB = "9611000102";
+  const res = await postMetaWebhook(
+    MA_TEAM_ID,
+    waInboundBatch([
+      {
+        phoneNumberId: MA.whatsapp.a.account,
+        wabaId: MA.whatsapp.a.waba,
+        from: fromA,
+        mid: "wamid.ma.batch.a",
+        text: "hello sales",
+      },
+      {
+        phoneNumberId: MA.whatsapp.b.account,
+        wabaId: MA.whatsapp.b.waba,
+        from: fromB,
+        mid: "wamid.ma.batch.b",
+        text: "hello support",
+      },
+    ]),
+  );
+  expect(res.status, res.text).toBe(200);
+
+  for (const [from, mid, expected] of [
+    [fromA, "wamid.ma.batch.a", MA_CONN.whatsappA],
+    [fromB, "wamid.ma.batch.b", MA_CONN.whatsappB],
+  ] as const) {
+    const conv = await db().conversation.findFirstOrThrow({
+      where: { workspaceId: MA_TEAM_ID, contact: { phoneNumber: from } },
+      select: { id: true, channelConnectionId: true },
+    });
+    expect(conv.channelConnectionId, `conversation for ${from}`).toBe(expected);
+
+    // The immutable historical stamp must agree — this is what per-account
+    // analytics, CSV exports and outbound-webhook `channel` blocks all read.
+    const msg = await db().message.findFirstOrThrow({
+      where: { workspaceId: MA_TEAM_ID, externalId: mid },
+      select: { channelConnectionId: true },
+    });
+    expect(msg.channelConnectionId, `message ${mid}`).toBe(expected);
+  }
+});
+
+test("after a batched POST, each thread replies from its OWN number", async () => {
+  // The consequence that actually reaches a customer: a reply must leave the
+  // number they messaged, where their 24h window is open.
+  await postMetaWebhook(
+    MA_TEAM_ID,
+    waInboundBatch([
+      {
+        phoneNumberId: MA.whatsapp.a.account,
+        wabaId: MA.whatsapp.a.waba,
+        from: "9611000103",
+        mid: "wamid.ma.batch.r1",
+        text: "sales q",
+      },
+      {
+        phoneNumberId: MA.whatsapp.b.account,
+        wabaId: MA.whatsapp.b.waba,
+        from: "9611000104",
+        mid: "wamid.ma.batch.r2",
+        text: "support q",
+      },
+    ]),
+  );
+
+  const convA = await db().conversation.findFirstOrThrow({
+    where: { workspaceId: MA_TEAM_ID, contact: { phoneNumber: "9611000103" } },
+    select: { id: true },
+  });
+  const convB = await db().conversation.findFirstOrThrow({
+    where: { workspaceId: MA_TEAM_ID, contact: { phoneNumber: "9611000104" } },
+    select: { id: true },
+  });
+
+  await resetMock();
+  expect(
+    (await v1Send(apiToken, convA.id, { body: "reply from sales" }, "ma-batch-r1")).status,
+  ).toBe(201);
+  expect(
+    (await v1Send(apiToken, convB.id, { body: "reply from support" }, "ma-batch-r2")).status,
+  ).toBe(201);
+
+  // Which Meta phone-number id each send was addressed to.
+  const used = await sendAccountIds();
+  expect(used).toContain(MA.whatsapp.a.account);
+  expect(used).toContain(MA.whatsapp.b.account);
+});
+
+test("a batch naming an UNCONNECTED number drops only that entry", async () => {
+  const known = "9611000105";
+  const res = await postMetaWebhook(
+    MA_TEAM_ID,
+    waInboundBatch([
+      {
+        phoneNumberId: MA.whatsapp.a.account,
+        wabaId: MA.whatsapp.a.waba,
+        from: known,
+        mid: "wamid.ma.batch.known",
+        text: "i exist",
+      },
+      {
+        phoneNumberId: "e2e_ma_wa_not_ours",
+        wabaId: "e2e_ma_waba_not_ours",
+        from: "9611000106",
+        mid: "wamid.ma.batch.foreign",
+        text: "i do not",
+      },
+    ]),
+  );
+  // Fail-soft: the POST still 200s (a non-2xx would make Meta retry-storm the
+  // whole batch, including the half that landed correctly).
+  expect(res.status, res.text).toBe(200);
+
+  expect(
+    await db().message.findFirst({
+      where: { workspaceId: MA_TEAM_ID, externalId: "wamid.ma.batch.known" },
+      select: { channelConnectionId: true },
+    }),
+  ).toMatchObject({ channelConnectionId: MA_CONN.whatsappA });
+  expect(
+    await db().message.findFirst({
+      where: { workspaceId: MA_TEAM_ID, externalId: "wamid.ma.batch.foreign" },
+    }),
+  ).toBeNull();
+});
+
+test("Messenger: ONE POST for TWO Pages binds each thread to its own Page", async () => {
+  const res = await postMetaWebhook(
+    MA_TEAM_ID,
+    fbInboundBatch([
+      { pageId: MA.messenger.a.account, psid: "psid_batch_a", mid: "mid.batch.a", text: "hi A" },
+      { pageId: MA.messenger.b.account, psid: "psid_batch_b", mid: "mid.batch.b", text: "hi B" },
+    ]),
+  );
+  expect(res.status, res.text).toBe(200);
+
+  for (const [mid, expected] of [
+    ["mid.batch.a", MA_CONN.messengerA],
+    ["mid.batch.b", MA_CONN.messengerB],
+  ] as const) {
+    const msg = await db().message.findFirstOrThrow({
+      where: { workspaceId: MA_TEAM_ID, externalId: mid },
+      select: { channelConnectionId: true, conversationId: true },
+    });
+    expect(msg.channelConnectionId, mid).toBe(expected);
+    const conv = await db().conversation.findUniqueOrThrow({
+      where: { id: msg.conversationId },
+      select: { channelConnectionId: true },
+    });
+    expect(conv.channelConnectionId, `conversation for ${mid}`).toBe(expected);
+  }
 });

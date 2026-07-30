@@ -197,8 +197,22 @@ export default async function ChannelsCatalogPage() {
         </a>
       )}
 
-      <Section title="Meta">
+      {/* The Meta app is the LAYER UNDER the three Meta channels, not a fourth
+          channel beside them. Listing all four as peers in one grid was the whole
+          reason "which app do my accounts use?" read as unanswerable: nothing on
+          this page said the relationship existed. So the app gets its own labelled
+          band, and the channels that draw on it are grouped beneath it. */}
+      <Section
+        title="Meta app"
+        hint="Credentials shared by WhatsApp, Messenger and Instagram. One app can serve every account you connect — and an account can run on a different app if you connect it with that app's credentials."
+      >
         <CatalogCard card={metaCard} canManage={canManage} />
+      </Section>
+
+      <Section
+        title="Meta channels"
+        hint="Each channel holds as many accounts as you need — numbers, Pages or handles. Open one to see its accounts and add another."
+      >
         {live.map((c) => (
           <CatalogCard key={c.key} card={c} canManage={canManage} />
         ))}
@@ -219,12 +233,24 @@ export default async function ChannelsCatalogPage() {
   );
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function Section({
+  title,
+  hint,
+  children,
+}: {
+  title: string;
+  /** One line saying what this group IS — the relationship, not a feature pitch. */
+  hint?: string;
+  children: ReactNode;
+}) {
   return (
     <div className="flex flex-col gap-3">
-      <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        {title}
-      </h2>
+      <div className="flex flex-col gap-1">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          {title}
+        </h2>
+        {hint && <p className="max-w-3xl text-2xs leading-relaxed text-muted-foreground">{hint}</p>}
+      </div>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {children}
       </div>
@@ -248,10 +274,18 @@ function CatalogCard({ card, canManage }: { card: CardModel; canManage: boolean 
       <div className="flex flex-col gap-1">
         <h3 className="text-sm font-semibold">{card.name}</h3>
         <p className="text-xs leading-relaxed text-muted-foreground">{card.description}</p>
-        {card.connected && card.accountCount != null && card.accountCount > 0 && card.accountNoun && (
-          <p className="text-2xs font-medium text-muted-foreground">
-            {card.accountCount} {card.accountNoun}
-            {card.accountCount === 1 ? "" : "s"} connected
+        {/* The count is the ANSWER to "how many accounts do I have on this
+            channel", so it reads as a figure, not as a footnote. Driven by the
+            account directory rather than by `connected` (which only ever described
+            the DEFAULT account), so it stays truthful even when the default is
+            mid-reconnect. */}
+        {card.accountCount != null && card.accountCount > 0 && card.accountNoun && (
+          <p className="text-xs">
+            <span className="font-semibold tabular-nums">{card.accountCount}</span>{" "}
+            <span className="text-muted-foreground">
+              {card.accountNoun}
+              {card.accountCount === 1 ? "" : "s"} connected
+            </span>
           </p>
         )}
       </div>

@@ -14,6 +14,11 @@ import type IORedis from "ioredis";
 import { recordJobFailure } from "@/common/job-failure-metrics";
 import { getMetaProvider } from "@/lib/providers";
 import { ingestHistoricalMessage, isTransientDbError } from "@/lib/providers/ingest";
+import {
+  distinctExternalAccountIds,
+  resolveInboundAccounts,
+  soleActiveAccountId,
+} from "@/lib/providers/inbound-accounts";
 import { createWorkerConnection } from "@/lib/workflows/queue";
 import type { NormalizedEvent } from "@ccp/shared/providers/types";
 
@@ -67,6 +72,36 @@ export function startHistoryWorker(): Worker<HistoryJobData> {
         return;
       }
 
+      // Per-event account attribution, same rule as the live path: a history
+      // chunk can carry messages for several of the workspace's numbers, and one
+      // job-wide account would bind them all to whichever number was listed
+      // first. Each event carries its own `externalAccountId` (stamped by the
+      // parser from `metadata.phone_number_id`).
+      const accounts = await resolveInboundAccounts(
+        workspaceId,
+        "whatsapp",
+        distinctExternalAccountIds(events),
+      );
+      let soleLookup: Promise<string | null> | undefined;
+      const sole = (): Promise<string | null> => {
+        soleLookup ??= soleActiveAccountId(workspaceId, "whatsapp");
+        return soleLookup;
+      };
+      // DELIBERATELY more forgiving than the live path, which DROPS an
+      // unattributable event. This is history the customer can never re-fetch, an
+      // unattributed old thread is harmless (the next live inbound re-stamps it),
+      // and losing the message would be permanent. So: the event's own account,
+      // else the job's legacy account (pre-deploy jobs only), else a sole active
+      // account, else land it unattributed.
+      const accountFor = async (evt: NormalizedEvent): Promise<string | null> => {
+        if (evt.externalAccountId) {
+          const own = accounts.get(evt.externalAccountId);
+          if (own) return own;
+        }
+        if (channelConnectionId) return channelConnectionId;
+        return sole();
+      };
+
       let landed = 0;
       let poisoned = 0;
       for (const evt of events) {
@@ -94,7 +129,7 @@ export function startHistoryWorker(): Worker<HistoryJobData> {
             timestamp: evt.timestamp,
             direction: "in",
             rawPayload: evt.rawPayload,
-            channelConnectionId,
+            channelConnectionId: await accountFor(evt),
           });
           landed++;
         } else if (evt.kind === "echo") {
@@ -109,7 +144,7 @@ export function startHistoryWorker(): Worker<HistoryJobData> {
             timestamp: evt.timestamp,
             direction: "out",
             rawPayload: evt.rawPayload,
-            channelConnectionId,
+            channelConnectionId: await accountFor(evt),
           });
           landed++;
         }

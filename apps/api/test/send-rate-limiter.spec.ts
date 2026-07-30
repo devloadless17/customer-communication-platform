@@ -173,6 +173,30 @@ describe("rollout safety", () => {
     expect(resolveSendRate(undefined)).toBe(40);
     expect(resolveSendRate("SOMETHING_NEW")).toBe(40);
   });
+
+  it("caps a COEXISTENCE number at Meta's fixed 20/s, ignoring its throughput level", () => {
+    // Meta's throughput doc: a WhatsApp Business APP number used with Cloud API
+    // simultaneously is capped at 20 messages/second — a FIXED figure, outside the
+    // 80 (default) / 1,000 (upgraded) ladder. Meta still reports a `throughput.level`
+    // for those numbers, so pacing off the level alone ran them at 75/s (STANDARD)
+    // or 40/s (unknown): 2-4x over a hard ceiling. That earns sustained 130429s
+    // mid-campaign and damages the quality rating of exactly the fragile numbers
+    // Coexistence serves — a small business's own handset.
+    //
+    // The cap REPLACES the ladder rather than blending with it, so even a HIGH
+    // number is held at the Coexistence rate.
+    expect(resolveSendRate("HIGH", true)).toBe(18);
+    expect(resolveSendRate("STANDARD", true)).toBe(18);
+    expect(resolveSendRate(null, true)).toBe(18);
+    // Under 20, with the same protective margin HIGH/STANDARD keep under 1000/80.
+    expect(resolveSendRate("STANDARD", true)).toBeLessThan(20);
+
+    // NOT coexistence, and NOT-YET-POLLED, both keep the ordinary ladder — a null
+    // must never be read as "true" or every unpolled number would crawl.
+    expect(resolveSendRate("STANDARD", false)).toBe(75);
+    expect(resolveSendRate("STANDARD", null)).toBe(75);
+    expect(resolveSendRate("STANDARD", undefined)).toBe(75);
+  });
 });
 
 // ---------------------------------------------------------------------------

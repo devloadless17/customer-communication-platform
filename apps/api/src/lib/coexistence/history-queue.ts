@@ -18,7 +18,12 @@ export interface HistoryJobData {
   workspaceId: string;
   /** The raw Meta `history` webhook body — re-parsed by the worker. */
   payload: unknown;
-  /** Account the chunk arrived on; stamped on threads this backfill creates. */
+  /**
+   * LEGACY. Only jobs enqueued before per-event history attribution carry this.
+   * The worker now resolves each event's OWN account from its stamped
+   * `externalAccountId` and uses this only as a fallback. Remove once the queue
+   * has drained past that deploy.
+   */
   channelConnectionId?: string | null;
 }
 

@@ -27,6 +27,11 @@ interface MetaChannelConfig {
   phoneNumberId?: string;
   displayPhoneNumber?: string;
   wabaId?: string;
+  // NO `wabaId` HERE. It used to live in this JSON blob *and* in a column, with
+  // the send-config loader reading the JSON while template scoping read the
+  // column — two copies of one fact that could drift. The
+  // `WhatsappBusinessAccount` FK is now the single authority and this loader
+  // joins it.
   /** See MetaSendConfig.messagingAccountId — opt-in, unset for everyone. */
   messagingAccountId?: string;
   appId?: string;
@@ -74,16 +79,30 @@ export interface MetaSendConfig {
   accessToken: string;
   graphVersion: string;
   /**
-   * WhatsApp Business Account id. Required by the template catalog endpoint
-   * (`/{wabaId}/message_templates`) but NOT required for sending text/media/
-   * templates — those go through the phone-number-id. Optional here so the
-   * send routes can ignore it; the templates sync route enforces presence.
+   * META's WhatsApp Business Account id, joined from
+   * `ChannelConnection.wabaAccount.externalWabaId`. Required by the template
+   * catalog endpoint (`/{wabaId}/message_templates`) but NOT required for
+   * sending text/media/templates — those go through the phone-number-id.
+   *
+   * Undefined means this number has NO WABA linked. That is a hard refusal for
+   * anything template-shaped, never "no opinion": the old `""` sentinel made the
+   * cross-account guard a no-op, so any template was sendable from any account.
    */
   wabaId?: string;
   /**
+   * OUR `WhatsappBusinessAccount.id` for the same WABA. Carried alongside
+   * `wabaId` so template scoping can key on the FK without a second query, while
+   * every outward-facing DTO keeps emitting Meta's `wabaId` (never our cuid).
+   */
+  wabaAccountId?: string;
+  /**
    * Meta's Messaging Account id, for the account-model split (WABA → WhatsApp
-   * Business Account + Messaging Account). Sent as `messaging_account_id` on
-   * Messages API calls to say WHICH account to bill.
+   * Business Account (WAAC, the phone number) + Messaging Account (templates,
+   * billing, webhook subscriptions — and it KEEPS the WABA's id)). Sent as
+   * `messaging_account_id` on Messages API calls to say WHICH account to bill —
+   * see `messagingAccountField`, which documents why that spelling and NOT the
+   * `paid_messaging_account_id` the guide pages still show (changelog 2026-06-16
+   * made the latter a deprecated alias).
    *
    * OPT-IN, and unset for everyone by default — that is deliberate. It is
    * optional at Phase 1 and only *required* when one app holds SEVERAL
@@ -104,6 +123,21 @@ export interface MetaSendConfig {
    * creating a template with a media header. Optional everywhere else.
    */
   appId?: string;
+  /**
+   * THIS ACCOUNT'S OWN Meta app secret, used only to compute `appsecret_proof`
+   * on Graph calls (never sent to Meta itself).
+   *
+   * It must be the secret of the app that ISSUED `accessToken`, which is why it
+   * is read from the connection's own `secrets` rather than the workspace's
+   * shared Meta app: an account onboarded under a different app signs with that
+   * app's secret, and using the shared one would make every proof invalid for
+   * exactly those accounts.
+   *
+   * Optional and best-effort. The proof is ADDITIVE — Meta accepts a call
+   * without it unless the app has "Require App Secret" enabled — so a missing or
+   * undecryptable secret must degrade to "no proof" and never block a send.
+   */
+  appSecret?: string;
   /**
    * The business phone number in display form (e.g. "+1 555-0100").
    *
@@ -211,7 +245,11 @@ const DEFAULT_GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
 interface SendConfigCipher {
   phoneNumberId: string;
   accessTokenCipher: string;
+  /** This ACCOUNT'S OWN app secret, for `appsecret_proof`. Ciphertext in cache
+   *  (never plaintext) exactly like the token above — see the cache header. */
+  appSecretCipher?: string;
   wabaId?: string;
+  wabaAccountId?: string;
   messagingAccountId?: string;
   appId?: string;
   displayPhoneNumber?: string;
@@ -277,14 +315,28 @@ async function loadSendCipher(
     where: accountId
       ? { id: accountId, workspaceId, channel: "whatsapp" }
       : { workspaceId, channel: "whatsapp", isDefault: true },
-    select: { config: true, secrets: true, isActive: true },
+    select: {
+      config: true,
+      secrets: true,
+      isActive: true,
+      // The WABA is the authority on the template catalog AND — under Embedded
+      // Signup — on the access token, which is issued once per (customer, WABA)
+      // rather than once per phone number. Joining it here means the id we fetch
+      // templates with and the FK we key template rows by come from the same
+      // row, so they cannot disagree.
+      wabaAccount: { select: { id: true, externalWabaId: true, secrets: true } },
+    },
   });
   if (!conn || !conn.isActive) return { kind: "err", missing: ["not-connected"] };
   const config = (conn.config ?? {}) as MetaChannelConfig;
   const secrets = (conn.secrets ?? {}) as MetaChannelSecrets;
+  const wabaSecrets = (conn.wabaAccount?.secrets ?? {}) as MetaChannelSecrets;
+  // WABA token wins when present: an ES tenant stores ONE customer-scoped token
+  // on the WABA instead of a copy per number, so rotation touches one row.
+  const accessTokenCipher = wabaSecrets.accessToken ?? secrets.accessToken;
   const missing: string[] = [];
   if (!config.phoneNumberId) missing.push("phoneNumberId");
-  if (!secrets.accessToken) missing.push("accessToken");
+  if (!accessTokenCipher) missing.push("accessToken");
   if (missing.length > 0) return { kind: "err", missing };
   return {
     kind: "ok",
@@ -293,12 +345,16 @@ async function loadSendCipher(
       // Store the CIPHERTEXT in cache, not the decrypted token. Decrypt
       // per-call so plaintext never lives longer than the request that
       // uses it. See the cache header comment for the security rationale.
-      accessTokenCipher: secrets.accessToken!,
-      ...(config.wabaId ? { wabaId: config.wabaId } : {}),
+      accessTokenCipher: accessTokenCipher!,
+      ...(conn.wabaAccount ? { wabaId: conn.wabaAccount.externalWabaId } : {}),
+      ...(conn.wabaAccount ? { wabaAccountId: conn.wabaAccount.id } : {}),
       ...(config.messagingAccountId
         ? { messagingAccountId: config.messagingAccountId }
         : {}),
       ...(config.appId ? { appId: config.appId } : {}),
+      // The account's OWN app secret (not the shared app's) — see
+      // MetaSendConfig.appSecret for why that distinction is load-bearing.
+      ...(secrets.appSecret ? { appSecretCipher: secrets.appSecret } : {}),
       ...(config.displayPhoneNumber
         ? { displayPhoneNumber: config.displayPhoneNumber }
         : {}),
@@ -328,15 +384,30 @@ function materializeSendConfig(
     // ENCRYPTION_KEY rotation or ciphertext corruption land here.
     throw new ProviderNotConfiguredError(workspaceId, ["accessToken (decrypt failed)"]);
   }
+  let appSecret: string | undefined;
+  if (cipher.appSecretCipher) {
+    try {
+      appSecret = decryptSecret(cipher.appSecretCipher);
+    } catch {
+      // Swallowed on purpose — see the spread below.
+      appSecret = undefined;
+    }
+  }
   return {
     phoneNumberId: cipher.phoneNumberId,
     accessToken,
     graphVersion: DEFAULT_GRAPH_VERSION,
     ...(cipher.wabaId ? { wabaId: cipher.wabaId } : {}),
+    ...(cipher.wabaAccountId ? { wabaAccountId: cipher.wabaAccountId } : {}),
     ...(cipher.messagingAccountId
       ? { messagingAccountId: cipher.messagingAccountId }
       : {}),
     ...(cipher.appId ? { appId: cipher.appId } : {}),
+    // Best-effort, deliberately unlike the access token above: the token is
+    // fatal to decrypt-fail (a silent send-nothing is worse than a loud error),
+    // but the proof is additive, so a bad app secret must degrade to "no proof"
+    // rather than take the channel down.
+    ...(appSecret ? { appSecret } : {}),
     ...(cipher.displayPhoneNumber
       ? { displayPhoneNumber: cipher.displayPhoneNumber }
       : {}),

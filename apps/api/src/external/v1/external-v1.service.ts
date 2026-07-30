@@ -229,15 +229,17 @@ export class ExternalV1Service {
   async getTemplateExternalId(
     workspaceId: string,
     templateId: string,
-  ): Promise<{ externalId: string; wabaId: string | null } | null> {
+  ): Promise<{ externalId: string; wabaAccountId: string } | null> {
     const row = await this.db.messageTemplate.findFirst({
       where: { id: templateId, workspaceId },
       // The WABA comes back too: analytics are scoped to it, and so are the
       // reasons they can be empty (enablement date, excluded region).
-      select: { externalId: true, wabaId: true },
+      select: { externalId: true, wabaAccountId: true },
     });
-    // `""` is the legacy/unknown-WABA sentinel — normalise to "no opinion".
-    return row?.externalId ? { externalId: row.externalId, wabaId: row.wabaId || null } : null;
+    // No sentinel to normalise: `wabaAccountId` is a NOT NULL FK.
+    return row?.externalId
+      ? { externalId: row.externalId, wabaAccountId: row.wabaAccountId }
+      : null;
   }
 
   listConversations(
@@ -2023,7 +2025,9 @@ export class ExternalV1Service {
         ...(filters.category
           ? { category: filters.category as Prisma.MessageTemplateWhereInput["category"] }
           : {}),
-        ...(filters.wabaId ? { wabaId: filters.wabaId } : {}),
+        // The `waba_id` query param is Meta's own id (a public API contract), so
+        // it is matched through the relation rather than against our internal FK.
+        ...(filters.wabaId ? { wabaAccount: { externalWabaId: filters.wabaId } } : {}),
       },
       // (name, language, id) is the stable keyset order; the cursor is the id.
       orderBy: [{ name: "asc" }, { language: "asc" }, { id: "asc" }],
@@ -2032,7 +2036,8 @@ export class ExternalV1Service {
       select: {
         id: true,
         externalId: true,
-        wabaId: true,
+        // Meta's id for the DTO — never our internal cuid.
+        wabaAccount: { select: { externalWabaId: true } },
         name: true,
         language: true,
         category: true,
@@ -2264,7 +2269,10 @@ export class ExternalV1Service {
     // One active connection per provider today; lists all the team's channels.
     const conns = await this.db.channelConnection.findMany({
       where: { workspaceId, isActive: true },
-      select: { channel: true, config: true },
+      // `externalAccountId` is the provider's own id and the column every other
+      // system keys on (webhook resolution, sends, analytics). Reading identity
+      // from the `config` JSON alone is what let Instagram report its PAGE id.
+      select: { channel: true, config: true, externalAccountId: true },
     });
     const items = conns
       .map((c) => {
@@ -2273,7 +2281,6 @@ export class ExternalV1Service {
           displayPhoneNumber?: string;
           pageId?: string;
           pageName?: string;
-          igUserId?: string;
           igUsername?: string;
           siteKey?: string;
           widgetName?: string;
@@ -2283,8 +2290,19 @@ export class ExternalV1Service {
         // identity that channel carries, instead of dropping every non-WA row
         // (which made teams on messenger/instagram/webchatwidget see an empty
         // or WhatsApp-only channel list through the API).
+        // `externalAccountId` FIRST. The old chain read `cfg.igUserId`, a key
+        // Instagram onboarding never writes (it stores `igId`), so an Instagram row
+        // fell through to `cfg.pageId` and reported its linked PAGE id as the
+        // channel id — while inbound resolution, sends and analytics all key on the
+        // IG id. A partner reconciling ids against webhook payloads saw a mismatch
+        // on exactly one channel. The config keys stay as a fallback for
+        // webchatwidget (no ChannelConnection row) and pre-column rows.
         const id =
-          cfg.phoneNumberId ?? cfg.pageId ?? cfg.igUserId ?? cfg.siteKey ?? null;
+          c.externalAccountId ||
+          cfg.phoneNumberId ||
+          cfg.pageId ||
+          cfg.siteKey ||
+          null;
         if (!id) return null;
         const display =
           cfg.displayPhoneNumber ??

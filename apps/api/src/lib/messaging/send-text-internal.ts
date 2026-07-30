@@ -184,8 +184,12 @@ export async function sendTextInternal(
 
   // Meta social: inside the 24h free-form window Meta wants `messaging_type:
   // RESPONSE` (no tag); in the 24h–7d support band it needs the HUMAN_AGENT tag.
-  // Shared with every other send path via `outsideFreeFormWindow`. Ignored by
-  // WhatsApp (window null).
+  // Shared with every other send path via `outsideFreeFormWindow`.
+  //
+  // Inapplicable to WhatsApp — not because its window is null (it is 24h), but
+  // because `humanAgentWindowMs` is null: WhatsApp has no 7-day human-agent
+  // extension, so the window check above has already thrown by the time this
+  // could be true, and the provider ignores the tag regardless.
   const useHumanAgentTag = outsideFreeFormWindow(
     binding.provider.capabilities.freeFormWindowMs,
     lastInboundAt,

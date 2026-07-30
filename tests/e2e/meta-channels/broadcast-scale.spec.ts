@@ -65,7 +65,12 @@ async function waHealth() {
   return db().channelConnection.findFirst({
     where: { workspaceId: META_TEST_TEAM_ID, channel: "whatsapp", isDefault: true },
     select: {
-      portfolio: { select: { messagingTier: true, messagingDailyCap: true } },
+      // Portfolio → WABA → number: the portfolio is reached through the WABA.
+      wabaAccount: {
+        select: {
+          portfolio: { select: { messagingTier: true, messagingDailyCap: true } },
+        },
+      },
       qualityRating: true,
       throughputLevel: true,
     },
@@ -94,7 +99,7 @@ test.describe("number messaging-health webhooks update the tier snapshot", () =>
     await pollUntil(
       async () => {
         const h = await waHealth();
-        return h?.portfolio?.messagingTier === "TIER_10K" && h?.portfolio?.messagingDailyCap === 10_000 ? h : null;
+        return h?.wabaAccount?.portfolio?.messagingTier === "TIER_10K" && h?.wabaAccount?.portfolio?.messagingDailyCap === 10_000 ? h : null;
       },
       { label: "messagingTier=TIER_10K" },
     );
@@ -112,7 +117,7 @@ test.describe("number messaging-health webhooks update the tier snapshot", () =>
     await pollUntil(
       async () => {
         const h = await waHealth();
-        return h?.portfolio?.messagingTier === "TIER_100K" && h?.portfolio?.messagingDailyCap === 100_000 ? h : null;
+        return h?.wabaAccount?.portfolio?.messagingTier === "TIER_100K" && h?.wabaAccount?.portfolio?.messagingDailyCap === 100_000 ? h : null;
       },
       { label: "messagingTier=TIER_100K" },
     );
@@ -132,7 +137,7 @@ test.describe("number messaging-health webhooks update the tier snapshot", () =>
     // → no channel_health event → no write).
     expect(res.status).toBe(200);
     const after = await waHealth();
-    expect(after?.portfolio?.messagingTier).toBe(before?.portfolio?.messagingTier);
-    expect(after?.portfolio?.messagingDailyCap).toBe(before?.portfolio?.messagingDailyCap);
+    expect(after?.wabaAccount?.portfolio?.messagingTier).toBe(before?.wabaAccount?.portfolio?.messagingTier);
+    expect(after?.wabaAccount?.portfolio?.messagingDailyCap).toBe(before?.wabaAccount?.portfolio?.messagingDailyCap);
   });
 });

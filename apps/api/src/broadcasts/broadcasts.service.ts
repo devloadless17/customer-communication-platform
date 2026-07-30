@@ -710,14 +710,21 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     if (template && sendingAccountId) {
       const account = await this.db.channelConnection.findFirst({
         where: { id: sendingAccountId, workspaceId },
-        select: { wabaId: true },
+        select: { wabaAccountId: true },
       });
-      const accountWaba = account?.wabaId ?? "";
-      const templateWaba = template.wabaId ?? "";
-      // `""` is the legacy/unknown-WABA sentinel on both sides — treat it as
-      // "no opinion" rather than a mismatch, or every pre-multi-account template
-      // becomes unsendable.
-      if (accountWaba && templateWaba && accountWaba !== templateWaba) {
+      // A missing account WABA is a REFUSAL, not "no opinion" — see the same
+      // hardening in send-template-internal.ts. The old form defaulted both sides
+      // to the `""` sentinel and so passed whenever either was unknown, which let
+      // a WABA-less number blast any template in the workspace.
+      if (!account?.wabaAccountId) {
+        throw new BadRequestException({
+          error: "waba_unknown",
+          detail:
+            "The number you're sending from has no WhatsApp Business Account linked, so " +
+            "it has no template catalog. Add its WABA ID in WhatsApp settings first.",
+        });
+      }
+      if (account.wabaAccountId !== template.wabaAccountId) {
         throw new BadRequestException({
           error: "template_wrong_account",
           detail:
@@ -1443,7 +1450,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       // Meta's day buckets for days AFTER completion (see analyticsWindowEnd).
       end: analyticsWindowEnd(broadcast.completedAt),
       // Scope to the template's own WABA — see refreshTemplateAnalytics.
-      wabaId: template.wabaId,
+      wabaAccountId: template.wabaAccountId,
     });
   }
 

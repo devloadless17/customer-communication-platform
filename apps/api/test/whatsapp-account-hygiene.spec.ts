@@ -19,6 +19,7 @@ import { createTestPrismaClient } from "./_prisma";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { setSharedDb } from "@/lib/db";
+import { seedWabaAccount } from "./_waba";
 import {
   flagChannelNeedsReconnect,
   clearChannelNeedsReconnect,
@@ -47,6 +48,10 @@ async function mkConn(suffix: string, extra?: Record<string, unknown>) {
         workspaceId,
         channel: "whatsapp",
         externalAccountId: `${S}_${suffix}`,
+        // Its OWN WABA. The portfolio link lives on the WABA now, so the self-heal
+        // attribution below has something to attach to — and giving each number a
+        // DISTINCT WABA is what makes "attributed to one connection" testable.
+        wabaAccountId: await seedWabaAccount(prisma, workspaceId, `${S}_waba_${suffix}`),
         isActive: true,
         config: { phoneNumberId: `${S}_${suffix}` },
         secrets: {},
@@ -108,8 +113,8 @@ describe("portfolio self-heal attribution (D2)", () => {
     await persistWhatsappHealth(workspaceId, { messagingTier: "TIER_2K" });
     const portfolios = await prisma.whatsappPortfolio.count({ where: { workspaceId } });
     expect(portfolios).toBe(0);
-    const linked = await prisma.channelConnection.count({
-      where: { workspaceId, channel: "whatsapp", portfolioId: { not: null } },
+    const linked = await prisma.whatsappBusinessAccount.count({
+      where: { workspaceId, portfolioId: { not: null } },
     });
     expect(linked).toBe(0);
   });
@@ -119,17 +124,19 @@ describe("portfolio self-heal attribution (D2)", () => {
     const [a, b] = await Promise.all([
       prisma.channelConnection.findUniqueOrThrow({
         where: { id: connA },
-        select: { portfolioId: true },
+        select: { wabaAccount: { select: { portfolioId: true } } },
       }),
       prisma.channelConnection.findUniqueOrThrow({
         where: { id: connB },
-        select: { portfolioId: true },
+        select: { wabaAccount: { select: { portfolioId: true } } },
       }),
     ]);
-    expect(a.portfolioId).not.toBeNull();
-    expect(b.portfolioId).toBeNull(); // the old self-heal attached this one too
+    expect(a.wabaAccount?.portfolioId).not.toBeNull();
+    // The old self-heal attached this one too. Each number has its OWN WABA here,
+    // and the portfolio link lives on the WABA, so B stays unattributed.
+    expect(b.wabaAccount?.portfolioId ?? null).toBeNull();
     const portfolio = await prisma.whatsappPortfolio.findUniqueOrThrow({
-      where: { id: a.portfolioId! },
+      where: { id: a.wabaAccount!.portfolioId! },
       select: { messagingTier: true, messagingDailyCap: true },
     });
     expect(portfolio.messagingTier).toBe("TIER_2K");

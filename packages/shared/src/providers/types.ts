@@ -104,7 +104,37 @@ export interface NormalizedContactIdentity {
   username?: string;
 }
 
-export interface NormalizedInboundMessage extends NormalizedContactIdentity {
+/**
+ * The account that RECEIVED this event, as the PROVIDER names it.
+ *
+ * Meta batches "multiple changes from different objects that are of the same
+ * type" into ONE webhook POST (up to 1000 updates, and batching is explicitly
+ * not guaranteed either way), so attribution is per-EVENT and never per-body.
+ * A parser that resolved one account for a whole payload bound every thread in
+ * it to whichever account happened to be listed first — replies then went out
+ * the WRONG number, where no 24h customer-service window exists.
+ *
+ * This is the VENDOR's own id and matches `ChannelConnection.externalAccountId`
+ * exactly: WhatsApp `entry[].changes[].value.metadata.phone_number_id`,
+ * Messenger `entry[].id` (the Page), Instagram `entry[].id` (the IG account).
+ * It is deliberately NOT our `ChannelConnection.id` — mapping it to a row is a
+ * tenant-scoped DB decision and lives in the domain layer
+ * (`apps/api/src/lib/providers/inbound-accounts.ts`), never in a parser
+ * (CLAUDE.md §5: providers hold no business logic).
+ *
+ * Undefined when the payload names no receiving account. For WhatsApp that is
+ * the ACCOUNT-LEVEL notification class (`phone_number_quality_update`,
+ * `business_capability_update`, `account_update`, `account_alerts`, template
+ * lifecycle), whose subject ingest resolves per-event from `wabaId` /
+ * `displayPhoneNumber` rather than from the account it arrived on.
+ */
+export interface NormalizedEventSource {
+  externalAccountId?: string;
+}
+
+export interface NormalizedInboundMessage
+  extends NormalizedContactIdentity,
+    NormalizedEventSource {
   kind: "message";
   /** Provider-assigned id; the dedupe key. */
   externalId: string;
@@ -142,7 +172,7 @@ export interface NormalizedInboundMessage extends NormalizedContactIdentity {
   rawPayload: Record<string, unknown>;
 }
 
-export interface NormalizedStatusUpdate {
+export interface NormalizedStatusUpdate extends NormalizedEventSource {
   kind: "status";
   /** externalId of the message whose status is changing. */
   externalId: string;
@@ -188,7 +218,7 @@ export interface NormalizedStatusUpdate {
  * `watermark` as read (that's the "Seen" / blue-tick state). WhatsApp uses the
  * per-message `NormalizedStatusUpdate{status:"read"}` path instead.
  */
-export interface NormalizedReadWatermark {
+export interface NormalizedReadWatermark extends NormalizedEventSource {
   kind: "read_watermark";
   /** The customer who read — PSID / IGSID (social) or phone (unused today). */
   externalContactId?: string;
@@ -207,7 +237,7 @@ export interface NormalizedReadWatermark {
  * "sent" tick until it's read. Instagram has no delivery webhook (never emits
  * this); WhatsApp uses the per-message status path.
  */
-export interface NormalizedDeliveredWatermark {
+export interface NormalizedDeliveredWatermark extends NormalizedEventSource {
   kind: "delivered_watermark";
   externalContactId?: string;
   contactPhone?: string;
@@ -226,7 +256,7 @@ export interface NormalizedDeliveredWatermark {
  * vs `incoming` lets the audit subscriber differentiate direction without
  * a Call-row read; the ingest mapper collapses both to `CallStatus.ringing`.
  */
-export interface NormalizedCallEvent {
+export interface NormalizedCallEvent extends NormalizedEventSource {
   kind: "call";
   /** Meta-assigned call id; dedup key half. */
   externalCallId: string;
@@ -639,7 +669,7 @@ export interface CallPermissionState {
  * else by (name, language), and flips its `status`. `status` is null when the
  * provider's event value doesn't map to a known TemplateStatus (forward-compat).
  */
-export interface NormalizedTemplateStatusUpdate {
+export interface NormalizedTemplateStatusUpdate extends NormalizedEventSource {
   kind: "template_status";
   /**
    * The WABA this update is about (Meta webhook `entry[].id`). Load-bearing for
@@ -728,7 +758,7 @@ export interface NormalizedTemplateStatusUpdate {
  * and Meta rejected every send with error 132000 until someone happened to press
  * "Sync".
  */
-export interface NormalizedTemplateComponentsChanged {
+export interface NormalizedTemplateComponentsChanged extends NormalizedEventSource {
   kind: "template_components_changed";
   externalId?: string;
   name?: string;
@@ -743,7 +773,7 @@ export interface NormalizedTemplateComponentsChanged {
  * `reaction` column, then fans out `message.reaction_changed` to the thread.
  * Inbound-only — agent-side reacting is deferred.
  */
-export interface NormalizedReaction {
+export interface NormalizedReaction extends NormalizedEventSource {
   kind: "reaction";
   /** The reaction message's OWN provider id (for logging / future dedupe). */
   externalId: string;
@@ -778,7 +808,9 @@ export interface NormalizedReaction {
  * sent collides on the wamid unique and is a safe no-op (returns the existing
  * row) rather than creating a phantom.
  */
-export interface NormalizedOutboundEcho extends NormalizedContactIdentity {
+export interface NormalizedOutboundEcho
+  extends NormalizedContactIdentity,
+    NormalizedEventSource {
   kind: "echo";
   /** Provider-assigned id (wamid / mid) — the dedupe key. */
   externalId: string;
@@ -814,7 +846,7 @@ export interface NormalizedOutboundEcho extends NormalizedContactIdentity {
  * "agent owns the name, sticky after create" policy: it fills a blank/default
  * name, never clobbers one an agent typed.
  */
-export interface NormalizedContactSync {
+export interface NormalizedContactSync extends NormalizedEventSource {
   kind: "contact_sync";
   /** E.164 digits, no '+'. */
   phone: string;
@@ -836,7 +868,7 @@ export interface NormalizedContactSync {
  * body (`action: "edit"` → sets `editedAt` + new body), then fans out
  * `message.updated` to the thread.
  */
-export interface NormalizedMessageCorrection {
+export interface NormalizedMessageCorrection extends NormalizedEventSource {
   kind: "message_correction";
   action: "edit" | "delete";
   /**
@@ -860,7 +892,7 @@ export interface NormalizedMessageCorrection {
  * `response_feedback`). NOT a reaction — a distinct helpful/not-helpful signal
  * on our OUTBOUND message. Matched by `targetExternalId` (the message id).
  */
-export interface NormalizedMessageFeedback {
+export interface NormalizedMessageFeedback extends NormalizedEventSource {
   kind: "message_feedback";
   targetExternalId: string;
   feedback: "positive" | "negative";
@@ -875,7 +907,7 @@ export interface NormalizedMessageFeedback {
  * existing contact to the new number so the person's thread CONTINUES instead of
  * fragmenting into a second contact + conversation when they next message.
  */
-export interface NormalizedContactNumberChange {
+export interface NormalizedContactNumberChange extends NormalizedEventSource {
   kind: "contact_number_change";
   /** OLD phone (digits) — the contact to migrate. */
   oldPhone: string;
@@ -895,7 +927,7 @@ export interface NormalizedContactNumberChange {
  * the operator their remaining daily allowance. Every field optional — a given
  * webhook only carries the field(s) that changed; ingest merges partial updates.
  */
-export interface NormalizedChannelHealth {
+export interface NormalizedChannelHealth extends NormalizedEventSource {
   kind: "channel_health";
   /**
    * The WABA the update belongs to (Meta webhook `entry[].id`). Account-level
@@ -1020,7 +1052,7 @@ export interface NormalizedChannelHealth {
  * DECLINED rename was invisible — the number silently kept its old name and
  * the operator learned at registration time.
  */
-export interface NormalizedNumberNameUpdate {
+export interface NormalizedNumberNameUpdate extends NormalizedEventSource {
   kind: "number_name_update";
   /** Which number, as Meta displays it — resolved to a connection by ingest. */
   displayPhoneNumber?: string;
@@ -1042,7 +1074,7 @@ export interface NormalizedNumberNameUpdate {
  * clear an existing opt-out — an inbound STOP keyword may opt a customer OUT but
  * must never opt them back IN, because consent has to be affirmative.
  */
-export interface NormalizedMarketingPreference {
+export interface NormalizedMarketingPreference extends NormalizedEventSource {
   kind: "marketing_preference";
   /** E.164 digits, no '+'. */
   contactPhone: string;
@@ -2301,23 +2333,35 @@ export interface ProviderBusinessProfile {
   email?: string;
   websites?: string[];
   /**
-   * Meta's industry category (`RETAIL`, `HEALTH`, …). READ-ONLY here on
-   * purpose: the `WhatsAppVertical` enum's members are not published in the
-   * profile reference, and writing a value we guessed would be rejected — or
-   * worse, silently set the wrong industry. Editable in WhatsApp Manager.
+   * Meta's industry category (`RETAIL`, `HEALTH`, …). WRITABLE — see
+   * `UpdateBusinessProfileArgs`. It was read-only on the grounds that the
+   * `WhatsAppVertical` members "are not published in the profile reference"; Meta's
+   * Business Profiles doc now lists all 21 verbatim, so the value can be validated
+   * rather than guessed.
    */
   vertical?: string;
   /** Meta-hosted URL. Set by uploading a handle, never by writing this. */
   profilePictureUrl?: string;
 }
 
-/** The writable subset. `vertical` and `profilePictureUrl` are excluded above. */
+/** The writable subset. `profilePictureUrl` is excluded — it is set via a handle. */
 export interface UpdateBusinessProfileArgs {
+  /**
+   * 1-139 characters. CANNOT be empty: unlike the other fields, `""` does not
+   * clear it — Meta rejects the request outright ("String cannot be empty").
+   */
   about?: string;
   address?: string;
   description?: string;
   email?: string;
   websites?: string[];
+  /**
+   * Business category. One of Meta's published `vertical` members, or `""` to
+   * clear (the doc allows "either an empty string or one of the accepted values").
+   * Validated against the exact enum at the request boundary, since Graph rejects
+   * anything unlisted.
+   */
+  vertical?: string;
   /**
    * A handle from the resumable upload API (the same one template header media
    * uses) — Meta hosts the image itself, so there is no URL to set.

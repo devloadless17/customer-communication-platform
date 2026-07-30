@@ -40,6 +40,14 @@ afterAll(async () => {
 /** Every raw partial index the product depends on, and what it protects. */
 const REQUIRED_PARTIAL_INDEXES: { name: string; unique: boolean; protects: string }[] = [
   {
+    name: "Message_template_send_budget_idx",
+    unique: false,
+    protects:
+      "the portfolio 24h messaging-budget query — it scans outbound TEMPLATE " +
+      "sends on the largest table in the schema, so without this the gate " +
+      "sequential-scans Message on every broadcast eligibility check",
+  },
+  {
     name: "Ticket_first_response_due_idx",
     unique: false,
     protects:

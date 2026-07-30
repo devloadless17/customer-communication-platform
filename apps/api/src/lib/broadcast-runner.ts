@@ -209,6 +209,8 @@ function resolveSendPacing(
   channel: Channel,
   throughputLevel: string | null,
   limiterActive: boolean,
+  /** COEXISTENCE — Meta's fixed 20 msg/s ceiling; see `resolveSendRate`. */
+  isOnBusinessApp?: boolean | null,
 ): SendPacing {
   // When the token bucket is enforcing the rate, IT is the authority: lanes are
   // sized to sustain that rate and the fixed inter-send gap goes to zero (the
@@ -221,7 +223,21 @@ function resolveSendPacing(
   // rate authority at all — full-speed unpaced lanes. Such a run must fall
   // through to the static gap pacing below.
   if (limiterActive && channel === "whatsapp") {
-    return { lanes: lanesForRate(resolveSendRate(throughputLevel)), gapMs: 0 };
+    return {
+      lanes: lanesForRate(resolveSendRate(throughputLevel, isOnBusinessApp)),
+      gapMs: 0,
+    };
+  }
+  // COEXISTENCE, static-pacing mode. Handled BEFORE the throughput ladder because
+  // Meta's 20/s cap replaces the ladder rather than sitting inside it — a
+  // Coexistence number reporting HIGH must not get 16 lanes at a 60ms gap
+  // (~266/s). 2 lanes × 125ms ≈ 16/s, under the 20 ceiling with the same margin
+  // the bucket path keeps.
+  if (channel === "whatsapp" && isOnBusinessApp === true) {
+    return {
+      lanes: envInt("BROADCAST_SEND_CONCURRENCY_COEXISTENCE", 2, 1, MAX_LANES_PER_RUN),
+      gapMs: envInt("BROADCAST_SEND_GAP_MS_COEXISTENCE", 125, 0, 5_000),
+    };
   }
   if (channel === "whatsapp" && throughputLevel === "HIGH") {
     return {
@@ -1286,17 +1302,28 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   // the campaign's bound account — reading the workspace default would size
   // lanes and the bucket's fill rate off a different number's tier (a HIGH
   // default pacing a STANDARD second number at 900/s = sustained 130429s).
-  const throughputLevel =
+  //
+  // The same read also yields `isOnBusinessApp` — a COEXISTENCE number (still in use
+  // in the WhatsApp Business app) is hard-capped by Meta at 20 messages/second,
+  // OUTSIDE the 80/1000 ladder that `throughput.level` reports. Meta still reports a
+  // level for those numbers, so pacing off the level alone ran them 2-4x over a hard
+  // ceiling.
+  const health =
     broadcast.channel === "whatsapp"
-      ? (
-          await getWhatsappHealth(
-            broadcast.workspaceId,
-            broadcast.channelConnectionId,
-          ).catch(() => null)
-        )?.throughputLevel ?? null
+      ? await getWhatsappHealth(
+          broadcast.workspaceId,
+          broadcast.channelConnectionId,
+        ).catch(() => null)
       : null;
+  const throughputLevel = health?.throughputLevel ?? null;
+  const isOnBusinessApp = health?.isOnBusinessApp ?? null;
   const rateLimited = sendRateLimiterEnabled();
-  const pacing = resolveSendPacing(broadcast.channel, throughputLevel, rateLimited);
+  const pacing = resolveSendPacing(
+    broadcast.channel,
+    throughputLevel,
+    rateLimited,
+    isOnBusinessApp,
+  );
   const lanes = Math.min(pacing.lanes, queue.length);
 
   // Per-NUMBER send-rate ceiling (dark unless BROADCAST_RATE_LIMITER_ENABLED=1).
@@ -1313,7 +1340,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     | undefined;
   const rateKey =
     sendConfig?.phoneNumberId || `ws:${broadcast.workspaceId}:${broadcast.channel}`;
-  const sendRate = resolveSendRate(throughputLevel);
+  const sendRate = resolveSendRate(throughputLevel, isOnBusinessApp);
 
   // Cooperative cancel — operators flip the broadcast row to `canceled`
   // via POST /api/broadcasts/:id/cancel; the lanes check this flag at the
@@ -2606,6 +2633,11 @@ async function processOneRecipient(
         // window — this column is what survives, and it's what lets a status
         // webhook find the recipient with no extra query.
         broadcastId: broadcast.id,
+        // Only when a TEMPLATE actually carried it — a free-form broadcast must not
+        // be marked, or the 24h budget would count sends that never consumed it.
+        // Broadcasts remain authoritative via `BroadcastRecipient`; this keeps the
+        // two views of the same send consistent.
+        ...(broadcast.templateName ? { templateName: broadcast.templateName } : {}),
         rawPayload: {
           sentVia: "broadcast",
           broadcastId: broadcast.id,
@@ -3799,6 +3831,8 @@ export async function reconcileCanceledMarkerRecipients(): Promise<void> {
             status: "sent",
             // The campaign's own account — see the send path above.
             channelConnectionId: broadcast.channelConnectionId ?? null,
+            // Template marker, template sends only — see the send path above.
+            ...(broadcast.templateName ? { templateName: broadcast.templateName } : {}),
             rawPayload: {
               sentVia: "broadcast",
               broadcastId: broadcast.id,

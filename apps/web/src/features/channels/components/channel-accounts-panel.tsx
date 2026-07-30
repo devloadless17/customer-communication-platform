@@ -221,6 +221,7 @@ export function ChannelAccountsPanel({
                   {a.externalAccountId}
                   {a.wabaId ? ` · WABA ${a.wabaId}` : ""}
                 </div>
+                <AppBindingLine appBinding={a.appBinding} appId={a.appId} />
                 {a.health && (
                   <AccountHealthRow health={a.health} nameStatus={a.nameStatus} />
                 )}
@@ -303,6 +304,57 @@ export function ChannelAccountsPanel({
       </ul>
         </div>
       ))}
+    </div>
+  );
+}
+
+/**
+ * Which Meta app this account runs on.
+ *
+ * The missing link in the whole multi-account picture: an admin could see how many
+ * accounts they had, but nothing said which app any of them used — so "if I add a
+ * second Meta app, which accounts move to it?" had no answer in the product, and a
+ * shared-secret rotation appeared to apply to some accounts and skip others for no
+ * visible reason.
+ *
+ * Deliberately a quiet line rather than a loud badge: on the common setup every
+ * account says the same thing, and the ONE case worth noticing — an account on its
+ * own app, which a shared rotation will not touch — is the one that gets colour.
+ */
+function AppBindingLine({
+  appBinding,
+  appId,
+}: {
+  appBinding: ChannelAccountView["appBinding"];
+  appId: string | null;
+}) {
+  if (appBinding === "unset") {
+    return (
+      <div className="truncate text-3xs text-warning-fg" title="No app secret is stored for this account, so Meta has nothing to sign its webhooks with and inbound may be rejected. Re-save its credentials.">
+        No Meta app credentials
+      </div>
+    );
+  }
+  const own = appBinding === "own_app";
+  return (
+    <div
+      className={cn("truncate text-3xs", own ? "text-foreground/70" : "text-muted-foreground")}
+      title={
+        own
+          ? "This account uses its OWN Meta app, not the workspace's shared one. Rotating the shared app's secret will not change this account."
+          : "This account uses the workspace's shared Meta app. Rotating that app's secret updates this account too."
+      }
+    >
+      {own ? "Own Meta app" : "Shared Meta app"}
+      {/* The id is shown ONLY for an own-app account, where it answers "which
+          other app". It is deliberately withheld on the shared app, and not for
+          brevity: `appSecret` and `appId` are independently optional (an `appId`
+          alone is legitimate — the resumable upload endpoint for template media
+          needs one), so a row can hold app-B's id while still signing with the
+          shared app-A secret. Rendering it here read "Shared Meta app · <app-B
+          id>", where both halves are false together. The shared app's real id is
+          stated once, on Settings → Meta App, which cannot drift this way. */}
+      {own && appId ? ` · ${appId}` : ""}
     </div>
   );
 }

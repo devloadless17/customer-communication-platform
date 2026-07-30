@@ -72,23 +72,46 @@ export async function syncTemplateCatalog(workspaceId: string): Promise<CatalogS
   const provider = getMetaProvider();
   if (!provider.fetchTemplates) return result;
 
-  const connections = await db.channelConnection.findMany({
-    where: { workspaceId, channel: "whatsapp", isActive: true },
-    orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
-    select: { id: true },
+  // Iterate WABA ROWS, not connections. A WABA is the catalog boundary, and since
+  // Embedded Signup it can legitimately hold ZERO phone numbers
+  // (`FINISH_ONLY_WABA`) while its templates and template webhooks are live — a
+  // connection-driven loop skipped those entirely. Iterating WABAs also removes
+  // the old dedupe: several numbers under one WABA used to page the same list
+  // repeatedly and reconcile it twice.
+  //
+  // Credentials come from the WABA's own token when it has one (the ES case), else
+  // from any active number under it. `getMetaSendConfig` handles that preference
+  // internally, so asking via one of the WABA's connections is enough.
+  const wabaAccounts = await db.whatsappBusinessAccount.findMany({
+    where: { workspaceId },
+    orderBy: { createdAt: "asc" },
+    select: {
+      id: true,
+      externalWabaId: true,
+      connections: {
+        where: { isActive: true },
+        orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+        take: 1,
+        select: { id: true },
+      },
+    },
   });
 
-  // Several numbers commonly sit under ONE WABA and share its catalog, so
-  // fetching per-number would page the same list repeatedly and reconcile it
-  // twice. Dedupe on the WABA the resolved credentials actually point at — not
-  // on the denormalized column — so the id we fetch with and the id we key rows
-  // by can never disagree.
-  const done = new Set<string>();
-
-  for (const conn of connections) {
+  for (const waba of wabaAccounts) {
+    const probeConnectionId = waba.connections[0]?.id;
+    if (!probeConnectionId) {
+      // A WABA with no active number yet. Nothing to fetch WITH — and crucially we
+      // must NOT reconcile, because `reconcileWaba` prunes anything absent from the
+      // fetched list, and an empty fetch would delete the whole catalog.
+      result.failed.push({
+        wabaId: waba.externalWabaId,
+        error: "waba_has_no_active_number",
+      });
+      continue;
+    }
     let config;
     try {
-      config = await getMetaSendConfig(workspaceId, conn.id);
+      config = await getMetaSendConfig(workspaceId, probeConnectionId);
     } catch (err) {
       // Fail-soft per account, including on an unexpected error (a corrupt
       // secret, a decrypt failure). Rethrowing would abort the whole sweep and
@@ -96,15 +119,23 @@ export async function syncTemplateCatalog(workspaceId: string): Promise<CatalogS
       // them has bad credentials.
       if (!(err instanceof ProviderNotConfiguredError)) {
         result.failed.push({
-          wabaId: "",
+          wabaId: waba.externalWabaId,
           error: err instanceof Error ? err.message : String(err),
         });
       }
       continue;
     }
-    const wabaId = config.wabaId ?? "";
-    if (!wabaId || done.has(wabaId)) continue;
-    done.add(wabaId);
+    // Sanity-check the join: the credentials we resolved must point at the WABA we
+    // are about to reconcile. If they disagree, the FK and the config drifted and
+    // pruning against the wrong catalog would be silent, permanent data loss.
+    if (config.wabaAccountId !== waba.id) {
+      result.failed.push({
+        wabaId: waba.externalWabaId,
+        error: `resolved credentials point at a different WABA (${config.wabaId ?? "none"})`,
+      });
+      continue;
+    }
+    const wabaId = waba.externalWabaId;
 
     let fetched: ProviderTemplate[];
     try {
@@ -117,7 +148,7 @@ export async function syncTemplateCatalog(workspaceId: string): Promise<CatalogS
       continue;
     }
 
-    const one = await reconcileWaba(workspaceId, wabaId, fetched);
+    const one = await reconcileWaba(workspaceId, waba.id, fetched);
     result.syncedCount += one.syncedCount;
     result.prunedCount += one.prunedCount;
 
@@ -128,7 +159,7 @@ export async function syncTemplateCatalog(workspaceId: string): Promise<CatalogS
     // type checks would silently not run. One blueprint fetch per DISTINCT
     // missing library name (usually zero), fail-soft: a library hiccup must
     // not fail the sync that just completed.
-    await backfillLibraryParamTypes(workspaceId, wabaId, config).catch(() => undefined);
+    await backfillLibraryParamTypes(workspaceId, waba.id, config).catch(() => undefined);
   }
 
   return result;
@@ -137,7 +168,7 @@ export async function syncTemplateCatalog(workspaceId: string): Promise<CatalogS
 /** See the call site above. Bounded: one library lookup per distinct name. */
 async function backfillLibraryParamTypes(
   workspaceId: string,
-  wabaId: string,
+  wabaAccountId: string,
   config: MetaSendConfig,
 ): Promise<void> {
   const provider = getMetaProvider();
@@ -145,7 +176,7 @@ async function backfillLibraryParamTypes(
   const missing = await db.messageTemplate.findMany({
     where: {
       workspaceId,
-      wabaId,
+      wabaAccountId,
       libraryTemplateName: { not: null },
       bodyParamTypes: { isEmpty: true },
     },
@@ -178,7 +209,8 @@ async function backfillLibraryParamTypes(
  */
 async function reconcileWaba(
   workspaceId: string,
-  wabaId: string,
+  /** OUR `WhatsappBusinessAccount.id` — the catalog boundary this run owns. */
+  wabaAccountId: string,
   fetched: ProviderTemplate[],
 ): Promise<{ syncedCount: number; prunedCount: number }> {
   const now = new Date();
@@ -187,7 +219,7 @@ async function reconcileWaba(
   // archived-transition detection below and the prune at the end. Reading after
   // the upsert would see our own writes and make every template look unchanged.
   const localRows = await db.messageTemplate.findMany({
-    where: { workspaceId, wabaId },
+    where: { workspaceId, wabaAccountId },
     select: {
       id: true,
       name: true,
@@ -214,16 +246,16 @@ async function reconcileWaba(
 
       return db.messageTemplate.upsert({
         where: {
-          workspaceId_wabaId_name_language: {
+          workspaceId_wabaAccountId_name_language: {
             workspaceId,
-            wabaId,
+            wabaAccountId,
             name: t.name,
             language: t.language,
           },
         },
         create: {
           workspaceId,
-          wabaId,
+          wabaAccountId,
           externalId: t.externalId ?? null,
           name: t.name,
           language: t.language,

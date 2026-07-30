@@ -1257,32 +1257,33 @@ export class ExternalV1MessagingService {
       const account = conv.channelConnectionId
         ? await this.db.channelConnection.findFirst({
             where: { id: conv.channelConnectionId, workspaceId },
-            select: { wabaId: true },
+            select: { wabaAccountId: true },
           })
         : null;
-      const accountWaba = account?.wabaId ?? "";
-      const byName = {
-        workspaceId,
-        name: input.template.name,
-        language: input.template.language,
-      };
-      // Prefer this account's own catalog; fall back to the legacy `""`
-      // sentinel (pre-multi-account rows, which belong to no WABA in
-      // particular). With no account WABA known there is nothing to scope by,
-      // so keep the original behaviour and let the send-time guard decide.
-      const template = accountWaba
-        ? ((await this.db.messageTemplate.findFirst({
-            where: { ...byName, wabaId: accountWaba },
-            select: { id: true },
-          })) ??
-          (await this.db.messageTemplate.findFirst({
-            where: { ...byName, wabaId: "" },
-            select: { id: true },
-          })))
-        : await this.db.messageTemplate.findFirst({
-            where: byName,
-            select: { id: true },
-          });
+      // No WABA on the sending number means no catalog at all — say so here rather
+      // than letting the lookup wander the whole workspace and be refused later
+      // with a message that reads like the partner's template is at fault.
+      if (!account?.wabaAccountId) {
+        throw new BadRequestException({
+          error: "waba_unknown",
+          detail:
+            "the number this conversation replies from has no WhatsApp Business Account " +
+            "linked, so it has no template catalog",
+        });
+      }
+      // EXACT scoping, single lookup. This used to try the account's WABA and then
+      // fall back to `wabaId: ""` — the legacy "unknown WABA" sentinel — which meant
+      // `/v1` deliberately steered templates into the one hole that made the
+      // send-time cross-account guard a no-op. The sentinel is gone.
+      const template = await this.db.messageTemplate.findFirst({
+        where: {
+          workspaceId,
+          wabaAccountId: account.wabaAccountId,
+          name: input.template.name,
+          language: input.template.language,
+        },
+        select: { id: true },
+      });
       if (!template) {
         throw new NotFoundException({
           error: "template_not_found",

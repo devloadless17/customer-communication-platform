@@ -2030,7 +2030,7 @@ export class ExternalV1Controller {
     // them a partner's dashboard can only report the zero as a measurement.
     return {
       ...result,
-      ...(await templateAnalyticsAccountContext(auth.workspaceId, template.wabaId)),
+      ...(await templateAnalyticsAccountContext(auth.workspaceId, template.wabaAccountId)),
     };
   }
 

@@ -64,6 +64,9 @@ export function InstagramSettings({
   const [form, setForm] = useState({
     pageId: current.pageId ?? "",
     igAccessToken: "",
+    // Per-account Meta app override — see the fields at the bottom of the form.
+    appSecret: "",
+    appId: current.appId ?? "",
   });
   const setField = (k: keyof typeof form) => (v: string) =>
     setForm((f) => ({ ...f, [k]: v }));
@@ -73,10 +76,17 @@ export function InstagramSettings({
 
   async function save() {
     setError(null);
+    // Drop blank optionals rather than posting "". The server reads an ABSENT
+    // appSecret as "keep whatever this row already has" (input → row's own →
+    // shared), so sending an empty string from an untouched box would reset an
+    // account that is deliberately on its own Meta app back onto the shared one.
+    const body = Object.fromEntries(
+      Object.entries(form).filter(([, v]) => typeof v === "string" && v.trim().length > 0),
+    );
     const res = await apiFetch("/api/workspace/instagram", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(form),
+      body: JSON.stringify({ ...body, pageId: form.pageId }),
     });
     if (!res.ok) {
       const data = (await res.json().catch(() => ({}))) as {
@@ -281,6 +291,23 @@ export function InstagramSettings({
             onChange={setField("igAccessToken")}
             placeholder="Leave blank to derive from your Meta App system-user token"
             secret
+          />
+          {/* PUT THIS ACCOUNT ON A DIFFERENT META APP. One Meta app can serve many
+              accounts, and the model has always let an account carry another app's
+              credentials — but this form never submitted them, so the capability
+              was unreachable. Blank = use the workspace's shared Meta app. */}
+          <LabeledInput
+            label="App secret (different Meta app, optional)"
+            value={form.appSecret}
+            onChange={setField("appSecret")}
+            placeholder="Leave blank to use your shared Meta App"
+            secret
+          />
+          <LabeledInput
+            label="App ID (different Meta app, optional)"
+            value={form.appId}
+            onChange={setField("appId")}
+            placeholder="Leave blank to use your shared Meta App"
           />
           {error && <p className="text-xs text-destructive">{error}</p>}
           <div className="flex justify-end">

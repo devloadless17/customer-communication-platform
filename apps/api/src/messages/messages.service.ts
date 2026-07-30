@@ -3406,6 +3406,9 @@ function captionable(kind: MediaKind): boolean {
 
 const TEMPLATE_ERROR_STATUS: Record<SendTemplateValidationError["code"], number> = {
   conversation_not_found: 404,
+  // The sending number has no WABA linked, so it has no template catalog. 409:
+  // the request is well-formed, the account's configuration is what's wrong.
+  waba_unknown: 409,
   template_not_found: 404,
   template_not_approved: 409,
   wrong_body_var_count: 400,

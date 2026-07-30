@@ -516,18 +516,32 @@ export function parseSocialMessaging(
 
   const events: NormalizedEvent[] = [];
   for (const entry of env.entry) {
+    // `entry.id` is the Page (Messenger) or Instagram professional account that
+    // received everything in THIS entry. One POST can batch entries for several
+    // of a workspace's accounts — Meta's own contract is that "multiple changes
+    // from different objects that are of the same type may be batched together" —
+    // so the account is stamped per entry, never resolved once for the body.
+    // Resolving per body bound a second Page's threads to the first Page, and the
+    // reply then went out from an account the customer never messaged.
+    const receivingAccountId =
+      typeof entry.id === "string" && entry.id.length > 0 ? entry.id : undefined;
+    const emit = <E extends NormalizedEvent>(evt: E): void => {
+      events.push(
+        receivingAccountId ? ({ ...evt, externalAccountId: receivingAccountId } as E) : evt,
+      );
+    };
     // Call lifecycle events (Messenger Calling) ride entry.calls[], separate
     // from messaging. An entry carries one or the other.
     if (Array.isArray(entry.calls)) {
       for (const c of entry.calls) {
         const call = mapSocialCall(c);
-        if (call) events.push(call);
+        if (call) emit(call);
       }
     }
     // Business-initiated call permission opt-in reply (entry-level).
     if (entry.call_permission_reply?.response && entry.sender?.id) {
       const approved = entry.call_permission_reply.response === "approve";
-      events.push({
+      emit({
         kind: "call",
         externalCallId: `perm:${entry.sender.id}:${entry.timestamp ?? ""}`,
         externalContactId: entry.sender.id,
@@ -565,7 +579,7 @@ export function parseSocialMessaging(
       // tombstone the stored row (no new content). Checked before the echo/
       // message branches since a deleted message carries `message.mid`.
       if (m.message?.is_deleted && m.message.mid) {
-        events.push({
+        emit({
           kind: "message_correction",
           action: "delete",
           targetExternalId: m.message.mid,
@@ -580,7 +594,7 @@ export function parseSocialMessaging(
       // and the notification is parsed into nothing, leaving the agent looking
       // at text the customer has already corrected.
       if (m.message_edit?.mid && typeof m.message_edit.text === "string") {
-        events.push({
+        emit({
           kind: "message_correction",
           action: "edit",
           targetExternalId: m.message_edit.mid,
@@ -614,7 +628,7 @@ export function parseSocialMessaging(
               : !media && echoAtt
                 ? socialAttachmentLabel(echoAtt)
                 : "";
-          events.push({
+          emit({
             kind: "echo",
             externalId: mid,
             externalContactId: customerId,
@@ -637,7 +651,7 @@ export function parseSocialMessaging(
                 )
               : [];
           extraEchoMedia.forEach((extra, i) => {
-            events.push({
+            emit({
               kind: "echo",
               externalId: `${mid}:att:${i + 1}`,
               externalContactId: customerId,
@@ -742,13 +756,13 @@ export function parseSocialMessaging(
           timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
           rawPayload: m as unknown as Record<string, unknown>,
         };
-        events.push(msg);
+        emit(msg);
         // Sibling rows for the additional media in a multi-attachment message.
         // Stable derived externalId (`${mid}:att:${i}`) keeps dedup idempotent
         // across Meta's at-least-once redelivery — mirrors how WhatsApp yields
         // one row per media, so the inbox renders all N attachments.
         extraMedia.forEach((extra, i) => {
-          events.push({
+          emit({
             kind: "message",
             externalId: `${mid}:att:${i + 1}`,
             externalContactId: senderId,
@@ -784,7 +798,7 @@ export function parseSocialMessaging(
             timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
             rawPayload: m as unknown as Record<string, unknown>,
           };
-          events.push(msg);
+          emit(msg);
         }
         continue;
       }
@@ -810,7 +824,7 @@ export function parseSocialMessaging(
               ? "Started a conversation from your ad"
               : "Started a conversation from a link";
           const label = attribution.headline ? `${base} · ${attribution.headline}` : base;
-          events.push({
+          emit({
             kind: "message",
             externalId,
             externalContactId: senderId,
@@ -842,7 +856,7 @@ export function parseSocialMessaging(
           timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
           rawPayload: m as unknown as Record<string, unknown>,
         };
-        events.push(reaction);
+        emit(reaction);
         continue;
       }
       // Messenger 👍/👎 "message feedback" (`response_feedback`) is Meta's
@@ -851,7 +865,10 @@ export function parseSocialMessaging(
       // `reaction` field, handled above), so we surface it as a DISTINCT feedback
       // chip: emit `message_feedback` → ingest patches `Message.feedback` and the
       // bubble renders a separate "Helpful / Not helpful" chip. Meta delivers
-      // this on the messaging webhook without a dedicated subscription field.
+      // this on the `response_feedback` webhook field, which the Page must be
+      // SUBSCRIBED to — see PAGE_OPTIONAL_FIELDS. Subscribing is also what puts the
+      // 👍/👎 buttons in the customer's thread in the first place, so an
+      // unsubscribed Page produces neither the buttons nor this event.
       if (m.response_feedback?.mid) {
         const fb: NormalizedMessageFeedback = {
           kind: "message_feedback",
@@ -861,7 +878,7 @@ export function parseSocialMessaging(
           timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
           rawPayload: m as unknown as Record<string, unknown>,
         };
-        events.push(fb);
+        emit(fb);
         continue;
       }
       // Delivery receipt (Messenger). `message_deliveries` ALWAYS carries a
@@ -873,7 +890,7 @@ export function parseSocialMessaging(
       if (m.delivery && typeof m.delivery.watermark === "number") {
         const from = m.sender?.id;
         if (from) {
-          events.push({
+          emit({
             kind: "delivered_watermark",
             externalContactId: from,
             watermark: new Date(m.delivery.watermark),
@@ -893,11 +910,11 @@ export function parseSocialMessaging(
             timestamp: new Date(m.timestamp ?? Date.now()),
             rawPayload: m as unknown as Record<string, unknown>,
           };
-          events.push(status);
+          emit(status);
         } else if (typeof m.read.watermark === "number") {
           const from = m.sender?.id;
           if (from) {
-            events.push({
+            emit({
               kind: "read_watermark",
               externalContactId: from,
               watermark: new Date(m.read.watermark),
@@ -935,9 +952,28 @@ export function parseSocialMessaging(
 /**
  * A quoted-reply fragment for the send body — Meta social supports replying to a
  * specific message via a top-level `reply_to: { mid }`. Empty when not a reply.
+ *
+ * Dropped entirely OUTSIDE the 24h window, because Meta's Send API reference
+ * puts a precondition on this field that the messaging window itself does not
+ * have: *"The page should have received a message from the user within the last
+ * 24 hours."* The Human Agent tag buys 7 days to SEND — it does not extend
+ * `reply_to`.
+ *
+ * So the two are not independent, and getting it wrong costs the whole message:
+ * an agent quoting a specific message on a two-day-old thread — precisely the
+ * case the 24h–7d support band exists for — would have the entire send rejected
+ * instead of arriving unquoted. Losing the quote is cosmetic; losing the reply
+ * is the agent's answer never reaching the customer.
+ *
+ * `undefined` is treated as possibly-outside and drops the quote, matching how
+ * `messagingTypeFields` resolves the same unknown conservatively.
  */
-function replyToFragment(replyToExternalId?: string): { reply_to: { mid: string } } | object {
-  return replyToExternalId ? { reply_to: { mid: replyToExternalId } } : {};
+function replyToFragment(
+  replyToExternalId?: string,
+  useHumanAgentTag?: boolean,
+): { reply_to: { mid: string } } | object {
+  if (!replyToExternalId || useHumanAgentTag !== false) return {};
+  return { reply_to: { mid: replyToExternalId } };
 }
 
 /**
@@ -957,7 +993,7 @@ function messagingTypeFields(useHumanAgentTag?: boolean): object {
  * Send a text message on a Meta social channel. `accountId` is the Page id
  * (Messenger / Instagram both send via the Page); `accessToken` is the Page
  * token. Human Agent tag = valid for the 7-day support window. Quoted replies
- * are supported via `reply_to.mid`.
+ * ride on `reply_to.mid`, but only inside 24h — see `replyToFragment`.
  */
 export async function sendSocialText(
   args: SendTextArgs,
@@ -967,7 +1003,7 @@ export async function sendSocialText(
   const res = await graphPostJson(url, opts.accessToken, {
     recipient: { id: args.to },
     ...messagingTypeFields(args.useHumanAgentTag),
-    ...replyToFragment(args.replyToExternalId),
+    ...replyToFragment(args.replyToExternalId, args.useHumanAgentTag),
     message: { text: args.body },
   }, opts.appSecret);
   const messageId = typeof res.message_id === "string" ? res.message_id : "";
@@ -1025,7 +1061,7 @@ export async function sendSocialInteractive(
   const res = await graphPostJson(url, opts.accessToken, {
     recipient: { id: args.to },
     ...messagingTypeFields(args.useHumanAgentTag),
-    ...replyToFragment(args.replyToExternalId),
+    ...replyToFragment(args.replyToExternalId, args.useHumanAgentTag),
     message: { text: args.bodyText, quick_replies },
   }, opts.appSecret);
   const messageId = typeof res.message_id === "string" ? res.message_id : "";
@@ -1093,7 +1129,7 @@ export async function sendSocialMedia(
   const res = await graphPostJson(url, opts.accessToken, {
     recipient: { id: args.to },
     ...messagingTypeFields(args.useHumanAgentTag),
-    ...replyToFragment(args.replyToExternalId),
+    ...replyToFragment(args.replyToExternalId, args.useHumanAgentTag),
     message: { attachment: { type, payload } },
   }, opts.appSecret);
   const messageId = typeof res.message_id === "string" ? res.message_id : "";

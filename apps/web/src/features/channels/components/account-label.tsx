@@ -15,12 +15,19 @@ import type { Channel } from "@ccp/shared/types";
  * problem, not the duplication: an agent who learns that the grey chip means
  * "the number this arrived on" should read the same thing everywhere.
  *
- * THE VISIBILITY RULE lives here and nowhere else. Attribution is a
- * DISAMBIGUATOR: a workspace with one WhatsApp number must look exactly as it
- * did before multi-account, so this renders `null` unless the channel actually
- * holds more than one account. Centralising it means no future call site can
- * forget — which is the same reasoning that made the account resolution itself
- * a single choke point on the server.
+ * THE VISIBILITY RULE lives in `useChannelAccounts().showAccountFor` and nowhere
+ * else: the account shows from the FIRST connected account, and is hidden only
+ * when the channel has none (or the name is unknown — see `fallbackName`).
+ *
+ * It used to require a SECOND account, on the theory that attribution is purely a
+ * disambiguator. That was wrong about what the chip does: it is also how an agent
+ * learns accounts exist, so gating it until a second number appears introduced the
+ * concept at the exact moment it became load-bearing. Naming the single account
+ * from the start costs one quiet chip and means nothing changes conceptually on the
+ * day a workspace grows.
+ *
+ * Centralising it means no call site can forget — the same reasoning that made
+ * account resolution a single choke point on the server.
  */
 export function AccountLabel({
   channel,
@@ -40,8 +47,16 @@ export function AccountLabel({
    * rendering nothing there would silently re-attribute the past.
    */
   fallbackName?: string | null;
-  /** `chip` for list rows, `inline` for the "· via X" line in a header. */
-  variant?: "chip" | "inline";
+  /**
+   * `chip` for list rows, `inline` for the "· via X" line in a header, `from` for
+   * the composer.
+   *
+   * `from` is the only variant that spells the relationship out on screen instead
+   * of in the tooltip, because the composer is where it changes a decision: every
+   * other surface is describing a message that already exists, while here the agent
+   * is about to send one and needs to know which of their numbers it leaves from.
+   */
+  variant?: "chip" | "inline" | "from";
   /** How the tooltip reads. The verb differs by surface, the shape doesn't. */
   verb?: "Received on" | "Replying from" | "Sent from" | "Calling from";
   /** Thread header only: warn that this account's token is dead. */
@@ -64,6 +79,28 @@ export function AccountLabel({
       : `${verb} ${account.name}`;
 
   const display = shortenAccountName(name);
+
+  if (variant === "from") {
+    return (
+      <span
+        title={title}
+        className={cn(
+          "inline-flex shrink-0 items-center gap-1 rounded-md border border-border bg-muted/40 px-1.5 py-0.5 text-2xs",
+          className,
+        )}
+      >
+        <span className="text-muted-foreground">From</span>
+        <span
+          className={cn(
+            "font-medium",
+            disconnected ? "text-muted-foreground line-through" : "text-foreground/80",
+          )}
+        >
+          {display}
+        </span>
+      </span>
+    );
+  }
 
   if (variant === "inline") {
     return (

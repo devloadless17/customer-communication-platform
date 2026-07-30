@@ -117,6 +117,8 @@ export class SendTemplateValidationError extends Error {
     // The template belongs to a different WhatsApp Business Account than the
     // number this thread replies from. Meta rejects it with an opaque error.
     | "template_wrong_account"
+    // The sending number has no WABA linked, so it has no template catalog at all.
+    | "waba_unknown"
     | "contact_has_no_phone"
     // The workspace blocked this contact (Block Users API) — the provider
     // rejects every send to them, so refuse up front with the reason.
@@ -593,12 +595,23 @@ export async function sendTemplateInternal(
   // `send_template` step. Free: `wabaId` is already on the send config, so
   // there is no extra query.
   //
-  // `""` is the legacy/unknown-WABA sentinel on BOTH sides — treat it as "no
-  // opinion" rather than a mismatch, or every pre-multi-account template
-  // becomes unsendable.
-  const accountWaba = (sendConfig as { wabaId?: string }).wabaId ?? "";
-  const templateWaba = template.wabaId ?? "";
-  if (accountWaba && templateWaba && accountWaba !== templateWaba) {
+  // A NULL account WABA is a REFUSAL, not "no opinion". This guard used to read
+  // `accountWaba && templateWaba && accountWaba !== templateWaba`, where both
+  // sides defaulted to the `""` sentinel — so it silently passed whenever either
+  // side was unknown. Two real holes followed from that: a legacy template was
+  // sendable from ANY account, and a connection whose WABA was never pasted could
+  // send ANY of the workspace's templates. The template side is now a NOT NULL FK,
+  // so only the account side can be absent, and that is refused explicitly.
+  const accountWabaAccountId = (sendConfig as { wabaAccountId?: string }).wabaAccountId;
+  if (!accountWabaAccountId) {
+    throw new SendTemplateValidationError(
+      "waba_unknown",
+      "sending number has no WhatsApp Business Account linked",
+      "The number this conversation replies from has no WhatsApp Business Account " +
+        "linked, so it has no template catalog. Add its WABA ID in WhatsApp settings.",
+    );
+  }
+  if (accountWabaAccountId !== template.wabaAccountId) {
     throw new SendTemplateValidationError(
       "template_wrong_account",
       "template belongs to a different WhatsApp Business Account",
@@ -683,6 +696,13 @@ export async function sendTemplateInternal(
     direction: "out",
     channel: provider,
     status: "sent",
+    // Durable template marker. `rawPayload.templateName` below is kept for
+    // back-compat, but the rawPayload-retention sweeper COLLAPSES that blob — the
+    // same reason `broadcastId` became a real column. This one makes the portfolio
+    // 24h messaging budget honest: a template sent from the composer, a workflow or
+    // `/v1` spends Meta's real budget, and before this column the gate counted only
+    // broadcast recipients and so under-reported.
+    templateName: template.name,
     rawPayload: {
       sentVia: args.sentVia,
       // Portfolio/template pacing: Meta accepted this send but is HOLDING it

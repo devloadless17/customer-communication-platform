@@ -54,6 +54,7 @@ import { CHANNEL_CAPABILITIES, supportsInlineCaption } from "@ccp/shared/provide
 import { mediaSizeCap, channelSupportsMediaKind } from "@ccp/shared/providers/media-caps";
 import { CHANNEL_LABEL } from "./channel-badge";
 import { useChannelAccounts } from "@/features/channels/contexts/channel-accounts-context";
+import { AccountLabel } from "@/features/channels/components/account-label";
 import type { Channel } from "@ccp/shared/types";
 import { resolveFieldTokens } from "@ccp/shared/field-tokens";
 import { useNow } from "@/hooks/use-now";
@@ -1561,6 +1562,21 @@ function ReplyBoxImpl({
             <ToggleButton active={mode === "note"} onClick={() => switchMode("note")} icon={StickyNote} label="Note" />
           </div>
           {!isNote && <WindowBadgeFromStatus status={windowStatus} size="sm" />}
+          {/* WHICH ACCOUNT this reply leaves from. The thread header already says
+              which account the conversation arrived on, but the composer is where
+              it changes a decision — the agent is choosing to send, and on a
+              multi-number workspace "which number does the customer see" was
+              readable nowhere near the Send button. Notes never leave the product,
+              so they get no origin. Renders nothing when the channel has a single
+              account (AccountLabel owns that rule). */}
+          {!isNote && (
+            <AccountLabel
+              channel={channel}
+              accountId={channelConnectionId}
+              variant="from"
+              verb="Replying from"
+            />
+          )}
           {!isNote && windowClosed && caps.templates && (
             <Button
               type="button"

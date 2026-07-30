@@ -26,6 +26,7 @@ import { createTestPrismaClient } from "./_prisma";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { setSharedDb } from "@/lib/db";
+import { seedWabaAccount } from "./_waba";
 
 vi.mock("@/lib/providers/meta-graph", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/providers/meta-graph")>();
@@ -122,7 +123,8 @@ beforeAll(async () => {
         externalAccountId: PHONE_A,
         isDefault: true,
         isActive: true,
-        config: { phoneNumberId: PHONE_A, wabaId: WABA },
+        wabaAccountId: await seedWabaAccount(prisma, workspaceId, WABA),
+        config: { phoneNumberId: PHONE_A },
         secrets: { accessToken: `${S}_token` },
       },
       select: { id: true },
@@ -135,7 +137,8 @@ beforeAll(async () => {
         channel: "whatsapp",
         externalAccountId: PHONE_B,
         isActive: true,
-        config: { phoneNumberId: PHONE_B, wabaId: WABA },
+        wabaAccountId: await seedWabaAccount(prisma, workspaceId, WABA),
+        config: { phoneNumberId: PHONE_B },
         secrets: { accessToken: `${S}_token` },
       },
       select: { id: true },
@@ -163,11 +166,19 @@ describe("fetchWhatsappHealthFromGraph per account", () => {
     const [a, b] = await Promise.all([
       prisma.channelConnection.findUniqueOrThrow({
         where: { id: connA },
-        select: { qualityRating: true, throughputLevel: true, portfolioId: true },
+        select: {
+          qualityRating: true,
+          throughputLevel: true,
+          wabaAccount: { select: { portfolioId: true } },
+        },
       }),
       prisma.channelConnection.findUniqueOrThrow({
         where: { id: connB },
-        select: { qualityRating: true, throughputLevel: true, portfolioId: true },
+        select: {
+          qualityRating: true,
+          throughputLevel: true,
+          wabaAccount: { select: { portfolioId: true } },
+        },
       }),
     ]);
     expect(b.qualityRating).toBe("GREEN");
@@ -178,9 +189,9 @@ describe("fetchWhatsappHealthFromGraph per account", () => {
     expect(a.throughputLevel).toBeNull();
 
     // Portfolio discovery ran for the POLLED connection's WABA.
-    expect(b.portfolioId).not.toBeNull();
+    expect(b.wabaAccount?.portfolioId).not.toBeNull();
     const portfolio = await prisma.whatsappPortfolio.findUniqueOrThrow({
-      where: { id: b.portfolioId! },
+      where: { id: b.wabaAccount!.portfolioId! },
       select: { externalPortfolioId: true, messagingTier: true, messagingDailyCap: true },
     });
     expect(portfolio.externalPortfolioId).toBe(PORTFOLIO);

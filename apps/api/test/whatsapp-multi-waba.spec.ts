@@ -22,9 +22,12 @@ import { createTestPrismaClient } from "./_prisma";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { setSharedDb } from "@/lib/db";
+import { seedWabaAccount } from "./_waba";
+
 import { encryptSecret } from "@/lib/crypto/envelope";
 import { invalidateMetaConnection } from "@/lib/providers/meta-connection";
 import { WhatsappService } from "@/workspace-settings/whatsapp/whatsapp.service";
+import { UpdateWhatsappConfigSchema } from "@/workspace-settings/whatsapp/whatsapp.schemas";
 import type { DbService } from "@/db/db.service";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
@@ -101,10 +104,10 @@ async function mkConn(phoneNumberId: string, wabaId: string, isDefault: boolean)
         workspaceId,
         channel: "whatsapp",
         externalAccountId: phoneNumberId,
-        wabaId,
+        wabaAccountId: await seedWabaAccount(prisma, workspaceId, wabaId),
         isDefault,
         isActive: true,
-        config: { phoneNumberId, wabaId, verifyToken: `${S}_vt` },
+        config: { phoneNumberId, verifyToken: `${S}_vt` },
         secrets: {},
       },
       select: { id: true },
@@ -161,12 +164,14 @@ describe("wabaId is per-account on re-save", () => {
           externalAccountId: PHONE_B,
         },
       },
-      select: { wabaId: true, config: true },
+      select: { wabaAccount: { select: { externalWabaId: true } }, config: true },
     });
     // The bug stamped WABA_A here (or threw, once the ownership guard noticed
     // WABA_A doesn't own PHONE_B).
-    expect(b.wabaId).toBe(WABA_B);
-    expect((b.config as { wabaId?: string }).wabaId).toBe(WABA_B);
+    expect(b.wabaAccount?.externalWabaId).toBe(WABA_B);
+    // The duplicate `config.wabaId` copy is GONE — the FK is the single authority,
+    // so the loader joins it instead of reading a JSON copy that could drift.
+    expect((b.config as { wabaId?: string }).wabaId).toBeUndefined();
   });
 
   it("leaves the default number's WABA alone", async () => {
@@ -178,15 +183,34 @@ describe("wabaId is per-account on re-save", () => {
           externalAccountId: PHONE_A,
         },
       },
-      select: { wabaId: true },
+      select: { wabaAccount: { select: { externalWabaId: true } } },
     });
-    expect(a.wabaId).toBe(WABA_A);
+    expect(a.wabaAccount?.externalWabaId).toBe(WABA_A);
   });
 
-  it("an explicit empty wabaId still CLEARS it (optional-update semantics)", async () => {
-    stubGraph();
+  it("REFUSES an empty wabaId at the request boundary — it can't be cleared", async () => {
+    // Deliberate behaviour change. `wabaId` used to have optional-update semantics
+    // where `""` meant "clear the column", and a WABA-less number was then a
+    // no-opinion case that could send ANY template in the workspace (the guard only
+    // refused when both sides were known and differed). Templates are WABA-scoped
+    // in Meta, so a number with no WABA has no catalog: the field is now required
+    // and there is no way to unset it.
+    const parsed = UpdateWhatsappConfigSchema.safeParse({
+      phoneNumberId: PHONE_B,
+      wabaId: "",
+    });
+    expect(parsed.success).toBe(false);
+    expect(
+      UpdateWhatsappConfigSchema.safeParse({ phoneNumberId: PHONE_B }).success,
+    ).toBe(false);
+  });
 
-    await service.updateConfig(workspaceId, { phoneNumberId: PHONE_B, wabaId: "" });
+  it("a re-save that OMITS wabaId keeps the row's own (service level)", async () => {
+    // The service still applies "leave unchanged" for internal callers such as
+    // `MetaService.resyncChannels`; what changed is that the HTTP boundary won't
+    // let a human omit it.
+    stubGraph();
+    await service.updateConfig(workspaceId, { phoneNumberId: PHONE_B, wabaId: WABA_B });
 
     const b = await prisma.channelConnection.findUniqueOrThrow({
       where: {
@@ -196,8 +220,8 @@ describe("wabaId is per-account on re-save", () => {
           externalAccountId: PHONE_B,
         },
       },
-      select: { wabaId: true },
+      select: { wabaAccount: { select: { externalWabaId: true } } },
     });
-    expect(b.wabaId).toBeNull();
+    expect(b.wabaAccount?.externalWabaId).toBe(WABA_B);
   });
 });

@@ -4,6 +4,7 @@ import { createContext, useContext, useMemo } from "react";
 
 import type { ChannelAccountDirectoryEntry } from "@/lib/api/queries";
 import type { Channel } from "@ccp/shared/types";
+import { accountVisibility } from "@/features/channels/lib/account-visibility";
 
 /**
  * Which of the workspace's channel accounts a conversation belongs to.
@@ -29,18 +30,32 @@ import type { Channel } from "@ccp/shared/types";
  * matters most. Contacts, calls, templates and broadcasts previously each
  * refetched the same rows for the same reason.
  *
- * `showAccountFor(channel)` is the important part of the contract. A workspace
- * with ONE WhatsApp number must look exactly as it does today: attribution is a
- * disambiguator, and rendering "+1 555 010 0000" on every row when there is
- * nothing to disambiguate is noise. So the chip appears only once a channel
- * actually holds more than one account.
+ * `showAccountFor(channel)` is the important part of the contract: attribution
+ * shows from the FIRST connected account, not the second. The chip is not only a
+ * disambiguator — it is how an agent learns that accounts exist at all, and
+ * introducing it at the moment a second number appears is introducing it at the
+ * moment it is hardest to learn. It stays hidden only when a channel has NO
+ * accounts, where there is nothing to name.
  */
 interface ChannelAccountsValue {
   byId: Map<string, ChannelAccountDirectoryEntry>;
   /** Every account, in the server's order (default first, then oldest). */
   all: ChannelAccountDirectoryEntry[];
-  /** True when `channel` has more than one connected account. */
+  /**
+   * NAME the account: true when `channel` has at least one connected account.
+   * For attribution — "which of my numbers is this".
+   */
   showAccountFor: (channel: Channel | undefined) => boolean;
+  /**
+   * Offer a CHOICE between accounts: true only when `channel` has more than one.
+   *
+   * Distinct from `showAccountFor` on purpose. Naming the single number an agent
+   * works on is informative; offering a one-entry "pick an account" filter is
+   * clutter. These were one predicate, so relaxing attribution to show from the
+   * first account would also have grown a pointless one-item filter in the inbox
+   * sidebar — two different questions that only coincidentally had the same answer.
+   */
+  hasMultipleFor: (channel: Channel | undefined) => boolean;
   /** The account for a conversation, or null when unknown/not worth showing. */
   accountFor: (
     channel: Channel | undefined,
@@ -59,11 +74,13 @@ const EMPTY: ChannelAccountsValue = {
   byId: new Map(),
   all: [],
   showAccountFor: () => false,
+  hasMultipleFor: () => false,
   accountFor: () => null,
   failed: false,
 };
 
 const ChannelAccountsContext = createContext<ChannelAccountsValue>(EMPTY);
+
 
 export function ChannelAccountsProvider({
   accounts,
@@ -77,16 +94,12 @@ export function ChannelAccountsProvider({
 }) {
   const value = useMemo<ChannelAccountsValue>(() => {
     const byId = new Map(accounts.map((a) => [a.id, a]));
-    const perChannel = new Map<string, number>();
-    for (const a of accounts) {
-      perChannel.set(a.channel, (perChannel.get(a.channel) ?? 0) + 1);
-    }
-    const showAccountFor = (channel: Channel | undefined) =>
-      channel ? (perChannel.get(channel) ?? 0) > 1 : false;
+    const { showAccountFor, hasMultipleFor } = accountVisibility(accounts);
     return {
       byId,
       all: accounts,
       showAccountFor,
+      hasMultipleFor,
       accountFor: (channel, channelConnectionId) => {
         if (!channelConnectionId || !showAccountFor(channel)) return null;
         return byId.get(channelConnectionId) ?? null;

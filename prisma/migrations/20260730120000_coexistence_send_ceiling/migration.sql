@@ -1,0 +1,18 @@
+-- Coexistence numbers have a FIXED 20 messages/second ceiling.
+--
+-- Meta's throughput doc: a WhatsApp Business **app** number used with Cloud API
+-- simultaneously is capped at 20 mps — a fixed figure, NOT part of the 80 (default)
+-- / 1,000 (upgraded) ladder that `throughput.level` reports for every other number.
+--
+-- Nothing recorded which numbers those are, so the broadcast runner paced them off
+-- `throughput.level` like any other number: 75/s at STANDARD, or 40/s when
+-- throughput is unknown. Both are multiples of the real ceiling, so a campaign on a
+-- Coexistence number earned sustained 130429s and dragged down the quality rating of
+-- precisely the fragile numbers Coexistence exists to serve — a small business's own
+-- handset, still receiving personal traffic on the same line.
+--
+-- Per-NUMBER, like `throughput`/`qualityRating` and unlike the messaging limit
+-- (portfolio) or the template catalog (WABA). Nullable: null means "not polled yet",
+-- treated as not-coexistence because the ordinary ladder is the common case and the
+-- unknown-throughput baseline already errs slow.
+ALTER TABLE "ChannelConnection" ADD COLUMN "isOnBusinessApp" BOOLEAN;

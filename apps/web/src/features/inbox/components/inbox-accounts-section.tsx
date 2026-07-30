@@ -28,14 +28,16 @@ import { cn } from "@ccp/shared/utils";
  * not clear "Unassigned". They answer different questions and compose.
  */
 export function InboxAccountsSection() {
-  const { byId, showAccountFor } = useChannelAccounts();
+  const { byId, hasMultipleFor } = useChannelAccounts();
   const { accountId, setAccountId } = useInboxFilter();
   const [open, setOpen] = useState(true);
 
   const accounts = [...byId.values()]
     // Only channels that genuinely have several accounts — an Instagram handle
     // sitting alone alongside two WhatsApp numbers is not a choice worth making.
-    .filter((a) => showAccountFor(a.channel))
+    // `hasMultipleFor`, NOT `showAccountFor`: attribution now names even a single
+    // account, but a one-entry filter is still clutter.
+    .filter((a) => hasMultipleFor(a.channel))
     .sort((a, b) =>
       a.channel === b.channel ? a.name.localeCompare(b.name) : a.channel.localeCompare(b.channel),
     );
