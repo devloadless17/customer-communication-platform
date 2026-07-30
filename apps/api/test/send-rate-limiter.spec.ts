@@ -41,6 +41,25 @@ async function take(key: string, rate: number, capacity: number): Promise<number
   return Number(await redis.eval(ACQUIRE_LUA, 1, key, String(rate), String(capacity)));
 }
 
+/**
+ * Rate used by the TIMING tests, deliberately SLOW.
+ *
+ * These drain a bucket with a few sequential `take`s — each a real Redis
+ * round-trip — then assert the next one has to WAIT. That only holds if less
+ * than one refill interval passes while draining. At 100/s the interval is
+ * 10ms, which a loaded CI runner blows straight through between round-trips:
+ * the bucket quietly refills a token, the "must wait" take is granted
+ * instantly, and the test dies on `expected 0 to be greater than 0`.
+ *
+ * That is not hypothetical — it failed the `unit` job on 2026-07-30 and, since
+ * `ship` needs `unit`, it blocked a deploy of an otherwise green tree.
+ *
+ * 4/s = 250ms per token, which no handful of local Redis calls will outrun.
+ * Do NOT raise it to make these tests faster: the speed IS the bug.
+ */
+const SLOW_RATE = 4;
+const SLOW_REFILL_MS = 1000 / SLOW_RATE;
+
 beforeAll(async () => {
   await redis.del(KEY, OTHER);
 });
@@ -81,26 +100,28 @@ describe("the bucket limits", () => {
 
   it("refills at the configured rate", async () => {
     const capacity = 2;
-    // Drain.
-    await take(KEY, 100, capacity);
-    await take(KEY, 100, capacity);
-    expect(await take(KEY, 100, capacity)).toBeGreaterThan(0);
+    // Drain. SLOW_RATE so draining cannot outrun the refill — see its docblock.
+    await take(KEY, SLOW_RATE, capacity);
+    await take(KEY, SLOW_RATE, capacity);
+    expect(await take(KEY, SLOW_RATE, capacity)).toBeGreaterThan(0);
 
-    // At 100/s a token appears in ~10ms. Wait generously and confirm it granted
-    // — a bucket that limits but never refills would stall a campaign forever,
-    // which is worse than not limiting at all.
-    await new Promise((r) => setTimeout(r, 120));
-    expect(await take(KEY, 100, capacity)).toBe(0);
+    // One refill interval later a token exists again. A bucket that limits but
+    // never refills would stall a campaign forever, which is worse than not
+    // limiting at all.
+    await new Promise((r) => setTimeout(r, SLOW_REFILL_MS + 80));
+    expect(await take(KEY, SLOW_RATE, capacity)).toBe(0);
   });
 
   it("tells you HOW LONG to wait, sized to the rate", async () => {
     const capacity = 1;
-    await take(KEY, 10, capacity); // drain
-    const wait = await take(KEY, 10, capacity);
-    // At 10/s one token is 100ms. Allow slack for the elapsed time between the
-    // two calls; what matters is the order of magnitude, not the exact value.
+    await take(KEY, SLOW_RATE, capacity); // drain
+    const wait = await take(KEY, SLOW_RATE, capacity);
+    // The reported wait is bounded by one refill interval. Same slow rate as
+    // above and for the same reason: at 10/s the 100ms interval was only just
+    // wider than two Redis round-trips, so this had the same latent flake.
+    // What matters is the order of magnitude, not the exact value.
     expect(wait).toBeGreaterThan(0);
-    expect(wait).toBeLessThanOrEqual(100);
+    expect(wait).toBeLessThanOrEqual(SLOW_REFILL_MS);
   });
 });
 
