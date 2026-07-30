@@ -46,9 +46,14 @@ import { NextResponse } from "next/server";
  * One pilot tenant + a 30-day window to confirm every Meta subscription
  * is on the new /webhooks/meta/{workspaceId} URL. After the deadline:
  *
- *   1. Confirm zero hits to this route in the access logs for the prior 7d
- *      (`grep '/api/webhooks/meta/' /var/log/caddy/access.log` or whatever
- *      log path the deploy is shipping).
+ *   1. Confirm zero hits for the prior 7d. As of 2026-07-30 you no longer need
+ *      Caddy logs for this: every arrival now logs `meta.legacy_webhook_proxy_hit`
+ *      at WARN from the web container, naming the workspace. So
+ *      `grep meta.legacy_webhook_proxy_hit` over the app logs answers it, and
+ *      silence for a week IS the evidence. (The Caddy grep still works:
+ *      `grep '/api/webhooks/meta/' /var/log/caddy/access.log`.)
+ *      This was added because the deadline had already slipped TWICE on nobody
+ *      having the logs to hand — the check now gathers itself.
  *   2. Delete this file.
  *   3. Delete the `/api/webhooks/meta/*` handle block in
  *      `deploy/Caddyfile.template`.
@@ -209,12 +214,48 @@ interface RouteContext {
   params: Promise<{ workspaceId: string }>;
 }
 
+/**
+ * Every arrival here is newsworthy, so say so in the log.
+ *
+ * The deletion decision has now stalled twice on the same question — "is anything
+ * still pointing at this URL?" — because answering it required grepping prod Caddy
+ * access logs, which nobody had to hand at the moment the deadline came round. That
+ * made the deadline slip silently, twice.
+ *
+ * This flips it from a question you have to go and ask into a fact that announces
+ * itself. A single line at WARN with a stable, greppable event name means:
+ *   - if the logs are silent for a week, the log check is DONE — that is the
+ *     evidence step 1 of the checklist below asks for, gathered passively;
+ *   - if it fires, you immediately know the workspace and can go flip that
+ *     subscription, which is the action the policy note asks for anyway.
+ *
+ * Deliberately not rate-limited: this route should receive nothing, so volume here
+ * is itself the signal. If it ever becomes noisy, that is the answer, not a reason
+ * to quieten it.
+ */
+function reportLegacyHit(workspaceId: string | undefined, method: string): void {
+  console.warn(
+    JSON.stringify({
+      event: "meta.legacy_webhook_proxy_hit",
+      severity: "warning",
+      method,
+      workspaceId: workspaceId ?? null,
+      note:
+        "A Meta subscription STILL points at the legacy /api/webhooks/meta/ path. " +
+        "Flip it to /webhooks/meta/{workspaceId} in the App Dashboard; this proxy " +
+        "is scheduled for deletion.",
+    }),
+  );
+}
+
 export async function GET(req: Request, ctx: RouteContext): Promise<Response> {
   const { workspaceId } = await ctx.params;
+  reportLegacyHit(workspaceId, "GET");
   return forward(req, workspaceId, "GET");
 }
 
 export async function POST(req: Request, ctx: RouteContext): Promise<Response> {
   const { workspaceId } = await ctx.params;
+  reportLegacyHit(workspaceId, "POST");
   return forward(req, workspaceId, "POST");
 }
