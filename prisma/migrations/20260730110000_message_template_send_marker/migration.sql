@@ -24,8 +24,12 @@ CREATE INDEX "Message_channelConnectionId_idx" ON "Message"("channelConnectionId
 -- which stays authoritative for them — see the union in `recentUniqueRecipientIds`).
 -- Prisma's DSL cannot express a WHERE clause, so this lives in raw SQL and is
 -- therefore INVISIBLE to `migrate diff` and `check:prisma-fields`. It is mirrored
--- in the hand-maintained section of `0_init/migration.sql` and asserted by
--- `apps/api/test/partial-indexes.spec.ts` — keep all three in lockstep.
+-- asserted by `apps/api/test/partial-indexes.spec.ts` — keep both in lockstep.
+--
+-- Deliberately NOT mirrored into `0_init`'s hand-maintained section, unlike the
+-- other raw partial indexes: both columns it references are added HERE, so a copy
+-- in the baseline runs before they exist and fails a fresh database outright
+-- (P3018 / 42703). See the note left in its place at the bottom of 0_init.
 CREATE INDEX "Message_template_send_budget_idx"
   ON "Message" ("channelConnectionId", "createdAt" DESC)
   WHERE ("direction" = 'out' AND "templateName" IS NOT NULL AND "broadcastId" IS NULL);

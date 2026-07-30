@@ -128,6 +128,28 @@ import { DbService } from "../../db/db.service";
 import { WebhookRateLimitGuard } from "../webhook-rate-limit.guard";
 
 /**
+ * The raw request bytes, for HMAC verification.
+ *
+ * Express's `Request` has no `rawBody` — `main.ts` attaches it from the
+ * body-parser `verify` hook, because the signature must be checked against the
+ * EXACT bytes Meta signed, not a re-serialisation of the parsed body.
+ *
+ * One accessor instead of the same cast at four call sites. That is the
+ * double-assertion ratchet's actual point: the 4th copy arrived with the
+ * app-level webhook route and tripped CI, and the honest fix is to name the
+ * contract once rather than raise the baseline. `unknown` in, so this is a single
+ * assertion — there is no lying about a type we genuinely add at runtime.
+ */
+interface RequestWithRawBody {
+  rawBody?: Buffer;
+}
+
+function rawBodyOf(req: unknown): Buffer | undefined {
+  return (req as RequestWithRawBody).rawBody;
+}
+
+
+/**
  * Per-team Meta WhatsApp Cloud API webhook.
  *
  *   GET  /webhooks/meta/:workspaceId   → one-time subscription verify challenge
@@ -252,7 +274,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     const channel = channelForMetaObject(req.body);
     if (!channel) return { ok: true, ingested: 0, dropped: "unsupported_object" };
 
-    const rawBody = (req as unknown as { rawBody?: Buffer }).rawBody;
+    const rawBody = rawBodyOf(req);
     if (!rawBody) {
       this.logger.error(
         "[app-level] webhook missing rawBody — returning 200 to avoid retry storm",
@@ -382,7 +404,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     // captures req.rawBody on every JSON-parsed request. Without it,
     // JSON.stringify(req.body) would silently invalidate the HMAC on any
     // whitespace difference.
-    const rawBody = (req as unknown as { rawBody?: Buffer }).rawBody;
+    const rawBody = rawBodyOf(req);
     if (!rawBody) {
       // Fail SOFT — Meta retries on any non-2xx and a 500 here would put
       // us in an infinite retry storm if a future middleware reordering
@@ -655,7 +677,7 @@ export class MetaWebhookController implements OnModuleDestroy {
     const config = await getWebhookConfig(workspaceId);
     if (!config) throw webhookForbidden(this.logger, workspaceId, channel, req, "no_config");
 
-    const rawBody = (req as unknown as { rawBody?: Buffer }).rawBody;
+    const rawBody = rawBodyOf(req);
     if (!rawBody) {
       this.logger.error(
         `[${workspaceId}] ${channel} webhook missing rawBody — returning 200 to avoid retry storm`,
@@ -1690,7 +1712,7 @@ function webhookForbidden(
         ? "no webhook config for this team+channel."
         : "Meta sent no signature header.";
   logger.warn(`[${workspaceId}] ${channel} webhook 403 — ${reason} (object=${objectType}): ${hint}`);
-  const rawBody = (req as unknown as { rawBody?: Buffer }).rawBody;
+  const rawBody = rawBodyOf(req);
   if (rawBody) wireIn(`${channel} REJECTED (${reason})`, rawBody.toString("utf8"));
   return new HttpException("forbidden", 403);
 }

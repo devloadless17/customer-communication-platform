@@ -2675,7 +2675,20 @@ CREATE UNIQUE INDEX "InboxView_shared_name_key" ON public."InboxView" USING btre
 CREATE INDEX "Message_broadcastId_idx" ON public."Message" USING btree ("broadcastId") WHERE ("broadcastId" IS NOT NULL);
 CREATE INDEX "Message_conversationId_timestamp_inbound_idx" ON public."Message" USING btree ("conversationId", "timestamp" DESC) WHERE (direction = 'in'::"MessageDirection");
 CREATE INDEX "Message_inbound_media_pending_idx" ON public."Message" USING btree ("createdAt") WHERE ((direction = 'in'::"MessageDirection") AND ("mediaKind" IS NOT NULL) AND ("mediaUrl" IS NULL));
-CREATE INDEX "Message_template_send_budget_idx" ON public."Message" USING btree ("channelConnectionId", "createdAt" DESC) WHERE ((direction = 'out'::"MessageDirection") AND ("templateName" IS NOT NULL) AND ("broadcastId" IS NULL));
+-- NOT MIRRORED HERE ON PURPOSE: "Message_template_send_budget_idx".
+--
+-- The rule for this section is that it carries raw partial/expression indexes so a
+-- regenerated baseline does not silently drop them. That rule only holds for an
+-- index whose COLUMNS exist in this baseline. This one depends on
+-- Message."channelConnectionId" and Message."templateName", both of which are added
+-- by LATER migrations, so mirroring it here made `0_init` fail on any FRESH database
+-- with `P3018 / 42703: column "templateName" does not exist` — while every already-
+-- migrated database (including every dev box) sailed past, because 0_init never
+-- re-runs there. CI was the first fresh apply and caught it.
+--
+-- It lives solely in 20260730110000_message_template_send_marker, immediately after
+-- the ALTER that adds the column, and is asserted by partial-indexes.spec.ts. Fold
+-- it in here only if this baseline is ever regenerated to include those columns.
 CREATE INDEX "Organization_isPlatform_idx" ON public."Organization" USING btree ("isPlatform") WHERE "isPlatform";
 CREATE INDEX "OutboundEvent_drainer_pending_idx" ON public."OutboundEvent" USING btree ("createdAt") WHERE (("publishedAt" IS NULL) AND ("failedAt" IS NULL));
 CREATE INDEX "OutboundEvent_retention_idx" ON public."OutboundEvent" USING btree ("publishedAt") WHERE (("publishedAt" IS NOT NULL) AND ("failedAt" IS NULL));
