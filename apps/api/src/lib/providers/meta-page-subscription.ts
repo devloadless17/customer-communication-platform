@@ -57,11 +57,12 @@ export const PAGE_MESSAGING_FIELDS = [
  * ignores can't raise a permanent false warning on the settings page.
  *
  *  - `calls`          — Messenger Calling (`entry.calls[]`).
- *  - `messaging_seen` — Instagram's read receipt. Messenger delivers reads on
- *    `message_reads`; Instagram has no such field and uses this one instead. Both
- *    land on `entry.messaging[].read` and are parsed by the same branch, but
- *    without this subscription Instagram read receipts never arrive at all,
- *    despite `CHANNEL_CAPABILITIES.instagram.readReceipts === true`.
+ *  - `call_permission_reply` — the customer's answer to a Messenger call-permission
+ *    request (`entry.call_permission_reply`). The parser has produced
+ *    permission_granted / permission_revoked call events from it for a while, but
+ *    the field was in NEITHER array, so — exactly like `response_feedback` below —
+ *    the branch was unreachable and the replies never arrived. Confirmed a real
+ *    `page` field by `devtools_webhook_list{list_topics}` (2026-07-30).
  *  - `response_feedback` — Messenger's built-in 👍/👎 rating of a business
  *    message. The parser has produced `message_feedback` from it for a while, but
  *    the field was never subscribed, so the branch was unreachable. Meta's
@@ -75,7 +76,27 @@ export const PAGE_MESSAGING_FIELDS = [
  *    Instagram-only Page rejecting it must not take the core `messages`
  *    subscription down with it.
  */
-export const PAGE_OPTIONAL_FIELDS = ["calls", "messaging_seen", "response_feedback"] as const;
+/**
+ * NOTE on `messaging_seen`, removed here 2026-07-30. It is NOT a `page` field —
+ * `devtools_webhook_list{list_topics}` returns 69 fields for `page`, including
+ * `message_reads` and NOT `messaging_seen`; `messaging_seen` is a field on the
+ * separate app-level `instagram` topic (own universe, own callback, own field set),
+ * and our own dev app's live subscriptions confirm the split from the other side.
+ *
+ * So the docblock above used to justify it with something factually wrong —
+ * Instagram read receipts are not obtainable by subscribing a Page to it, and
+ * POSTing an unknown field risks the whole optional apply being rejected, which
+ * would silently take `calls` and `response_feedback` down with it.
+ *
+ * Instagram read receipts really do depend on the app-level `instagram` topic
+ * subscription, which nothing in this repo asserts or health-checks — tracked
+ * separately; it is a dashboard-managed gate, not a `subscribed_apps` call.
+ */
+export const PAGE_OPTIONAL_FIELDS = [
+  "calls",
+  "call_permission_reply",
+  "response_feedback",
+] as const;
 
 export interface PageSubscriptionStatus {
   /** Fields the app is currently subscribed to for this Page. */

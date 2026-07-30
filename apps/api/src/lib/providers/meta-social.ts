@@ -158,9 +158,19 @@ interface MessagingEvent {
     // messaging event. Read both so IG's "from your ad" attribution isn't lost.
     referral?: SocialReferral;
   };
-  // The customer EDITED a message (`message_edits` field). MESSENGER ONLY —
-  // Instagram ships no edit webhook, so an IG message's text is immutable once
-  // received. Carries the new text for an existing `mid`.
+  // The customer EDITED a message. Carries the new text for an existing `mid`.
+  //
+  // BOTH channels ship this, under DIFFERENT field names — corrected 2026-07-30
+  // against `devtools_webhook_list{list_topics}`: the `page` topic carries
+  // `message_edits` (plural) and the `instagram` topic carries `message_edit`
+  // (singular), and our dev app subscribes both. The note here previously said
+  // "MESSENGER ONLY — Instagram ships no edit webhook, so an IG message's text is
+  // immutable once received", which would have led the next reader to delete the
+  // IG path. The branch itself is object-agnostic, so IG edits already parse fine.
+  //
+  // The singular/plural split is a general trap on these two topics: `page` also
+  // has `messaging_handovers`/`messaging_referrals` where `instagram` has
+  // `messaging_handover`/`messaging_referral`.
   message_edit?: { mid?: string; text?: string; num_edit?: number };
   delivery?: { mids?: string[]; watermark?: number };
   // Messenger sends a `watermark` (all outbound up to it are read); Instagram
@@ -573,7 +583,36 @@ export function parseSocialMessaging(
         }),
       );
     }
-    if (!Array.isArray(entry.messaging)) continue;
+    if (!Array.isArray(entry.messaging)) {
+      // Some subscribed topics arrive as `entry[].changes[]`, not
+      // `entry[].messaging[]` — on Instagram that is `comments`,
+      // `live_comments`, `mentions` and `story_insights`. They bailed out here
+      // with NO trace at all, because the `unhandled_messaging` warn below lives
+      // INSIDE the messaging loop and is therefore unreachable for them. The
+      // WhatsApp path warns on an unknown `field`; this one did not, so the two
+      // channels had asymmetric observability and four subscribed IG topics
+      // vanished silently.
+      //
+      // Warn rather than parse: none of those four is a MESSAGE, so there is
+      // nothing for a shared inbox to ingest. This exists so "subscribed but
+      // unhandled" is visible instead of indistinguishable from "never sent".
+      const changes = (entry as { changes?: unknown[] }).changes;
+      if (Array.isArray(changes) && changes.length > 0) {
+        console.warn(
+          JSON.stringify({
+            event: "social.unhandled_changes_entry",
+            severity: "warning",
+            channel: expectedObject,
+            entryId: (entry as { id?: string }).id ?? null,
+            fields: changes
+              .map((c) => (c as { field?: string } | null)?.field ?? null)
+              .filter((f): f is string => typeof f === "string"),
+            note: "topic delivers entry[].changes[], not entry[].messaging[] — subscribed but not ingested",
+          }),
+        );
+      }
+      continue;
+    }
     for (const m of entry.messaging) {
       // Unsend: the customer deleted a message. References an existing mid;
       // tombstone the stored row (no new content). Checked before the echo/

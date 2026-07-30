@@ -141,6 +141,74 @@ const GRAPH_BASE = process.env.META_GRAPH_BASE_URL || "https://graph.facebook.co
 const TEMPLATE_LIST_MAX_PAGES = 40;
 
 /**
+ * `whatsapp_business_account` webhook fields we KNOW about and deliberately do
+ * not consume, so `parseWebhook` drops them without a warn.
+ *
+ * The warn exists to surface a field Meta newly starts sending. Our apps were
+ * subscribed to 13 fields with no handler (confirmed via
+ * `devtools_webhook_list{list_topics}`, 2026-07-30), so it fired on nearly every
+ * delivery and had stopped being a signal. Silencing the known set restores it.
+ *
+ * Each entry is a per-topic decision made against its own doc page:
+ *
+ *   Genuinely irrelevant to a shared inbox — no entity here to keep fresh:
+ *     `automatic_events`          CTWA conversion telemetry; needs a Meta-Suite
+ *                                 opt-in we never ask for, and we model no
+ *                                 conversion.
+ *     `flows`                     health/status of WhatsApp Flows ASSETS. We ship
+ *                                 no Flows builder. (A user's Flow *response*
+ *                                 arrives on `messages` and IS handled.)
+ *     `partner_solutions`         Multi-Partner Solution lifecycle on the
+ *                                 PARTNER's portfolio. We are not one.
+ *     `payment_configuration_update`  India Payments only; no payment config
+ *                                 modelled. Trap if ever implemented: its enum is
+ *                                 Title Case with a space, not SCREAMING_SNAKE.
+ *
+ *   Groups — a deliberate non-feature (group inbounds are already dropped by
+ *   `group_id` gate). Kept subscribed so the metadata is flowing the day a pilot
+ *   asks for it:
+ *     `group_lifecycle_update` · `group_participants_update`
+ *     `group_settings_update`  · `group_status_update`
+ *
+ *   No WhatsApp payload documented anywhere — only Messenger's shape exists, and
+ *   WhatsApp has no thread ownership to hand over ("all parties the phone number
+ *   is shared with receive incoming webhooks"). Implementing off the Messenger
+ *   shape would be guessing at a wire format:
+ *     `messaging_handovers` · `standby`
+ *
+ *   Not findable as documented WhatsApp fields at all, despite being subscribable.
+ *   Recorded here rather than parsed on a guess:
+ *     `template_correct_category_detection`  the real category signal we DO
+ *                                 consume is `template_category_update`, whose
+ *                                 advisory shape carries `correct_category`.
+ *     `business_status_update` · `tracking_events`
+ *
+ *   Announces phone-number settings changes (calling status, icon, SIP). Our
+ *   settings surfaces always read live from Graph, so there is no cached copy to
+ *   refresh:
+ *     `account_settings_update`
+ *
+ * `business_username_updates` is deliberately ABSENT from this list — it carries
+ * state we do model (a number's username) and should be handled, not silenced.
+ */
+const QUIET_DROP_WHATSAPP_FIELDS = new Set<string>([
+  "account_settings_update",
+  "automatic_events",
+  "business_status_update",
+  "flows",
+  "group_lifecycle_update",
+  "group_participants_update",
+  "group_settings_update",
+  "group_status_update",
+  "messaging_handovers",
+  "partner_solutions",
+  "payment_configuration_update",
+  "standby",
+  "template_correct_category_detection",
+  "tracking_events",
+]);
+
+/**
  * Does a Graph 400 mean "you asked for this the wrong SHAPE" (as opposed to a
  * real data or permission error)? Used to fall back between the edge form
  * (`GET /{wabaId}/<field>`) and the field-expansion form
@@ -596,20 +664,21 @@ interface MetaCall {
       url?: string;
     };
   };
-  /** Transcript-available payload — same media semantics as call_recording,
-   *  but the asset is a JSON transcript document. TWO spellings typed: the
-   *  doc says `call_transcript` under a `call_transcription_available` event,
-   *  while the wire delivers the event as `call_transcript_available` — so
-   *  the field name is read defensively under both spellings too. */
+  /**
+   * Transcript-available payload — same media semantics as call_recording, but
+   * the asset is a JSON transcript document.
+   *
+   * ONE field spelling, confirmed 2026-07-30 against the call-transcription
+   * doc: the artifact key is `call_transcript.document`. A second
+   * `call_transcription` object used to be typed and read as a fallback; it
+   * matches no documented shape and could never fire, so it read as unresolved
+   * uncertainty about the artifact key when there is none. Removed.
+   *
+   * The EVENT name genuinely has two observed spellings and both are still
+   * accepted at the mapping site — see `mapMetaCallPhase`. That hedge is about
+   * the event, not this field.
+   */
   call_transcript?: {
-    document?: {
-      id?: string;
-      sha256?: string;
-      mime_type?: string;
-      url?: string;
-    };
-  };
-  call_transcription?: {
     document?: {
       id?: string;
       sha256?: string;
@@ -1647,7 +1716,7 @@ function parseMetaCall(
     ...(() => {
       if (phase !== "transcript_available") return {};
       // Field name read under both spellings — see the MetaCall comment.
-      const doc = c.call_transcript?.document ?? c.call_transcription?.document;
+      const doc = c.call_transcript?.document;
       return doc?.id
         ? {
             transcriptMedia: {
@@ -3171,14 +3240,17 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         // other type since `value.messages` / `value.calls` / `value.statuses`
         // are independently present.
         if (change.field !== "messages" && change.field !== "calls") {
-          // `account_settings_update` is a KNOWN field we deliberately don't
-          // consume: it announces phone-number settings changes (calling
-          // status, icon, SIP), but our settings surfaces always read live
-          // from Graph, so there is no cached copy to refresh. Dropped
-          // quietly — a tenant subscribing it would otherwise emit one
-          // unhandled-field warn per settings save, drowning the signal the
-          // warn below exists for (genuinely NEW fields).
-          if (change.field === "account_settings_update") continue;
+          // Fields we KNOW about and deliberately do not consume. Dropped
+          // quietly, because each one Meta has us subscribed to would otherwise
+          // emit an unhandled-field warn on every delivery and drown the signal
+          // the warn below exists for: a genuinely NEW field.
+          //
+          // That was not hypothetical. `devtools_webhook_list{list_topics}` on
+          // 2026-07-30 showed our apps subscribed to 13 fields with no handler,
+          // so the tripwire was firing constantly and had stopped meaning
+          // anything. Each entry below is a decision, reviewed against its own
+          // doc page — not a blanket silence:
+          if (change.field && QUIET_DROP_WHATSAPP_FIELDS.has(change.field)) continue;
           // Everything above is handled; anything else Meta subscribed us to
           // (account/phone-number quality alerts, flows, etc.) is dropped — but
           // logged so a NEW field type Meta starts sending surfaces in ops

@@ -108,7 +108,7 @@ describe("getPageSubscription is scoped to our app", () => {
       ],
     });
 
-    const status = await getPageSubscription("page_1", "tok", "v25.0", OURS);
+    const status = await getPageSubscription("page_1", "tok", "v26.0", OURS);
 
     expect(status.scopedToApp).toBe(true);
     expect(status.receivesMessages, "our app holds only `name`").toBe(false);
@@ -120,7 +120,7 @@ describe("getPageSubscription is scoped to our app", () => {
       data: [{ id: THEIRS, subscribed_fields: [...PAGE_MESSAGING_FIELDS] }],
     });
 
-    const status = await getPageSubscription("page_1", "tok", "v25.0", OURS);
+    const status = await getPageSubscription("page_1", "tok", "v26.0", OURS);
 
     expect(status.receivesMessages).toBe(false);
     expect(status.subscribedFields).toEqual([]);
@@ -134,7 +134,7 @@ describe("getPageSubscription is scoped to our app", () => {
       ],
     });
 
-    const status = await getPageSubscription("page_1", "tok", "v25.0");
+    const status = await getPageSubscription("page_1", "tok", "v26.0");
 
     expect(status.scopedToApp).toBe(false);
     expect(status.receivesMessages).toBe(true);
@@ -150,7 +150,7 @@ describe("ensurePageSubscribedToMessaging repairs OUR subscription", () => {
     });
     mockedPost.mockResolvedValue({});
 
-    const res = await ensurePageSubscribedToMessaging("page_1", "tok", "v25.0", OURS);
+    const res = await ensurePageSubscribedToMessaging("page_1", "tok", "v26.0", OURS);
 
     expect(res.ok).toBe(true);
     expect(mockedPost, "no POST means our app was never subscribed").toHaveBeenCalled();
@@ -170,7 +170,7 @@ describe("ensurePageSubscribedToMessaging repairs OUR subscription", () => {
     });
     mockedPost.mockResolvedValue({});
 
-    await ensurePageSubscribedToMessaging("page_1", "tok", "v25.0", OURS);
+    await ensurePageSubscribedToMessaging("page_1", "tok", "v26.0", OURS);
 
     const posted = postedFields()[0] ?? [];
     expect(posted, "our unrelated fields are preserved").toEqual(
@@ -186,15 +186,18 @@ describe("ensurePageSubscribedToMessaging repairs OUR subscription", () => {
           id: OURS,
           subscribed_fields: [
             ...PAGE_MESSAGING_FIELDS,
+            // Mirror PAGE_OPTIONAL_FIELDS. `messaging_seen` used to be here; it is
+            // not a `page` field at all (it belongs to the app-level `instagram`
+            // topic), so it was removed from the array and from this fixture.
             "calls",
-            "messaging_seen",
+            "call_permission_reply",
             "response_feedback",
           ],
         },
       ],
     });
 
-    const res = await ensurePageSubscribedToMessaging("page_1", "tok", "v25.0", OURS);
+    const res = await ensurePageSubscribedToMessaging("page_1", "tok", "v26.0", OURS);
 
     expect(res.ok).toBe(true);
     expect(mockedPost).not.toHaveBeenCalled();

@@ -36,9 +36,23 @@ const PARSER_CONSUMES: ReadonlyArray<{ field: string; branch: string }> = [
   { field: "message_echoes", branch: "replies typed in Meta's native Page inbox" },
   { field: "message_deliveries", branch: "delivery watermark → delivered ticks" },
   { field: "message_reads", branch: "Messenger read watermark → Seen" },
-  { field: "messaging_seen", branch: "Instagram read receipt (IG has no message_reads)" },
+  // `messaging_seen` was listed here as "Instagram read receipt (IG has no
+  // message_reads)". Both halves are wrong, per `list_topics` on 2026-07-30: it is
+  // NOT one of the `page` topic's 69 fields (which DO include `message_reads`), and
+  // it belongs to the separate app-level `instagram` topic. Subscribing a Page to
+  // it achieved nothing and risked the optional POST being rejected wholesale.
+  //
+  // IG read receipts really do arrive on `entry.messaging[].read`, but the gate is
+  // the app-level `instagram` topic subscription — not a `subscribed_apps` field —
+  // so it is outside this test's scope by construction.
   { field: "message_reactions", branch: "emoji reaction on a message" },
-  { field: "message_edits", branch: "customer edited a message (Messenger only)" },
+  // Both channels ship an edit webhook, under different names: `page` has
+  // `message_edits` (plural), `instagram` has `message_edit` (singular).
+  { field: "message_edits", branch: "customer edited a message" },
+  {
+    field: "call_permission_reply",
+    branch: "customer's answer to a Messenger call-permission request",
+  },
   { field: "messaging_postbacks", branch: "Get Started / persistent menu / button taps" },
   { field: "messaging_referrals", branch: "m.me ref links + Click-to-Messenger attribution" },
   { field: "messaging_optins", branch: "opt-in / notification tokens" },
