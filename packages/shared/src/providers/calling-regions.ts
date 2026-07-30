@@ -25,6 +25,32 @@
  * Countries where a business phone number CANNOT place business-initiated
  * calls. A number registered here can still RECEIVE calls normally.
  */
+/**
+ * These five are CURRENT as of 2026-07-30, and Turkey is deliberately NOT among
+ * them — verified twice because the sources disagree.
+ *
+ * Meta REMOVED Turkey from this list some time between 2025-10-05 and 2026-05-13,
+ * as a silent doc edit with no changelog entry. Wayback pins both ends: the
+ * 2025-09-26 and 2025-10-05 snapshots read "USA Canada Turkey Egypt Vietnam
+ * Nigeria", while the 2026-05-13 and 2026-07-05 snapshots — and a live fetch of
+ * both the `/documentation/` and legacy `/docs/` pages today — read "United
+ * States, Canada, Egypt, Vietnam, Nigeria". The calling FAQ used to carry a
+ * duplicate copy of the six; by 2026-04-13 Meta had reduced that answer to "See
+ * Calling Availability" rather than maintain two lists.
+ *
+ * TWO TRAPS, both of which produced a wrong "add Turkey back" conclusion during
+ * this audit before being caught:
+ *   1. The docs MCP's search index serves page versions stamped Oct/Nov 2025 for
+ *      this page — i.e. PRE-edit. Reading the index rather than fetching the URL
+ *      returns the stale six.
+ *   2. Third-party integrator docs (Wati, Respond.io, Infobip, Twilio, …) still
+ *      mirror the old six. Do not let one of them be cited as a refutation.
+ *
+ * So: fetch the live page, and cross-check a second URL, before editing this set.
+ * Error 138013 stays handled as a clean refusal regardless — its remediation text
+ * points at exactly this availability section, so it is the documented server-side
+ * answer AND the safety net if Meta re-adds a country as quietly as it dropped one.
+ */
 export const BIC_BLOCKED_COUNTRY_CODES: ReadonlySet<string> = new Set([
   "US",
   "CA",

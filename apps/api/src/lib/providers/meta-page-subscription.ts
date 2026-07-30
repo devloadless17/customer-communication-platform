@@ -90,7 +90,21 @@ export const PAGE_MESSAGING_FIELDS = [
  *
  * Instagram read receipts really do depend on the app-level `instagram` topic
  * subscription, which nothing in this repo asserts or health-checks — tracked
- * separately; it is a dashboard-managed gate, not a `subscribed_apps` call.
+ * separately; it is a dashboard-managed gate, not a `subscribed_apps` call. Graph is
+ * explicit that it cannot be reached from here at all: "You cannot use the
+ * subscribed_fields parameter to configure or subscribe to Webhooks for Instagram.
+ * You must use your app dashboard."
+ *
+ * CONFIRMED 2026-07-30 that removing it mattered, and that it was NOT a harmless
+ * extra. Graph REJECTS an unknown field ELEMENT-WISE with a 400 naming the offender —
+ * a reproduced error reads `(#100) Param subscribed_fields[2] must be one of {feed,
+ * mention, … message_reads, messaging_referrals …}` from a POST containing exactly
+ * `messages,messaging_seen,…`. Because `messaging_seen` sat in THIS array, that 400
+ * failed the whole optional apply and took `calls` and `call_permission_reply` down
+ * with it on every attempt. The Messenger webhooks page that appears to list
+ * `messaging_seen` as a page field is the dual-surface table whose row is
+ * Instagram-annotated: "message_reads … for Messenger conversations. See
+ * messaging_seen for Instagram Messaging conversations."
  */
 export const PAGE_OPTIONAL_FIELDS = [
   "calls",

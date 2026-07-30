@@ -5743,11 +5743,24 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         ...(args.profilePictureHandle
           ? { profile_picture_handle: args.profilePictureHandle }
           : {}),
-        // Meta's own POST example sends `websites` as a JSON-ENCODED STRING
-        // (`"[\n  \"https://…\"\n]"`), even though the GET returns a real
-        // array. The send example is the authority on the send shape — an
-        // overview's prose describes the user-visible result, the example
-        // describes the payload — so it is stringified here deliberately.
+        // `websites` goes out as a JSON-ENCODED STRING (`"[\n \"https://…\"\n]"`),
+        // and Graph also accepts a real array — BOTH work, so this is a style
+        // choice, not a correctness one.
+        //
+        // Do not "fix" it in either direction on the strength of one doc page.
+        // Checked 2026-07-30: TWO current Meta pages document this same endpoint
+        // with the same `application/json` content-type and DISAGREE —
+        // .../whatsapp/business-profiles (updated Jun 24 2026) shows the encoded
+        // string, while .../whatsapp/business-phone-numbers/business-profiles
+        // (updated Nov 4 2025) shows a real array and a parameter table reading
+        // "websites array of strings … maximum of 2 websites". Two equally-current
+        // pages presented as working means Graph coerces. Meta's official Business
+        // SDKs cannot arbitrate either: the Cloud API business-profile endpoint is
+        // not in their codegen surface at all (their `WhatsAppBusinessProfile` is
+        // the unrelated Marketing-API node with three read-only fields).
+        //
+        // The previous comment here asserted the string form was THE authority. It
+        // is one of two, and staying put is simply the lower-risk half of a coin flip.
         ...(args.websites !== undefined
           ? { websites: JSON.stringify(args.websites) }
           : {}),
@@ -7514,8 +7527,27 @@ function unixSeconds(d: Date): number {
 /**
  * One filter for the field-expansion form: `.name(A,B,C)`.
  *
- * Meta's own guide examples write these as BARE comma lists inside the parens
- * (`.dimensions(PRICING_CATEGORY,PRICING_TYPE,COUNTRY)`), not as JSON arrays.
+ * Graph accepts the bare comma list, the bracketed list and the bracketed-quoted
+ * list INTERCHANGEABLY here; bare is chosen for brevity, and there is nothing to
+ * fix. Investigated 2026-07-30 because Meta's analytics page is internally
+ * inconsistent — the same page writes
+ * `.dimensions(["CONVERSATION_CATEGORY","CONVERSATION_TYPE"])`,
+ * `.dimensions([CONVERSATION_TYPE])` and
+ * `.dimensions(PRICING_CATEGORY,PRICING_TYPE,TIER,COUNTRY)` — which looks like a
+ * per-field wire contract and is not one.
+ *
+ * What settles it: the Graph reference for `conversation_analytics` declares ONE
+ * schema (`array<enum {...}>`) and then auto-generates the SAME request two ways —
+ * its cURL tab emits a bare comma list while its Android and Objective-C tabs emit
+ * the bracketed-quoted form. One schema, two serialisers ⇒ the inconsistency is
+ * authorship, not semantics. Third-party production integrations also send bare
+ * lists to `conversation_analytics`, the field Meta only ever documents bracketed.
+ *
+ * This note is deliberately explicit because the previous wording ("Meta's own guide
+ * examples write these as BARE comma lists, not JSON arrays") implied the bracketed
+ * form was WRONG — which is exactly what tempts a well-meaning contributor to
+ * "correct" this back and forth on the strength of whichever example they read last.
+ *
  * An empty or absent list is omitted entirely rather than sent as `()` — Meta
  * documents an empty list as "return everything", which is what omitting does,
  * and `()` is a parse error on some fields.
