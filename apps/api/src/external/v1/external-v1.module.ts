@@ -36,7 +36,7 @@ import { WorkflowsModule as WorkflowsSettingsModule } from "@/workspace-settings
   // AssignmentModule exports AssignmentService — the /v1 routing-config routes
   // reuse the SAME service the settings page calls, which is what makes the
   // parity rule real instead of a second implementation that drifts.
-  // UsersModule exports UsersService — the /v1 availability + working-hours
+  // UsersModule exports UserAvailabilityService — the /v1 availability + working-hours
   // writes run through the SAME single writer the settings UI does, so the
   // override-expiry rule and the domain event can't diverge between them.
   // MessageFlagsCatalogModule exports MessageFlagsCatalogService — the /v1

@@ -728,7 +728,7 @@ export class RealtimeGateway
    * to ONE query per team rather than one per socket.
    *
    * STALENESS IS BOUNDED TO WHAT IT SHOULD BE. The only write path to
-   * `availabilityStatus` is `UsersService.updateMyAvailability`, which
+   * `availabilityStatus` is `UserAvailabilityService.updateMyAvailability`, which
    * publishes `user.availability_changed`; that fanout calls
    * `emitPresenceSnapshot`, which busts this cache first (see `afterInit`). So
    * a status flip is never delayed. The one case the TTL does cover is

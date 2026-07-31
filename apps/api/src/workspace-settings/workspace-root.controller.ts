@@ -13,7 +13,7 @@ import {
   SetTeamWorkHoursSchema,
   type SetTeamWorkHoursInput,
 } from "../users/users.schemas";
-import { UsersService } from "../users/users.service";
+import { UserAvailabilityService } from "../users/user-availability.service";
 import { getActiveWhatsappCountries } from "@/lib/providers/config";
 import { isBicAllowedForBusinessNumber } from "@ccp/shared/providers/calling-regions";
 
@@ -57,8 +57,8 @@ export class WorkspaceRootController {
     private readonly teamRoot: WorkspaceRootService,
     private readonly db: DbService,
     // Working-hours edits re-resolve availability through the one writer in
-    // UsersService rather than duplicating the rule here.
-    private readonly users: UsersService,
+    // UserAvailabilityService rather than duplicating the rule here.
+    private readonly availability: UserAvailabilityService,
   ) {}
 
   @Get()
@@ -148,7 +148,7 @@ export class WorkspaceRootController {
       where: { id: session.workspaceId },
       data: { workHours: body.workHours ?? Prisma.DbNull },
     });
-    await this.users.resyncAvailability(session.workspaceId);
+    await this.availability.resyncAvailability(session.workspaceId);
     return { ok: true, workHours: body.workHours };
   }
 

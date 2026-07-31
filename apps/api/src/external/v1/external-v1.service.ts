@@ -57,7 +57,7 @@ import type {
   RetryBroadcastInput,
 } from "@/broadcasts/broadcasts.schemas";
 import type { ManualTriggerInput } from "@/workspace-settings/workflows/workflows.schemas";
-import { UsersService } from "@/users/users.service";
+import { UserAvailabilityService } from "@/users/user-availability.service";
 import {
   asWorkHours,
   type AvailabilitySource,
@@ -146,7 +146,7 @@ export class ExternalV1Service {
     private readonly calls: CallsService,
     // Availability writes go through the SAME service the internal admin route
     // uses, so /v1 and the UI share one writer (and one set of rules).
-    private readonly users: UsersService,
+    private readonly users: UserAvailabilityService,
     // Same service the settings UI calls, so a /v1 trigger and a UI trigger
     // run the identical published/trigger-type gates.
     private readonly workflows: WorkflowsService,

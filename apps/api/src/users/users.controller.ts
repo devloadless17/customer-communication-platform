@@ -49,6 +49,7 @@ import {
   type UpdateMyProfileInput,
   type UpdateUserInput,
 } from "./users.schemas";
+import { UserAvailabilityService } from "./user-availability.service";
 import { UsersService } from "./users.service";
 
 /**
@@ -75,7 +76,10 @@ function periodSince(period: StatsQuery["period"]): Date | null {
 @Controller("api/users")
 @UseGuards(SessionGuard)
 export class UsersController {
-  constructor(private readonly users: UsersService) {}
+  constructor(
+    private readonly users: UsersService,
+    private readonly availability: UserAvailabilityService,
+  ) {}
 
   @Get()
   async list(@CurrentSession() session: ApiSession) {
@@ -164,7 +168,7 @@ export class UsersController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(UpdateMyAvailabilitySchema)) body: UpdateMyAvailabilityInput,
   ) {
-    const user = await this.users.updateMyAvailability(
+    const user = await this.availability.updateMyAvailability(
       session.workspaceId,
       session.userId,
       body,
@@ -225,7 +229,7 @@ export class UsersController {
     @Param("id") id: string,
     @Body(zBody(SetUserAvailabilitySchema)) body: SetUserAvailabilityInput,
   ) {
-    const user = await this.users.setUserAvailability(
+    const user = await this.availability.setUserAvailability(
       session.workspaceId,
       session.userId,
       { role: session.role, isSuperAdmin: session.isSuperAdmin, orgRole: session.orgRole },
@@ -246,7 +250,7 @@ export class UsersController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    return this.users.getUserWorkHours(session.workspaceId, id);
+    return this.availability.getUserWorkHours(session.workspaceId, id);
   }
 
   /**
@@ -261,7 +265,7 @@ export class UsersController {
     @Param("id") id: string,
     @Body(zBody(SetUserWorkHoursSchema)) body: SetUserWorkHoursInput,
   ) {
-    const user = await this.users.setUserWorkHours(
+    const user = await this.availability.setUserWorkHours(
       session.workspaceId,
       { role: session.role, isSuperAdmin: session.isSuperAdmin, orgRole: session.orgRole },
       id,
