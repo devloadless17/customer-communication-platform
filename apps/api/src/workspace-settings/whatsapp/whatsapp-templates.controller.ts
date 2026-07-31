@@ -48,7 +48,7 @@ import { WhatsappService } from "./whatsapp.service";
  *   POST   /api/workspace/whatsapp/templates/:id/edit        — edit category/components/TTL
  *   POST   /api/workspace/whatsapp/templates/:id/unpause     — lift a quality pause
  *   DELETE /api/workspace/whatsapp/templates/:id            — remove (Meta first, then local)
- *   PATCH  /api/workspace/whatsapp/templates/:id            — update variableBindings only
+ *   PATCH  /api/workspace/whatsapp/templates/:id            — update variableBindings / labels (ours, never Meta's)
  *   GET    /api/workspace/whatsapp/templates/:id/compare      — head-to-head vs another
  *   GET    /api/workspace/whatsapp/templates/:id/analytics   — stored daily rollup
  *   POST   /api/workspace/whatsapp/templates/:id/analytics/refresh — pull from Meta
@@ -71,13 +71,17 @@ export class WhatsappTemplatesController {
    * `?accountId=` scopes the catalogue to ONE WhatsApp number's WABA — what the
    * broadcast composer and the per-channel templates page use, so a campaign
    * bound to a number can only pick templates that number can actually send.
+   * `?label=` narrows to templates carrying that organizational label
+   * (case-insensitive exact match; the pickers filter client-side, this is the
+   * server-shaped counterpart mirrored on `/v1`).
    */
   @Get()
   async list(
     @CurrentSession() session: ApiSession,
     @Query("accountId") accountId?: string,
+    @Query("label") label?: string,
   ) {
-    return this.whatsapp.listTemplates(session.workspaceId, accountId);
+    return this.whatsapp.listTemplates(session.workspaceId, accountId, label);
   }
 
   /**

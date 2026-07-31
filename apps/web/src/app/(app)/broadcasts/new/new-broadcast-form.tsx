@@ -9,11 +9,13 @@ import {
   CalendarClock,
   Check,
   ChevronRight,
+  Clock,
   FileText,
   Loader2,
   RefreshCw,
   Search,
   Send,
+  Tag as TagIcon,
   Users,
 } from "lucide-react";
 
@@ -66,6 +68,12 @@ import {
 } from "@/features/templates/components/carousel-cards-field";
 import { TokenHighlightInput } from "@/features/templates/components/token-highlight";
 import { useChannelAccounts } from "@/features/channels/contexts/channel-accounts-context";
+import {
+  recentlyUsedTemplates,
+  templateHasLabel,
+  templateLabelVocabulary,
+  templateLabelsMatchQuery,
+} from "@/features/templates/lib/template-labels";
 
 /** Result of POST /api/broadcasts/preview-missing — recipients whose template
  *  variables would resolve to empty (missing field, no default) and be rejected
@@ -1084,7 +1092,8 @@ export function NewBroadcastForm({
       (t) =>
         t.name.toLowerCase().includes(q) ||
         t.bodyText.toLowerCase().includes(q) ||
-        t.language.toLowerCase().includes(q),
+        t.language.toLowerCase().includes(q) ||
+        templateLabelsMatchQuery(t, q),
     );
   }, [templates, templateQuery]);
 
@@ -1520,6 +1529,7 @@ export function NewBroadcastForm({
         >
           <TemplatePickerInline
             templates={filteredTemplates}
+            allTemplates={templates}
             query={templateQuery}
             onQueryChange={setTemplateQuery}
             loading={templatesLoading}
@@ -2010,6 +2020,7 @@ function StepCard({
 
 function TemplatePickerInline({
   templates,
+  allTemplates,
   query,
   onQueryChange,
   loading,
@@ -2021,6 +2032,9 @@ function TemplatePickerInline({
   onRefresh,
 }: {
   templates: TemplateDto[];
+  /** The UNFILTERED catalog — label vocabulary + the "Recently used" row are
+   *  derived from it so they stay stable while the operator types. */
+  allTemplates: TemplateDto[];
   query: string;
   onQueryChange: (q: string) => void;
   loading: boolean;
@@ -2031,6 +2045,27 @@ function TemplatePickerInline({
   onSelect: (id: string) => void;
   onRefresh: () => void;
 }) {
+  // Organizational-label filter chip — local to the picker, like the search box.
+  const [labelFilter, setLabelFilter] = useState<string | null>(null);
+  const labelOptions = useMemo(
+    () => templateLabelVocabulary(allTemplates),
+    [allTemplates],
+  );
+  const shown = useMemo(
+    () =>
+      labelFilter
+        ? templates.filter((t) => templateHasLabel(t, labelFilter))
+        : templates,
+    [templates, labelFilter],
+  );
+  // Quick row: only when nothing narrows the list — a search or an active
+  // chip already says what the operator wants.
+  const recent = useMemo(
+    () =>
+      query.trim() || labelFilter ? [] : recentlyUsedTemplates(allTemplates),
+    [allTemplates, query, labelFilter],
+  );
+
   if (!hasWabaId) {
     return (
       <div className="rounded-md border border-warning-border bg-warning-bg p-4 text-xs">
@@ -2078,6 +2113,32 @@ function TemplatePickerInline({
         </Button>
       </div>
 
+      {/* Label filter chips — hidden until the workspace has labeled anything. */}
+      {labelOptions.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1">
+          {labelOptions.map((label) => {
+            const active = labelFilter?.toLowerCase() === label.toLowerCase();
+            return (
+              <button
+                key={label.toLowerCase()}
+                type="button"
+                onClick={() => setLabelFilter(active ? null : label)}
+                aria-pressed={active}
+                className={cn(
+                  "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-2xs font-medium transition-colors",
+                  active
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "border-border bg-muted/40 text-muted-foreground hover:bg-accent hover:text-foreground",
+                )}
+              >
+                <TagIcon className="size-2.5" aria-hidden="true" />
+                {label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {error && (
         <div
           role="alert"
@@ -2093,72 +2154,133 @@ function TemplatePickerInline({
           <Loader2 className="size-4 animate-spin" />
           <span>Loading templates…</span>
         </div>
-      ) : templates.length === 0 ? (
+      ) : shown.length === 0 ? (
         <div className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-6 text-center text-xs text-muted-foreground">
           {query.length > 0
             ? `No templates match "${query}".`
-            : "No templates yet. Approve some in WhatsApp Manager and click Refresh."}
+            : labelFilter
+              ? "No templates carry this label."
+              : "No templates yet. Approve some in WhatsApp Manager and click Refresh."}
         </div>
       ) : (
-        <ul className="divide-y divide-border rounded-md border border-border bg-background">
-          {templates.map((t) => {
-            // Commerce templates (catalog/MPM/SPM/order-details) need product
-            // parameters the platform can't supply — the server refuses them,
-            // so offering one here would be a dead click.
-            const unsupported = unsupportedTemplateFeature(t.components);
-            const sendable = t.status === "approved" && !unsupported;
-            const selected = t.id === selectedId;
-            return (
-              <li key={t.id}>
-                <button
-                  type="button"
-                  disabled={!sendable}
-                  onClick={() => onSelect(t.id)}
-                  className={cn(
-                    "group flex w-full cursor-pointer items-start gap-3 px-3 py-2.5 text-left transition-colors",
-                    "hover:bg-accent/50 focus:bg-accent/50 focus:outline-hidden",
-                    selected && "bg-primary/5 hover:bg-primary/5",
-                    !sendable && "cursor-not-allowed opacity-60 hover:bg-transparent",
-                  )}
-                >
-                  <div
-                    className={cn(
-                      "mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-md",
-                      selected ? "bg-primary text-primary-foreground" : "bg-primary/10 text-primary",
-                    )}
-                  >
-                    <FileText className="size-3.5" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="min-w-0 truncate text-sm font-medium">{t.name}</span>
-                      <CategoryPill category={t.category} />
-                      <span className="rounded border border-border bg-muted/40 px-1.5 py-0.5 font-mono text-3xs text-muted-foreground">
-                        {t.language}
-                      </span>
-                      {!sendable && (
-                        <span className="rounded-full border border-warning-border bg-warning-bg px-1.5 py-0.5 text-3xs uppercase text-warning-fg">
-                          {unsupported ? `Needs ${unsupported}` : t.status}
-                        </span>
-                      )}
-                      <TemplateQualityPill score={t.qualityScore} />
-                    </div>
-                    <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
-                      {t.bodyText || "—"}
-                    </p>
-                  </div>
-                  {selected ? (
-                    <Check className="mt-2 size-4 shrink-0 text-primary" />
-                  ) : sendable ? (
-                    <ChevronRight className="mt-2 size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-foreground" />
-                  ) : null}
-                </button>
-              </li>
-            );
-          })}
-        </ul>
+        <>
+          {recent.length > 0 && (
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center gap-1.5 text-3xs font-semibold uppercase tracking-wide text-muted-foreground">
+                <Clock className="size-3" aria-hidden="true" />
+                <span>Recently used</span>
+              </div>
+              <ul className="divide-y divide-border rounded-md border border-border bg-background">
+                {recent.map((t) => (
+                  <InlineTemplateRow
+                    key={`recent-${t.id}`}
+                    template={t}
+                    selectedId={selectedId}
+                    onSelect={onSelect}
+                  />
+                ))}
+              </ul>
+              <div className="mt-1 text-3xs font-semibold uppercase tracking-wide text-muted-foreground">
+                All templates
+              </div>
+            </div>
+          )}
+          <ul className="divide-y divide-border rounded-md border border-border bg-background">
+            {shown.map((t) => (
+              <InlineTemplateRow
+                key={t.id}
+                template={t}
+                selectedId={selectedId}
+                onSelect={onSelect}
+              />
+            ))}
+          </ul>
+        </>
       )}
     </div>
+  );
+}
+
+function InlineTemplateRow({
+  template: t,
+  selectedId,
+  onSelect,
+}: {
+  template: TemplateDto;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  // Commerce templates (catalog/MPM/SPM/order-details) need product
+  // parameters the platform can't supply — the server refuses them,
+  // so offering one here would be a dead click.
+  const unsupported = unsupportedTemplateFeature(t.components);
+  const sendable = t.status === "approved" && !unsupported;
+  const selected = t.id === selectedId;
+  return (
+    <li>
+      <button
+        type="button"
+        disabled={!sendable}
+        onClick={() => onSelect(t.id)}
+        className={cn(
+          "group flex w-full cursor-pointer items-start gap-3 px-3 py-2.5 text-left transition-colors",
+          "hover:bg-accent/50 focus:bg-accent/50 focus:outline-hidden",
+          selected && "bg-primary/5 hover:bg-primary/5",
+          !sendable && "cursor-not-allowed opacity-60 hover:bg-transparent",
+        )}
+      >
+        <div
+          className={cn(
+            "mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-md",
+            selected ? "bg-primary text-primary-foreground" : "bg-primary/10 text-primary",
+          )}
+        >
+          <FileText className="size-3.5" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="min-w-0 truncate text-sm font-medium">{t.name}</span>
+            <CategoryPill category={t.category} />
+            <span className="rounded border border-border bg-muted/40 px-1.5 py-0.5 font-mono text-3xs text-muted-foreground">
+              {t.language}
+            </span>
+            {!sendable && (
+              <span className="rounded-full border border-warning-border bg-warning-bg px-1.5 py-0.5 text-3xs uppercase text-warning-fg">
+                {unsupported ? `Needs ${unsupported}` : t.status}
+              </span>
+            )}
+            <TemplateQualityPill score={t.qualityScore} />
+            {/* Organizational labels — quieter than the state pills, capped so
+                a heavily-tagged template doesn't wrap the whole row. */}
+            {t.labels.slice(0, 2).map((label) => (
+              <span
+                key={label.toLowerCase()}
+                className="inline-flex max-w-24 items-center gap-1 rounded-full border border-border bg-muted/40 px-1.5 py-0.5 text-3xs font-medium text-muted-foreground"
+              >
+                <TagIcon className="size-2.5 shrink-0" aria-hidden="true" />
+                <span className="truncate">{label}</span>
+              </span>
+            ))}
+            {t.labels.length > 2 && (
+              <span
+                className="text-3xs text-muted-foreground"
+                title={t.labels.slice(2).join(", ")}
+              >
+                +{t.labels.length - 2}
+              </span>
+            )}
+          </div>
+          <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+            {t.bodyText || "—"}
+          </p>
+        </div>
+        {selected ? (
+          <Check className="mt-2 size-4 shrink-0 text-primary" />
+        ) : sendable ? (
+          <ChevronRight className="mt-2 size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-foreground" />
+        ) : null}
+      </button>
+    </li>
   );
 }
 

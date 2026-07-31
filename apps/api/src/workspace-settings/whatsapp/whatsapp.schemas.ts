@@ -51,18 +51,34 @@ export const RegisterWhatsappNumberSchema = z.object({
 export type RegisterWhatsappNumberInput = z.infer<typeof RegisterWhatsappNumberSchema>;
 
 /**
- * PATCH /api/workspace/whatsapp/templates/:id — update variableBindings only.
+ * PATCH /api/workspace/whatsapp/templates/:id — update the parts of the
+ * template OUR app owns: `variableBindings` and/or `labels`. Everything else
+ * on the row is Meta's, written only by the catalog sync / webhooks.
  *
- * Generous on shape: the runner re-parses bindings on every read so a bad
- * write degrades to the legacy `manual` behavior, not a crash. We only
- * require an object (not array / primitive) so a non-object can't land in
- * the JSONB column.
+ * `variableBindings` is generous on shape: the runner re-parses bindings on
+ * every read so a bad write degrades to the legacy `manual` behavior, not a
+ * crash. We only require an object (not array / primitive) so a non-object
+ * can't land in the JSONB column.
+ *
+ * `labels` replaces the whole set (send the full list): each label trimmed,
+ * 1–40 chars, at most 20 per template. The service dedupes case-insensitively,
+ * preserving first-seen casing — Zod can't express identity across elements.
  */
-export const UpdateTemplateBindingsSchema = z.object({
-  variableBindings: z
-    .record(z.string(), z.unknown())
-    .refine((v) => !Array.isArray(v), { message: "expected an object" }),
-});
+export const TemplateLabelsSchema = z
+  .array(z.string().trim().min(1).max(40))
+  .max(20, "at most 20 labels per template");
+
+export const UpdateTemplateBindingsSchema = z
+  .object({
+    variableBindings: z
+      .record(z.string(), z.unknown())
+      .refine((v) => !Array.isArray(v), { message: "expected an object" })
+      .optional(),
+    labels: TemplateLabelsSchema.optional(),
+  })
+  .refine((b) => b.variableBindings !== undefined || b.labels !== undefined, {
+    message: "nothing to update",
+  });
 export type UpdateTemplateBindingsInput = z.infer<typeof UpdateTemplateBindingsSchema>;
 
 // CreateTemplate body shape is rich (Meta component sub-shapes per

@@ -30,6 +30,7 @@ import {
   externalTemplate,
   maskPhoneLikeName,
 } from "@/lib/external-shapes";
+import { templateIdsWithLabel } from "@/lib/templates/labels";
 import { directoryContactWhere, ensureDefaultStage, toContactWire } from "@/lib/queries";
 import type {
   Contact as DomainContact,
@@ -2015,6 +2016,7 @@ export class ExternalV1Service {
       status?: string;
       category?: string;
       wabaId?: string;
+      label?: string;
       limit?: number;
       cursor?: string;
     } = {},
@@ -2024,6 +2026,13 @@ export class ExternalV1Service {
     // `components`, a single call could materialize tens of MB in the api's
     // 2GB heap.
     const limit = filters.limit ?? 50;
+    // Label filter, resolved to ids first: labels dedupe case-insensitively so
+    // the match must too, Prisma's array filters are exact-case only, and an
+    // id list composes with the keyset pagination below where an in-memory
+    // post-filter would not.
+    const labelIds = filters.label
+      ? await templateIdsWithLabel(this.db, workspaceId, filters.label)
+      : null;
     const rows = await this.db.messageTemplate.findMany({
       where: {
         workspaceId,
@@ -2038,6 +2047,7 @@ export class ExternalV1Service {
         // The `waba_id` query param is Meta's own id (a public API contract), so
         // it is matched through the relation rather than against our internal FK.
         ...(filters.wabaId ? { wabaAccount: { externalWabaId: filters.wabaId } } : {}),
+        ...(labelIds ? { id: { in: labelIds } } : {}),
       },
       // (name, language, id) is the stable keyset order; the cursor is the id.
       orderBy: [{ name: "asc" }, { language: "asc" }, { id: "asc" }],
@@ -2062,6 +2072,7 @@ export class ExternalV1Service {
         qualityScore: true,
         qualityScoreAt: true,
         linkTrackingOptedOut: true,
+        labels: true,
         archivedAt: true,
         lastUsedAt: true,
         syncedAt: true,

@@ -221,8 +221,10 @@ import {
   ExternalTemplateAnalyticsQuerySchema,
   type ExternalSetLinkTrackingInput,
   ExternalTemplateListQuerySchema,
+  ExternalUpdateTemplateLabelsSchema,
   type ExternalTemplateAnalyticsQueryInput,
   type ExternalTemplateListQueryInput,
+  type ExternalUpdateTemplateLabelsInput,
 } from "./external-v1.schemas";
 import {
   CreateInboxViewSchema,
@@ -2414,6 +2416,27 @@ export class ExternalV1Controller {
     query: ExternalTemplateListQueryInput,
   ) {
     return this.api.listTemplates(auth.workspaceId, query);
+  }
+
+  /**
+   * Replace a template's organizational LABELS — the one part of a template
+   * this API may write. Labels are OURS ("promo", "ramadan-2026"): Meta has no
+   * such concept, nothing goes over the Graph wire, and a catalog re-sync
+   * leaves them untouched. Parity with the internal templates PATCH;
+   * `write:catalog` because labels are catalog taxonomy, like tags.
+   */
+  @Patch("templates/:id")
+  @RequireScope("write:catalog")
+  async updateTemplateLabels(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(ExternalUpdateTemplateLabelsSchema))
+    body: ExternalUpdateTemplateLabelsInput,
+  ) {
+    await this.whatsapp.updateTemplateBindings(auth.workspaceId, id, {
+      labels: body.labels,
+    });
+    return { ok: true };
   }
 
   /**

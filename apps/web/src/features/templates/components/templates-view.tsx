@@ -14,6 +14,7 @@ import {
   Sparkles,
   Search,
   Play,
+  Tag as TagIcon,
   Trash2,
   X,
 } from "lucide-react";
@@ -34,6 +35,11 @@ import { parseVariableBindings, type VariableBindings } from "@ccp/shared/templa
 import { TemplateInsights } from "@/features/broadcasts/charts/template-insights";
 import { TemplateComparison } from "@/features/templates/components/template-comparison";
 import { useChannelAccounts } from "@/features/channels/contexts/channel-accounts-context";
+import {
+  templateHasLabel,
+  templateLabelVocabulary,
+  templateLabelsMatchQuery,
+} from "@/features/templates/lib/template-labels";
 import {
   TEMPLATE_AUTO_ARCHIVE_MONTHS,
   templateArchivalRisk,
@@ -158,6 +164,9 @@ export function TemplatesView({
   const [query, setQueryState] = useState(initialQuery);
   const [statusFilter, setStatusFilterState] =
     useState<StatusFilter>(initialStatusFilter);
+  // Organizational-label filter. The vocabulary is DERIVED from the loaded
+  // list (no extra endpoint), so it follows the account scope automatically.
+  const [labelFilter, setLabelFilter] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -180,18 +189,29 @@ export function TemplatesView({
     [templates, selectedId],
   );
 
+  const labelVocabulary = useMemo(() => templateLabelVocabulary(templates), [templates]);
+  // A label filter can outlive its label (account switch, teammate removed it
+  // everywhere) — drop it rather than filter to a guaranteed-empty list.
+  useEffect(() => {
+    if (labelFilter && !labelVocabulary.some((l) => l.toLowerCase() === labelFilter.toLowerCase())) {
+      setLabelFilter(null);
+    }
+  }, [labelFilter, labelVocabulary]);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return templates.filter((t) => {
       if (statusFilter !== "all" && t.status !== statusFilter) return false;
+      if (labelFilter && !templateHasLabel(t, labelFilter)) return false;
       if (!q) return true;
       return (
         t.name.toLowerCase().includes(q) ||
         t.bodyText.toLowerCase().includes(q) ||
-        t.language.toLowerCase().includes(q)
+        t.language.toLowerCase().includes(q) ||
+        templateLabelsMatchQuery(t, q)
       );
     });
-  }, [templates, query, statusFilter]);
+  }, [templates, query, statusFilter, labelFilter]);
 
   const reload = useCallback(async () => {
     setReloadError(null);
@@ -338,6 +358,10 @@ export function TemplatesView({
     );
   }, []);
 
+  const onLabelsSaved = useCallback((id: string, labels: string[]) => {
+    setTemplates((cur) => cur.map((t) => (t.id === id ? { ...t, labels } : t)));
+  }, []);
+
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6 md:py-8">
       <header className="flex flex-col gap-1">
@@ -405,6 +429,23 @@ export function TemplatesView({
               <option key={a.id} value={a.id}>
                 {a.name}
                 {a.isDefault ? " · default" : ""}
+              </option>
+            ))}
+          </select>
+        )}
+        {/* Label filter — hidden until the workspace has labeled anything,
+            same convention as the multi-account select beside it. */}
+        {labelVocabulary.length > 0 && (
+          <select
+            value={labelFilter ?? ""}
+            onChange={(e) => setLabelFilter(e.target.value || null)}
+            className="h-9 rounded-md border border-input bg-background px-2 text-xs"
+            aria-label="Filter by label"
+          >
+            <option value="">All labels</option>
+            {labelVocabulary.map((l) => (
+              <option key={l.toLowerCase()} value={l}>
+                {l}
               </option>
             ))}
           </select>
@@ -525,6 +566,8 @@ export function TemplatesView({
         unpauseError={unpauseError}
         onUnpause={() => selected && void onUnpause(selected)}
         onBindingsSaved={onBindingsSaved}
+        labelVocabulary={labelVocabulary}
+        onLabelsSaved={onLabelsSaved}
         onReload={reload}
       />
 
@@ -621,8 +664,32 @@ function TemplateCard({
             personalized
           </span>
         )}
+        {/* Organizational labels — capped so a heavily-tagged template doesn't
+            blow up the card footer. */}
+        {template.labels.slice(0, 3).map((label) => (
+          <LabelChip key={label.toLowerCase()} label={label} />
+        ))}
+        {template.labels.length > 3 && (
+          <span
+            className="rounded-full bg-muted/60 px-1.5 py-0.5 font-medium"
+            title={template.labels.slice(3).join(", ")}
+          >
+            +{template.labels.length - 3}
+          </span>
+        )}
       </div>
     </button>
+  );
+}
+
+/** One organizational-label chip — deliberately quieter than the status and
+ *  category pills (labels are the operator's own bookkeeping, not state). */
+function LabelChip({ label }: { label: string }) {
+  return (
+    <span className="inline-flex max-w-32 items-center gap-1 rounded-full border border-border bg-muted/40 px-1.5 py-0.5 font-medium text-muted-foreground">
+      <TagIcon className="size-2.5 shrink-0" aria-hidden="true" />
+      <span className="truncate">{label}</span>
+    </span>
   );
 }
 
@@ -865,6 +932,8 @@ function DetailDrawer({
   unpauseError,
   onUnpause,
   onBindingsSaved,
+  labelVocabulary,
+  onLabelsSaved,
   onReload,
 }: {
   template: TemplateDto | null;
@@ -885,6 +954,9 @@ function DetailDrawer({
   unpauseError: string | null;
   onUnpause: () => void;
   onBindingsSaved: (id: string, bindings: VariableBindings) => void;
+  /** The workspace's existing labels — the editor's typeahead suggestions. */
+  labelVocabulary: string[];
+  onLabelsSaved: (id: string, labels: string[]) => void;
   onReload: () => void;
 }) {
   return (
@@ -1156,6 +1228,28 @@ function DetailDrawer({
                 )}
 
                 <section>
+                  <SectionLabel>Labels</SectionLabel>
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                    Your own organizational tags (&quot;promo&quot;,
+                    &quot;ramadan-2026&quot;) for filtering and searching
+                    templates everywhere they&apos;re picked. Never sent to
+                    Meta.
+                  </p>
+                  <div className="mt-3">
+                    {/* Keyed like LinkTrackingToggle: the drawer body doesn't
+                        remount across selections and this editor seeds local
+                        state from props. */}
+                    <TemplateLabelsEditor
+                      key={template.id}
+                      template={template}
+                      vocabulary={labelVocabulary}
+                      canManage={canManage}
+                      onSaved={(labels) => onLabelsSaved(template.id, labels)}
+                    />
+                  </div>
+                </section>
+
+                <section>
                   <SectionLabel>Variable bindings</SectionLabel>
                   <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                     Pull each <code className="rounded bg-muted px-1 text-2xs">{"{{n}}"}</code> from a contact
@@ -1423,6 +1517,167 @@ function LinkTrackingToggle({
         disabled={!canManage || saving}
         aria-label="Button-click tracking"
       />
+    </div>
+  );
+}
+
+/** Bounds mirrored from the server's Zod schema — refuse locally so the
+ *  operator gets a message, not a 400. */
+const LABEL_MAX_LENGTH = 40;
+const LABELS_MAX_COUNT = 20;
+
+/**
+ * Chip editor for a template's organizational labels. Persists on every
+ * add/remove (whole-set PATCH — the same route the bindings editor uses),
+ * with a datalist typeahead over the labels the workspace already uses so
+ * "promo" doesn't fragment into five spellings.
+ */
+function TemplateLabelsEditor({
+  template,
+  vocabulary,
+  canManage,
+  onSaved,
+}: {
+  template: TemplateDto;
+  /** The workspace's existing labels, derived from the loaded list. */
+  vocabulary: string[];
+  canManage: boolean;
+  onSaved: (labels: string[]) => void;
+}) {
+  // Seeded from the row; the parent re-syncs its own copy via onSaved.
+  const [labels, setLabels] = useState<string[]>(template.labels);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function persist(next: string[]) {
+    setSaving(true);
+    const prev = labels;
+    setLabels(next);
+    try {
+      const res = await apiFetch(`/api/workspace/whatsapp/templates/${template.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ labels: next }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as {
+          error?: string;
+          detail?: string;
+        };
+        throw new Error(body.detail || body.error || `HTTP ${res.status}`);
+      }
+      onSaved(next);
+    } catch (err) {
+      setLabels(prev);
+      toast.error(
+        err instanceof Error && err.message
+          ? `Couldn't save labels: ${err.message}`
+          : "Couldn't save labels.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function addDraft() {
+    const label = draft.trim();
+    if (!label) return;
+    if (label.length > LABEL_MAX_LENGTH) {
+      toast.error(`Labels are limited to ${LABEL_MAX_LENGTH} characters.`);
+      return;
+    }
+    // Case-insensitive dedupe, mirroring the server — the first-seen casing wins.
+    if (labels.some((l) => l.toLowerCase() === label.toLowerCase())) {
+      setDraft("");
+      return;
+    }
+    if (labels.length >= LABELS_MAX_COUNT) {
+      toast.error(`A template can carry at most ${LABELS_MAX_COUNT} labels.`);
+      return;
+    }
+    setDraft("");
+    void persist([...labels, label]);
+  }
+
+  if (!canManage && labels.length === 0) {
+    return (
+      <p className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+        No labels yet.
+      </p>
+    );
+  }
+
+  const suggestions = vocabulary.filter(
+    (v) => !labels.some((l) => l.toLowerCase() === v.toLowerCase()),
+  );
+
+  return (
+    <div className="flex flex-col gap-2">
+      {labels.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {labels.map((label) => (
+            <span
+              key={label.toLowerCase()}
+              className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/40 px-2 py-0.5 text-xs font-medium text-foreground"
+            >
+              <TagIcon className="size-3 text-muted-foreground" aria-hidden="true" />
+              {label}
+              {canManage && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    void persist(labels.filter((l) => l !== label))
+                  }
+                  disabled={saving}
+                  className="ml-0.5 rounded-full text-muted-foreground hover:text-foreground disabled:opacity-50"
+                  aria-label={`Remove label ${label}`}
+                >
+                  <X className="size-3" />
+                </button>
+              )}
+            </span>
+          ))}
+        </div>
+      )}
+      {canManage && (
+        <div className="flex items-center gap-2">
+          <Input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              // Enter adds without submitting any surrounding form.
+              if (e.key === "Enter") {
+                e.preventDefault();
+                addDraft();
+              }
+            }}
+            list={`template-label-suggestions-${template.id}`}
+            placeholder={labels.length === 0 ? "Add a label…" : "Add another…"}
+            aria-label="Add a label"
+            maxLength={LABEL_MAX_LENGTH}
+            disabled={saving}
+            className="h-8 max-w-56 text-xs"
+          />
+          {/* Native datalist typeahead — the vocabulary is small (derived from
+              the loaded list) and this needs no popover machinery. */}
+          <datalist id={`template-label-suggestions-${template.id}`}>
+            {suggestions.map((v) => (
+              <option key={v.toLowerCase()} value={v} />
+            ))}
+          </datalist>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={addDraft}
+            disabled={saving || draft.trim().length === 0}
+            className="h-8 gap-1 text-xs"
+          >
+            {saving ? <Loader2 className="size-3 animate-spin" /> : <Plus className="size-3" />}
+            Add
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

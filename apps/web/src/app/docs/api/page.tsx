@@ -1175,8 +1175,27 @@ export default function ApiDocsPage() {
           Filter with{" "}
           <code>?status=</code> / <code>?category=</code> /{" "}
           <code>?wabaId=</code> (templates belong to one WhatsApp Business
-          Account — read the id off any row, then scope to it). Read-only —
-          creating a template is a Meta review submission, not a CRUD write.
+          Account — read the id off any row, then scope to it) /{" "}
+          <code>?label=</code> (one of your own organizational labels, matched
+          case-insensitively — each row carries its <code>labels</code> array).
+          Read-only — creating a template is a Meta review submission, not a
+          CRUD write; the one writable part is <code>labels</code>, via the
+          PATCH below.
+        </Endpoint>
+        <Endpoint
+          method="PATCH"
+          path="/api/external/v1/templates/:id"
+          body={{ labels: ["promo", "ramadan-2026"] }}
+        >
+          Replace the template&apos;s <strong>labels</strong> — your own
+          organizational taxonomy (<code>&quot;promo&quot;</code>,{" "}
+          <code>&quot;support&quot;</code>), nothing Meta ever sees: they never
+          go over the Graph wire and a catalog re-sync leaves them untouched.
+          Whole-set semantics: send the full list (an empty array clears them).
+          Each label is trimmed, 1–40 characters, at most 20 per template;
+          duplicates are collapsed case-insensitively, keeping the casing you
+          sent first. Scope <code>write:catalog</code> — labels are catalog
+          taxonomy, like tags.
         </Endpoint>
         <Endpoint method="POST" path="/api/external/v1/templates/:id/unpause">
           Lift a quality pause, and release any campaigns that were paused with

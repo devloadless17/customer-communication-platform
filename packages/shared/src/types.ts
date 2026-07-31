@@ -514,6 +514,13 @@ export interface TemplateDto {
    * not a bug. Null = Meta hasn't reported the flag yet.
    */
   linkTrackingOptedOut: boolean | null;
+  /**
+   * Local organizational labels ("promo", "ramadan-2026") — the workspace's
+   * own taxonomy, like `variableBindings`. Never synced to/from Meta; a
+   * catalog re-sync leaves them untouched. Deduped case-insensitively with
+   * first-seen casing preserved.
+   */
+  labels: string[];
   syncedAt: string;
 }
 

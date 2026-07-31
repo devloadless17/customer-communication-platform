@@ -23,6 +23,13 @@ import type {
   User,
 } from "@ccp/shared/types";
 
+import {
+  recentlyUsedTemplates,
+  templateHasLabel,
+  templateLabelVocabulary,
+  templateLabelsMatchQuery,
+} from "@/features/templates/lib/template-labels";
+
 import { TemplateFillView } from "./template-picker/fill-view";
 import { TemplateListView } from "./template-picker/list-view";
 import { labelCategory } from "./template-picker/utils";
@@ -147,6 +154,9 @@ function PickerPanel(props: PickerProps) {
     onSend,
   } = props;
   const [query, setQuery] = useState("");
+  // Organizational-label filter chip; the vocabulary is derived from the
+  // loaded list, so it always matches what's actually pickable here.
+  const [labelFilter, setLabelFilter] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -177,19 +187,34 @@ function PickerPanel(props: PickerProps) {
     [templates, selectedId],
   );
 
-  // Filter: approved first, matching name/body/category, sorted within group.
+  const labelOptions = useMemo(() => templateLabelVocabulary(templates), [templates]);
+
+  // Filter: approved first, matching name/body/category/labels, sorted within
+  // group; the active label chip narrows before the text query applies.
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return templates;
-    return templates.filter((t) => {
+    const pool = labelFilter
+      ? templates.filter((t) => templateHasLabel(t, labelFilter))
+      : templates;
+    if (!q) return pool;
+    return pool.filter((t) => {
       return (
         t.name.toLowerCase().includes(q) ||
         t.bodyText.toLowerCase().includes(q) ||
         t.category.toLowerCase().includes(q) ||
-        t.language.toLowerCase().includes(q)
+        t.language.toLowerCase().includes(q) ||
+        templateLabelsMatchQuery(t, q)
       );
     });
-  }, [templates, query]);
+  }, [templates, query, labelFilter]);
+
+  // The quick row: shown only when nothing narrows the list — a search or an
+  // active chip already says what the agent wants.
+  const recent = useMemo(
+    () =>
+      query.trim() || labelFilter ? [] : recentlyUsedTemplates(templates),
+    [templates, query, labelFilter],
+  );
 
   return (
     <div
@@ -295,6 +320,10 @@ function PickerPanel(props: PickerProps) {
           query={query}
           onQueryChange={setQuery}
           templates={filtered}
+          labelOptions={labelOptions}
+          activeLabel={labelFilter}
+          onLabelChange={setLabelFilter}
+          recent={recent}
           onSelect={(id) => setSelectedId(id)}
         />
       )}

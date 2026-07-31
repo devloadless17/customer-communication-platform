@@ -416,6 +416,11 @@ export interface ExternalTemplate {
    *  — an empty `clicked` series on this template is a setting, not a gap.
    *  Null = not reported by Meta yet. */
   linkTrackingOptedOut: boolean | null;
+  /** Local organizational labels ("promo", "ramadan-2026") — OURS, like
+   *  `variableBindings`: Meta has no such concept and a catalog re-sync leaves
+   *  them untouched. Edited via `PATCH /templates/:id`; filter the list with
+   *  `?label=` (case-insensitive exact match). */
+  labels: string[];
   archivedAt: string | null;
   lastUsedAt: string | null;
   syncedAt: string;
@@ -445,6 +450,7 @@ export function externalTemplate(t: {
   qualityScore: string | null;
   qualityScoreAt: Date | null;
   linkTrackingOptedOut: boolean | null;
+  labels: string[];
   archivedAt: Date | null;
   lastUsedAt: Date | null;
   syncedAt: Date;
@@ -470,6 +476,7 @@ export function externalTemplate(t: {
     qualityScore: t.qualityScore,
     qualityScoreAt: t.qualityScoreAt?.toISOString() ?? null,
     linkTrackingOptedOut: t.linkTrackingOptedOut,
+    labels: t.labels,
     archivedAt: t.archivedAt?.toISOString() ?? null,
     lastUsedAt: t.lastUsedAt?.toISOString() ?? null,
     syncedAt: t.syncedAt.toISOString(),

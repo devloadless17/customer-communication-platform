@@ -1108,6 +1108,9 @@ export const ExternalTemplateListQuerySchema = z
      *  the UI's per-account catalogue scoping. Rows already return `wabaId`,
      *  so a partner reads the id off any row and filters by it. */
     wabaId: z.string().min(1).optional(),
+    /** One of OUR organizational labels (see `PATCH /templates/:id`) —
+     *  case-insensitive exact match against each row's `labels`. */
+    label: z.string().trim().min(1).max(40).optional(),
     /** Keyset page size. Meta permits 6,000 templates per WABA and a carousel's
      *  `components` JSON runs to KBs, so an unbounded list could materialize
      *  tens of MB in a 2GB-capped heap — this was the only unpaged list route. */
@@ -1120,6 +1123,24 @@ export const ExternalTemplateListQuerySchema = z
   .strict();
 export type ExternalTemplateListQueryInput = z.infer<
   typeof ExternalTemplateListQuerySchema
+>;
+
+/**
+ * PATCH /v1/templates/:id — replace the template's organizational LABELS, the
+ * one part of a template this API may write. Labels are OURS ("promo",
+ * "ramadan-2026"): Meta has no such concept, nothing goes over the Graph wire,
+ * and a catalog re-sync leaves them untouched. Whole-set semantics (send the
+ * full list); same bounds as the internal editor — trimmed, 1–40 chars, at
+ * most 20 — and the service dedupes case-insensitively, preserving first-seen
+ * casing.
+ */
+export const ExternalUpdateTemplateLabelsSchema = z
+  .object({
+    labels: z.array(z.string().trim().min(1).max(40)).max(20),
+  })
+  .strict();
+export type ExternalUpdateTemplateLabelsInput = z.infer<
+  typeof ExternalUpdateTemplateLabelsSchema
 >;
 
 /**

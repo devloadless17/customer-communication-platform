@@ -2664,6 +2664,12 @@ model MessageTemplate {
   // Null = Meta hasn't reported the flag for this row yet (distinct from
   // false); synced with the leave-alone rule, toggled via the provider.
   linkTrackingOptedOut  Boolean?
+  // Local organizational labels the workspace's operators apply ("promo",
+  // "ramadan-2026", "support") — filter/search chips in the pickers and the
+  // templates page. OURS, like `variableBindings`: Meta has no such concept,
+  // nothing goes over the Graph wire, and the catalog sync's reconcile writes
+  // explicit fields only, so a re-sync leaves labels untouched.
+  labels                String[]          @default([])
   // Per-body-parameter value types (`["TEXT","AMOUNT","DATE"]`), positionally
   // aligned with the body's `{{n}}`. ONLY library templates have these, and they
   // are only readable from the library catalogue — the template node doesn't

@@ -68,6 +68,10 @@ import {
 } from "@ccp/shared/template-render";
 import { checkWhatsappUsername } from "@ccp/shared/whatsapp/username";
 import { syncTemplateCatalog } from "@/lib/templates/catalog-sync";
+import {
+  normalizeTemplateLabels,
+  templateIdsWithLabel,
+} from "@/lib/templates/labels";
 import { assertChannelDisconnectConfirmed } from "@/lib/providers/assert-channel-disconnect";
 
 import { EventBus } from "../../events/event-bus.module";
@@ -1267,6 +1271,8 @@ export class WhatsappService {
   async listTemplates(
     workspaceId: string,
     accountId?: string,
+    /** Case-insensitive exact match against the template's own LABELS. */
+    label?: string,
   ): Promise<{
     templates: TemplateDto[];
     hasWabaId: boolean;
@@ -1300,11 +1306,18 @@ export class WhatsappService {
       }
     }
 
+    // Label filter, resolved to ids first: labels dedupe case-insensitively,
+    // so the match must too, and Prisma's array filters are exact-case only.
+    const labelIds = label?.trim()
+      ? await templateIdsWithLabel(this.db, workspaceId, label.trim())
+      : null;
+
     const [rows, conn] = await Promise.all([
       this.db.messageTemplate.findMany({
         where: {
           workspaceId,
           ...(scopeWabaAccountId ? { wabaAccountId: scopeWabaAccountId } : {}),
+          ...(labelIds ? { id: { in: labelIds } } : {}),
         },
         // Meta's own WABA id for the DTO — never our internal cuid.
         include: { wabaAccount: { select: { externalWabaId: true } } },
@@ -2747,7 +2760,11 @@ export class WhatsappService {
     }
   }
 
-  /** Update variableBindings only — the part of the template our app owns. */
+  /**
+   * Update the parts of the template OUR app owns — `variableBindings` and/or
+   * `labels`. Absent field = leave alone; the Zod schema refuses an empty
+   * patch. Labels dedupe case-insensitively, preserving first-seen casing.
+   */
   async updateTemplateBindings(
     workspaceId: string,
     id: string,
@@ -2756,7 +2773,12 @@ export class WhatsappService {
     const updated = await this.db.messageTemplate.updateMany({
       where: { id, workspaceId },
       data: {
-        variableBindings: input.variableBindings as Prisma.InputJsonValue,
+        ...(input.variableBindings !== undefined
+          ? { variableBindings: input.variableBindings as Prisma.InputJsonValue }
+          : {}),
+        ...(input.labels !== undefined
+          ? { labels: normalizeTemplateLabels(input.labels) }
+          : {}),
       },
     });
     if (updated.count === 0) {
@@ -3018,6 +3040,7 @@ function toTemplateDto(row: {
   bodyText: string;
   components: Prisma.JsonValue;
   variableBindings: Prisma.JsonValue;
+  labels: string[];
   parameterFormat: string;
   messageSendTtlSeconds: number | null;
   syncedAt: Date;
@@ -3053,6 +3076,7 @@ function toTemplateDto(row: {
       ? (row.components as unknown as TemplateComponent[])
       : [],
     variableBindings: row.variableBindings ?? {},
+    labels: row.labels,
     parameterFormat: row.parameterFormat === "named" ? "named" : "positional",
     syncedAt: row.syncedAt.toISOString(),
   };
