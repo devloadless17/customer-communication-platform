@@ -39,7 +39,11 @@ import {
   PanelSkeleton,
   StatTile,
 } from "@/features/reports/report-primitives";
-import { ReportControls, useScopeAccounts } from "@/features/reports/report-controls";
+import {
+  computeReportRange,
+  ReportControls,
+  useScopeAccounts,
+} from "@/features/reports/report-controls";
 import { ReportsNav } from "@/features/reports/reports-nav";
 import type { Channel } from "@ccp/shared/types";
 import type { WorkspaceReport } from "@ccp/shared/dtos";
@@ -93,11 +97,7 @@ export function ReportsClient() {
   const [error, setError] = useState(false);
   // The range is computed once per selection (not per render) so the request
   // URL is stable and an eslint-exhaustive-deps refetch loop can't start.
-  const range = useMemo(() => {
-    const to = new Date();
-    const from = new Date(to.getTime() - days * 24 * 60 * 60 * 1000);
-    return { from, to };
-  }, [days]);
+  const range = useMemo(() => computeReportRange(days), [days]);
 
   useEffect(() => {
     let cancelled = false;

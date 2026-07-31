@@ -30,7 +30,7 @@ import {
   Panel,
   StatTile,
 } from "@/features/reports/report-primitives";
-import { ReportControls } from "@/features/reports/report-controls";
+import { computeReportRange, ReportControls } from "@/features/reports/report-controls";
 import { ReportsNav } from "@/features/reports/reports-nav";
 import { AgentDetailSheet } from "@/features/reports/agent-detail-sheet";
 import { TeamNowStrip, type NowStripMember } from "@/features/reports/team-now-strip";
@@ -103,11 +103,7 @@ export function TeamClient({
 
   // Computed once per selection so the request URL is stable and an
   // exhaustive-deps refetch loop can't start (same rule as the overview).
-  const range = useMemo(() => {
-    const to = new Date();
-    const from = new Date(to.getTime() - days * 24 * 60 * 60 * 1000);
-    return { from, to };
-  }, [days]);
+  const range = useMemo(() => computeReportRange(days), [days]);
 
   useEffect(() => {
     let cancelled = false;

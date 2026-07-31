@@ -12,10 +12,28 @@ import { cn } from "@ccp/shared/utils";
  */
 
 export const RANGES = [
+  { days: 1, label: "Today" },
   { days: 7, label: "7 days" },
   { days: 30, label: "30 days" },
   { days: 90, label: "90 days" },
 ] as const;
+
+/**
+ * The [from, to) window for a range selection. "Today" (days === 1) starts at
+ * the BROWSER's midnight — "how many calls did he have today" means the
+ * calendar day, not the trailing 24 hours — which also matches how the daily
+ * buckets flip (the tz travels with the request). The multi-day presets stay
+ * trailing windows ending now.
+ */
+export function computeReportRange(days: number): { from: Date; to: Date } {
+  const to = new Date();
+  if (days === 1) {
+    const from = new Date(to);
+    from.setHours(0, 0, 0, 0);
+    return { from, to };
+  }
+  return { from: new Date(to.getTime() - days * 24 * 60 * 60 * 1000), to };
+}
 
 /**
  * Accounts worth offering as a report scope: only those on channels that
