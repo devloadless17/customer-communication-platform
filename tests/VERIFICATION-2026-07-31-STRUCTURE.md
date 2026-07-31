@@ -560,7 +560,7 @@ not automate.**
 
 ## Listed for approval (grows as domains close — nothing here is executed)
 
-- `external/v1/external-v1.controller.ts` split by resource (192 routes / 67 imports).
+- `external/v1/external-v1.controller.ts` split by resource — **IN PROGRESS, safely resumable**: request guards extracted (`1844968b`); WORKFLOWS / CUSTOMERS / OUTBOUND WEBHOOKS / AUDIENCE GROUPS+SNIPPETS / TICKETS+escalation peeled (`e0535189`, `9e3ee429`, `51e52f74`) — 3,540 → 2,650 lines, six controllers. **check:v1-docs now DISCOVERS every *.controller.ts under external/v1** (the first peel silently dropped its routes from a hand-named-file count, 197 → 191 with a green tick — fixed + negative-tested), so any session can continue peeling: remaining sections are Channel accounts / Instagram / Messenger (~1,360 L), CONVERSATION OPERATIONS, BROADCAST WRITES, and the contacts/messages core. Sealed by full api vitest (exit 0) + live 401 probes per peel.
 - ~~`team-chat/channels.service.ts` split~~ — **DONE post-program** (`fc21719a`): three services + shared channel-guards.ts; team-chat e2e 33/33.
 - `lib/providers/meta.ts` (7,766 L) split.
 - `team.*` event / `team:*` frame renames — **contract-breaking** (§9 additive-only); recommend keeping wire names, renaming only internals.
