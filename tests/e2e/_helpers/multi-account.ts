@@ -307,8 +307,8 @@ export async function seedMultiAccountTeam(): Promise<MultiAccountTeam> {
   // Same reasoning for the policies/rules a routing spec builds: leaving them
   // behind means an unrelated spec's inbound resolves a stale pool.
   await d.assignmentRule.deleteMany({ where: { workspaceId: MA_TEAM_ID } });
-  await d.assignmentPolicyMember.deleteMany({ where: { workspaceId: MA_TEAM_ID } });
-  await d.assignmentPolicy.deleteMany({ where: { workspaceId: MA_TEAM_ID } });
+  await d.teamMember.deleteMany({ where: { workspaceId: MA_TEAM_ID } });
+  await d.team.deleteMany({ where: { workspaceId: MA_TEAM_ID } });
 
   // Unrestricted API key for `Authorization: Bearer` against the test api.
   const key = generateApiKey();

@@ -2190,7 +2190,7 @@ export class ExternalV1Service {
    * importing the controller, which owns no service.
    */
   async listAssignmentPolicies(workspaceId: string) {
-    const policies = await this.db.assignmentPolicy.findMany({
+    const policies = await this.db.team.findMany({
       where: { workspaceId, archivedAt: null },
       select: { id: true, name: true, isDefault: true, strategy: true },
       orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],

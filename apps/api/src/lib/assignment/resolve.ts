@@ -1,4 +1,4 @@
-import type { AssignmentPolicy, PrismaClient } from "@prisma/client";
+import type { Team, PrismaClient } from "@prisma/client";
 
 import type {
   AssignmentContext,
@@ -42,10 +42,10 @@ import {
 
 type Db = Pick<
   PrismaClient,
-  | "assignmentPolicy"
+  | "team"
   | "assignmentRule"
   | "assignmentSettings"
-  | "assignmentPolicyMember"
+  | "teamMember"
   | "user"
   | "conversation"
 >;
@@ -57,7 +57,7 @@ type Db = Pick<
 const CONFIG_TTL_MS = 15_000;
 
 interface CachedConfig {
-  policies: AssignmentPolicy[];
+  policies: Team[];
   rules: {
     id: string;
     name: string;
@@ -156,7 +156,7 @@ async function loadConfigFresh(db: Db, workspaceId: string): Promise<CachedConfi
   const generation = cacheGeneration.get(workspaceId) ?? 0;
 
   const [policies, rules, settings] = await Promise.all([
-    db.assignmentPolicy.findMany({
+    db.team.findMany({
       where: { workspaceId, archivedAt: null },
       orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
     }),
@@ -303,7 +303,7 @@ async function withPickLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
 // Resolution
 // ---------------------------------------------------------------------------
 
-function toSelectable(policy: AssignmentPolicy): SelectablePolicy {
+function toSelectable(policy: Team): SelectablePolicy {
   return {
     id: policy.id,
     name: policy.name,
@@ -376,7 +376,7 @@ async function previousAgentFor(
 }
 
 /**
- * Implicit default for a team that has no `AssignmentPolicy` row.
+ * Implicit default for a team that has no `Team` row.
  *
  * The migration backfilled every team that existed, and `ensureBootstrap`
  * creates one the first time an admin opens the settings page — but a team
@@ -393,7 +393,7 @@ async function previousAgentFor(
  * cursor write for it, which costs nothing (with no persisted cursor the
  * rotation just restarts, and least-busy doesn't depend on it).
  */
-function implicitDefaultPolicy(workspaceId: string): AssignmentPolicy {
+function implicitDefaultPolicy(workspaceId: string): Team {
   const now = new Date(0);
   return {
     id: "",
@@ -433,7 +433,7 @@ export async function resolvePolicyFor(
   ctx: AssignmentContext,
   requestedPolicyId?: string | null,
 ): Promise<{
-  policy: AssignmentPolicy | null;
+  policy: Team | null;
   ruleId: string | null;
   ruleName: string | null;
 }> {
@@ -483,7 +483,7 @@ async function loadMembers(
       },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     }),
-    db.assignmentPolicyMember.findMany({
+    db.teamMember.findMany({
       where: { policyId },
       select: { userId: true, weight: true, maxOpen: true, enabled: true, served: true },
     }),
@@ -609,19 +609,19 @@ export async function resolveAssignee(args: {
  */
 async function commitPick(
   db: Db,
-  policy: AssignmentPolicy,
+  policy: Team,
   userId: string,
 ): Promise<void> {
   // The implicit default (see implicitDefaultPolicy) has no row to write to.
   if (!policy.id) return;
-  await db.assignmentPolicy.updateMany({
+  await db.team.updateMany({
     where: { id: policy.id, workspaceId: policy.workspaceId },
     data: { cursorUserId: userId },
   });
   if (policy.strategy !== "weighted") return;
   // upsert, not update: with `includeAllMembers` a picked member may have no
   // override row yet, and weighted fairness needs somewhere to count.
-  await db.assignmentPolicyMember.upsert({
+  await db.teamMember.upsert({
     where: { policyId_userId: { policyId: policy.id, userId } },
     create: {
       workspaceId: policy.workspaceId,

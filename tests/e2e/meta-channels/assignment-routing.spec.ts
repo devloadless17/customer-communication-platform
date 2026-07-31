@@ -272,7 +272,7 @@ test.beforeAll(async () => {
     },
   });
   await db().assignmentRule.deleteMany({ where: { workspaceId: META_TEST_TEAM_ID } });
-  await db().assignmentPolicy.deleteMany({ where: { workspaceId: META_TEST_TEAM_ID } });
+  await db().team.deleteMany({ where: { workspaceId: META_TEST_TEAM_ID } });
   await db().assignmentSettings.deleteMany({ where: { workspaceId: META_TEST_TEAM_ID } });
 
   ALI = await makeUser("ali");
@@ -297,7 +297,7 @@ test.afterAll(async () => {
     where: { workspaceId: META_TEST_TEAM_ID, name: { startsWith: PREFIX } },
   });
   await db().assignmentRule.deleteMany({ where: { workspaceId: META_TEST_TEAM_ID } });
-  await db().assignmentPolicy.deleteMany({ where: { workspaceId: META_TEST_TEAM_ID } });
+  await db().team.deleteMany({ where: { workspaceId: META_TEST_TEAM_ID } });
   await db().user.deleteMany({
     where: {
       workspaceMemberships: { some: { workspaceId: META_TEST_TEAM_ID } },
@@ -343,7 +343,7 @@ test.describe("configuration", () => {
     });
     expect(stale.status).toBe(409);
 
-    const after = await db().assignmentPolicy.findUniqueOrThrow({ where: { id: def.id } });
+    const after = await db().team.findUniqueOrThrow({ where: { id: def.id } });
     expect(after.name).toBe("Renamed");
     // This test deliberately bumped the version out from under the local
     // tracker — drop it so the next configureDefault re-reads.
@@ -416,7 +416,7 @@ test.describe("strategies", () => {
   });
 
   test("preview is read-only — polling it never skews the rotation", async () => {
-    const before = await db().assignmentPolicy.findFirstOrThrow({
+    const before = await db().team.findFirstOrThrow({
       where: { workspaceId: META_TEST_TEAM_ID, isDefault: true },
       select: { cursorUserId: true },
     });
@@ -426,7 +426,7 @@ test.describe("strategies", () => {
         body: JSON.stringify({ source: "inbound" }),
       });
     }
-    const after = await db().assignmentPolicy.findFirstOrThrow({
+    const after = await db().team.findFirstOrThrow({
       where: { workspaceId: META_TEST_TEAM_ID, isDefault: true },
       select: { cursorUserId: true },
     });
@@ -444,7 +444,7 @@ test.describe("strategies", () => {
       ],
     });
     // Reset the counters so the ratio starts clean.
-    await db().assignmentPolicyMember.updateMany({
+    await db().teamMember.updateMany({
       where: { workspaceId: META_TEST_TEAM_ID },
       data: { served: 0 },
     });

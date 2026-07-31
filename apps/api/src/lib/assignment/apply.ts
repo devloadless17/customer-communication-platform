@@ -46,10 +46,10 @@ type Db = Pick<
   | "conversation"
   | "user"
   | "$transaction"
-  | "assignmentPolicy"
+  | "team"
   | "assignmentRule"
   | "assignmentSettings"
-  | "assignmentPolicyMember"
+  | "teamMember"
 >;
 
 type Publish = <K extends DomainEventType>(event: DomainEventOf<K>) => Promise<void>;

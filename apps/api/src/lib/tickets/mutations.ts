@@ -38,7 +38,7 @@ type Db = Pick<
   | "tag"
   // Handing a ticket to a team has to verify the team is this workspace's and
   // not archived — see assertWorkspaceTeam.
-  | "assignmentPolicy"
+  | "team"
   | "$transaction"
 >;
 
@@ -107,7 +107,7 @@ export interface CreateTicketArgs extends EventGates {
   description?: string | null;
   priority?: TicketPriority;
   assignedUserId?: string | null;
-  /** Hand it straight to a team's queue (an AssignmentPolicy id). */
+  /** Hand it straight to a team's queue (an Team id). */
   assignedTeamId?: string | null;
   source?: TicketSource;
   tagIds?: string[];
@@ -557,7 +557,7 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
       data.status = "open";
     }
 
-    // Teams are the OWNER's queues (an AssignmentPolicy belongs to one
+    // Teams are the OWNER's queues (an Team belongs to one
     // workspace), so a guest cannot move the ticket between them.
     if (args.assignedTeamId !== undefined && !isGuest) {
       data.assignedTeamId = args.assignedTeamId;
@@ -1488,7 +1488,7 @@ interface TagSnapshot {
 /** An assignee must be a live member of THIS workspace — otherwise a crafted id
  *  could hand work to someone in another tenant. */
 /**
- * Does this team (AssignmentPolicy) belong to this workspace, and is it live?
+ * Does this team (Team) belong to this workspace, and is it live?
  *
  * The FK alone only proves the row exists — it says nothing about WHOSE it is.
  * A handoff to another tenant's team id would otherwise be accepted and put
@@ -1501,7 +1501,7 @@ async function assertWorkspaceTeam(
   workspaceId: string,
   policyId: string,
 ): Promise<boolean> {
-  const policy = await db.assignmentPolicy.findFirst({
+  const policy = await db.team.findFirst({
     where: { id: policyId, workspaceId, archivedAt: null },
     select: { id: true },
   });

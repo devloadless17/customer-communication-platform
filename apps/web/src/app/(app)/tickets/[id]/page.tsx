@@ -61,7 +61,7 @@ export default async function TicketDetailPage({
   const [users, tags, teams, escalationTargets] = await Promise.all([
     listTeamMembers(),
     listTags(),
-    // Teams (AssignmentPolicy) drive the handoff picker. Degrades to [] — a
+    // Teams (Team) drive the handoff picker. Degrades to [] — a
     // teams read failing must not 500 a ticket the agent navigated to; the
     // picker simply says there are none, and the failure is logged.
     soft("assignment policies", [], () => listAssignmentPolicies()),

@@ -86,7 +86,7 @@ test.beforeAll(async () => {
   // pointing at a policy whose squad is that one agent. Cleared and rebuilt so a
   // re-run is deterministic rather than accumulating rules.
   const makePool = async (name: string, userId: string, isDefault: boolean) => {
-    const policy = await d.assignmentPolicy.create({
+    const policy = await d.team.create({
       data: {
         workspaceId: MA_TEAM_ID,
         name,
@@ -99,7 +99,7 @@ test.beforeAll(async () => {
       },
       select: { id: true },
     });
-    await d.assignmentPolicyMember.create({
+    await d.teamMember.create({
       data: { workspaceId: MA_TEAM_ID, policyId: policy.id, userId, enabled: true },
     });
     return policy.id;

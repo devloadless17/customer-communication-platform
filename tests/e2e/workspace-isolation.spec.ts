@@ -298,7 +298,7 @@ test.describe("assignment + workflows", () => {
       { data: { name: "HIJACKED", expectedVersion: 1 } },
     );
     expect(res.status()).toBeGreaterThanOrEqual(400);
-    const after = await db().assignmentPolicy.findUniqueOrThrow({
+    const after = await db().team.findUniqueOrThrow({
       where: { id: other.assignmentPolicyId },
       select: { name: true },
     });
@@ -310,7 +310,7 @@ test.describe("assignment + workflows", () => {
       `/api/workspace/assignment/policies/${other.assignmentPolicyId}`,
     );
     expect(res.status()).toBeGreaterThanOrEqual(400);
-    expect(await db().assignmentPolicy.count({ where: { id: other.assignmentPolicyId } })).toBe(1);
+    expect(await db().team.count({ where: { id: other.assignmentPolicyId } })).toBe(1);
   });
 
   test("workflows are scoped, and another workspace's workflow is unreadable", async ({

@@ -16,7 +16,7 @@ import { publish } from "@/lib/events/bus";
  *
  *   - open CONVERSATIONS and TICKETS — owned in name by someone who cannot see
  *     them, and absent from the Unassigned queue, so nobody picks them up;
- *   - an `AssignmentPolicyMember` seat — the routing pool filters on membership
+ *   - an `TeamMember` seat — the routing pool filters on membership
  *     so they stop receiving work, but their weights/capacity linger and the
  *     policy editor still lists a stranger;
  *   - `TeamChannelMember` rows, including #general;
@@ -216,7 +216,7 @@ async function clearGrants(
     // Routing seat. `includeAllMembers` policies already stop considering them
     // (the pool filters on WorkspaceMember), but the row would keep showing a
     // stranger in the policy editor with weights and a capacity cap.
-    db.assignmentPolicyMember
+    db.teamMember
       .deleteMany({ where: { workspaceId, userId } })
       .catch(() => undefined),
 
@@ -268,16 +268,16 @@ async function clearGrants(
   // find no candidate — traffic silently stops. Three separate updateManys
   // because each column needs its own predicate.
   await Promise.all([
-    db.assignmentPolicy
+    db.team
       .updateMany({ where: { workspaceId, fixedUserId: userId }, data: { fixedUserId: null } })
       .catch(() => undefined),
-    db.assignmentPolicy
+    db.team
       .updateMany({
         where: { workspaceId, fallbackUserId: userId },
         data: { fallbackUserId: null },
       })
       .catch(() => undefined),
-    db.assignmentPolicy
+    db.team
       .updateMany({ where: { workspaceId, cursorUserId: userId }, data: { cursorUserId: null } })
       .catch(() => undefined),
   ]);

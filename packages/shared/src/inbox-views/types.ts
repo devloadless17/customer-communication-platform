@@ -33,7 +33,7 @@ import type { Channel, ConversationStatus } from "../types";
  *                 changes what the whole team sees.
  *
  * There is deliberately no "specific teammates" visibility. That is a third
- * membership model to keep in sync with `AssignmentPolicy` members and
+ * membership model to keep in sync with `Team` members and
  * `WorkspaceMember`, and the same result is reached by a shared view whose
  * assignee filter names those people.
  */

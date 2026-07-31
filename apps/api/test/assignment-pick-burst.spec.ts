@@ -61,7 +61,7 @@ beforeAll(async () => {
       update: {},
     });
   }
-  const policy = await prisma.assignmentPolicy.create({
+  const policy = await prisma.team.create({
     data: {
       workspaceId: WS_ID,
       name: "burst-round-robin",
@@ -82,7 +82,7 @@ beforeEach(() => {
 });
 
 afterAll(async () => {
-  await prisma.assignmentPolicy.deleteMany({ where: { workspaceId: WS_ID } });
+  await prisma.team.deleteMany({ where: { workspaceId: WS_ID } });
   await prisma.workspaceMember.deleteMany({ where: { workspaceId: WS_ID } });
   await prisma.user.deleteMany({ where: { id: { in: AGENTS } } });
   await prisma.workspace.deleteMany({ where: { id: WS_ID } });
@@ -121,7 +121,7 @@ describe("concurrent pick burst (round_robin)", () => {
     // tie-break — an unserialized burst of 3 reads served=0 three times and
     // hands all three to A. Serialized (correct): A, A, then the 2-2-2 tie
     // rotates to someone else — A must get exactly 2.
-    const weighted = await prisma.assignmentPolicy.create({
+    const weighted = await prisma.team.create({
       data: {
         workspaceId: WS_ID,
         name: "burst-weighted",
@@ -153,10 +153,10 @@ describe("concurrent pick burst (round_robin)", () => {
     const toFirst = decisions.filter((d) => d.userId === AGENTS[0]).length;
     expect(toFirst).toBe(2);
 
-    await prisma.assignmentPolicyMember.deleteMany({
+    await prisma.teamMember.deleteMany({
       where: { policyId: weighted.id, workspaceId: WS_ID },
     });
-    await prisma.assignmentPolicy.deleteMany({
+    await prisma.team.deleteMany({
       where: { id: weighted.id, workspaceId: WS_ID },
     });
   });
@@ -168,7 +168,7 @@ describe("concurrent pick burst (round_robin)", () => {
       ctx: { source: "inbound" },
       policyId,
     });
-    const row = await prisma.assignmentPolicy.findFirst({
+    const row = await prisma.team.findFirst({
       where: { id: policyId, workspaceId: WS_ID },
       select: { cursorUserId: true },
     });

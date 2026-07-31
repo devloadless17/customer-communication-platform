@@ -66,7 +66,7 @@ export interface SelectableMember {
   availabilityStatus: string | null;
   /** Non-closed conversations currently assigned to them, team-wide. */
   openCount: number;
-  /** True when an AssignmentPolicyMember row exists for this policy. */
+  /** True when an TeamMember row exists for this policy. */
   hasOverride: boolean;
   /** From the override row (defaults when absent). */
   enabled: boolean;

@@ -301,7 +301,7 @@ describe("assign_ticket", () => {
 describe("assign_ticket → team routing", () => {
   it("picks a person from the queue and records which queue it came through", async () => {
     // A team whose only member is our test user.
-    const policy = await prisma.assignmentPolicy.create({
+    const policy = await prisma.team.create({
       data: {
         workspaceId,
         name: `TWS routing ${Date.now().toString().slice(-6)}`,

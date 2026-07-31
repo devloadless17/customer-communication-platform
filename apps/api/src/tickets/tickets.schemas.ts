@@ -47,7 +47,7 @@ export const ListTicketsQuerySchema = z.object({
   assignee: z.string().optional(),
   /**
    * The TEAM queue. `none` means "owned by no team" (a real filter, distinct
-   * from omitting the param); a raw AssignmentPolicy id filters to that team.
+   * from omitting the param); a raw Team id filters to that team.
    *
    * Independent of `assignee`, and both together is the useful query: "in
    * Sales' queue AND still unclaimed" is how a team finds work handed to them.

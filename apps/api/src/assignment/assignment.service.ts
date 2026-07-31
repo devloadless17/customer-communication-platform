@@ -59,12 +59,12 @@ export class AssignmentService {
    */
   async ensureBootstrap(workspaceId: string): Promise<void> {
     const [policyCount, settings] = await Promise.all([
-      this.db.assignmentPolicy.count({ where: { workspaceId, archivedAt: null } }),
+      this.db.team.count({ where: { workspaceId, archivedAt: null } }),
       this.db.assignmentSettings.findUnique({ where: { workspaceId }, select: { workspaceId: true } }),
     ]);
 
     if (policyCount === 0) {
-      await this.db.assignmentPolicy
+      await this.db.team
         .create({
           data: {
             workspaceId,
@@ -107,7 +107,7 @@ export class AssignmentService {
     });
 
     const [policies, rules, settings, members, grouped] = await Promise.all([
-      this.db.assignmentPolicy.findMany({
+      this.db.team.findMany({
         where: { workspaceId, archivedAt: null },
         orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
         include: {
@@ -175,7 +175,7 @@ export class AssignmentService {
   // -------------------------------------------------------------------------
 
   async createPolicy(workspaceId: string, input: CreatePolicyInput) {
-    const count = await this.db.assignmentPolicy.count({
+    const count = await this.db.team.count({
       where: { workspaceId, archivedAt: null },
     });
     if (count >= ASSIGNMENT_LIMITS.maxPoliciesPerTeam) {
@@ -183,7 +183,7 @@ export class AssignmentService {
     }
     await this.validateTargets(workspaceId, input);
 
-    const policy = await this.db.assignmentPolicy.create({
+    const policy = await this.db.team.create({
       data: {
         workspaceId,
         name: input.name,
@@ -210,7 +210,7 @@ export class AssignmentService {
   }
 
   async updatePolicy(workspaceId: string, policyId: string, input: UpdatePolicyInput) {
-    const existing = await this.db.assignmentPolicy.findFirst({
+    const existing = await this.db.team.findFirst({
       where: { id: policyId, workspaceId, archivedAt: null },
     });
     if (!existing) throw new NotFoundException({ error: "policy_not_found" });
@@ -219,7 +219,7 @@ export class AssignmentService {
     // Optimistic concurrency: the CAS is on `version`, and the same statement
     // bumps it, so a co-admin's stale save fails loudly instead of silently
     // reverting the weights that just landed.
-    const { count } = await this.db.assignmentPolicy.updateMany({
+    const { count } = await this.db.team.updateMany({
       where: { id: policyId, workspaceId, version: input.expectedVersion },
       data: {
         ...(input.name !== undefined ? { name: input.name } : {}),
@@ -257,18 +257,18 @@ export class AssignmentService {
    * it from ever being attempted.
    */
   async setDefaultPolicy(workspaceId: string, policyId: string) {
-    const policy = await this.db.assignmentPolicy.findFirst({
+    const policy = await this.db.team.findFirst({
       where: { id: policyId, workspaceId, archivedAt: null },
       select: { id: true },
     });
     if (!policy) throw new NotFoundException({ error: "policy_not_found" });
 
     await this.db.$transaction(async (tx) => {
-      await tx.assignmentPolicy.updateMany({
+      await tx.team.updateMany({
         where: { workspaceId, isDefault: true, id: { not: policyId } },
         data: { isDefault: false },
       });
-      await tx.assignmentPolicy.updateMany({
+      await tx.team.updateMany({
         where: { id: policyId, workspaceId },
         data: { isDefault: true },
       });
@@ -285,7 +285,7 @@ export class AssignmentService {
    * nothing, and silent is the enemy here.
    */
   async archivePolicy(workspaceId: string, policyId: string) {
-    const policy = await this.db.assignmentPolicy.findFirst({
+    const policy = await this.db.team.findFirst({
       where: { id: policyId, workspaceId, archivedAt: null },
       select: { id: true, isDefault: true },
     });
@@ -296,7 +296,7 @@ export class AssignmentService {
 
     await this.db.$transaction(async (tx) => {
       await tx.assignmentRule.deleteMany({ where: { workspaceId, policyId } });
-      await tx.assignmentPolicy.updateMany({
+      await tx.team.updateMany({
         where: { id: policyId, workspaceId },
         data: { archivedAt: new Date(), isDefault: false },
       });
@@ -313,7 +313,7 @@ export class AssignmentService {
   }
 
   private async getPolicy(workspaceId: string, policyId: string) {
-    const policy = await this.db.assignmentPolicy.findFirst({
+    const policy = await this.db.team.findFirst({
       where: { id: policyId, workspaceId },
       include: {
         members: {
@@ -352,7 +352,7 @@ export class AssignmentService {
       }
     }
 
-    const existing = await this.db.assignmentPolicyMember.findMany({
+    const existing = await this.db.teamMember.findMany({
       where: { policyId },
       select: { userId: true, weight: true, served: true },
     });
@@ -364,7 +364,7 @@ export class AssignmentService {
     const avgRatio = totalWeight > 0 ? totalServed / totalWeight : 0;
 
     await this.db.$transaction(async (tx) => {
-      await tx.assignmentPolicyMember.deleteMany({
+      await tx.teamMember.deleteMany({
         where: {
           policyId,
           workspaceId,
@@ -373,7 +373,7 @@ export class AssignmentService {
       });
       for (const m of members) {
         const prior = existingByUser.get(m.userId);
-        await tx.assignmentPolicyMember.upsert({
+        await tx.teamMember.upsert({
           where: { policyId_userId: { policyId, userId: m.userId } },
           create: {
             workspaceId,
@@ -426,7 +426,7 @@ export class AssignmentService {
   async createRule(workspaceId: string, input: CreateRuleInput) {
     const [count, policy] = await Promise.all([
       this.db.assignmentRule.count({ where: { workspaceId } }),
-      this.db.assignmentPolicy.findFirst({
+      this.db.team.findFirst({
         where: { id: input.policyId, workspaceId, archivedAt: null },
         select: { id: true },
       }),
@@ -457,7 +457,7 @@ export class AssignmentService {
 
   async updateRule(workspaceId: string, ruleId: string, input: UpdateRuleInput) {
     if (input.policyId) {
-      const policy = await this.db.assignmentPolicy.findFirst({
+      const policy = await this.db.team.findFirst({
         where: { id: input.policyId, workspaceId, archivedAt: null },
         select: { id: true },
       });
@@ -529,7 +529,7 @@ export class AssignmentService {
     await this.ensureBootstrap(workspaceId);
 
     if (input.aiHandoffPolicyId) {
-      const policy = await this.db.assignmentPolicy.findFirst({
+      const policy = await this.db.team.findFirst({
         where: { id: input.aiHandoffPolicyId, workspaceId, archivedAt: null },
         select: { id: true },
       });

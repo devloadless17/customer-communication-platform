@@ -867,7 +867,7 @@ export class UsersService {
     }
 
     // Null the no-FK pointer columns that name this user. The delete cascaded
-    // their WorkspaceMember / TeamChannelMember / AssignmentPolicyMember rows and
+    // their WorkspaceMember / TeamChannelMember / TeamMember rows and
     // SetNull'd every real FK (assigned conversations, message flags, audit
     // authors), but four columns hold a user id WITHOUT a foreign key — a
     // deliberate choice so a deleted user degrades a policy rather than cascading
@@ -880,19 +880,19 @@ export class UsersService {
     // like the GC below.
     if (memberWorkspaceIds.length > 0) {
       await Promise.all([
-        this.db.assignmentPolicy
+        this.db.team
           .updateMany({
             where: { workspaceId: { in: memberWorkspaceIds }, fixedUserId: targetId },
             data: { fixedUserId: null },
           })
           .catch(() => undefined),
-        this.db.assignmentPolicy
+        this.db.team
           .updateMany({
             where: { workspaceId: { in: memberWorkspaceIds }, fallbackUserId: targetId },
             data: { fallbackUserId: null },
           })
           .catch(() => undefined),
-        this.db.assignmentPolicy
+        this.db.team
           .updateMany({
             where: { workspaceId: { in: memberWorkspaceIds }, cursorUserId: targetId },
             data: { cursorUserId: null },

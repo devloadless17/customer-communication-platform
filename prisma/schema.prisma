@@ -749,7 +749,7 @@ model Workspace {
   calls                   Call[]
   callPermissionRequests  CallPermissionRequest[]
   customerIdentityEvents  CustomerIdentityEvent[]
-  assignmentPolicies      AssignmentPolicy[]
+  assignmentPolicies      Team[]
   assignmentRules         AssignmentRule[]
   assignmentSettings      AssignmentSettings?
   aiHandoffAssignee       User?                    @relation("AiHandoffAssignee", fields: [aiHandoffAssigneeId], references: [id], onDelete: SetNull)
@@ -1384,7 +1384,7 @@ model User {
   // mode). SetNull on delete so removing the member degrades the team setting
   // to "leave unassigned" rather than orphaning the FK.
   aiHandoffForWorkspaces  Workspace[]              @relation("AiHandoffAssignee")
-  assignmentMemberships   AssignmentPolicyMember[] @relation("AssignmentPolicyMemberships")
+  assignmentMemberships   TeamMember[] @relation("AssignmentPolicyMemberships")
 
   @@index([organizationId])
   /// Messenger personas minted for this agent (one per Page). See MessengerPersona.
@@ -2038,7 +2038,7 @@ model Conversation {
   // Durable "who handled this customer last" — set whenever an assignee is
   // written, and NEVER cleared (closing a conversation clears `assignedUserId`,
   // which is exactly when this history would otherwise be lost). Powers
-  // AssignmentPolicy.preferPreviousAgent so a returning customer goes back to
+  // Team.preferPreviousAgent so a returning customer goes back to
   // the person who already knows them. Plain id, no FK: a removed member must
   // degrade to "no continuity", not cascade into the thread.
   lastAssignedUserId   String?
@@ -3600,12 +3600,12 @@ model Ticket {
   // never-cleared continuity column as the conversation (see its comment).
   assignedUserId     String?
   lastAssignedUserId String?
-  // The AssignmentPolicy that routed it, for reporting "which queue did this
+  // The Team (assignment policy) that routed it, for reporting "which queue did this
   // come through". Plain id, no FK — an archived policy must not cascade into
   // closed work. PROVENANCE ONLY: it records how the ticket arrived, and never
   // changes when the ticket is handed on. See `assignedTeamId` for ownership.
   policyId           String?
-  // The TEAM that currently owns this ticket — an AssignmentPolicy, which is
+  // The TEAM that currently owns this ticket — a Team (mapped to table AssignmentPolicy), which is
   // what a "team" is in this product (Sales, Support, Billing).
   //
   // This is the handoff primitive, and it is deliberately separate from
@@ -3677,7 +3677,7 @@ model Ticket {
   conversation  Conversation?     @relation("ConversationTickets", fields: [conversationId], references: [id], onDelete: Cascade)
   contact       Contact?          @relation(fields: [contactId], references: [id], onDelete: Cascade)
   assignedUser  User?             @relation("AssignedTickets", fields: [assignedUserId], references: [id], onDelete: SetNull)
-  assignedTeam  AssignmentPolicy? @relation("TeamTickets", fields: [assignedTeamId], references: [id], onDelete: SetNull)
+  assignedTeam  Team? @relation("TeamTickets", fields: [assignedTeamId], references: [id], onDelete: SetNull)
   resolvedBy    User?             @relation("ResolvedTickets", fields: [resolvedById], references: [id], onDelete: SetNull)
   slaPolicy     TicketSlaPolicy?  @relation(fields: [slaPolicyId], references: [id], onDelete: SetNull)
   // Shared taxonomy with contacts — an org that already colour-codes "VIP" and
@@ -5731,8 +5731,8 @@ model AiReplySuggestion {
 // pool, and pre-assign a campaign's replies.
 //
 // The model is deliberately three small tables, not one JSON blob:
-//   AssignmentPolicy        — a named strategy ("Support — weighted")
-//   AssignmentPolicyMember  — per-member weight + capacity inside that policy
+//   Team (table AssignmentPolicy) — a named strategy ("Support — weighted")
+//   TeamMember (table AssignmentPolicyMember) — per-member weight + capacity inside that policy
 //   AssignmentRule          — first-match-wins routing INTO a policy
 //   AssignmentSettings      — the per-team switchboard (when auto-assign fires)
 //
@@ -5750,7 +5750,7 @@ enum AssignmentStrategy {
   // cursor so equal-load teams still spread evenly. This is the historical
   // behavior and the default — it self-balances when chats have uneven length.
   least_busy
-  // Proportional share by `AssignmentPolicyMember.weight` — a member with
+  // Proportional share by `TeamMember.weight` — a member with
   // weight 50 receives ~5x the volume of one with weight 10. Implemented as
   // deficit-based selection (lowest served/weight ratio wins), so the split is
   // exact over time rather than probabilistic.
@@ -5783,11 +5783,11 @@ enum AssignmentOverflow {
   // Ignore the caps and assign to the least-loaded candidate anyway. For teams
   // that would rather overload someone than leave a customer unowned.
   ignore_capacity
-  // Assign to `AssignmentPolicy.fallbackUserId` (a supervisor).
+  // Assign to `Team.fallbackUserId` (a supervisor).
   fallback_user
 }
 
-model AssignmentPolicy {
+model Team {
   id          String  @id @default(cuid())
   workspaceId String
   name        String
@@ -5861,7 +5861,7 @@ model AssignmentPolicy {
   updatedAt DateTime @updatedAt
 
   workspace Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  members   AssignmentPolicyMember[]
+  members   TeamMember[]
   /// Tickets currently owned by this team — the queue side of a handoff.
   /// See `Ticket.assignedTeamId`.
   tickets   Ticket[]                 @relation("TeamTickets")
@@ -5869,9 +5869,13 @@ model AssignmentPolicy {
 
   @@index([workspaceId, archivedAt])
   @@index([workspaceId, isDefault])
+  // Promoted from AssignmentPolicy 2026-07-31 (the UI has said "Teams & routing"
+  // all along). @@map keeps the TABLE name — the org→workspace rename showed
+  // what a physical rename does to raw partial indexes.
+  @@map("AssignmentPolicy")
 }
 
-model AssignmentPolicyMember {
+model TeamMember {
   id          String @id @default(cuid())
   workspaceId String
   policyId    String
@@ -5898,13 +5902,14 @@ model AssignmentPolicyMember {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  policy AssignmentPolicy @relation(fields: [policyId], references: [id], onDelete: Cascade)
+  policy Team @relation(fields: [policyId], references: [id], onDelete: Cascade)
   user   User             @relation("AssignmentPolicyMemberships", fields: [userId], references: [id], onDelete: Cascade)
 
   // workspaceId deliberately absent from this unique: the leading cuid FK
   // already implies exactly one workspace (Batch D, 2026-07-27).
   @@unique([policyId, userId])
   @@index([workspaceId])
+  @@map("AssignmentPolicyMember")
 }
 
 model AssignmentRule {
@@ -5935,7 +5940,7 @@ model AssignmentRule {
   updatedAt DateTime @updatedAt
 
   workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  policy    AssignmentPolicy @relation(fields: [policyId], references: [id], onDelete: Cascade)
+  policy    Team @relation(fields: [policyId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, enabled, position])
 }
@@ -5996,7 +6001,7 @@ enum BroadcastAssignmentMode {
   // Proportional split of the WHOLE audience by weight, distributed with the
   // largest-remainder method so the totals add up exactly.
   split_percent
-  // Run each recipient through an AssignmentPolicy (respects capacity,
+  // Run each recipient through a Team (respects capacity,
   // presence and weights at materialize time).
   policy
 }

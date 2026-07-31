@@ -148,7 +148,7 @@ export async function seedOtherWorkspace(): Promise<OtherWorkspace> {
     },
   });
 
-  const assignmentPolicy = await d.assignmentPolicy.create({
+  const assignmentPolicy = await d.team.create({
     data: { workspaceId, name: `${P}Policy` },
   });
 

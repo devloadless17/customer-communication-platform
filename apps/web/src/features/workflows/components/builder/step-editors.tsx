@@ -2094,7 +2094,7 @@ export function AssignTicketEditor({
   };
   onChange: (c: Record<string, unknown>) => void;
   users: BuilderCatalogs["users"];
-  /** Teams (AssignmentPolicy) available for queue routing. */
+  /** Teams (Team) available for queue routing. */
   policies?: Array<{ id: string; name: string }>;
 }) {
   return (

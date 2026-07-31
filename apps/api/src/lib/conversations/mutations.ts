@@ -245,7 +245,7 @@ export async function assignConversation(args: {
         // whenever a real assignee is written, and never clear it. Closing a
         // conversation nulls `assignedUserId`, so without this the "who
         // handled this customer before" history would be destroyed exactly
-        // when it becomes useful. See AssignmentPolicy.preferPreviousAgent.
+        // when it becomes useful. See Team.preferPreviousAgent.
         data: {
           assignedUserId: targetUserId,
           ...(statusChanged ? { status: nextStatus } : {}),

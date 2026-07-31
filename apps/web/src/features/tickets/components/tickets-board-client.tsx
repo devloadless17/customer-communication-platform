@@ -74,7 +74,7 @@ export function TicketsBoardClient({
   viewerUserId,
 }: {
   users: User[];
-  /** Teams (AssignmentPolicy) — drives the queue filter. */
+  /** Teams (Team) — drives the queue filter. */
   teams: Array<{ id: string; name: string; isDefault: boolean }>;
   /** Whose "new reply" badges these are. Read state is per-PERSON, so a frame
    *  meant for a colleague must not light this board. */

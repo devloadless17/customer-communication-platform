@@ -14,7 +14,7 @@ import { RulesPanel } from "./rules-panel";
 import type { AssignmentOverview } from "./types";
 
 // "Teams" is the user-facing name for what the schema calls an
-// AssignmentPolicy: a named group of members with a strategy, weights and
+// Team: a named group of members with a strategy, weights and
 // capacity. It IS the routable team — inventing a second entity beside it
 // would give one concept two homes that could disagree about who is on it.
 const TABS = [

@@ -3,7 +3,7 @@ import { permanentRedirect } from "next/navigation";
 /**
  * Legacy URL. This page rendered the WORKSPACE member roster while being
  * called "team" — and in this product a "team" is a specific, different thing:
- * a soft grouping INSIDE a workspace (`AssignmentPolicy` — Sales vs Support
+ * a soft grouping INSIDE a workspace (`Team` — Sales vs Support
  * sharing one inbox). Naming the workspace's member list after it made the two
  * concepts read as one.
  *

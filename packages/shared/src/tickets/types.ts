@@ -184,7 +184,7 @@ export interface Ticket {
   assignedUserId: string | null;
   assignedUserName: string | null;
   /**
-   * The TEAM that currently owns this ticket (an AssignmentPolicy id), or null.
+   * The TEAM that currently owns this ticket (an Team id), or null.
    *
    * Independent of `assignedUserId`: a ticket handed to Sales sits in their
    * queue with no person on it until someone claims it. Both set means someone

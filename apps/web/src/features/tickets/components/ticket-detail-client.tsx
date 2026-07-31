@@ -140,7 +140,7 @@ export function TicketDetailClient({
   viewerWorkspaceId: string;
   users: User[];
   tags: Tag[];
-  /** Teams (AssignmentPolicy) this ticket can be handed to. */
+  /** Teams (Team) this ticket can be handed to. */
   teams: Array<{ id: string; name: string; isDefault: boolean }>;
   /** Sibling workspaces this ticket can be escalated to. */
   escalationTargets: Array<{ id: string; name: string }>;

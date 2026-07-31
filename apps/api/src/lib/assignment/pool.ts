@@ -15,7 +15,7 @@ import type { PrismaClient } from "@prisma/client";
  * DO apply — those are durable statements about who belongs in this pool.
  */
 
-type Db = Pick<PrismaClient, "user" | "assignmentPolicy" | "assignmentPolicyMember">;
+type Db = Pick<PrismaClient, "user" | "team" | "teamMember">;
 
 export interface PoolMember {
   userId: string;
@@ -41,16 +41,16 @@ export async function buildPolicyPool(args: {
   const { db, workspaceId, policyId } = args;
 
   const policy = policyId
-    ? await db.assignmentPolicy.findFirst({
+    ? await db.team.findFirst({
         where: { id: policyId, workspaceId, archivedAt: null },
       })
     : null;
   const effective =
     policy ??
-    (await db.assignmentPolicy.findFirst({
+    (await db.team.findFirst({
       where: { workspaceId, archivedAt: null, isDefault: true },
     })) ??
-    (await db.assignmentPolicy.findFirst({
+    (await db.team.findFirst({
       where: { workspaceId, archivedAt: null },
       orderBy: { createdAt: "asc" },
     }));
@@ -67,7 +67,7 @@ export async function buildPolicyPool(args: {
       // and a live rotation agree on who "first" is.
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     }),
-    db.assignmentPolicyMember.findMany({
+    db.teamMember.findMany({
       where: { policyId: effective.id },
       select: { userId: true, weight: true, enabled: true },
     }),

@@ -41,7 +41,7 @@ import { buildPolicyPool } from "./pool";
  * fails to deliver never assigns anyone work that doesn't exist.
  */
 
-type Db = Pick<PrismaClient, "user" | "conversation" | "assignmentPolicy" | "assignmentPolicyMember">;
+type Db = Pick<PrismaClient, "user" | "conversation" | "team" | "teamMember">;
 
 export interface BroadcastAssignmentConfig {
   mode: BroadcastAssignmentMode;

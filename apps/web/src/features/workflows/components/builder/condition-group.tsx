@@ -500,7 +500,7 @@ function ConditionValueControl({
       </Select>
     );
   }
-  // Teams (AssignmentPolicy) and sibling workspaces have no catalog threaded
+  // Teams (Team) and sibling workspaces have no catalog threaded
   // into the builder, so they stay free-text ids rather than a dropdown that
   // would silently offer nothing. Same treatment `channel_account_id` had
   // before its catalog existed.

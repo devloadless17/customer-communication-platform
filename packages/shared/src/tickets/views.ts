@@ -44,7 +44,7 @@ export interface TicketViewFilters {
    * not whoever created it.
    */
   assignee?: string;
-  /** `"none"` = owned by no team; a raw AssignmentPolicy id = that queue. */
+  /** `"none"` = owned by no team; a raw Team id = that queue. */
   team?: string;
   tagIds?: string[];
   channel?: string;
