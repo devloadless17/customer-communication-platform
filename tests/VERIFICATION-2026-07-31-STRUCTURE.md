@@ -561,7 +561,7 @@ not automate.**
 ## Listed for approval (grows as domains close — nothing here is executed)
 
 - `external/v1/external-v1.controller.ts` split by resource (192 routes / 67 imports).
-- `team-chat/channels.service.ts` (2,083 L / 1,466 code) split into lifecycle+membership+DMs / messages (post/edit/delete/threads, incl. the hand-tuned postMessage) / pins+reactions+read-receipts — mechanical, controller injects three; run the 70-test team-chat e2e batch as proof. Recommended, deferred only because the proof can't run mid-program on this box.
+- ~~`team-chat/channels.service.ts` split~~ — **DONE post-program** (`fc21719a`): three services + shared channel-guards.ts; team-chat e2e 33/33.
 - `lib/providers/meta.ts` (7,766 L) split.
 - `team.*` event / `team:*` frame renames — **contract-breaking** (§9 additive-only); recommend keeping wire names, renaming only internals.
 - The ~2,300 lower-case `team*` identifier occurrences across api+web (`teamSchedule`, `teamSlots`, `teamCounts`, `teamActivity`…) — mechanical rename sweep, wide blast radius; recommend doing it per-file as those files are next touched rather than in one churn commit.
@@ -570,6 +570,6 @@ not automate.**
 - Internal splits of the 4 biggest client monoliths (new-broadcast-form, step-editors, reply-box, message-thread).
 - `AiAssistantConfig` (7 Json cols) / `WorkflowRun` (5, incl. per-run graphSnapshot) remodelling.
 - Availability columns → `WorkspaceMember` (named as the correct fix in `lib/availability/schedule.ts` itself).
-- Move the broadcasts / reports / settings clients into `features/` (the S9 pattern) once the pending campaign-analytics session commits — those exact files carry its uncommitted work today.
-- `queries.ts` split into `lib/api/queries/<domain>.ts` (fetchers + DTOs per domain) — same blocker, same timing.
+- ~~Move the broadcasts / reports / settings clients into `features/`~~ — **DONE post-program** (`5e3438bb`): 31 clients moved; app/ holds only pages/layouts/boundaries + 5 small route-local forms (deliberate).
+- ~~`queries.ts` split~~ — **DONE post-program** (`7ea07c3c`): 13 domain files behind a re-export facade (67 importers unchanged); the cache pin caught the move and now scans the directory.
 - Adopt the new `Skeleton` primitive at the 15 raw `animate-pulse` sites and 4 remaining local skeletons, per-file as touched.
