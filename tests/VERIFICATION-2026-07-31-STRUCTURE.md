@@ -441,6 +441,28 @@ negative-tested) + E (web vitest 37/37).**
   their campaignName hunk; splitting underneath an active edit is churn with
   a live victim).
 
+## Close-out gate (S12) — the ritual, adapted from the 07-29 ledger
+
+Run when the box is free of the sibling session's suites (concurrent browser
+runs on this box are the documented phantom-failure recipe):
+
+1. `pnpm run check` — 0 errors, 8/8 checkers.
+2. `pnpm test` — api + web vitest (NOT while a Playwright suite is live: the
+   api suite's `wipeTestData` shares the dev DB with the e2e harness's pinned
+   team — the exact mechanism behind the "shared-team flake").
+3. `pnpm test:e2e:meta` (already run green mid-program for the S10 proof;
+   re-run at HEAD).
+4. `pnpm test:e2e:multiaccount` — never concurrently with 3.
+5. Extended UX rubric (`tests/e2e/uiux/rubric.spec.ts`) against the dev
+   stack — now 16 full-rubric/axe surfaces + 18 settings + 12 feature
+   subpages + the completeness guard.
+6. Main Playwright suite via `pnpm test:e2e:batched` with an explicit path
+   filter per the 07-29 notes; the two S4-touched specs (org-member-limit,
+   auth-recovery) must be seen green here.
+7. Live UX walk: per-page browser pass over every route (loading, empty
+   states, layout shift, navigation clarity, copy) — findings fixed or
+   ledgered.
+
 ## Listed for approval (grows as domains close — nothing here is executed)
 
 - `external/v1/external-v1.controller.ts` split by resource (192 routes / 67 imports).
