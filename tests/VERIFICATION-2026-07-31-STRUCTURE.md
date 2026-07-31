@@ -84,9 +84,9 @@ NUMBER, the messaging limit per PORTFOLIO).
 | # | Domain | Lens | Status |
 |---|---|---|---|
 | S1 | Model spine & schema structure | tenancy exceptions vs reality; partial-index lockstep incl. the 2 NEW uncommitted migrations; cascade recount at 77 models; Json-heavy models | ✅ **2026-07-31** — Finding #1 fixed (11 unprotected indexes); cascade + tenancy gates verified mechanically |
-| S2 | Org / workspaces / membership / session | service-less controllers; users.service grab-bag; duplicated tx idiom; single-definition rules verified at HEAD | ☐ |
+| S2 | Org / workspaces / membership / session | service-less controllers; users.service grab-bag; duplicated tx idiom; single-definition rules verified at HEAD | ✅ **2026-07-31** — users split done; single-definitions verified; 2 R-only acceptances recorded |
 | S3 | Assignment + availability | structural claims at HEAD; round-robin shim; cache-invalidation convention; naming residue | ☐ |
-| S4 | Team/Workspace naming residue | `/api/admin/teams` rename (both sides); `Team.<field>` comments; `team.*` events = contracts (list-only); AssignmentPolicy→Team promotion (recommendation only) | ☐ |
+| S4 | Team/Workspace naming residue | `/api/admin/teams` rename (both sides); `Team.<field>` comments; `team.*` events = contracts (list-only); AssignmentPolicy→Team promotion (recommendation only) | ✅ **2026-07-31** — route/DTO/component rename landed (`ed0c81b0`); events + identifier residue carried to approval list |
 | S5 | Team chat structure | 2,083 L god-service; RealtimeGateway direct injection (the ONE EventBus bypass); "#general" ×3; postMessage dedup | ☐ |
 | S6 | Realtime & client state | contact-panel fake reducer consumer → rewire + pin; convergence-policy duplication (list-only) | ☐ |
 | S7 | Frontend fetching & loading perf | RSC waterfalls; getOrganizationOverview cache(); soft() consistency; force-dynamic; metadata; use-call fetch | ☐ |
@@ -151,12 +151,86 @@ NUMBER, the messaging limit per PORTFOLIO).
 - **Json-heavy models** (`AiAssistantConfig` 7 cols, `WorkflowRun` 5 incl.
   per-run `graphSnapshot`) → carried to the approval list, per plan.
 
+### S2 — org / workspaces / membership / session — ✅ CLOSED (2026-07-31)
+
+**Method: R (adversarial + mechanical grep) + E (availability 9, full api vitest) + refactor.**
+
+- **Single-definition rules — ✅ VERIFIED at HEAD by exhaustive grep**, not
+  trusted from the exploration: `resolveActiveWorkspaceId` has exactly the
+  three §18 callers (session.guard.ts:509, socket-auth.service.ts:263, web
+  current-user.ts:150); `provisionWorkspace` exactly three
+  (provision-organization, oauth-provision, WorkspacesService.create);
+  `detachMemberFromWorkspace` exactly two (workspaces.service,
+  users.service via detachFromAllWorkspaces).
+- **users.service.ts grab-bag — FIXED (`7479c0d1`).** The availability +
+  working-hours half (updateMyAvailability / setUserAvailability /
+  writeAvailability / getUserWorkHours / setUserWorkHours / resyncAvailability)
+  moved VERBATIM to a new `UserAvailabilityService` — orchestration moved,
+  invariants didn't (`applyAvailability` in lib stays the one writer). Six
+  wiring sites updated (users controller+module, workspace-root controller,
+  /v1 service+module comment, one gateway comment). UsersService is now
+  profile/roster/lifecycle at ~930 lines. Proven by api typecheck + the
+  availability unit specs (9/9) + full api vitest.
+- **R-only ACCEPTED — the "duplicated tx-or-client idiom" is not duplication.**
+  `applyWrite` (workspaces.service:345) and `applyWrites` (users.service) share
+  only the closure SHAPE (`Prisma.TransactionClient | DbService`); their bodies
+  are different writes with different atomicity reasons. A shared helper would
+  abstract a type union, which §17 forbids as speculative.
+- **R-only ACCEPTED — the five service-less controllers stay service-less.**
+  admin-workspaces / admin-organizations / register / oauth-provision /
+  change-password hold ~16 small Prisma calls in 5–15-line handlers whose
+  guards are load-bearing and documented in place (e.g. the
+  `organization.isPlatform: false` tenancy guard, the self-team-guard history
+  in the admin controller's header). Their READS already live in the domain
+  layer (`lib/queries/super-admin.ts`). Extracting the writes into services
+  would add a layer that reduces nothing — §17's judgment overrides §4's
+  letter here. Revisit if any of these surfaces grows real orchestration.
+- **Flake observed, not chased:** `test/bsuid-fork-reconcile.spec.ts` (an
+  UNTRACKED spec belonging to the pending 07-31 session) failed once under
+  full-suite load ("resolves by phone…" at 4.9 s) and passes 6/6 alone —
+  contention-sensitive, same class as the historical sweeper flakes. Left for
+  its owning session; recorded so it isn't rediscovered as new.
+
+### S4 — Team/Workspace naming residue — ✅ CLOSED (2026-07-31)
+
+**Method: R (exhaustive grep) + refactor (`ed0c81b0`) + E (deferred e2e).**
+
+- **`/api/admin/teams` → `/api/admin/workspaces`** — route, controller file +
+  class, response key (`{teams}` → `{workspaces}`), error key
+  (`team_not_found` → `workspace_not_found`), the lib query fns
+  (`listAllWorkspacesForSuperAdmin`, `getWorkspaceDetailForSuperAdmin`), the
+  shared DTOs (`SuperAdminWorkspaceRow` / `SuperAdminWorkspaceDetail`, field
+  `team` → `workspace`) and every consumer: web queries + both platform pages
+  + limit-control + two e2e specs. All consumers are in-repo, so the break is
+  clean. The three platform components that said "team" while acting on
+  ORGANIZATIONS became `OrgStatusBadge` / `OrgStatusControls` /
+  `DeleteOrganizationButton` (delete-org-button vs delete-team-button were
+  NOT duplicates — deliberately different copy, both act on orgs; the
+  misnamed one renamed).
+- **Four stale comments fixed on the way**, two of them substantive: the
+  users-controller and reset-password-dialog docblocks both cited a
+  cross-tenant superAdmin reset route that was deliberately REMOVED
+  (auth-recovery.spec.ts asserts it stays gone — its URL updated to the new
+  prefix so the assertion keeps meaning); workspace-root.service cited
+  `DELETE /api/admin/teams/:id`, a route that never existed under that prefix
+  (the real one is `DELETE /api/admin/organizations/:id`).
+- **Deliberately NOT renamed (carried to approval list):** `team.*` event
+  names + `team:*` socket frames (§9: an event name is a contract, additive
+  only), `TeamChannel*` models (legitimately team-chat), the
+  `agentConversationVisibility: "team"` enum VALUE (a wire contract), the
+  ~2,300 remaining lower-case identifier occurrences (`teamSchedule`,
+  `teamSlots`, `teamCounts`…) — mechanical but wide; and the underlying
+  product question, promoting `AssignmentPolicy` to a first-class "Team".
+- **E note:** the two touched e2e specs (org-member-limit, auth-recovery)
+  compile but the web dev server was down; they run in the close-out gate.
+
 ## Listed for approval (grows as domains close — nothing here is executed)
 
 - `external/v1/external-v1.controller.ts` split by resource (192 routes / 67 imports).
 - `lib/providers/meta.ts` (7,766 L) split.
 - `team.*` event / `team:*` frame renames — **contract-breaking** (§9 additive-only); recommend keeping wire names, renaming only internals.
-- AssignmentPolicy → first-class "Team" promotion (product decision).
+- The ~2,300 lower-case `team*` identifier occurrences across api+web (`teamSchedule`, `teamSlots`, `teamCounts`, `teamActivity`…) — mechanical rename sweep, wide blast radius; recommend doing it per-file as those files are next touched rather than in one churn commit.
+- AssignmentPolicy → first-class "Team" promotion (product decision — it already carries a durable member set, weights, capacity, rules and a rotation cursor; naming cleanup direction depends on this call).
 - Reconnect-convergence policy dedup across the 4 large hooks.
 - Internal splits of the 4 biggest client monoliths (new-broadcast-form, step-editors, reply-box, message-thread).
 - `AiAssistantConfig` (7 Json cols) / `WorkflowRun` (5, incl. per-run graphSnapshot) remodelling.
