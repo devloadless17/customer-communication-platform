@@ -15,7 +15,8 @@
  *
  *   pnpm --filter @ccp/api exec vitest run test/template-labels.spec.ts
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 
 import { createTestPrismaClient } from "./_prisma";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -322,9 +323,19 @@ describe("/v1 parity", () => {
     // Source-shaped assertion, same approach as scripts/check-v1-docs.mjs:
     // ScopeGuard is permissive by default, so a decorator dropped in a refactor
     // silently opens the route to ANY valid key.
-    // Path is cwd-relative (vitest runs from apps/api), like the sibling
-    // source-shaped assertions in broadcast-tag-safety.spec.ts.
-    const src = readFileSync("src/external/v1/external-v1.controller.ts", "utf8");
+    //
+    // Reads EVERY v1 controller, not one filename. What this test cares about
+    // is that the route is gated, not where it lives — and pinning the file
+    // broke the moment `@Patch("templates/:id")` moved into
+    // `external-v1-whatsapp.controller.ts` during the controller split, failing
+    // CI for a refactor that had changed nothing about the guard. Paths are
+    // cwd-relative (vitest runs from apps/api), like the sibling source-shaped
+    // assertions in broadcast-tag-safety.spec.ts.
+    const dir = "src/external/v1";
+    const src = readdirSync(dir)
+      .filter((f) => /^external-v1.*\.controller\.ts$/.test(f))
+      .map((f) => readFileSync(join(dir, f), "utf8"))
+      .join("\n");
     const gated = (verb: string, path: string) =>
       new RegExp(
         `@${verb}\\("${path.replace(/[:/]/g, (c) => `\\${c}`)}"\\)\\s*\\n\\s*@RequireScope\\("[^"]+"\\)`,
