@@ -49,7 +49,6 @@ import { ScopeGuard } from "../../auth/scope.guard";
 import { hasScope } from "@ccp/shared/api-keys/scopes";
 import { RateLimit } from "../../common/rate-limit.interceptor";
 import { zBody, zQuery } from "../../common/zod-validation.pipe";
-import { MAX_CHAIN_DEPTH, parseChainDepth } from "@/lib/workflows/events";
 import { setContactBlocked } from "@/lib/messaging/block-contact";
 import { mapBlockContactError } from "../../common/block-contact-http";
 import { markContactSpam } from "@/lib/messaging/block-contact";
@@ -205,6 +204,8 @@ import {
   type UpdateRuleInput,
 } from "@/assignment/assignment.schemas";
 
+import { parseChainDepth } from "@/lib/workflows/events";
+import { guardChainDepth, idemKey, idemKeyRequired } from "./v1-request-guards";
 import { ExternalV1Service } from "./external-v1.service";
 import { ExternalV1FlagsService } from "./external-v1-flags.service";
 import { InboxViewsService, type InboxViewActor } from "@/inbox-views/inbox-views.service";
@@ -393,79 +394,6 @@ export class ExternalV1Controller {
     private readonly calls: CallsService,
   ) {}
 
-  /**
-   * Cross-system loop guard for EVERY mutating /v1 route that publishes a
-   * domain event (which can fan an outbound webhook back to the partner, who
-   * may POST back here). The outbound-webhook deliverer stamps an incrementing
-   * `X-CCP-Depth` on each delivery; if a request arrives already at/over the
-   * cap, refuse it with 429 to break the loop. The send + bulk-tag routes
-   * already do this via their service methods; this centralizes the SAME check
-   * for the contact + conversation mutation routes that previously omitted it
-   * (createContact, upsert, update, delete, tag add/remove, assign, setStatus,
-   * and the contact-keyed assign/status aliases). HTTP-boundary concern, so it
-   * lives in the controller — the service signatures stay untouched.
-   */
-  private guardChainDepth(xCcpDepth: string | undefined): void {
-    const depth = parseChainDepth(xCcpDepth);
-    if (depth >= MAX_CHAIN_DEPTH) {
-      throw new HttpException(
-        {
-          error: "chain_depth_exceeded",
-          detail:
-            `inbound X-CCP-Depth ${depth} >= ${MAX_CHAIN_DEPTH} — request dropped ` +
-            "to break a likely cross-system loop.",
-        },
-        429,
-      );
-    }
-  }
-
-  /**
-   * Normalize the inbound `Idempotency-Key` header for EVERY /v1 mutation:
-   *   - trim; empty/absent → `undefined` (no idempotency, as before)
-   *   - > 255 chars → 400 `idempotency_key_too_long` (Stripe convention: an
-   *     invalid key errors, it does NOT silently degrade — the two send routes
-   *     used to drop an over-long key, leaving the highest-risk operation with
-   *     ZERO duplicate-send protection on a partner's retry-after-timeout flow).
-   * 255 is the same ceiling the send routes already enforced; applying it
-   * uniformly keeps the surface internally consistent (other routes had NO cap).
-   */
-  private idemKey(raw: string | undefined): string | undefined {
-    const trimmed = raw?.trim();
-    if (!trimmed) return undefined;
-    if (trimmed.length > 255) {
-      throw new HttpException(
-        {
-          error: "idempotency_key_too_long",
-          detail: "Idempotency-Key must be at most 255 characters.",
-        },
-        400,
-      );
-    }
-    return trimmed;
-  }
-
-  // Same as idemKey() but MANDATORY — for routes that send to Meta. A WhatsApp
-  // send is non-idempotent (Meta assigns the wamid; we can't dedupe before the
-  // call returns), bills the team, and counts against their quality rating. The
-  // only thing that makes a partner's retry-after-5xx safe is a stable client
-  // key, so we refuse the send without one rather than risk double-texting the
-  // customer. Use a unique value per logical send (e.g. the inbound message id).
-  private idemKeyRequired(raw: string | undefined): string {
-    const key = this.idemKey(raw);
-    if (!key) {
-      throw new HttpException(
-        {
-          error: "idempotency_key_required",
-          detail:
-            "Send an Idempotency-Key header (unique per logical send, e.g. the inbound message id) so a retry can't double-send to WhatsApp.",
-        },
-        400,
-      );
-    }
-    return key;
-  }
-
   // ---- Contacts: list + find -----------------------------------------
 
   @Get("contacts")
@@ -512,7 +440,7 @@ export class ExternalV1Controller {
       auth.apiKeyId,
       "tag-add",
       body,
-      this.idemKey(idempotencyKey),
+      idemKey(idempotencyKey),
       parseChainDepth(xCcpDepth),
     );
   }
@@ -531,7 +459,7 @@ export class ExternalV1Controller {
       auth.apiKeyId,
       "tag-remove",
       body,
-      this.idemKey(idempotencyKey),
+      idemKey(idempotencyKey),
       parseChainDepth(xCcpDepth),
     );
   }
@@ -581,7 +509,7 @@ export class ExternalV1Controller {
     @Headers("idempotency-key") idempotencyKey?: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     // REQUIRED, not optional: this route's own docblock, the service comment
     // and both doc surfaces all said so while the code accepted a missing
     // header. A gateway timeout + client retry then queued a SECOND job over
@@ -593,7 +521,7 @@ export class ExternalV1Controller {
       auth.workspaceId,
       auth.apiKeyId,
       body,
-      this.idemKeyRequired(idempotencyKey),
+      idemKeyRequired(idempotencyKey),
     );
   }
 
@@ -668,7 +596,7 @@ export class ExternalV1Controller {
     @Body(zBody(ExternalCreateContactSchema)) body: ExternalCreateContactInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     const contact = await this.api.createContact(auth.workspaceId, auth.apiKeyId, body);
     return { contact };
   }
@@ -681,12 +609,12 @@ export class ExternalV1Controller {
     @Headers("idempotency-key") idempotencyKey?: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.api.upsertContact(
       auth.workspaceId,
       auth.apiKeyId,
       body,
-      this.idemKey(idempotencyKey),
+      idemKey(idempotencyKey),
       hasScope(auth.scopes, "read:contacts"),
     );
   }
@@ -706,7 +634,7 @@ export class ExternalV1Controller {
     @Headers("idempotency-key") idempotencyKey?: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     if (rawBody && Object.prototype.hasOwnProperty.call(rawBody, "phoneNumber")) {
       throw new BadRequestException({
         error: "phone_immutable",
@@ -726,7 +654,7 @@ export class ExternalV1Controller {
       auth.apiKeyId,
       id,
       parsed.data,
-      this.idemKey(idempotencyKey),
+      idemKey(idempotencyKey),
       hasScope(auth.scopes, "read:contacts"),
     );
     return { contact };
@@ -739,7 +667,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     await this.api.deleteContact(auth.workspaceId, auth.apiKeyId, id);
     return { ok: true };
   }
@@ -761,7 +689,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.setContactBlockedV1(auth, id, true);
   }
 
@@ -774,7 +702,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.setContactBlockedV1(auth, id, false);
   }
 
@@ -792,7 +720,7 @@ export class ExternalV1Controller {
     @Body(zBody(ReplyToCommentSchema)) body: ReplyToCommentInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     try {
       const res = await replyToCommentPublicly({
         workspaceId: auth.workspaceId,
@@ -826,7 +754,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     try {
       await markContactSpam({
         workspaceId: auth.workspaceId,
@@ -892,13 +820,13 @@ export class ExternalV1Controller {
     @Headers("idempotency-key") idempotencyKey?: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     const contact = await this.api.addContactTags(
       auth.workspaceId,
       auth.apiKeyId,
       id,
       body,
-      this.idemKey(idempotencyKey),
+      idemKey(idempotencyKey),
       hasScope(auth.scopes, "read:contacts"),
     );
     return { contact };
@@ -913,13 +841,13 @@ export class ExternalV1Controller {
     @Headers("idempotency-key") idempotencyKey?: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     const contact = await this.api.removeContactTag(
       auth.workspaceId,
       auth.apiKeyId,
       id,
       tagId,
-      this.idemKey(idempotencyKey),
+      idemKey(idempotencyKey),
       hasScope(auth.scopes, "read:contacts"),
     );
     return { contact };
@@ -940,14 +868,14 @@ export class ExternalV1Controller {
     @Headers("idempotency-key") idempotencyKey?: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     const contact = await this.api.removeContactTags(
       auth.workspaceId,
       auth.apiKeyId,
       id,
       body.tagIds,
       body.silent === true,
-      this.idemKey(idempotencyKey),
+      idemKey(idempotencyKey),
       hasScope(auth.scopes, "read:contacts"),
     );
     return { contact };
@@ -1114,7 +1042,7 @@ export class ExternalV1Controller {
     @Body(zBody(CreatePolicySchema)) body: CreatePolicyInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.assignment.createPolicy(auth.workspaceId, body);
   }
 
@@ -1126,7 +1054,7 @@ export class ExternalV1Controller {
     @Body(zBody(UpdatePolicySchema)) body: UpdatePolicyInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.assignment.updatePolicy(auth.workspaceId, id, body);
   }
 
@@ -1263,7 +1191,7 @@ export class ExternalV1Controller {
     @Body(zBody(CreateTicketViewSchema)) body: CreateTicketViewInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     // Forced SHARED: a key has no person to own a personal view, and one
     // created with a null author would be visible to nobody.
     return this.tickets.createView(auth.workspaceId, "", "admin", {
@@ -1280,7 +1208,7 @@ export class ExternalV1Controller {
     @Body(zBody(UpdateTicketViewSchema)) body: UpdateTicketViewInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.tickets.updateView(auth.workspaceId, "", "admin", viewId, body);
   }
 
@@ -1291,7 +1219,7 @@ export class ExternalV1Controller {
     @Param("viewId") viewId: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.tickets.deleteView(auth.workspaceId, "", "admin", viewId);
   }
 
@@ -1316,7 +1244,7 @@ export class ExternalV1Controller {
     @Body(zBody(CreateTicketSchema)) body: CreateTicketInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.tickets.create(auth.workspaceId, { apiKeyId: auth.apiKeyId }, body);
   }
 
@@ -1328,7 +1256,7 @@ export class ExternalV1Controller {
     @Body(zBody(UpdateTicketSchema)) body: UpdateTicketInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.tickets.update(auth.workspaceId, { apiKeyId: auth.apiKeyId }, id, body);
   }
 
@@ -1343,7 +1271,7 @@ export class ExternalV1Controller {
   async deleteTicketV1(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.tickets.remove(auth.workspaceId, { apiKeyId: auth.apiKeyId }, id);
   }
 
@@ -1367,7 +1295,7 @@ export class ExternalV1Controller {
     @Body(zBody(AddTicketNoteSchema)) body: AddTicketNoteInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.tickets.addNote(auth.workspaceId, { apiKeyId: auth.apiKeyId }, id, body.body);
   }
 
@@ -1385,7 +1313,7 @@ export class ExternalV1Controller {
     @Body(zBody(EscalateTicketSchema)) body: EscalateTicketInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.tickets.escalate(auth.workspaceId, { apiKeyId: auth.apiKeyId }, id, body);
   }
 
@@ -1401,7 +1329,7 @@ export class ExternalV1Controller {
     @Body(zBody(PostThreadMessageSchema)) body: PostThreadMessageInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     // JSON only: a partner posts text, and a multipart API surface nobody asked
     // for is scope we would have to keep working. The in-app composer covers
     // files. No read route either — read state is per-USER, and an API key has
@@ -1425,7 +1353,7 @@ export class ExternalV1Controller {
     @Param("guestWorkspaceId") guestWorkspaceId: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.tickets.revokeShare(
       auth.workspaceId,
       { apiKeyId: auth.apiKeyId },
@@ -1444,7 +1372,7 @@ export class ExternalV1Controller {
     @Param("attachmentId") attachmentId: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.tickets.removeAttachment(
       auth.workspaceId,
       { apiKeyId: auth.apiKeyId },
@@ -1465,7 +1393,7 @@ export class ExternalV1Controller {
     @Body() body: { channelConnectionId?: unknown } | undefined,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     const channelConnectionId =
       body && typeof body.channelConnectionId === "string" ? body.channelConnectionId : undefined;
     return this.tickets.messageEscalatedCustomer(
@@ -1790,7 +1718,7 @@ export class ExternalV1Controller {
   ) {
     // A send is non-idempotent and bills the business, so `/v1` sends REQUIRE the
     // header (CLAUDE.md §8) — the same gate every other /v1 send applies.
-    this.idemKeyRequired(idempotencyKey);
+    idemKeyRequired(idempotencyKey);
     const out = await this.api.sendMessengerTemplate(auth.workspaceId, auth.apiKeyId, id, body);
     return { ok: true, message_id: out.messageId };
   }
@@ -1938,8 +1866,8 @@ export class ExternalV1Controller {
     @Headers("idempotency-key") idempotencyKey?: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
-    await this.api.assign(auth.workspaceId, auth.apiKeyId, id, body, this.idemKey(idempotencyKey));
+    guardChainDepth(xCcpDepth);
+    await this.api.assign(auth.workspaceId, auth.apiKeyId, id, body, idemKey(idempotencyKey));
     return { ok: true, conversationId: id };
   }
 
@@ -1952,8 +1880,8 @@ export class ExternalV1Controller {
     @Headers("idempotency-key") idempotencyKey?: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
-    await this.api.setStatus(auth.workspaceId, auth.apiKeyId, id, body, this.idemKey(idempotencyKey));
+    guardChainDepth(xCcpDepth);
+    await this.api.setStatus(auth.workspaceId, auth.apiKeyId, id, body, idemKey(idempotencyKey));
     return { ok: true, conversationId: id };
   }
 
@@ -1969,8 +1897,8 @@ export class ExternalV1Controller {
     @Headers("idempotency-key") idempotencyKey?: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
-    await this.api.setAiEnabled(auth.workspaceId, auth.apiKeyId, id, body, this.idemKey(idempotencyKey));
+    guardChainDepth(xCcpDepth);
+    await this.api.setAiEnabled(auth.workspaceId, auth.apiKeyId, id, body, idemKey(idempotencyKey));
     return { ok: true };
   }
 
@@ -1989,13 +1917,13 @@ export class ExternalV1Controller {
     @Headers("idempotency-key") idempotencyKey?: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.api.assignByContact(
       auth.workspaceId,
       auth.apiKeyId,
       id,
       body,
-      this.idemKey(idempotencyKey),
+      idemKey(idempotencyKey),
     );
   }
 
@@ -2008,13 +1936,13 @@ export class ExternalV1Controller {
     @Headers("idempotency-key") idempotencyKey?: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.api.setStatusByContact(
       auth.workspaceId,
       auth.apiKeyId,
       id,
       body,
-      this.idemKey(idempotencyKey),
+      idemKey(idempotencyKey),
     );
   }
 
@@ -2034,13 +1962,13 @@ export class ExternalV1Controller {
     @Headers("idempotency-key") idempotencyKey?: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     const contact = await this.api.updateContact(
       auth.workspaceId,
       auth.apiKeyId,
       id,
       { stageId: body.stageId },
-      this.idemKey(idempotencyKey),
+      idemKey(idempotencyKey),
       hasScope(auth.scopes, "read:contacts"),
     );
     return { contact };
@@ -2071,12 +1999,12 @@ export class ExternalV1Controller {
     // Idempotency-Key; if we evaluated `idemKeyRequired` first we'd 400 on the
     // missing key and never cap the chain. The contact-mutation routes already
     // guard depth first; the send routes must too.
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.api.sendTopLevelMessage(
       auth.workspaceId,
       auth.apiKeyId,
       body,
-      this.idemKeyRequired(idempotencyKey),
+      idemKeyRequired(idempotencyKey),
       parseChainDepth(xCcpDepth),
     );
   }
@@ -2128,13 +2056,13 @@ export class ExternalV1Controller {
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
     // Loop guard before idempotency/body checks — see sendTopLevelMessage.
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     const out = await this.api.sendMessage(
       auth.workspaceId,
       auth.apiKeyId,
       id,
       body,
-      this.idemKeyRequired(idempotencyKey),
+      idemKeyRequired(idempotencyKey),
       parseChainDepth(xCcpDepth),
       // Reopen a closed thread after the send lands — UI↔/v1 parity (§12): the
       // inbox reply reopens, and so does the top-level POST /v1/messages route.
@@ -2178,13 +2106,13 @@ export class ExternalV1Controller {
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
     // Loop guard before idempotency/body checks — see sendTopLevelMessage.
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.api.sendInteractive(
       auth.workspaceId,
       auth.apiKeyId,
       id,
       body,
-      this.idemKeyRequired(idempotencyKey),
+      idemKeyRequired(idempotencyKey),
     );
   }
 
@@ -2204,7 +2132,7 @@ export class ExternalV1Controller {
       auth.apiKeyId,
       id,
       body,
-      this.idemKey(idempotencyKey),
+      idemKey(idempotencyKey),
       parseChainDepth(xCcpDepth),
     );
     return { ok: true, note: out.note };
@@ -2218,7 +2146,7 @@ export class ExternalV1Controller {
     @Param("noteId") noteId: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.api.deleteNote(auth.workspaceId, id, noteId);
   }
   // ---- Message flags ------------------------------------------------
@@ -2669,7 +2597,7 @@ export class ExternalV1Controller {
     @Body(zBody(ExternalRaiseFlagSchema)) body: ExternalRaiseFlagInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     // No Idempotency-Key requirement here, unlike sends: raising a flag is
     // idempotent by construction (@@unique([messageId, definitionId]) + upsert)
     // and costs nothing, so demanding a key would be friction with no payoff.
@@ -2684,7 +2612,7 @@ export class ExternalV1Controller {
     @Body(zBody(ExternalUpdateFlagSchema)) body: ExternalUpdateFlagInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.flags.update(auth.workspaceId, auth.apiKeyId, flagId, body);
   }
 
@@ -2695,7 +2623,7 @@ export class ExternalV1Controller {
     @Param("flagId") flagId: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.flags.remove(auth.workspaceId, auth.apiKeyId, flagId);
   }
 
@@ -2880,7 +2808,7 @@ export class ExternalV1Controller {
       auth.workspaceId,
       auth.apiKeyId,
       id,
-      this.idemKeyRequired(idempotencyKey),
+      idemKeyRequired(idempotencyKey),
     );
   }
 
@@ -2903,7 +2831,7 @@ export class ExternalV1Controller {
       auth.apiKeyId,
       id,
       body,
-      this.idemKeyRequired(idempotencyKey),
+      idemKeyRequired(idempotencyKey),
     );
   }
 
@@ -2950,13 +2878,13 @@ export class ExternalV1Controller {
     @Headers("idempotency-key") idempotencyKey?: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.api.triggerWorkflow(
       auth.workspaceId,
       auth.apiKeyId,
       id,
       body,
-      this.idemKeyRequired(idempotencyKey),
+      idemKeyRequired(idempotencyKey),
     );
   }
 
@@ -2995,7 +2923,7 @@ export class ExternalV1Controller {
     @Body(zBody(PublishWorkflowSchema)) body: PublishWorkflowInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     const out = await this.workflows.publish(auth.workspaceId, id, body.publish);
     return { ok: true, ...out };
   }
@@ -3020,7 +2948,7 @@ export class ExternalV1Controller {
     @Body(zBody(StartConversationSchema)) body: StartConversationInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.conversations.startConversation(auth.workspaceId, null, body);
   }
 
@@ -3097,12 +3025,12 @@ export class ExternalV1Controller {
     @Headers("idempotency-key") idempotencyKey?: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.api.createBroadcast(
       auth.workspaceId,
       auth.apiKeyId,
       body,
-      this.idemKeyRequired(idempotencyKey),
+      idemKeyRequired(idempotencyKey),
     );
   }
 
@@ -3130,7 +3058,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     await this.broadcasts.cancel(auth.workspaceId, id);
     return { ok: true };
   }
@@ -3148,7 +3076,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     const resumed = await this.broadcasts.resume(auth.workspaceId, id);
     if (!resumed) {
       throw new ConflictException({ error: "broadcast_not_paused" });
@@ -3171,13 +3099,13 @@ export class ExternalV1Controller {
     @Headers("idempotency-key") idempotencyKey?: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     return this.api.retryBroadcast(
       auth.workspaceId,
       auth.apiKeyId,
       id,
       body,
-      this.idemKeyRequired(idempotencyKey),
+      idemKeyRequired(idempotencyKey),
     );
   }
 
@@ -3190,7 +3118,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     await this.broadcasts.remove(auth.workspaceId, id);
     return { ok: true };
   }
@@ -3261,7 +3189,7 @@ export class ExternalV1Controller {
     @Body(zBody(RenameCustomerSchema)) body: RenameCustomerInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     const customer = await this.customers.rename(auth.workspaceId, id, body.name);
     return { ok: true, customer };
   }
@@ -3280,7 +3208,7 @@ export class ExternalV1Controller {
     @Body(zBody(LinkContactSchema)) body: LinkContactInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     const customer = await this.customers.linkContact(
       auth.workspaceId,
       id,
@@ -3299,7 +3227,7 @@ export class ExternalV1Controller {
     @Body(zBody(UnlinkContactSchema)) body: UnlinkContactInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     const out = await this.customers.unlinkContact(
       auth.workspaceId,
       id,
@@ -3339,7 +3267,7 @@ export class ExternalV1Controller {
     @Body(zBody(CreateOutboundWebhookSchema)) body: CreateOutboundWebhookInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     // `createdById: null` — an API key is not a person. The service already
     // treats a null creator as "created by an integration".
     return this.outboundWebhooks.create(auth.workspaceId, null, body);
@@ -3353,7 +3281,7 @@ export class ExternalV1Controller {
     @Body(zBody(UpdateOutboundWebhookSchema)) body: UpdateOutboundWebhookInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     const webhook = await this.outboundWebhooks.update(auth.workspaceId, id, body);
     return { webhook };
   }
@@ -3377,7 +3305,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     await this.outboundWebhooks.remove(auth.workspaceId, id);
     return { ok: true };
   }
@@ -3443,7 +3371,7 @@ export class ExternalV1Controller {
     @Body(zBody(CreateAudienceGroupSchema)) body: CreateAudienceGroupInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     const group = await this.audienceGroups.create(auth.workspaceId, null, body);
     return { group };
   }
@@ -3456,7 +3384,7 @@ export class ExternalV1Controller {
     @Body(zBody(UpdateAudienceGroupSchema)) body: UpdateAudienceGroupInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     const group = await this.audienceGroups.update(auth.workspaceId, id, body);
     return { group };
   }
@@ -3468,7 +3396,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     await this.audienceGroups.remove(auth.workspaceId, id);
     return { ok: true };
   }
@@ -3494,7 +3422,7 @@ export class ExternalV1Controller {
     @Body(zBody(CreateSnippetSchema)) body: CreateSnippetInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     const created = await this.snippets.create(auth.workspaceId, null, body);
     return { ok: true, id: created.id };
   }
@@ -3507,7 +3435,7 @@ export class ExternalV1Controller {
     @Body(zBody(UpdateSnippetSchema)) body: UpdateSnippetInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     await this.snippets.update(auth.workspaceId, id, body);
     return { ok: true };
   }
@@ -3519,7 +3447,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    this.guardChainDepth(xCcpDepth);
+    guardChainDepth(xCcpDepth);
     await this.snippets.remove(auth.workspaceId, id);
     return { ok: true };
   }
