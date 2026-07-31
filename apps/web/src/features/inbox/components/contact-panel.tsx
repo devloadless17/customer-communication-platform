@@ -456,12 +456,21 @@ function ContactPanelImpl({
 
     // Dev-only invariant: ContactPanel is the 3rd thread-state consumer (see
     // thread-reducers.ts header). It derives liveStatus / liveMessageCount /
-    // liveNoteCount DIRECTLY from these 4 events because its `data` prop is the
+    // liveNoteCount DIRECTLY from these events because its `data` prop is the
     // inbox-shell LRU snapshot (frozen w.r.t. live status/counts while the
     // thread is displayed), not MessageThread's live hook. Asserting coverage
     // here means a future field derived from an un-covered event fails loudly in
-    // dev instead of silently diverging. All 4 are covered today (no-op).
-    assertReducerCoverage(["note:new", "note:deleted", "message:flag"]);
+    // dev instead of silently diverging. The list must name EVERY socket event
+    // this component binds — including the contact-edit pair bound in the
+    // effect below — and test/contact-panel-coverage.spec.ts pins that the two
+    // stay in lockstep.
+    assertReducerCoverage([
+      "note:new",
+      "note:deleted",
+      "message:flag",
+      "contact:updated",
+      "contacts:bulk_updated",
+    ]);
 
     const onFlag: Parameters<typeof socket.on<"message:flag">>[1] = (payload) => {
       if (payload.conversationId !== conversationId) return;
