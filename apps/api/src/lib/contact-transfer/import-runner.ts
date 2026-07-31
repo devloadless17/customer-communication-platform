@@ -377,6 +377,17 @@ export async function runContactImport(opts: {
         ? await writeErrorReport({ workspaceId, jobId, format, headers, errorRows: reportRows })
         : null;
 
+    // Refresh planner statistics after a bulk import. Autovacuum's ANALYZE
+    // trigger is proportional to TABLE size, so a 100k+ import into a large
+    // multi-tenant Contact table can leave stats stale for a long time — and
+    // stale stats mis-plan the contact/global search (measured 2026-07-31 at
+    // 1M rows: the same search was 14-38s mid-import with stale stats, 730ms
+    // worst-case after ANALYZE). One statement, seconds at most, and only
+    // after imports big enough to move the distribution.
+    if (counters.created + counters.updated >= 10_000) {
+      await db.$executeRawUnsafe(`ANALYZE "Contact"`).catch(() => {});
+    }
+
     return {
       ...counters,
       totalRows: rowsSeen,

@@ -54,6 +54,7 @@
     "@types/node": "^24",
     "@types/papaparse": "^5.5.2",
     "@types/pg": "^8.11.10",
+    "dotenv": "17.4.2",
     "typescript": "^6.0.3",
     "vitest": "^4.1.10"
   }

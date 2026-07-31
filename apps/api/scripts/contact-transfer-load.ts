@@ -61,12 +61,18 @@ setSharedDb(
 );
 
 const { blobStorage } = require("../src/lib/blob-storage") as typeof import("../src/lib/blob-storage");
+const { IMPORT_EVENT_FANOUT_CAP, TRANSFER_MAX_IMPORT_ROWS } =
+  require("@ccp/shared/contacts/transfer-columns") as typeof import("@ccp/shared/contacts/transfer-columns");
 const { runContactExport } =
   require("../src/lib/contact-transfer/export-runner") as typeof import("../src/lib/contact-transfer/export-runner");
 const { runContactImport } =
   require("../src/lib/contact-transfer/import-runner") as typeof import("../src/lib/contact-transfer/import-runner");
 
 const ROWS = Number(process.argv[2] ?? 100_000);
+/** --keep: leave the seeded workspace behind (search/analytics probing at
+ *  scale reuses it); blob artifacts are still deleted. Clean up later with a
+ *  workspace delete on the printed id. */
+const KEEP = process.argv.includes("--keep");
 
 /**
  * Peak heap budget for one transfer. Set just above the measured worst case
@@ -119,11 +125,18 @@ async function timed<T>(label: string, fn: () => Promise<T>): Promise<T> {
 }
 
 async function main(): Promise<void> {
+  const runTag = `transfer-load-${randomUUID().slice(0, 8)}`;
+  // A workspace requires an owning organization since the org→workspace
+  // restructure; the throwaway org cascades away with the cleanup below.
   const team = await db.workspace.create({
-    data: { name: `transfer-load-${randomUUID().slice(0, 8)}` },
-    select: { id: true },
+    data: {
+      name: runTag,
+      organization: { create: { name: runTag } },
+    },
+    select: { id: true, organizationId: true },
   });
   const workspaceId = team.id;
+  const organizationId = team.organizationId;
   console.log(`team ${workspaceId} · ${ROWS.toLocaleString()} rows\n`);
 
   try {
@@ -153,25 +166,109 @@ async function main(): Promise<void> {
     );
     console.log(`  rows=${xlsx.rowCount} size=${(xlsx.artifactBytes / 1048576).toFixed(1)} MB`);
 
+    // The import cap (TRANSFER_MAX_IMPORT_ROWS = 200k/file) is a deliberate
+    // product guardrail — the runner tells users to split larger files. Above
+    // it, this harness does exactly what a real customer does: split the
+    // export into ≤cap parts and import them sequentially. The split scans
+    // byte offsets (no whole-file string) so the heap cap keeps meaning
+    // something; part buffers are slices + one ~20 MB concat each.
+    const sourceParts: string[] = [];
+    if (ROWS > TRANSFER_MAX_IMPORT_ROWS) {
+      // STREAM the artifact (blobStorage.fetch caps whole-buffer reads at
+      // 100 MB — a legitimate DoS guard the product never needs to exceed,
+      // since real imports are ≤200k rows ≈ 20 MB; a 1M export is bigger).
+      const { body } = await blobStorage.getObject(csv.artifactKey);
+      let header: Buffer | null = null;
+      let carry = Buffer.alloc(0);
+      let lines = 0;
+      let part = 0;
+      let chunkPieces: Buffer[] = [];
+      const flushPart = async () => {
+        if (!header || chunkPieces.length === 0) return;
+        const key = `transfers/${workspaceId}/load-part-${part}.csv`;
+        await blobStorage.putObject({
+          key,
+          bytes: Buffer.concat([header, ...chunkPieces]),
+          contentType: "text/csv",
+        });
+        sourceParts.push(key);
+        chunkPieces = [];
+        lines = 0;
+        part += 1;
+      };
+      for await (const raw of body) {
+        let buf: Buffer = Buffer.concat([carry, raw as Buffer]);
+        if (!header) {
+          const he = buf.indexOf(0x0a);
+          if (he === -1) {
+            carry = buf;
+            continue;
+          }
+          header = Buffer.from(buf.subarray(0, he + 1));
+          buf = buf.subarray(he + 1);
+        }
+        // Count newlines, slicing one piece per run of complete lines; the
+        // partial tail carries into the next stream chunk.
+        let pos = 0;
+        let runStart = 0;
+        while (pos < buf.length) {
+          const nl = buf.indexOf(0x0a, pos);
+          if (nl === -1) break;
+          lines += 1;
+          pos = nl + 1;
+          if (lines >= TRANSFER_MAX_IMPORT_ROWS) {
+            chunkPieces.push(Buffer.from(buf.subarray(runStart, pos)));
+            await flushPart();
+            runStart = pos;
+          }
+        }
+        if (pos > runStart) chunkPieces.push(Buffer.from(buf.subarray(runStart, pos)));
+        carry = Buffer.from(buf.subarray(pos));
+      }
+      if (carry.length > 0) {
+        chunkPieces.push(carry);
+        lines += 1;
+      }
+      await flushPart();
+      console.log(
+        `\nsplit ${ROWS.toLocaleString()} rows into ${sourceParts.length} parts of ≤${TRANSFER_MAX_IMPORT_ROWS.toLocaleString()} (the documented split-and-import flow)`,
+      );
+    } else {
+      sourceParts.push(csv.artifactKey);
+    }
+
+    type ImportCounters = Awaited<ReturnType<typeof runContactImport>>;
+    const importAllParts = async (
+      label: string,
+      mode: "create_only" | "create_and_update",
+      fireAutomations: boolean,
+    ): Promise<Pick<ImportCounters, "processedRows" | "skipped" | "updated" | "failed" | "automationsSkipped">> => {
+      const total = { processedRows: 0, skipped: 0, updated: 0, failed: 0, automationsSkipped: false };
+      for (let i = 0; i < sourceParts.length; i++) {
+        const run = await runContactImport({
+          workspaceId,
+          userId: null,
+          jobId: `${label}-${i}-${randomUUID().slice(0, 8)}`,
+          format: "csv",
+          sourceKey: sourceParts[i]!,
+          resumeFrom: 0,
+          options: { mode, tagMode: "merge", fireAutomations, canManageTags: true },
+        });
+        total.processedRows += run.processedRows;
+        total.skipped += run.skipped;
+        total.updated += run.updated;
+        total.failed += run.failed;
+        total.automationsSkipped ||= run.automationsSkipped;
+      }
+      return total;
+    };
+
     // Re-import the CSV export. Every row already exists, so create_only is
-    // 100k lookups + 100k skips — the cheapest realistic re-import.
+    // N lookups + N skips — the cheapest realistic re-import.
+    // (fireAutomations: true — above IMPORT_EVENT_FANOUT_CAP the runner
+    // forces it off; passing true exercises that gate rather than bypassing it.)
     const skipRun = await timed("import CSV (create_only, all existing)", () =>
-      runContactImport({
-        workspaceId,
-        userId: null,
-        jobId: `load-imp-skip-${randomUUID().slice(0, 8)}`,
-        format: "csv",
-        sourceKey: csv.artifactKey,
-        resumeFrom: 0,
-        options: {
-          mode: "create_only",
-          tagMode: "merge",
-          // Above IMPORT_EVENT_FANOUT_CAP the runner forces this off anyway;
-          // passing true exercises that gate rather than bypassing it.
-          fireAutomations: true,
-          canManageTags: true,
-        },
-      }),
+      importAllParts("load-imp-skip", "create_only", true),
     );
     console.log(
       `  processed=${skipRun.processedRows} skipped=${skipRun.skipped} failed=${skipRun.failed} automationsSkipped=${skipRun.automationsSkipped}`,
@@ -180,27 +277,16 @@ async function main(): Promise<void> {
       failures += 1;
       console.error(`  ✗ skipped ${skipRun.skipped}, expected ${ROWS}`);
     }
-    if (!skipRun.automationsSkipped) {
+    // The runner suppresses only ABOVE the cap (rowsSeen > cap), so this
+    // assertion is meaningful only when ROWS exceeds it.
+    if (ROWS > IMPORT_EVENT_FANOUT_CAP && !skipRun.automationsSkipped) {
       failures += 1;
       console.error("  ✗ per-row event fanout was NOT suppressed above the cap");
     }
 
-    // The heaviest realistic path: 100k bulk UPDATEs.
+    // The heaviest realistic path: N bulk UPDATEs.
     const upsertRun = await timed("import CSV (create_and_update, all updates)", () =>
-      runContactImport({
-        workspaceId,
-        userId: null,
-        jobId: `load-imp-upsert-${randomUUID().slice(0, 8)}`,
-        format: "csv",
-        sourceKey: csv.artifactKey,
-        resumeFrom: 0,
-        options: {
-          mode: "create_and_update",
-          tagMode: "merge",
-          fireAutomations: false,
-          canManageTags: true,
-        },
-      }),
+      importAllParts("load-imp-upsert", "create_and_update", false),
     );
     console.log(
       `  processed=${upsertRun.processedRows} updated=${upsertRun.updated} failed=${upsertRun.failed}`,
@@ -211,21 +297,36 @@ async function main(): Promise<void> {
     }
 
     // Round-trip integrity at scale: the data must be intact, not just fast.
+    // Sample the middle row so the check works at any ROWS.
+    const sampleRow = Math.floor(ROWS / 2);
     const sample = await db.contact.findFirst({
-      where: { workspaceId, phoneNumber: "15550050000" },
+      where: { workspaceId, phoneNumber: `1555${String(sampleRow).padStart(7, "0")}` },
       select: { name: true, email: true, customFields: true },
     });
-    if (sample?.name !== "Contact 50000") {
+    if (sample?.name !== `Contact ${sampleRow}`) {
       failures += 1;
       console.error("  ✗ round-trip corrupted a sampled row", sample);
     } else {
       console.log("\n  ✓ sampled row survived export → import intact");
     }
 
-    await blobStorage.delete([csv.artifactKey, xlsx.artifactKey]).catch(() => {});
+    await blobStorage
+      .delete([
+        csv.artifactKey,
+        xlsx.artifactKey,
+        ...sourceParts.filter((k) => k !== csv.artifactKey),
+      ])
+      .catch(() => {});
   } finally {
-    // Contacts cascade with the team; 100k deletes in one statement is fine.
-    await db.workspace.delete({ where: { id: workspaceId } }).catch((e) => console.error("cleanup", e));
+    if (KEEP) {
+      console.log(`\n--keep: workspace ${workspaceId} (org ${organizationId}) left in place`);
+    } else {
+      // Contacts cascade with the team; 100k deletes in one statement is fine.
+      await db.workspace.delete({ where: { id: workspaceId } }).catch((e) => console.error("cleanup", e));
+      await db.organization
+        .delete({ where: { id: organizationId } })
+        .catch((e) => console.error("cleanup org", e));
+    }
   }
 
   console.log(failures === 0 ? "\nPASS" : `\nFAIL (${failures})`);
