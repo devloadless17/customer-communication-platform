@@ -75,6 +75,9 @@ const AppearanceSchema = z.object({
   // Hide the header on an embedded (inline / full-page) widget — "just chat". Ignored
   // for a floating bubble. Default: shown.
   showHeader: z.boolean().optional(),
+  // Show the replying agent's name to visitors. Default: shown. When off the name is
+  // suppressed server-side (delivery + history) — it never reaches the wire.
+  showAgentName: z.boolean().optional(),
   // launcher / placement (settings-only — the widget reads these from data-* attrs)
   //
   // The three DEPLOY MODES, mutually exclusive per page:

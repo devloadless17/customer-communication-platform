@@ -1,6 +1,7 @@
 import { Injectable, type OnModuleDestroy, type OnModuleInit } from "@nestjs/common";
 
 import { SubscriberPriority } from "@/lib/events/bus";
+import { webchatwidgetShowsAgentName } from "@/lib/providers/webchatwidget-config";
 
 import { DbService } from "../db/db.service";
 import { EventBus } from "../events/event-bus.module";
@@ -84,7 +85,12 @@ export class WebchatwidgetDeliveryService implements OnModuleInit, OnModuleDestr
           // reply carries no senderUserId; we detect it from the send provenance
           // (`rawPayload.sentVia = "ai-assistant/…"`), which is set synchronously on
           // the message, so the widget can disclose the bot without a DB read.
-          const senderName = e.senderUserId ? await this.nameFor(e.senderUserId) : null;
+          // The per-widget `showAgentName` switch is enforced HERE so a disabled
+          // widget's frames never carry the name at all (not merely hidden client-side).
+          const senderName =
+            e.senderUserId && (await webchatwidgetShowsAgentName(e.conversationId))
+              ? await this.nameFor(e.senderUserId)
+              : null;
           const ai = isAiSend(e.message.rawPayload);
           this.gateway.deliverToVisitor(
             e.conversationId,

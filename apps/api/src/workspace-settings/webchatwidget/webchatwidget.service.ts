@@ -59,6 +59,7 @@ function buildConfig(
   if (input.awayMessage !== undefined) next.awayMessage = input.awayMessage || undefined;
   if (input.aiEnabled !== undefined) next.aiEnabled = input.aiEnabled;
   if (input.showHeader !== undefined) next.showHeader = input.showHeader;
+  if (input.showAgentName !== undefined) next.showAgentName = input.showAgentName;
   if (input.launcher !== undefined) next.launcher = input.launcher;
   if (input.position !== undefined) next.position = input.position;
   if (input.launcherLabel !== undefined) next.launcherLabel = input.launcherLabel;

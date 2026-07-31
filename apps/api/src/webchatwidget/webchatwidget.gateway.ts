@@ -26,6 +26,7 @@ import { recordConversationEvent } from "@/lib/inbox/events";
 import {
   recordFirstSeenOrigin,
   resolveWebchatwidgetByPublicKey,
+  webchatwidgetShowsAgentName,
   widgetAllowsMediaKind,
   type WebchatwidgetResolved,
 } from "@/lib/providers/webchatwidget-config";
@@ -641,10 +642,17 @@ export class WebchatwidgetGateway
     const hasMore = rows.length > HISTORY_LIMIT;
     const asc = (hasMore ? rows.slice(0, HISTORY_LIMIT) : rows).reverse();
     // Batch-resolve agent names for outbound messages so the widget shows who
-    // replied — one query for the distinct senders on the page.
-    const senderIds = [
-      ...new Set(asc.filter((r) => r.direction === "out" && r.senderUserId).map((r) => r.senderUserId!)),
-    ];
+    // replied — one query for the distinct senders on the page. Skipped entirely
+    // when the widget's `showAgentName` switch is off, so replayed history is as
+    // anonymous as the live frames (checked once per page, not per message).
+    const showNames = await webchatwidgetShowsAgentName(conversationId);
+    const senderIds = showNames
+      ? [
+          ...new Set(
+            asc.filter((r) => r.direction === "out" && r.senderUserId).map((r) => r.senderUserId!),
+          ),
+        ]
+      : [];
     const names = new Map<string, string>();
     if (senderIds.length > 0) {
       const users = await this.db.user.findMany({

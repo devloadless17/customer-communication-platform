@@ -743,6 +743,7 @@ export interface WebchatWidgetView {
     awayMessage?: string;
     aiEnabled?: boolean;
     showHeader?: boolean;
+    showAgentName?: boolean;
     launcher?: "bubble" | "off" | "inline";
     position?: "right" | "left";
     launcherLabel?: string;

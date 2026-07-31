@@ -98,6 +98,7 @@ export function WebchatWidgetSettings({
           awayMessage: w.config.awayMessage ?? "",
           aiEnabled: w.config.aiEnabled ?? false,
           showHeader: w.config.showHeader ?? true,
+          showAgentName: w.config.showAgentName ?? true,
           launcher: w.config.launcher ?? "bubble",
           position: w.config.position ?? "right",
           launcherLabel: w.config.launcherLabel ?? "",
@@ -442,6 +443,7 @@ function Editor({
           <Section title="Behavior">
             <Toggle checked={c.aiEnabled === true} onChange={(v) => onConfig({ aiEnabled: v })} label="AI auto-reply" hint="Let the AI assistant answer this widget's chats automatically. Off by default — turn on once you've reviewed how it responds." />
             <Toggle checked={c.soundEnabled === true} onChange={(v) => onConfig({ soundEnabled: v })} label="Play a chime on new messages" hint="A subtle sound when an agent replies." />
+            <Toggle checked={c.showAgentName !== false} onChange={(v) => onConfig({ showAgentName: v })} label="Show agent name to visitors" hint="When off, replies appear without the replying agent's name — agents stay anonymous." />
             <AttachmentPolicy value={c.allowedMediaKinds} onChange={(allowedMediaKinds) => onConfig({ allowedMediaKinds })} />
             <Toggle checked={c.showBranding !== false} onChange={(v) => onConfig({ showBranding: v })} label="Show “Powered by” footer" />
             <Toggle checked={widget.isActive} onChange={onActive} label="Active" hint="Inactive widgets stop accepting new chats." />

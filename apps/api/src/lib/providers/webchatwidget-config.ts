@@ -108,6 +108,13 @@ export interface WebchatwidgetConfig {
    * floating bubble (it needs the header's close/expand controls). Default: shown.
    */
   showHeader?: boolean;
+  /**
+   * Show the replying agent's name to the visitor. Default: shown (`!== false`).
+   * When off the name is suppressed SERVER-SIDE — it never reaches the wire — so
+   * agents stay anonymous to visitors. AI replies keep their "AI Assistant" label
+   * either way (bot disclosure, not an agent identity).
+   */
+  showAgentName?: boolean;
   // ---- launcher / placement defaults (used by the settings UI to generate the
   //      embed snippet; the widget itself reads these from data-* attributes) ----
   /**
@@ -233,6 +240,27 @@ export async function webchatwidgetAiAllowed(conversationId: string): Promise<bo
   if (!w || !w.isActive) return false;
   const cfg = (w.config ?? {}) as WebchatwidgetConfig;
   return cfg.aiEnabled === true;
+}
+
+/**
+ * Should THIS conversation's visitor frames carry the replying agent's name?
+ *
+ * Mirrors `webchatwidgetAiAllowed` (one indexed lookup, only on the webchatwidget
+ * delivery/history paths) but with the OPPOSITE default: showing the name is the
+ * long-standing behavior, so this fails OPEN — `true` for a non-widget
+ * conversation, a missing/inactive source widget, or an absent key. Only an
+ * explicit `config.showAgentName === false` suppresses the name.
+ */
+export async function webchatwidgetShowsAgentName(conversationId: string): Promise<boolean> {
+  const conv = await db.conversation.findUnique({
+    where: { id: conversationId },
+    select: {
+      webchatWidgetId: true,
+      webchatWidget: { select: { config: true } },
+    },
+  });
+  const cfg = (conv?.webchatWidget?.config ?? {}) as WebchatwidgetConfig;
+  return cfg.showAgentName !== false;
 }
 
 /**
