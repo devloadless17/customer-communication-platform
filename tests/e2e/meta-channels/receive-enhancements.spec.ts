@@ -167,9 +167,19 @@ test("Messenger Click-to-Messenger referral → ad attribution", async () => {
   });
   expect(res.status).toBe(200);
   const msg = await msgByExternalId("messenger", mid);
-  const attr = msg?.attribution as { source?: string; clickId?: string; headline?: string } | null;
+  const attr = msg?.attribution as {
+    source?: string;
+    clickId?: string;
+    adId?: string;
+    headline?: string;
+  } | null;
   expect(attr?.source).toBe("ad");
-  expect(attr?.clickId).toBe("ad_123");
+  // WHICH AD lives in `adId` — Messenger's `referral.ad_id` used to be folded
+  // into `clickId`, but a per-CLICK id and a per-AD id are different questions
+  // and Messenger has no per-click id at all (see MessageAttribution in
+  // @ccp/shared/types). Cross-channel ad grouping matches on adId.
+  expect(attr?.adId).toBe("ad_123");
+  expect(attr?.clickId).toBeUndefined();
   expect(attr?.headline).toBe("Summer Sale — 30% off");
 });
 

@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 
 import { CoexistenceWorkerService } from "../coexistence/coexistence-worker.service";
 import { MetaWebhookController } from "./meta/meta.controller";
+import { MetaWebhookIngestService } from "./meta/meta-webhook-ingest.service";
 import { MetaDataDeletionController } from "./meta/data-deletion.controller";
 
 /**
@@ -16,6 +17,6 @@ import { MetaDataDeletionController } from "./meta/data-deletion.controller";
  */
 @Module({
   controllers: [MetaWebhookController, MetaDataDeletionController],
-  providers: [CoexistenceWorkerService],
+  providers: [CoexistenceWorkerService, MetaWebhookIngestService],
 })
 export class WebhooksModule {}
