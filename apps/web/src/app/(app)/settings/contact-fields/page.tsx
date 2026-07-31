@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth/current-user";
 import { listContactFieldsWithBuiltins } from "@/lib/api/queries";
 
-import { ContactFieldsSettings } from "./contact-fields-settings";
+import { ContactFieldsSettings } from "@/features/settings/components/contact-fields-settings";
 
 export const metadata = { title: "Contact fields · Settings" };
 export const dynamic = "force-dynamic";

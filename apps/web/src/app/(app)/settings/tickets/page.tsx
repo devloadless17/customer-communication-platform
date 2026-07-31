@@ -1,6 +1,6 @@
 import { getTicketSettings } from "@/lib/api/queries";
 
-import { TicketSettingsClient } from "./ticket-settings-client";
+import { TicketSettingsClient } from "@/features/settings/components/ticket-settings-client";
 
 export const metadata = {
   title: "Tickets · Settings",

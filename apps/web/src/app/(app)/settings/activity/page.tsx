@@ -8,7 +8,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { initials } from "@ccp/shared/utils";
 import { cn } from "@ccp/shared/utils";
 import { PageHeader } from "@/components/layouts/page-header";
-import { CurrentActivityPanel } from "./current-activity-panel";
+import { CurrentActivityPanel } from "@/features/settings/components/current-activity-panel";
 
 export const metadata = { title: "Activity · Settings" };
 export const dynamic = "force-dynamic";

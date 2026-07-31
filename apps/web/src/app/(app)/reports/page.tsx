@@ -2,7 +2,7 @@ import { redirect } from "next/navigation";
 
 import { getSession } from "@/lib/auth/current-user";
 
-import { ReportsClient } from "./reports-client";
+import { ReportsClient } from "@/features/reports/reports-client";
 
 export const metadata = { title: "Reports" };
 export const dynamic = "force-dynamic";

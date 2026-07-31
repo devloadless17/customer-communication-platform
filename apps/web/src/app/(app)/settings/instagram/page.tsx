@@ -7,7 +7,7 @@ import {
 import { canManageUsers } from "@ccp/shared/auth/permissions";
 import { soft } from "@/lib/api/soft";
 
-import { InstagramSettings, type InstagramCurrent } from "./instagram-settings";
+import { InstagramSettings, type InstagramCurrent } from "@/features/settings/components/instagram-settings";
 
 export const metadata = {
   title: "Instagram · Settings",

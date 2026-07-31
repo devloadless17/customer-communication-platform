@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth/current-user";
 import { listMessageFlagDefinitionsWithUsage } from "@/lib/api/queries";
 
-import { MessageFlagsSettings } from "./message-flags-settings";
+import { MessageFlagsSettings } from "@/features/settings/components/message-flags-settings";
 
 export const metadata = { title: "Message flags · Settings" };
 export const dynamic = "force-dynamic";

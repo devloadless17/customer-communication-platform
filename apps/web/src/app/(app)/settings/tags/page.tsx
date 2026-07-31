@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth/current-user";
 import { getTagUsage, listTags } from "@/lib/api/queries";
 
-import { TagsSettings } from "./tags-settings";
+import { TagsSettings } from "@/features/settings/components/tags-settings";
 
 export const metadata = { title: "Tags · Settings" };
 export const dynamic = "force-dynamic";

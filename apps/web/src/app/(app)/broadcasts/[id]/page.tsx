@@ -4,7 +4,7 @@ import { ArrowLeft } from "lucide-react";
 
 import { getBroadcast } from "@/lib/api/queries";
 
-import { BroadcastDetail, type BroadcastDetailDto } from "./broadcast-detail";
+import { BroadcastDetail, type BroadcastDetailDto } from "@/features/broadcasts/components/broadcast-detail";
 
 export const metadata = { title: "Broadcast" };
 export const dynamic = "force-dynamic";

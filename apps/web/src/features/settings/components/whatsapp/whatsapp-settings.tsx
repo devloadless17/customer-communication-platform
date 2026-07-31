@@ -26,11 +26,11 @@ import {
   channelDisconnectCopy,
   fetchChannelRemovalImpact,
 } from "@/features/channels/lib/channel-disconnect";
-import { CallingSettings } from "./calling-settings";
-import { MessagingHealthPanel } from "./messaging-health-panel";
-import { BusinessProfilePanel } from "./business-profile-panel";
-import { QrCodesPanel } from "./qr-codes-panel";
-import { UsernamePanel } from "./username-panel";
+import { CallingSettings } from "@/features/settings/components/whatsapp/calling-settings";
+import { MessagingHealthPanel } from "@/features/settings/components/whatsapp/messaging-health-panel";
+import { BusinessProfilePanel } from "@/features/settings/components/whatsapp/business-profile-panel";
+import { QrCodesPanel } from "@/features/settings/components/whatsapp/qr-codes-panel";
+import { UsernamePanel } from "@/features/settings/components/whatsapp/username-panel";
 import { formatPhone } from "@ccp/shared/utils";
 
 export interface WhatsappCurrent {

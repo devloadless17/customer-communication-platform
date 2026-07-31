@@ -9,7 +9,7 @@ import {
   type InviteListDto,
 } from "@/lib/api/queries";
 
-import { MembersSettings, type PendingInviteRow, type TeamUserRow } from "./members-settings";
+import { MembersSettings, type PendingInviteRow, type TeamUserRow } from "@/features/settings/components/members-settings";
 
 export const metadata = { title: "Members · Settings" };
 

@@ -2,7 +2,7 @@ import { redirect } from "next/navigation";
 
 import { getSession } from "@/lib/auth/current-user";
 
-import { CampaignClient } from "./campaign-client";
+import { CampaignClient } from "@/features/reports/campaign-client";
 
 export const metadata = { title: "Campaign" };
 export const dynamic = "force-dynamic";

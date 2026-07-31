@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth/current-user";
 import { listContactFieldDefinitions, listSnippets } from "@/lib/api/queries";
 
-import { SnippetsSettings } from "./snippets-settings";
+import { SnippetsSettings } from "@/features/settings/components/snippets-settings";
 
 export const metadata = { title: "Snippets · Settings" };
 export const dynamic = "force-dynamic";

@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth/current-user";
 import { getStageContactCounts, listContactStages } from "@/lib/api/queries";
 
-import { StagesSettings } from "./stages-settings";
+import { StagesSettings } from "@/features/settings/components/stages-settings";
 
 export const metadata = { title: "Stages · Settings" };
 export const dynamic = "force-dynamic";

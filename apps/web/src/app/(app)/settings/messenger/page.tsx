@@ -7,7 +7,7 @@ import {
 import { canManageUsers } from "@ccp/shared/auth/permissions";
 import { soft } from "@/lib/api/soft";
 
-import { MessengerSettings, type MessengerCurrent } from "./messenger-settings";
+import { MessengerSettings, type MessengerCurrent } from "@/features/settings/components/messenger-settings";
 
 export const metadata = {
   title: "Messenger · Settings",

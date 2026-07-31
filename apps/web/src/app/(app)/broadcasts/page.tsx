@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { getSession } from "@/lib/auth/current-user";
 import { listBroadcasts } from "@/lib/api/queries";
 
-import { BroadcastsBrowser } from "./broadcasts-browser";
+import { BroadcastsBrowser } from "@/features/broadcasts/components/broadcasts-browser";
 // Pure SSR-safe primitives (no "use client") — same split as the inbox
 // filter cookies. Importing parsers / constants from a client component
 // crashes at runtime with "Attempted to call X() from the server but X
@@ -17,7 +17,7 @@ import {
   BROADCASTS_VIEW_COOKIE,
   parseBroadcastStatus,
   parseBroadcastView,
-} from "./broadcasts-cookies";
+} from "@/features/broadcasts/lib/broadcasts-cookies";
 
 export const metadata = { title: "Broadcasts" };
 export const dynamic = "force-dynamic";

@@ -23,8 +23,8 @@ import { cn } from "@ccp/shared/utils";
 import type { BroadcastListItem } from "@/lib/api/queries";
 import { CHANNEL_LABEL } from "@/features/inbox/components/channel-badge";
 
-import { BroadcastStatusBadge } from "./broadcast-status-badge";
-import { BroadcastDeleteButton } from "./broadcast-delete-button";
+import { BroadcastStatusBadge } from "@/features/broadcasts/components/broadcast-status-badge";
+import { BroadcastDeleteButton } from "@/features/broadcasts/components/broadcast-delete-button";
 
 /**
  * Client shell for the broadcasts page. SSR seeds `initial`; this island owns
@@ -41,7 +41,7 @@ import {
   BROADCASTS_VIEW_COOKIE,
   type BroadcastStatusFilter,
   type BroadcastView,
-} from "./broadcasts-cookies";
+} from "@/features/broadcasts/lib/broadcasts-cookies";
 
 // Dot fills mirror the BroadcastStatusBadge tone trios so a status reads the
 // same in the filter rail as on the row chip (no raw emerald/sky literals —

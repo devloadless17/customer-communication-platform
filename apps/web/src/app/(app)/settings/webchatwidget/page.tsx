@@ -2,7 +2,7 @@ import { getSession } from "@/lib/auth/current-user";
 import { getTeamWebchatWidgets } from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
 
-import { WebchatWidgetSettings } from "./webchatwidget-settings";
+import { WebchatWidgetSettings } from "@/features/settings/components/webchatwidget-settings";
 
 export const metadata = { title: "Website chat · Settings" };
 export const dynamic = "force-dynamic";

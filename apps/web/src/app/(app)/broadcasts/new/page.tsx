@@ -17,7 +17,7 @@ import {
   lookupContacts,
 } from "@/lib/api/queries";
 
-import { NewBroadcastForm } from "./new-broadcast-form";
+import { NewBroadcastForm } from "@/features/broadcasts/components/new-broadcast-form";
 
 export const metadata = { title: "New broadcast" };
 export const dynamic = "force-dynamic";

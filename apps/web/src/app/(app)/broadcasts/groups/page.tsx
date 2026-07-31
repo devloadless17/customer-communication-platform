@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { getSession } from "@/lib/auth/current-user";
 import { listAudienceGroups, listTags } from "@/lib/api/queries";
 
-import { GroupRow } from "./group-row";
+import { GroupRow } from "@/features/broadcasts/components/group-row";
 
 export const metadata = { title: "Audience groups" };
 export const dynamic = "force-dynamic";

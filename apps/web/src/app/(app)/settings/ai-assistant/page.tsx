@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { api } from "@/lib/api-client";
 import { getSession } from "@/lib/auth/current-user";
 
-import { AiAssistantSettings, type AiConfig, type AiDocument } from "./ai-assistant-settings";
+import { AiAssistantSettings, type AiConfig, type AiDocument } from "@/features/settings/components/ai-assistant-settings";
 
 export const metadata = {
   title: "AI Assistant · Settings",

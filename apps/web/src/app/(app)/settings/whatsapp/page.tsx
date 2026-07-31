@@ -8,7 +8,7 @@ import {
 import { canManageUsers } from "@ccp/shared/auth/permissions";
 import { soft } from "@/lib/api/soft";
 
-import { WhatsappSettings, type WhatsappCurrent } from "./whatsapp-settings";
+import { WhatsappSettings, type WhatsappCurrent } from "@/features/settings/components/whatsapp/whatsapp-settings";
 
 export const metadata = {
   title: "WhatsApp · Settings",

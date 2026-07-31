@@ -6,7 +6,7 @@ import { canManageUsers } from "@ccp/shared/auth/permissions";
 import { soft } from "@/lib/api/soft";
 import { MetaAppAccounts } from "@/features/channels/components/meta-app-accounts";
 
-import { MetaSettings, type MetaCurrent } from "./meta-settings";
+import { MetaSettings, type MetaCurrent } from "@/features/settings/components/meta-settings";
 
 export const metadata = {
   title: "Meta App · Settings",

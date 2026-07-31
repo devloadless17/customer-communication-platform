@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
 import { getSession } from "@/lib/auth/current-user";
 
-import { PermissionsSettings } from "./permissions-settings";
+import { PermissionsSettings } from "@/features/settings/components/permissions-settings";
 
 export const metadata = { title: "Role permissions · Settings" };
 export const dynamic = "force-dynamic";

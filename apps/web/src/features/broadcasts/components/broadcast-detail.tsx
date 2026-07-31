@@ -24,9 +24,9 @@ import { apiFetch } from "@/lib/api/client-fetch";
 import { BROWSER_API_BASE } from "@/lib/api/browser-base";
 import { getClientSocket } from "@/lib/socket-client";
 import { cn, formatPhone } from "@ccp/shared/utils";
-import { BroadcastStatusBadge } from "../broadcast-status-badge";
+import { BroadcastStatusBadge } from "@/features/broadcasts/components/broadcast-status-badge";
 import { CHANNEL_LABEL } from "@/features/inbox/components/channel-badge";
-import { BroadcastReport, type BroadcastReportDto } from "./broadcast-report";
+import { BroadcastReport, type BroadcastReportDto } from "@/features/broadcasts/components/broadcast-report";
 
 /**
  * Broadcast detail client component.
