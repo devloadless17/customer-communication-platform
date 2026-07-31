@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  ConflictException,
   Body,
   Controller,
   Delete,
@@ -91,21 +90,6 @@ import {
 } from "@/workspace-settings/instagram/instagram.schemas";
 import { WhatsappService } from "@/workspace-settings/whatsapp/whatsapp.service";
 import { BroadcastsService } from "@/broadcasts/broadcasts.service";
-import {
-  CreateBroadcastSchema,
-  PreviewMissingFieldsSchema,
-  RetryBroadcastSchema,
-  type CreateBroadcastInput,
-  type PreviewMissingFieldsInput,
-  type RetryBroadcastInput,
-} from "@/broadcasts/broadcasts.schemas";
-import { ConversationsService } from "@/conversations/conversations.service";
-import {
-  ListAttachmentsQuerySchema,
-  StartConversationSchema,
-  type ListAttachmentsQuery,
-  type StartConversationInput,
-} from "@/conversations/conversations.schemas";
 import {
   CreateQrCodeSchema,
   RegisterWhatsappNumberSchema,
@@ -316,7 +300,6 @@ export class ExternalV1Controller {
     private readonly messenger: MessengerService,
     private readonly whatsapp: WhatsappService,
     private readonly broadcasts: BroadcastsService,
-    private readonly conversations: ConversationsService,
     private readonly calls: CallsService,
   ) {}
 
@@ -2427,211 +2410,6 @@ export class ExternalV1Controller {
   }
 
   // ===========================================================================
-  // CONVERSATION OPERATIONS
-  // ===========================================================================
-  //
-  // Parity build, phase 3. Reads and status/assign writes already existed;
-  // these are the operations an integration needs to actually drive a thread.
-
-  /**
-   * Open (or reopen) a thread with a contact, by id or by phone number — the
-   * precursor to a send. Idempotent by nature: an existing OPEN thread comes
-   * back as-is, a CLOSED one is reopened through the audited status path, and
-   * a phone with no contact yet find-or-creates one.
-   */
-  @Post("conversations")
-  @RequireScope("write:conversations")
-  async startConversationV1(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(StartConversationSchema)) body: StartConversationInput,
-    @Headers("x-ccp-depth") xCcpDepth?: string,
-  ) {
-    guardChainDepth(xCcpDepth);
-    return this.conversations.startConversation(auth.workspaceId, null, body);
-  }
-
-  /**
-   * Mark a thread read. Unread is TEAM-WIDE in this product (not per-agent),
-   * so this clears it for everyone — call it when your system, rather than a
-   * human, has handled the thread.
-   */
-  @Post("conversations/:id/read")
-  @RequireScope("write:conversations")
-  async markConversationReadV1(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-  ) {
-    // The shared CAS publishes `conversation.read` only on a real 1→0
-    // transition, so a repeated call is a genuine no-op, not an event storm.
-    await this.conversations.markRead(auth.workspaceId, null, id);
-    return { ok: true };
-  }
-
-  /** The audit timeline for a thread — every status change, assignment, tag
-   *  and ticket transition, in order. */
-  @Get("conversations/:id/events")
-  @RequireScope("read:conversations")
-  async listConversationEventsV1(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-  ) {
-    const events = await this.conversations.listEvents(auth.workspaceId, id);
-    return { events };
-  }
-
-  /** Every media attachment on a thread, newest first. */
-  @Get("conversations/:id/attachments")
-  @RequireScope("read:messages")
-  async listConversationAttachmentsV1(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-    @Query(zQuery(ListAttachmentsQuerySchema)) query: ListAttachmentsQuery,
-  ) {
-    return this.conversations.listAttachments(auth.workspaceId, id, {
-      cursor: query.cursor,
-      take: query.take,
-      kind: query.kind,
-    });
-  }
-
-  // ===========================================================================
-  // BROADCAST WRITES
-  // ===========================================================================
-  //
-  // Parity build, phase 3. The read surface has existed for a while; the write
-  // surface was UI-only.
-  //
-  // `write:broadcasts` is a NEW scope and the most dangerous one in the API: a
-  // create sends billed template messages to an entire audience and there is
-  // no unsend. `read:broadcasts` deliberately does not imply it, so a
-  // reporting integration can never be one typo away from launching a
-  // campaign. Create and retry both REQUIRE an `Idempotency-Key`.
-
-  /**
-   * Launch a campaign (or schedule one — pass `scheduledAt`).
-   *
-   * `Idempotency-Key` REQUIRED and claimed irreversibly: a retry after a
-   * gateway timeout must never produce a second campaign to the same audience,
-   * and an ambiguous crash must not auto-clear into a re-send.
-   */
-  @Post("broadcasts")
-  @RequireScope("write:broadcasts")
-  @RateLimit({ perMinute: 10 })
-  async createBroadcastV1(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(CreateBroadcastSchema)) body: CreateBroadcastInput,
-    @Headers("idempotency-key") idempotencyKey?: string,
-    @Headers("x-ccp-depth") xCcpDepth?: string,
-  ) {
-    guardChainDepth(xCcpDepth);
-    return this.api.createBroadcast(
-      auth.workspaceId,
-      auth.apiKeyId,
-      body,
-      idemKeyRequired(idempotencyKey),
-    );
-  }
-
-  /**
-   * Pre-send preflight: how many recipients would resolve a template variable
-   * to empty and be rejected by WhatsApp. Read-only — call it before create so
-   * you find out now rather than from the failure report.
-   */
-  @Post("broadcasts/preview-missing")
-  @RequireScope("read:broadcasts")
-  @RateLimit({ perMinute: 20 })
-  async previewBroadcastMissingV1(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(PreviewMissingFieldsSchema)) body: PreviewMissingFieldsInput,
-  ) {
-    return this.broadcasts.previewMissingFields(auth.workspaceId, body);
-  }
-
-  /** Stop a running or scheduled campaign. Recipients already accepted by Meta
-   *  stay sent — a message cannot be unsent. */
-  @Post("broadcasts/:id/cancel")
-  @RequireScope("write:broadcasts")
-  async cancelBroadcastV1(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-    @Headers("x-ccp-depth") xCcpDepth?: string,
-  ) {
-    guardChainDepth(xCcpDepth);
-    await this.broadcasts.cancel(auth.workspaceId, id);
-    return { ok: true };
-  }
-
-  /**
-   * Explicitly resume a PAUSED campaign. The only path that may lift an
-   * `abuse_warning` pause — automatic recovery deliberately excludes it, so a
-   * human choosing to continue after seeing the pause reason is the review
-   * Meta's warning asks for. 409 `broadcast_not_paused` otherwise.
-   */
-  @Post("broadcasts/:id/resume")
-  @RequireScope("write:broadcasts")
-  async resumeBroadcastV1(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-    @Headers("x-ccp-depth") xCcpDepth?: string,
-  ) {
-    guardChainDepth(xCcpDepth);
-    const resumed = await this.broadcasts.resume(auth.workspaceId, id);
-    if (!resumed) {
-      throw new ConflictException({ error: "broadcast_not_paused" });
-    }
-    return { ok: true };
-  }
-
-  /**
-   * Re-queue FAILED recipients. `errorCodes` narrows it to one failure bucket,
-   * so you can retry the rate-limited without also re-sending to numbers that
-   * are permanently invalid. `Idempotency-Key` REQUIRED — this bills again.
-   */
-  @Post("broadcasts/:id/retry")
-  @RequireScope("write:broadcasts")
-  @RateLimit({ perMinute: 10 })
-  async retryBroadcastV1(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-    @Body(zBody(RetryBroadcastSchema)) body: RetryBroadcastInput,
-    @Headers("idempotency-key") idempotencyKey?: string,
-    @Headers("x-ccp-depth") xCcpDepth?: string,
-  ) {
-    guardChainDepth(xCcpDepth);
-    return this.api.retryBroadcast(
-      auth.workspaceId,
-      auth.apiKeyId,
-      id,
-      body,
-      idemKeyRequired(idempotencyKey),
-    );
-  }
-
-  /** Delete a campaign and its recipient rows. Terminal campaigns only — the
-   *  service refuses one that is still running. */
-  @Delete("broadcasts/:id")
-  @RequireScope("write:broadcasts")
-  async deleteBroadcastV1(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-    @Headers("x-ccp-depth") xCcpDepth?: string,
-  ) {
-    guardChainDepth(xCcpDepth);
-    await this.broadcasts.remove(auth.workspaceId, id);
-    return { ok: true };
-  }
-
-  /** Every recipient contact id for a campaign — for building a follow-up
-   *  audience from who actually received it. */
-  @Get("broadcasts/:id/recipient-ids")
-  @RequireScope("read:broadcasts")
-  async listBroadcastRecipientIdsV1(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-  ) {
-    return this.broadcasts.listRecipientContactIds(auth.workspaceId, id);
-  }
-
   // ===========================================================================
 }
 

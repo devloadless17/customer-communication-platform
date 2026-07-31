@@ -6,7 +6,9 @@ import { InstagramModule } from "@/workspace-settings/instagram/instagram.module
 import { MessengerModule } from "@/workspace-settings/messenger/messenger.module";
 import { ApiIdempotencyService } from "./api-idempotency.service";
 import { ExternalV1Controller } from "./external-v1.controller";
+import { ExternalV1BroadcastWritesController } from "./external-v1-broadcast-writes.controller";
 import { ExternalV1CatalogController } from "./external-v1-catalog.controller";
+import { ExternalV1ConversationOpsController } from "./external-v1-conversation-ops.controller";
 import { ExternalV1CustomersController } from "./external-v1-customers.controller";
 import { ExternalV1OutboundWebhooksController } from "./external-v1-outbound-webhooks.controller";
 import { ExternalV1TicketsController } from "./external-v1-tickets.controller";
@@ -89,7 +91,9 @@ import { WorkflowsModule as WorkflowsSettingsModule } from "@/workspace-settings
   ],
   controllers: [
     ExternalV1Controller,
+    ExternalV1BroadcastWritesController,
     ExternalV1CatalogController,
+    ExternalV1ConversationOpsController,
     ExternalV1CustomersController,
     ExternalV1OutboundWebhooksController,
     ExternalV1TicketsController,
