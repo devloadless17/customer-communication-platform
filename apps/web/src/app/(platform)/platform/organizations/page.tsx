@@ -2,8 +2,8 @@ import Link from "next/link";
 import { Building2, CheckCircle2, ChevronRight, Clock, Phone, X } from "lucide-react";
 
 import { LocalTime } from "@/components/local-time";
-import { TeamStatusBadge } from "@/components/platform/team-status-badge";
-import { QuickApproveButton } from "@/components/platform/team-status-actions";
+import { OrgStatusBadge } from "@/components/platform/org-status-badge";
+import { QuickApproveButton } from "@/components/platform/org-status-actions";
 import { listAllOrgsForSuperAdmin } from "@/lib/api/queries";
 import { formatPhone } from "@ccp/shared/utils";
 import type { OrgStatus } from "@ccp/shared/types";
@@ -101,7 +101,7 @@ export default async function PlatformOrganizationsPage() {
                     </div>
                   </td>
                   <td className="px-4 py-3">
-                    <TeamStatusBadge status={o.status} />
+                    <OrgStatusBadge status={o.status} />
                   </td>
                   <td className="px-4 py-3 text-2xs text-muted-foreground">
                     {o.workspaces.length} / {o.maxWorkspaces} workspace

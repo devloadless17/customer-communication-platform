@@ -14,14 +14,14 @@ import { MIN_PASSWORD_LENGTH } from "@ccp/shared/auth/password-policy";
 /**
  * Admin-initiated password reset dialog. The only recovery path in the app —
  * there's no self-serve email reset (no mail provider by design). An admin
- * (or superAdmin, from the platform org view) sets a new password for a
- * locked-out teammate, then shares it out-of-band.
+ * sets a new password for a locked-out teammate, then shares it out-of-band.
  *
- * Reusable across the team-settings members list (`/api/users/:id/reset-password`)
- * and the platform org detail roster
- * (`/api/admin/teams/:workspaceId/members/:userId/reset-password`) — the caller
- * passes the endpoint. The server hashes with the same bcrypt path Better
- * Auth verifies against and signs the target out of every device.
+ * The caller passes the endpoint (today only the members-settings list, via
+ * `/api/users/:id/reset-password`). The cross-tenant superAdmin reset route
+ * this dialog once also served was deliberately REMOVED — an operator choosing
+ * a customer's credential was indefensible; auth-recovery.spec.ts asserts it
+ * stays gone. The server hashes with the same bcrypt path Better Auth
+ * verifies against and signs the target out of every device.
  *
  * Two phases:
  *   1. Compose — type or generate a password (≥ MIN_PASSWORD_LENGTH).

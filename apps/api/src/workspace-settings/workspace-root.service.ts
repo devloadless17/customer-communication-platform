@@ -21,7 +21,7 @@ import { EventBus } from "../events/event-bus.module";
  *     `Organization`, not `Workspace`, so only this level actually removes a
  *     tenant. Both delete routes use it:
  *       DELETE /api/workspace        (owner removing their own organization)
- *       DELETE /api/admin/teams/:id  (superAdmin removing any organization)
+ *       DELETE /api/admin/organizations/:id  (superAdmin removing any organization)
  *
  * Blob cleanup is best-effort: a partial R2 failure leaves orphan
  * files but does NOT block the DB delete. Orphans cost storage, not

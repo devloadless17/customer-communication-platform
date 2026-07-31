@@ -4,14 +4,14 @@ import { ArrowLeft, CheckCircle2, ShieldX, Users, X } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { LocalTime } from "@/components/local-time";
-import { TeamStatusBadge } from "@/components/platform/team-status-badge";
-import { TeamStatusControls } from "@/components/platform/team-status-actions";
+import { OrgStatusBadge } from "@/components/platform/org-status-badge";
+import { OrgStatusControls } from "@/components/platform/org-status-actions";
 import { getSession } from "@/lib/auth/current-user";
-import { getTeamDetailForSuperAdmin } from "@/lib/api/queries";
+import { getWorkspaceDetailForSuperAdmin } from "@/lib/api/queries";
 import { roleLabel } from "@ccp/shared/auth/permissions";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
 
-import { DeleteTeamButton } from "./delete-team-button";
+import { DeleteOrganizationButton } from "./delete-organization-button";
 import { LimitControl } from "./limit-control";
 
 export const metadata = { title: "Organization · Platform" };
@@ -30,17 +30,17 @@ export default async function PlatformOrganizationDetailPage({
 }) {
   const { id } = await params;
   const [detail, session] = await Promise.all([
-    getTeamDetailForSuperAdmin(id),
+    getWorkspaceDetailForSuperAdmin(id),
     getSession(),
   ]);
   if (!detail) notFound();
 
-  const { team, members } = detail;
+  const { workspace, members } = detail;
   // Compared on the ORGANIZATION, not the workspace: both controls it gates
   // (delete, approve/suspend) act on the whole org, and the API refuses them
   // org-wide. Matching on workspace id offered an operator a Delete button for
   // a SIBLING workspace of their own org that the server then rejected.
-  const isOwnTeam = team.organizationId === session.organizationId;
+  const isOwnOrg = workspace.organizationId === session.organizationId;
   const activeMembers = members.filter((m) => !m.deactivatedAt);
   const deactivatedMembers = members.filter((m) => m.deactivatedAt);
   // Member-cap seats = active, non-superAdmin users IN THIS WORKSPACE (a
@@ -63,31 +63,31 @@ export default async function PlatformOrganizationDetailPage({
           <ArrowLeft className="size-3.5" />
           All organizations
         </Link>
-        <DeleteTeamButton
-          organizationId={team.organizationId}
-          teamName={team.name}
-          isOwnTeam={isOwnTeam}
+        <DeleteOrganizationButton
+          organizationId={workspace.organizationId}
+          orgName={workspace.name}
+          isOwnOrg={isOwnOrg}
         />
       </div>
 
       <header className="flex flex-col gap-2">
         <div className="flex flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-semibold tracking-tight">{team.name}</h1>
-          <TeamStatusBadge status={team.status} />
+          <h1 className="text-2xl font-semibold tracking-tight">{workspace.name}</h1>
+          <OrgStatusBadge status={workspace.status} />
         </div>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-          <span className="font-mono">{team.id}</span>
+          <span className="font-mono">{workspace.id}</span>
           <span>·</span>
           <span>
-            Created <LocalTime iso={team.createdAt} format="listTime" />
+            Created <LocalTime iso={workspace.createdAt} format="listTime" />
           </span>
           <span>·</span>
           {/* ORGANISATION-level cap: how many workspaces it may create. The
               seat cap next to the member list is per-WORKSPACE. */}
           <LimitControl
-            workspaceId={team.id}
-            max={team.maxWorkspaces}
-            used={team.workspaceCount ?? 0}
+            workspaceId={workspace.id}
+            max={workspace.maxWorkspaces}
+            used={workspace.workspaceCount ?? 0}
             endpoint="max-workspaces"
             bodyKey="maxWorkspaces"
             noun="workspace"
@@ -95,11 +95,11 @@ export default async function PlatformOrganizationDetailPage({
             hardMax={100}
           />
           <span>·</span>
-          {team.whatsappConnected ? (
+          {workspace.whatsappConnected ? (
             <span className="inline-flex items-center gap-1 text-success-fg">
               <CheckCircle2 className="size-3.5" />
-              {team.whatsappDisplayNumber
-                ? formatPhone(team.whatsappDisplayNumber)
+              {workspace.whatsappDisplayNumber
+                ? formatPhone(workspace.whatsappDisplayNumber)
                 : "WhatsApp connected"}
             </span>
           ) : (
@@ -116,38 +116,38 @@ export default async function PlatformOrganizationDetailPage({
         <div className="flex min-w-0 flex-col gap-1">
           <div className="text-sm font-semibold">Access</div>
           <p className="text-xs text-muted-foreground">
-            {team.status === "pending" &&
+            {workspace.status === "pending" &&
               "This organization is waiting for approval — its members can't use the app yet."}
-            {team.status === "active" &&
+            {workspace.status === "active" &&
               "This organization is approved and has full access to the app."}
-            {team.status === "suspended" &&
+            {workspace.status === "suspended" &&
               "This organization is suspended — its members are locked out until reactivated."}
           </p>
-          {team.statusReason && (
+          {workspace.statusReason && (
             <p className="mt-1 text-xs text-muted-foreground">
               <span className="font-medium text-foreground">Reason:</span>{" "}
-              {team.statusReason}
+              {workspace.statusReason}
             </p>
           )}
-          {team.statusUpdatedAt && (
+          {workspace.statusUpdatedAt && (
             <p className="text-2xs text-muted-foreground/80">
-              Last changed <LocalTime iso={team.statusUpdatedAt} format="listTime" />
+              Last changed <LocalTime iso={workspace.statusUpdatedAt} format="listTime" />
             </p>
           )}
         </div>
-        <TeamStatusControls
-          organizationId={team.organizationId}
-          status={team.status}
-          isOwnTeam={isOwnTeam}
+        <OrgStatusControls
+          organizationId={workspace.organizationId}
+          status={workspace.status}
+          isOwnOrg={isOwnOrg}
         />
       </section>
 
       <section className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-        <Stat label="Members" value={team.userCount} />
-        <Stat label="Contacts" value={team.contactCount} />
-        <Stat label="Chats" value={team.conversationCount} />
-        <Stat label="Messages" value={team.messageCount} />
-        <Stat label="Broadcasts" value={team.broadcastCount} />
+        <Stat label="Members" value={workspace.userCount} />
+        <Stat label="Contacts" value={workspace.contactCount} />
+        <Stat label="Chats" value={workspace.conversationCount} />
+        <Stat label="Messages" value={workspace.messageCount} />
+        <Stat label="Broadcasts" value={workspace.broadcastCount} />
       </section>
 
       <section className="rounded-xl border border-border bg-card">
@@ -163,8 +163,8 @@ export default async function PlatformOrganizationDetailPage({
           {/* Seat cap is per WORKSPACE; the workspace cap is per ORGANISATION.
               Both are super-admin controlled and both default to 2. */}
           <LimitControl
-            workspaceId={team.id}
-            max={team.maxMembers}
+            workspaceId={workspace.id}
+            max={workspace.maxMembers}
             used={memberSeatCount}
             endpoint="max-members"
             bodyKey="maxMembers"
@@ -236,7 +236,7 @@ export default async function PlatformOrganizationDetailPage({
         <Users className="size-3.5 shrink-0" />
         <span>
           Platform-admin view. Members and aggregate counts only — conversations
-          and message bodies stay private to each team.
+          and message bodies stay private to each workspace.
         </span>
       </div>
     </div>

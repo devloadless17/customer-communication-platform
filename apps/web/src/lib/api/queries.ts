@@ -11,8 +11,8 @@ import type {
   ListContactsOpts,
   PlatformAnalytics,
   PlatformOpsSnapshot,
-  SuperAdminTeamDetail,
-  SuperAdminTeamRow,
+  SuperAdminWorkspaceDetail,
+  SuperAdminWorkspaceRow,
   SuperAdminOrgRow,
   WhatsappConfigView,
 } from "@ccp/shared/dtos";
@@ -163,22 +163,22 @@ export const getMemberStats = cache(
 // Super-admin (cross-team)
 // ---------------------------------------------------------------------------
 
-export async function listAllTeamsForSuperAdmin(): Promise<SuperAdminTeamRow[]> {
-  const { teams } = await api<{ teams: SuperAdminTeamRow[] }>("/api/admin/teams");
-  return teams;
+export async function listAllWorkspacesForSuperAdmin(): Promise<SuperAdminWorkspaceRow[]> {
+  const { workspaces } = await api<{ workspaces: SuperAdminWorkspaceRow[] }>("/api/admin/workspaces");
+  return workspaces;
 }
 
 /** Organisations with their workspaces nested — what the platform list shows. */
 export async function listAllOrgsForSuperAdmin(): Promise<SuperAdminOrgRow[]> {
-  const { orgs } = await api<{ orgs: SuperAdminOrgRow[] }>("/api/admin/teams");
+  const { orgs } = await api<{ orgs: SuperAdminOrgRow[] }>("/api/admin/workspaces");
   return orgs;
 }
 
-export async function getTeamDetailForSuperAdmin(
+export async function getWorkspaceDetailForSuperAdmin(
   workspaceId: string,
-): Promise<SuperAdminTeamDetail | null> {
+): Promise<SuperAdminWorkspaceDetail | null> {
   try {
-    return await api<SuperAdminTeamDetail>(`/api/admin/teams/${workspaceId}`);
+    return await api<SuperAdminWorkspaceDetail>(`/api/admin/workspaces/${workspaceId}`);
   } catch (err) {
     if (isApiNotFound(err)) return null;
     throw err;

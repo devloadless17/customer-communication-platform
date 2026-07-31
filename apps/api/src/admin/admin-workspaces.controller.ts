@@ -9,9 +9,9 @@ import {
 import { z } from "zod";
 
 import {
-  getTeamDetailForSuperAdmin,
+  getWorkspaceDetailForSuperAdmin,
   listAllOrgsForSuperAdmin,
-  listAllTeamsForSuperAdmin,
+  listAllWorkspacesForSuperAdmin,
 } from "@/lib/queries";
 
 import { RequireRole } from "../auth/role.guard";
@@ -36,10 +36,10 @@ type SetMaxWorkspacesInput = z.infer<typeof SetMaxWorkspacesSchema>;
 /**
  * superAdmin cross-team admin surface — the WORKSPACE-keyed half.
  *
- *   GET    /api/admin/teams                   — every workspace + counts
- *   GET    /api/admin/teams/:id               — one workspace's detail
- *   PATCH  /api/admin/teams/:id/max-members   — seat cap for THIS workspace
- *   PATCH  /api/admin/teams/:id/max-workspaces— how many the owning ORG may have
+ *   GET    /api/admin/workspaces                   — every workspace + counts
+ *   GET    /api/admin/workspaces/:id               — one workspace's detail
+ *   PATCH  /api/admin/workspaces/:id/max-members   — seat cap for THIS workspace
+ *   PATCH  /api/admin/workspaces/:id/max-workspaces— how many the owning ORG may have
  *
  * Anything that acts on the ORGANISATION (approve / suspend / delete) lives in
  * `admin-organizations.controller.ts` and is keyed by the organisation id. The
@@ -52,9 +52,9 @@ type SetMaxWorkspacesInput = z.infer<typeof SetMaxWorkspacesSchema>;
  * Visibility ends at aggregate counts + the member roster — never customer
  * message bodies or contact names (see super-admin.ts query comment).
  */
-@Controller("api/admin/teams")
+@Controller("api/admin/workspaces")
 @RequireRole("superAdmin")
-export class AdminTeamsController {
+export class AdminWorkspacesController {
   constructor(
     private readonly db: DbService,
   ) {}
@@ -67,17 +67,17 @@ export class AdminTeamsController {
    */
   @Get()
   async list() {
-    const [teams, orgs] = await Promise.all([
-      listAllTeamsForSuperAdmin(),
+    const [workspaces, orgs] = await Promise.all([
+      listAllWorkspacesForSuperAdmin(),
       listAllOrgsForSuperAdmin(),
     ]);
-    return { teams, orgs };
+    return { workspaces, orgs };
   }
 
   @Get(":id")
   async get(@Param("id") workspaceId: string) {
-    const detail = await getTeamDetailForSuperAdmin(workspaceId);
-    if (!detail) throw new NotFoundException({ error: "team_not_found" });
+    const detail = await getWorkspaceDetailForSuperAdmin(workspaceId);
+    if (!detail) throw new NotFoundException({ error: "workspace_not_found" });
     return detail;
   }
 
@@ -87,7 +87,7 @@ export class AdminTeamsController {
    * NEW joins (invite-accept enforces it). Returns the current active count so
    * the UI can warn when the new cap is already met/exceeded.
    *
-   *   PATCH /api/admin/teams/:id/max-members   { maxMembers }
+   *   PATCH /api/admin/workspaces/:id/max-members   { maxMembers }
    */
   @Patch(":id/max-members")
   async setMaxMembers(
@@ -110,7 +110,7 @@ export class AdminTeamsController {
       data: { maxMembers: body.maxMembers },
     });
     if (updated.count === 0) {
-      throw new NotFoundException({ error: "team_not_found" });
+      throw new NotFoundException({ error: "workspace_not_found" });
     }
     const activeMembers = await this.db.user.count({
       where: { workspaceMemberships: { some: { workspaceId } }, deactivatedAt: null, isSuperAdmin: false },
@@ -121,7 +121,7 @@ export class AdminTeamsController {
   /**
    * Raise/lower how many WORKSPACES an organisation may create.
    *
-   *   PATCH /api/admin/teams/:id/max-workspaces   { maxWorkspaces }
+   *   PATCH /api/admin/workspaces/:id/max-workspaces   { maxWorkspaces }
    *
    * Addressed by a workspace id like the sibling routes (the platform detail
    * page is workspace-keyed), but writes the ORGANISATION that owns it.
@@ -141,7 +141,7 @@ export class AdminTeamsController {
       data: { maxWorkspaces: body.maxWorkspaces },
     });
     if (updated.count === 0) {
-      throw new NotFoundException({ error: "team_not_found" });
+      throw new NotFoundException({ error: "workspace_not_found" });
     }
     const workspace = await this.db.workspace.findUnique({
       where: { id: workspaceId },

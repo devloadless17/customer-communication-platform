@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 
 import { LocalTime } from "@/components/local-time";
-import { QuickApproveButton } from "@/components/platform/team-status-actions";
+import { QuickApproveButton } from "@/components/platform/org-status-actions";
 import { getPlatformAnalytics, getPlatformOps } from "@/lib/api/queries";
 
 export const metadata = { title: "Overview · Platform" };

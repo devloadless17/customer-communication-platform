@@ -30,15 +30,15 @@ export type { ListContactsOpts } from "./contacts";
 
 export {
   getPlatformAnalytics,
-  getTeamDetailForSuperAdmin,
+  getWorkspaceDetailForSuperAdmin,
   invalidateSuperAdminAggregates,
   listAllOrgsForSuperAdmin,
-  listAllTeamsForSuperAdmin,
+  listAllWorkspacesForSuperAdmin,
 } from "./super-admin";
 export type {
   PlatformAnalytics,
-  SuperAdminTeamDetail,
-  SuperAdminTeamRow,
+  SuperAdminWorkspaceDetail,
+  SuperAdminWorkspaceRow,
 } from "./super-admin";
 
 export {

@@ -10,19 +10,19 @@ import { apiFetch } from "@/lib/api/client-fetch";
 import { apiErrorMessage } from "@ccp/shared/api/error-message";
 
 /**
- * superAdmin-only inline delete button for a foreign team. Renders nothing
- * when `isOwnTeam` is true — admins delete their own org via /settings/members
+ * superAdmin-only inline delete button for a foreign organization. Renders nothing
+ * when `isOwnOrg` is true — admins delete their own org via /settings/members
  * so the operator's last action stays reversible (signout) rather than
  * self-destruct.
  */
-export function DeleteTeamButton({
+export function DeleteOrganizationButton({
   organizationId,
-  teamName,
-  isOwnTeam,
+  orgName,
+  isOwnOrg,
 }: {
   organizationId: string;
-  teamName: string;
-  isOwnTeam: boolean;
+  orgName: string;
+  isOwnOrg: boolean;
 }) {
   const router = useRouter();
   // A plain busy flag, NOT useTransition. `run` awaits `confirm()`, and inside
@@ -34,12 +34,12 @@ export function DeleteTeamButton({
   const [error, setError] = useState<string | null>(null);
   const { confirm, confirmDialog } = useConfirm();
 
-  if (isOwnTeam) return null;
+  if (isOwnOrg) return null;
 
   async function run() {
     setError(null);
     const ok = await confirm({
-      title: `Delete ${teamName}?`,
+      title: `Delete ${orgName}?`,
       description:
         "This permanently removes the organization and EVERYTHING in it — contacts, conversations, messages, broadcasts, automations, every member account, every uploaded file. The WhatsApp connection is dropped. This cannot be undone.",
       confirmLabel: "Delete organization",
@@ -47,11 +47,11 @@ export function DeleteTeamButton({
       // Blast radius = an entire tenant with no undo. Require typing the org
       // name so this can't be cleared with the same reflexive click as a tag
       // delete.
-      requireText: teamName,
+      requireText: orgName,
       requireTextLabel: (
         <>
           Type the organization name{" "}
-          <span className="font-semibold text-foreground">{teamName}</span> to
+          <span className="font-semibold text-foreground">{orgName}</span> to
           confirm
         </>
       ),

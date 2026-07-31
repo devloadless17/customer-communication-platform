@@ -30,7 +30,7 @@ const STYLES: Record<
   },
 };
 
-export function TeamStatusBadge({
+export function OrgStatusBadge({
   status,
   className,
 }: {

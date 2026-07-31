@@ -329,6 +329,8 @@ type PrismaContactListItem = Omit<
   // BSUID/username are identity internals (forward-compat) — not rendered in the
   // list row, so the narrow select omits them too.
   | "bsuid"
+  | "parentBsuid"
+  | "bsuidPortfolioId"
   | "username"
   // socialProfile (IG follower/verified signals) is panel-only context — the
   // list row never renders it, so the narrow select omits the JSONB column.

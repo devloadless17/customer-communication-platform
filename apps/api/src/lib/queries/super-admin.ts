@@ -1,8 +1,8 @@
 import { db } from "@/lib/db";
 import type {
   PlatformAnalytics,
-  SuperAdminTeamDetail,
-  SuperAdminTeamRow,
+  SuperAdminWorkspaceDetail,
+  SuperAdminWorkspaceRow,
   SuperAdminOrgRow,
 } from "@ccp/shared/dtos";
 import type { OrgRole, OrgStatus } from "@ccp/shared/types";
@@ -12,7 +12,7 @@ import type { OrgRole, OrgStatus } from "@ccp/shared/types";
 // requireSuperAdmin in auth-helpers.
 
 // DTO shapes live in @ccp/shared/dtos — single source for the wire shape.
-export type { PlatformAnalytics, SuperAdminTeamDetail, SuperAdminTeamRow };
+export type { PlatformAnalytics, SuperAdminWorkspaceDetail, SuperAdminWorkspaceRow };
 
 /**
  * Short-TTL memo for the two cross-team AGGREGATE reads below.
@@ -34,7 +34,7 @@ export type { PlatformAnalytics, SuperAdminTeamDetail, SuperAdminTeamRow };
  * making them estimates is the kind of change nobody notices until they are
  * reconciling numbers. 60s of staleness on a platform overview is invisible;
  * the repeated full scans are not. Deliberately NOT applied to
- * `getTeamDetailForSuperAdmin` — that one is scoped to a single team and is
+ * `getWorkspaceDetailForSuperAdmin` — that one is scoped to a single team and is
  * read right after an admin acts on it, where staleness would be confusing.
  */
 const AGGREGATE_TTL_MS = 60_000;
@@ -81,16 +81,16 @@ export function invalidateSuperAdminAggregates(): void {
  * per aggregate — fine at low team-count (single-VPS pilot). At >100 teams
  * we'd swap to a single SQL query with LATERAL joins; not worth it yet.
  */
-export async function listAllTeamsForSuperAdmin(): Promise<SuperAdminTeamRow[]> {
+export async function listAllWorkspacesForSuperAdmin(): Promise<SuperAdminWorkspaceRow[]> {
   return memoAggregate("roster", () => loadAllTeamsForSuperAdmin());
 }
 
-async function loadAllTeamsForSuperAdmin(): Promise<SuperAdminTeamRow[]> {
+async function loadAllTeamsForSuperAdmin(): Promise<SuperAdminWorkspaceRow[]> {
   const teams = await db.workspace.findMany({
     // The platform's own anchor is not a customer — the SAME filter every
     // sibling here carries (`loadAllOrgsForSuperAdmin`, `getTeamDetail…`, and
     // every aggregate in `loadPlatformAnalytics`). This loader was the one
-    // that didn't, so `GET /api/admin/teams` returned the anchor workspace in
+    // that didn't, so `GET /api/admin/workspaces` returned the anchor workspace in
     // `teams`; it stayed invisible only because nothing renders that array
     // today. One new consumer would have reintroduced the "Loadless listed
     // beside real customers" bug the org-side filter was added to fix.
@@ -196,11 +196,11 @@ async function loadAllOrgsForSuperAdmin(): Promise<SuperAdminOrgRow[]> {
         maxWorkspaces: true,
       },
     }),
-    // The MEMOIZED entry point, not the raw loader: `GET /api/admin/teams`
-    // awaits both this and `listAllTeamsForSuperAdmin()` in one Promise.all,
+    // The MEMOIZED entry point, not the raw loader: `GET /api/admin/workspaces`
+    // awaits both this and `listAllWorkspacesForSuperAdmin()` in one Promise.all,
     // so calling the loader directly ran the per-workspace `_count.messages`
     // scan TWICE concurrently on a cold cache.
-    listAllTeamsForSuperAdmin(),
+    listAllWorkspacesForSuperAdmin(),
   ]);
 
   // Distinct people per org, EXCLUDING platform operators and deactivated
@@ -217,7 +217,7 @@ async function loadAllOrgsForSuperAdmin(): Promise<SuperAdminOrgRow[]> {
     seatRows.map((r) => [r.organizationId, r._count._all]),
   );
 
-  const byOrg = new Map<string, SuperAdminTeamRow[]>();
+  const byOrg = new Map<string, SuperAdminWorkspaceRow[]>();
   for (const ws of workspaces) {
     const list = byOrg.get(ws.organizationId) ?? [];
     list.push(ws);
@@ -226,7 +226,7 @@ async function loadAllOrgsForSuperAdmin(): Promise<SuperAdminOrgRow[]> {
 
   return orgs.map((o) => {
     const own = byOrg.get(o.id) ?? [];
-    const sum = (pick: (w: SuperAdminTeamRow) => number) =>
+    const sum = (pick: (w: SuperAdminWorkspaceRow) => number) =>
       own.reduce((acc, w) => acc + pick(w), 0);
     return {
       id: o.id,
@@ -245,9 +245,9 @@ async function loadAllOrgsForSuperAdmin(): Promise<SuperAdminOrgRow[]> {
   });
 }
 
-export async function getTeamDetailForSuperAdmin(
+export async function getWorkspaceDetailForSuperAdmin(
   workspaceId: string,
-): Promise<SuperAdminTeamDetail | null> {
+): Promise<SuperAdminWorkspaceDetail | null> {
   // `findFirst`, not `findUnique`: the where carries a RELATION filter
   // alongside the id, and `findUnique` accepts only unique fields. Prisma's XOR
   // union types let the bad shape compile clean and then throw at runtime — the
@@ -331,7 +331,7 @@ export async function getTeamDetailForSuperAdmin(
   });
 
   return {
-    team: {
+    workspace: {
       id: team.id,
       name: team.name,
       createdAt: team.createdAt.toISOString(),

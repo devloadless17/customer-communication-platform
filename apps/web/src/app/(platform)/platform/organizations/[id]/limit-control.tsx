@@ -37,7 +37,7 @@ export function LimitControl({
   workspaceId: string;
   max: number;
   used: number;
-  /** e.g. "max-members" → PATCH /api/admin/teams/:id/max-members */
+  /** e.g. "max-members" → PATCH /api/admin/workspaces/:id/max-members */
   endpoint: string;
   /** e.g. "maxMembers" — the PATCH body key the endpoint expects. */
   bodyKey: string;
@@ -63,7 +63,7 @@ export function LimitControl({
     }
     setError(null);
     startTransition(async () => {
-      const res = await apiFetch(`/api/admin/teams/${workspaceId}/${endpoint}`, {
+      const res = await apiFetch(`/api/admin/workspaces/${workspaceId}/${endpoint}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ [bodyKey]: next }),

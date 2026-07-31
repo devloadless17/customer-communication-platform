@@ -102,7 +102,7 @@ test.describe("the super-admin password reset is GONE", () => {
     // credential and hand it over out-of-band. 404 (not 401) is the assertion —
     // 401 would mean the route is still mounted and merely guarded.
     const res = await request.post(
-      "/api/admin/teams/any-workspace/members/any-user/reset-password",
+      "/api/admin/workspaces/any-workspace/members/any-user/reset-password",
       { data: { newPassword: "irrelevant" }, failOnStatusCode: false },
     );
     expect(res.status()).toBe(404);

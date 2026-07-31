@@ -17,8 +17,8 @@ import { buildOpsSnapshot } from "../health/ops-snapshot";
  *                                  /health counters can't give), outbox lag, and
  *                                  whether ops alerts are configured.
  *
- * Separate base path from AdminTeamsController so `/analytics` never collides
- * with the `/api/admin/teams/:id` param route. superAdmin-only.
+ * Separate base path from AdminWorkspacesController so `/analytics` never collides
+ * with the `/api/admin/workspaces/:id` param route. superAdmin-only.
  */
 @Controller("api/admin/analytics")
 @RequireRole("superAdmin")

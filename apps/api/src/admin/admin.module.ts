@@ -3,7 +3,7 @@ import { Module } from "@nestjs/common";
 import { WorkspaceSettingsModule } from "../workspace-settings/workspace-settings.module";
 import { AdminAnalyticsController } from "./admin-analytics.controller";
 import { AdminOrganizationsController } from "./admin-organizations.controller";
-import { AdminTeamsController } from "./admin-teams.controller";
+import { AdminWorkspacesController } from "./admin-workspaces.controller";
 
 @Module({
   // UsersModule is gone with the cross-team password-reset route it existed
@@ -11,7 +11,7 @@ import { AdminTeamsController } from "./admin-teams.controller";
   // so no operator ever chooses or handles a customer's credential.
   imports: [WorkspaceSettingsModule],
   controllers: [
-    AdminTeamsController,
+    AdminWorkspacesController,
     AdminOrganizationsController,
     AdminAnalyticsController,
   ],

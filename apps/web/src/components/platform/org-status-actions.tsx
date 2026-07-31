@@ -82,20 +82,20 @@ export function QuickApproveButton({ organizationId }: { organizationId: string 
  * screen), and Reactivate (suspended → active). Hidden for the operator's own
  * org — that's managed from Settings, mirroring the delete button's guard.
  */
-export function TeamStatusControls({
+export function OrgStatusControls({
   organizationId,
   status,
-  isOwnTeam,
+  isOwnOrg,
 }: {
   organizationId: string;
   status: OrgStatus;
-  isOwnTeam: boolean;
+  isOwnOrg: boolean;
 }) {
   const { setStatus, pending, error } = useSetTeamStatus(organizationId);
   const [suspendOpen, setSuspendOpen] = useState(false);
   const [reason, setReason] = useState("");
 
-  if (isOwnTeam) {
+  if (isOwnOrg) {
     return (
       <p className="text-xs text-muted-foreground">
         This is your own organization.

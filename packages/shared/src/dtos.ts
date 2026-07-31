@@ -60,7 +60,7 @@ export interface AudienceGroupDto {
 // never crosses into customer message bodies (see the query file's note).
 // ---------------------------------------------------------------------------
 
-export interface SuperAdminTeamRow {
+export interface SuperAdminWorkspaceRow {
   id: string;
   name: string;
   createdAt: string;
@@ -114,11 +114,11 @@ export interface SuperAdminOrgRow {
   contactCount: number;
   conversationCount: number;
   messageCount: number;
-  workspaces: SuperAdminTeamRow[];
+  workspaces: SuperAdminWorkspaceRow[];
 }
 
-export interface SuperAdminTeamDetail {
-  team: SuperAdminTeamRow;
+export interface SuperAdminWorkspaceDetail {
+  workspace: SuperAdminWorkspaceRow;
   members: Array<{
     id: string;
     name: string;

@@ -30,7 +30,7 @@ type SetStatusInput = z.infer<typeof SetStatusSchema>;
  *   PATCH  /api/admin/organizations/:id/status — approve / suspend / reactivate
  *   DELETE /api/admin/organizations/:id        — hard-delete the whole tenant
  *
- * The sibling `/api/admin/teams/:id` routes do the same two things but are
+ * The sibling `/api/admin/workspaces/:id` routes do the same two things but are
  * keyed by a WORKSPACE id, which strands any organisation that has none. That
  * is not hypothetical: social signup provisions the Organization before the
  * User (`User.organizationId` is required with no default), so a failed user

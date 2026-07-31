@@ -291,9 +291,11 @@ export class UsersController {
    * Admin-initiated password reset for a teammate. The only recovery path —
    * there's no self-serve email reset (no mail provider). Admin/superAdmin
    * sets a new password, then hands it to the user out-of-band. Scoped to the
-   * caller's own team; cross-team reset is the superAdmin route on
-   * AdminTeamsController. `canModifyUser` (in the service) blocks an admin
-   * from resetting a superAdmin.
+   * caller's own workspace; there is deliberately NO cross-tenant superAdmin
+   * reset route (removed — an operator choosing a customer's credential was
+   * indefensible; tests/e2e/auth-recovery.spec.ts asserts it stays gone).
+   * `canModifyUser` (in the service) blocks an admin from resetting a
+   * superAdmin.
    */
   @RequireRole("admin")
   @Post(":id/reset-password")
