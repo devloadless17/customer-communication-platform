@@ -30,9 +30,18 @@
  *
  * Run: node scripts/check-v1-docs.mjs
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 
-const CONTROLLER = "apps/api/src/external/v1/external-v1.controller.ts";
+// EVERY *.controller.ts in the /v1 folder — discovered, not hand-named. The
+// 2026-07-31 split peels the 197-route god-controller into per-resource
+// controllers; a hand-named single file here would silently DROP each peeled
+// route from this check (the first peel took the count 197 → 191 with a green
+// tick, which is exactly the unnamed-surface failure the UX rubric documented).
+const V1_DIR = "apps/api/src/external/v1";
+const CONTROLLERS = readdirSync(V1_DIR)
+  .filter((f) => f.endsWith(".controller.ts"))
+  .map((f) => `${V1_DIR}/${f}`)
+  .sort();
 const SURFACES = [
   { label: "the in-app /docs/api page", path: "apps/web/src/app/docs/api/page.tsx" },
 ];
@@ -180,8 +189,8 @@ function routesMissingScope(src) {
   return missing;
 }
 
-const controller = read(CONTROLLER);
-const routes = routesFrom(controller);
+const controller = CONTROLLERS.map((p) => read(p)).join("\n");
+const routes = CONTROLLERS.flatMap((p) => routesFrom(read(p)));
 const scopes = [...new Set([...controller.matchAll(/@RequireScope\("([^"]+)"\)/g)].map((m) => m[1]))].sort();
 
 if (routes.length === 0) {
