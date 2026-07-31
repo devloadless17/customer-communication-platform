@@ -2493,7 +2493,6 @@ async function processOneRecipient(
                   {
                     to: toPhone,
                     ...(viaBsuid ? { viaBsuid: true } : {}),
-                ...(viaBsuid ? { viaBsuid: true } : {}),
                     name: broadcast.templateName!,
                     language: broadcast.templateLanguage!,
                     variables: templateVariables,

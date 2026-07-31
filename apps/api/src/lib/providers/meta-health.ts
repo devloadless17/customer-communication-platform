@@ -176,13 +176,6 @@ export interface WhatsappHealthUpdate {
    * webhook, or the settings read-through). Per-NUMBER like `qualityRating` —
    * a username is 1:1 with a business phone number. `null` clears (the
    * username was removed); `undefined` untouched.
-   *
-   * NOTE: the webhook pass-through (ingest's channel_health handler copying
-   * `businessUsername` off the event into this update) lands in a follow-up
-   * edit — ingest.ts is under concurrent edit right now, and its handler lists
-   * fields explicitly, so the parser's new field is dropped there harmlessly
-   * until then. The settings GET's read-through keeps the stored copy fresh in
-   * the meantime.
    */
   businessUsername?: string | null;
   /**

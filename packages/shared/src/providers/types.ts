@@ -1116,10 +1116,12 @@ export interface NormalizedChannelHealth extends NormalizedEventSource {
    * webhook — the number adopted, changed, or had a username transferred onto
    * it. Per-NUMBER like `qualityRating` (a username is 1:1 with a business
    * phone number). Lowercase — usernames are case-insensitive at Meta.
+   * `null` explicitly CLEARS the stored handle (webhook `status: "deleted"` —
+   * removed in the Business app, or force-transferred onto a sibling number);
    * `undefined` leaves the stored value untouched, like every other partial
    * field on this event.
    */
-  businessUsername?: string;
+  businessUsername?: string | null;
   rawPayload: Record<string, unknown>;
 }
 

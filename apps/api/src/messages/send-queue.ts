@@ -66,6 +66,11 @@ interface BaseSendJob {
    *  gap (rare), Meta will reject the send with a clear error and the
    *  worker publishes `message.send_failed`. */
   phoneNumber: string;
+  /** True when `phoneNumber` is a WhatsApp BSUID, not a phone — pre-resolved
+   *  at preflight (`resolveContactChannel`). The worker threads it to the
+   *  provider so the destination rides Meta's `recipient` field. Optional for
+   *  forward-compat with jobs enqueued before this field existed. */
+  viaBsuid?: boolean;
   /** Channel the destination belongs to, pre-resolved at preflight from the
    *  contact's identity (`resolveContactChannel`). The worker looks the
    *  provider up in the registry instead of assuming Meta. Optional for

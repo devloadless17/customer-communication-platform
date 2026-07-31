@@ -62,6 +62,10 @@ export async function sendMediaInternal(
           phoneNumber: true,
           identityChannel: true,
           externalContactId: true,
+          // BSUID-only threads (Meta omitted the phone for a username adopter)
+          // are media-sendable — resolveContactChannel falls back to the BSUID
+          // and flags viaBsuid, which the sendMedia call below threads.
+          bsuid: true,
           lastInboundAt: true,
           blockedAt: true,
         },

@@ -9,10 +9,12 @@
  *  - W11-01 `UNTIERED` is a documented `whatsapp_business_manager_messaging_limit`
  *    value that normalized to null, making it indistinguishable from
  *    TIER_UNLIMITED (which also has a null cap).
- *  - BSUID addressing: the BSUID belongs in `to` for /messages (a finding that
- *    claimed otherwise was REFUTED — the `recipient` param is /marketing_messages
- *    only), but a BSUID address cannot receive authentication templates (131062).
- *    The `to`-field test exists to stop a well-meaning "fix" toward `recipient`.
+ *  - BSUID addressing: `resolveContactChannel` carries the BSUID in `.to` and
+ *    flags `viaBsuid`; the WIRE form is the provider's call (re-verified
+ *    2026-07-31: `whatsappDestination()` emits the top-level `recipient` field
+ *    for BSUIDs, with a one-shot legacy-`to` retry on a #100 — see
+ *    ResolvedChannel's docblock). A BSUID address cannot receive
+ *    authentication templates (131062).
  *
  *   pnpm --filter @ccp/api exec vitest run test/meta-conformance-batch2.spec.ts
  */
@@ -65,11 +67,12 @@ describe("BSUID addressing · to-field is correct, auth templates are not", () =
     bsuid: "LB.946402411360800",
   };
 
-  it("puts the BSUID in `to` — /messages accepts both phone and BSUID there", () => {
-    // Meta, for POST /{PHONE_NUMBER_ID}/messages: "to — Supports both WhatsApp
-    // user phone numbers and user BSUIDs." The separate `recipient` body param
-    // belongs to /marketing_messages, which this platform does not use — so the
-    // send path must NOT be "fixed" toward it.
+  it("carries the BSUID in `.to` — the resolver's address slot, not the wire field", () => {
+    // The resolver hands one destination string to every send path; the WIRE
+    // form is the provider's decision — `whatsappDestination()` moves a
+    // viaBsuid destination to Meta's top-level `recipient` field (re-verified
+    // 2026-07-31, superseding the earlier `to`-only reading) with a one-shot
+    // legacy-`to` retry for rollout lag.
     expect(resolveContactChannel(bsuidOnly).to).toBe("LB.946402411360800");
   });
 

@@ -950,7 +950,15 @@ export class ConversationsService {
     // NEW thread to a deleted contact has no defensible UX.
     const contact = await this.db.contact.findFirst({
       where: { id: contactId, workspaceId, deletedAt: null },
-      select: { id: true, phoneNumber: true, identityChannel: true, externalContactId: true },
+      select: {
+        id: true,
+        phoneNumber: true,
+        identityChannel: true,
+        externalContactId: true,
+        // Every ChannelResolvable select carries bsuid — a BSUID-only contact
+        // resolves its channel instead of falling to the catch-default.
+        bsuid: true,
+      },
     });
     if (!contact) throw new NotFoundException({ error: "contact_not_found" });
 

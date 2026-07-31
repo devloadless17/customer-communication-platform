@@ -730,6 +730,10 @@ export class ExternalV1MessagingService {
             phoneNumber: true,
             identityChannel: true,
             externalContactId: true,
+            // BSUID-only threads (Meta omitted the phone for a username
+            // adopter) are free-form-sendable — resolveContactChannel falls
+            // back to the BSUID and flags viaBsuid for the send below.
+            bsuid: true,
             lastInboundAt: true,
           },
         },
@@ -874,6 +878,7 @@ export class ExternalV1MessagingService {
       send = await binding.provider.sendText(
         {
           to: channel.to,
+          ...(channel.viaBsuid ? { viaBsuid: true } : {}),
           body: input.body,
           useHumanAgentTag,
           ...(replyToExternalId ? { replyToExternalId } : {}),
@@ -1209,7 +1214,14 @@ export class ExternalV1MessagingService {
       // every message on a future non-phone contact's thread.
       const contactChannel = await this.db.contact.findUnique({
         where: { id: contactId },
-        select: { phoneNumber: true, identityChannel: true, externalContactId: true },
+        select: {
+          phoneNumber: true,
+          identityChannel: true,
+          externalContactId: true,
+          // Every ChannelResolvable select carries bsuid — a BSUID-only
+          // contact resolves its channel instead of falling to the default.
+          bsuid: true,
+        },
       });
       let channel: Channel = "whatsapp";
       if (contactChannel) {

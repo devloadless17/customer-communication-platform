@@ -761,6 +761,7 @@ export class MessagesService {
             conversationId: input.conversationId,
             channel: pre.channel,
             phoneNumber: pre.phoneNumber,
+            ...(pre.viaBsuid ? { viaBsuid: true } : {}),
             body: input.body,
             replyToMessageId: pre.replyToMessageId,
             replyToExternalId: pre.replyToExternalId,
@@ -820,6 +821,7 @@ export class MessagesService {
   ): Promise<{
     channel: Channel;
     phoneNumber: string;
+    viaBsuid?: boolean;
     replyToMessageId: string | null;
     replyToExternalId?: string;
   }> {
@@ -842,6 +844,11 @@ export class MessagesService {
               phoneNumber: true,
               identityChannel: true,
               externalContactId: true,
+              // BSUID-only threads (Meta omitted the phone for a username
+              // adopter) are free-form-sendable — resolveContactChannel falls
+              // back to the BSUID and flags viaBsuid, threaded through the
+              // job payload so the worker addresses Meta's `recipient` field.
+              bsuid: true,
               lastInboundAt: true,
             },
           },
@@ -964,6 +971,7 @@ export class MessagesService {
     return {
       channel: provider,
       phoneNumber: channel.to,
+      ...(channel.viaBsuid ? { viaBsuid: true } : {}),
       replyToMessageId,
       ...(replyToExternalId ? { replyToExternalId } : {}),
     };
@@ -1279,6 +1287,7 @@ export class MessagesService {
       send = await binding.provider.sendText(
         {
           to: phoneNumber,
+          ...(data.viaBsuid ? { viaBsuid: true } : {}),
           body,
           useHumanAgentTag,
           ...(replyToExternalId ? { replyToExternalId } : {}),
@@ -1651,6 +1660,10 @@ export class MessagesService {
             phoneNumber: true,
             identityChannel: true,
             externalContactId: true,
+            // BSUID-only threads (Meta omitted the phone for a username
+            // adopter) are media-sendable — resolveContactChannel falls back
+            // to the BSUID and flags viaBsuid for the send below.
+            bsuid: true,
             name: true,
             lastInboundAt: true,
           },
@@ -2760,6 +2773,7 @@ export class MessagesService {
             const send = await sendMedia(
               {
                 to: contactPhone,
+                ...(channel.viaBsuid ? { viaBsuid: true } : {}),
                 kind: mb.kind,
                 mediaId: uploaded?.mediaId ?? "",
                 ...(mediaUrl ? { mediaUrl } : {}),
@@ -2873,7 +2887,12 @@ export class MessagesService {
 
             // Pre-send. sendText is a required provider method (always present).
             const send = await binding.provider.sendText(
-              { to: contactPhone, body, useHumanAgentTag },
+              {
+                to: contactPhone,
+                ...(channel.viaBsuid ? { viaBsuid: true } : {}),
+                body,
+                useHumanAgentTag,
+              },
               sendConfig,
             );
 

@@ -113,6 +113,10 @@ export async function sendMessengerTemplateInternal(
           phoneNumber: true,
           identityChannel: true,
           externalContactId: true,
+          // Every ChannelResolvable select carries bsuid — harmless on a
+          // Messenger thread, load-bearing anywhere a WhatsApp BSUID-only
+          // contact could reach the resolver.
+          bsuid: true,
           lastInboundAt: true,
           blockedAt: true,
         },

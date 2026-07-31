@@ -477,11 +477,17 @@ interface MetaChangeValue {
    */
   display_phone_number?: string;
   // `business_username_updates` webhook fields — the number's @username was
-  // adopted / changed / transferred. Meta documents the FIELD but not a stable
-  // payload shape, so both plausible spellings are read and anything else is
-  // warn-logged raw by parseWebhook rather than guessed at.
+  // adopted / changed / deleted / transferred. Documented value shape:
+  // `{display_phone_number, username, status}` with status
+  // approved | reserved | deleted (`status` is declared once below, shared
+  // with other webhook kinds); `username` is OMITTED when status is
+  // `deleted`. `business_username` is wire tolerance for an undocumented
+  // sibling spelling; anything unrecognized is warn-logged raw by
+  // parseWebhook rather than guessed at.
   username?: string;
   business_username?: string;
+  /** `business_username_updates` status: approved | reserved | deleted. */
+  status?: string;
   // `phone_number_name_update` webhook fields — a display-name review
   // concluded. An unapproved name voids the number's certificate (blocks
   // registration), so this is readiness state, not cosmetics.
@@ -1689,9 +1695,9 @@ function parseMetaCall(
   // empty `from` used to freeze bsuid at "" and drop the call even when
   // `from_user_id` carried the real identity.
   const bsuid =
-    (identityIsPhone || !rawIdentity ? undefined : rawIdentity) ??
-    (direction === "in" ? c.from_user_id : c.to_user_id)?.trim() ??
-    contact?.user_id?.trim() ??
+    (identityIsPhone || !rawIdentity ? undefined : rawIdentity) ||
+    (direction === "in" ? c.from_user_id : c.to_user_id)?.trim() ||
+    contact?.user_id?.trim() ||
     undefined;
   const parentBsuid =
     (direction === "in" ? c.from_parent_user_id : c.to_parent_user_id)?.trim() ||
@@ -1728,7 +1734,8 @@ function parseMetaCall(
   const tsSecs = c.timestamp ? Number(c.timestamp) : NaN;
   const ts = Number.isFinite(tsSecs) ? new Date(tsSecs * 1000) : new Date();
 
-  // SDP. Rewrite `a=setup:actpass` → `setup:active` ONLY on answers —
+  // SDP. Rewrite `a=setup:actpass` → `setup:passive` ONLY on answers
+  // (Meta is the DTLS server — see rewriteSdpForBrowser) —
   // RTCPeerConnection.setRemoteDescription rejects answer SDPs with
   // `actpass`. Offers are passed through unchanged; the browser commits
   // to a concrete role in its generated answer.
@@ -3208,13 +3215,15 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         }
 
         // The number's @username changed (`business_username_updates`) —
-        // adopted, renamed, or force-transferred onto/off this number. Handled
-        // as a channel_health partial (the username is per-NUMBER state, like
-        // quality), carrying the same display-number/WABA attribution hints as
-        // its siblings. Meta documents the field but not a stable payload
-        // shape, so the parse is deliberately defensive: read the username
-        // from either plausible spelling, and when neither is present log the
-        // raw value and drop quietly — never throw, never guess.
+        // adopted, renamed, deleted, or force-transferred onto/off this
+        // number. Handled as a channel_health partial (the username is
+        // per-NUMBER state, like quality), carrying the same display-number/
+        // WABA attribution hints as its siblings. The documented value is
+        // `{display_phone_number, username, status}` with status
+        // approved | reserved | deleted — and on `deleted` the username field
+        // is OMITTED, so the status is load-bearing: storing the payload's
+        // username on a deleted/unknown status would re-assert a handle the
+        // event just revoked.
         if (change.field === "business_username_updates") {
           const rawUsername =
             (typeof value.username === "string" ? value.username : undefined) ??
@@ -3222,20 +3231,45 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
               ? value.business_username
               : undefined);
           const username = rawUsername?.trim().toLowerCase();
-          if (username) {
+          const status =
+            typeof value.status === "string"
+              ? value.status.trim().toLowerCase()
+              : undefined;
+          const attribution = {
+            ...(wabaId ? { wabaId } : {}),
+            ...(value.display_phone_number
+              ? { displayPhoneNumber: value.display_phone_number }
+              : {}),
+          };
+          if (status === "deleted") {
+            // Deleted via the Business app / WhatsApp Manager, or force-
+            // transferred onto a sibling number — clear the stored handle.
+            emit({
+              kind: "channel_health",
+              businessUsername: null,
+              ...attribution,
+              rawPayload: payload as Record<string, unknown>,
+            } satisfies NormalizedChannelHealth);
+          } else if (
+            username &&
+            (status === undefined || status === "approved" || status === "reserved")
+          ) {
+            // `approved` = live and visible; `reserved` = held for this number
+            // until the feature launches (pre-GA every adoption lands here).
+            // Both mean "this number's adopted handle", which is exactly what
+            // the stored column means — the settings GET read-through caches
+            // reserved handles the same way. A missing status is tolerated as
+            // an adopt (earlier payload generations carried no status).
             emit({
               kind: "channel_health",
               businessUsername: username,
-              ...(wabaId ? { wabaId } : {}),
-              ...(value.display_phone_number
-                ? { displayPhoneNumber: value.display_phone_number }
-                : {}),
+              ...attribution,
               rawPayload: payload as Record<string, unknown>,
             } satisfies NormalizedChannelHealth);
           } else {
-            // Unrecognized shape (e.g. a pure decision/removal envelope with
-            // no username string). Store nothing rather than storing a guess;
-            // the settings read-through re-syncs the stored copy from Graph.
+            // Unrecognized shape (unknown status, or a recognized status with
+            // no username). Store nothing rather than storing a guess; the
+            // settings read-through re-syncs the stored copy from Graph.
             console.warn(
               JSON.stringify({
                 event: "meta.business_username_update_unparsed",
@@ -3697,9 +3731,9 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           // username-adopter's message outright — no row, no unread, no 24h window,
           // and a 200 that stops Meta ever redelivering it.
           const bsuid =
-            (!fromIsPhone && rawFrom ? rawFrom : undefined) ??
-            m.from_user_id?.trim() ??
-            contact?.user_id?.trim() ??
+            (!fromIsPhone && rawFrom ? rawFrom : undefined) ||
+            m.from_user_id?.trim() ||
+            contact?.user_id?.trim() ||
             undefined;
           // Documented location is `profile.username`; the top-level read is wire
           // tolerance only (see MetaContact).
@@ -6090,9 +6124,12 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         text,
       );
     }
-    // The reference documents the endpoint but not the row shape, so accept
-    // both bare strings and `{ username }` rows under any of the plausible
-    // list keys — an unreadable row is skipped, never a throw.
+    // Documented response shape:
+    //   { "data": [ { "username_suggestions": ["<name>", …] } ] }
+    // — the suggestions array is NESTED inside a data row. Rows are also
+    // tolerated as bare strings or `{ username }` objects, and the array is
+    // accepted at any of the plausible top-level keys — an unreadable row is
+    // skipped, never a throw.
     const json = (await res.json()) as {
       data?: unknown;
       username_suggestions?: unknown;
@@ -6103,15 +6140,22 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     ) as unknown[] | undefined;
     if (!rows) return [];
     const out: string[] = [];
-    for (const row of rows) {
-      const value =
-        typeof row === "string"
-          ? row
-          : typeof (row as { username?: unknown })?.username === "string"
-            ? (row as { username: string }).username
-            : undefined;
-      const normalized = value?.trim().toLowerCase();
+    const push = (value: unknown) => {
+      const normalized =
+        typeof value === "string" ? value.trim().toLowerCase() : undefined;
       if (normalized && !out.includes(normalized)) out.push(normalized);
+    };
+    for (const row of rows) {
+      if (typeof row === "string") {
+        push(row);
+        continue;
+      }
+      const obj = row as { username?: unknown; username_suggestions?: unknown };
+      // The documented nesting: a data row wrapping the suggestions array.
+      if (Array.isArray(obj?.username_suggestions)) {
+        for (const nested of obj.username_suggestions) push(nested);
+      }
+      push(obj?.username);
     }
     return out;
   },
@@ -6419,7 +6463,10 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       );
     }
     const json = (await res.json()) as {
-      permission?: { status?: string; expiration_time?: number };
+      // Meta's own page self-contradicts on the expiry field name: the
+      // response SAMPLE spells it `expiration_time`, the response-parameters
+      // table spells it `expiration`. Read both, sample spelling first.
+      permission?: { status?: string; expiration_time?: number; expiration?: number };
       actions?: Array<{
         action_name?: string;
         can_perform_action?: boolean;
@@ -6446,11 +6493,13 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       canStartCall: startCall?.can_perform_action ?? status !== "no_permission",
       canRequestPermission:
         action("send_call_permission_request")?.can_perform_action ?? true,
-      // Permanent permissions carry no expiration_time at all.
-      expiresAt:
-        status === "temporary" && json.permission?.expiration_time
-          ? new Date(json.permission.expiration_time * 1000)
-          : null,
+      // Permanent permissions carry no expiration at all. Both documented
+      // spellings tolerated (see the response type above).
+      expiresAt: (() => {
+        const expiry =
+          json.permission?.expiration_time ?? json.permission?.expiration;
+        return status === "temporary" && expiry ? new Date(expiry * 1000) : null;
+      })(),
       startCallResetAt: resetAt ? new Date(resetAt * 1000) : null,
     };
   },

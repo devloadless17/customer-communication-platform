@@ -52,6 +52,10 @@ export async function sendReactionInternal(args: SendReactionInternalArgs): Prom
           phoneNumber: true,
           identityChannel: true,
           externalContactId: true,
+          // BSUID-only threads (Meta omitted the phone for a username adopter)
+          // can receive reactions — resolveContactChannel falls back to the
+          // BSUID and flags viaBsuid, which the sendReaction call threads.
+          bsuid: true,
           lastInboundAt: true,
           blockedAt: true,
         },

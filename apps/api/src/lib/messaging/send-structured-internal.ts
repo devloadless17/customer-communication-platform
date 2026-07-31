@@ -71,6 +71,9 @@ export async function sendStructuredInternal(
           phoneNumber: true,
           identityChannel: true,
           externalContactId: true,
+          // Every ChannelResolvable select carries bsuid so a BSUID-only
+          // WhatsApp thread (username adopter) resolves instead of throwing.
+          bsuid: true,
           lastInboundAt: true,
           blockedAt: true,
         },

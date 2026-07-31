@@ -370,6 +370,9 @@ export async function ingestEvents(
               }
             : {}),
           ...(evt.accountAlert !== undefined ? { accountAlert: evt.accountAlert } : {}),
+          ...(evt.businessUsername !== undefined
+            ? { businessUsername: evt.businessUsername }
+            : {}),
         },
         // Attribute the signal to the account whose webhook delivered it.
         // Quality / throughput / calling restrictions are per-NUMBER, so a

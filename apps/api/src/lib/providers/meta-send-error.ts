@@ -843,10 +843,7 @@ export function classifyMetaStatusError(code: number | null | undefined): MetaEr
     case 2534022:
       return "outside_24h_window";
     case 131026:
-    case 2534013:
     case 2534014:
-    case 2534029:
-    case 2534041:
       return "invalid_recipient";
     // Per-USER marketing frequency cap. The reference documents it as BOTH a
     // synchronous 400 and a post-acceptance status failure — the sync ladder
@@ -880,9 +877,16 @@ export function classifyMetaStatusError(code: number | null | undefined): MetaEr
     case 0:
       return "auth_expired";
     // Account-level enforcement / configuration (error-codes reference) —
-    // mirrors the sync ladder's run-fatal family.
+    // mirrors the sync ladder's run-fatal family. The IG trio 2534013/29/41
+    // is ACCOUNT state (unlinked page / API-blocked / owner revoked DMs), not
+    // recipient validity — same grouping as the sync ladder, which spells out
+    // why "invalid recipient" was actively misleading for them; only 2534014
+    // ("no matching Instagram user") stays a bad recipient above.
     case 368:
     case 131031:
+    case 2534013:
+    case 2534029:
+    case 2534041:
       return "account_restricted";
     // WE blocked this recipient (Block Users API). Also the drift signal that
     // the number was blocked out-of-band (WhatsApp Manager) — ingest reconciles
