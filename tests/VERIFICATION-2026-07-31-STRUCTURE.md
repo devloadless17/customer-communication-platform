@@ -85,7 +85,7 @@ NUMBER, the messaging limit per PORTFOLIO).
 |---|---|---|---|
 | S1 | Model spine & schema structure | tenancy exceptions vs reality; partial-index lockstep incl. the 2 NEW uncommitted migrations; cascade recount at 77 models; Json-heavy models | ✅ **2026-07-31** — Finding #1 fixed (11 unprotected indexes); cascade + tenancy gates verified mechanically |
 | S2 | Org / workspaces / membership / session | service-less controllers; users.service grab-bag; duplicated tx idiom; single-definition rules verified at HEAD | ✅ **2026-07-31** — users split done; single-definitions verified; 2 R-only acceptances recorded |
-| S3 | Assignment + availability | structural claims at HEAD; round-robin shim; cache-invalidation convention; naming residue | ☐ |
+| S3 | Assignment + availability | structural claims at HEAD; round-robin shim; cache-invalidation convention; naming residue | ✅ **2026-07-31** — dead exports removed (`c0c3c703`); cache convention verified 10/10; carried LOW refuted |
 | S4 | Team/Workspace naming residue | `/api/admin/teams` rename (both sides); `Team.<field>` comments; `team.*` events = contracts (list-only); AssignmentPolicy→Team promotion (recommendation only) | ✅ **2026-07-31** — route/DTO/component rename landed (`ed0c81b0`); events + identifier residue carried to approval list |
 | S5 | Team chat structure | 2,083 L god-service; RealtimeGateway direct injection (the ONE EventBus bypass); "#general" ×3; postMessage dedup | ☐ |
 | S6 | Realtime & client state | contact-panel fake reducer consumer → rewire + pin; convergence-policy duplication (list-only) | ☐ |
@@ -223,6 +223,42 @@ NUMBER, the messaging limit per PORTFOLIO).
   product question, promoting `AssignmentPolicy` to a first-class "Team".
 - **E note:** the two touched e2e specs (org-member-limit, auth-recovery)
   compile but the web dev server was down; they run in the close-out gate.
+
+### S3 — assignment + availability — ✅ CLOSED (2026-07-31)
+
+**Method: R (adversarial + scripted) + E (21 unit tests) + refactor (`c0c3c703`).**
+
+- **Pure/IO split — ✅ VERIFIED at HEAD**: `select.ts` and `rules.ts` import
+  only types (`@prisma/client` types + shared); no DB surface reaches the
+  decision layer. select.ts's own comment explains why the enum parity assert
+  exists (web must not import @prisma/client).
+- **"EVERY WRITE INVALIDATES THE CACHE" — ✅ VERIFIED MECHANICALLY**: scripted
+  scan of `AssignmentService` found 10 mutating methods, 10/10 call
+  `invalidateAssignmentCache`. Membership paths: `remove-member.ts:289` and
+  `users.service` (hard delete) also invalidate.
+- **Carried LOW "assignment-config cache not busted on member add/re-role" —
+  REFUTED at HEAD by reading both member paths**: the 15s config cache holds
+  ONLY policies/rules/settings; both the live pick (`loadMembers`,
+  resolve.ts) and the campaign pool (`buildPolicyPool`, pool.ts) read users +
+  policy-member overrides FRESH per call. A member add/re-role is reflected on
+  the very next pick with zero staleness — there is nothing for the cache to
+  go stale ON. Struck from the backlog.
+- **round-robin.ts shim — dead half REMOVED**: `pickRoundRobinAssignee` and
+  `RoundRobinDb` had zero callers (the docblock's "real callers" claim was
+  stale). `chooseRoundRobin` STAYS deliberately — its pure spec
+  (tests/e2e/workflows-events/round-robin.spec.ts) is the proof that the
+  engine's `least_busy` reproduces the legacy algorithm; docblock now says
+  exactly that. A stale comment in resolve.ts referencing the deleted fn
+  updated to point at the pin instead.
+- **Naming residue**: `teamSchedule`/`teamScheduleOf` →
+  `workspaceSchedule`/`workspaceScheduleOf` across the 4 availability files;
+  the `teamWorkHours` RESPONSE KEY kept verbatim (wire contract, /v1-exposed).
+  `availability-scope.spec.ts` updated with the rename; 21/21 green +
+  `typecheck:tests` clean.
+- **R-only note**: `lib/availability` remains the reference structure (2
+  files, one writer, every caller through it — confirmed post-split). The
+  process-local mutable state in resolve.ts (reservations, pick lock, config
+  cache) is exactly as its scaling-cliff docs describe; nothing drifted.
 
 ## Listed for approval (grows as domains close — nothing here is executed)
 
