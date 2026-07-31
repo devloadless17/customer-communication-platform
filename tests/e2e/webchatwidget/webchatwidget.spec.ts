@@ -1316,12 +1316,24 @@ test("pre-chat form asks one field at a time with a step counter", async ({ brow
       () => db().message.findFirst({ where: { workspaceId, body: msg }, select: { conversationId: true } }),
       { timeoutMs: 25_000, label: "stepped-form message" },
     );
-    const conv = await db().conversation.findUnique({
-      where: { id: row.conversationId },
-      select: { contact: { select: { name: true, email: true } } },
-    });
-    expect(conv?.contact.email).toBe("stepped@example.com");
-    expect(conv?.contact.name).toBe("Ali Ahmad");
+    // POLLED, not read once: the gateway applies pre-chat identity AFTER the
+    // message ingest commits (find-conversation → room join → presence →
+    // widget stamp all await in between), so the message row can be visible
+    // milliseconds before the contact carries the identity. A single read here
+    // raced that window and flaked on a loaded box while the DB showed the
+    // email landing right after.
+    const contact = await pollUntil(
+      async () => {
+        const conv = await db().conversation.findUnique({
+          where: { id: row.conversationId },
+          select: { contact: { select: { name: true, email: true } } },
+        });
+        return conv?.contact.email ? conv.contact : null;
+      },
+      { timeoutMs: 15_000, label: "stepped-form identity applied" },
+    );
+    expect(contact.email).toBe("stepped@example.com");
+    expect(contact.name).toBe("Ali Ahmad");
   } finally {
     await ctx.close();
   }
