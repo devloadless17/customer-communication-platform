@@ -407,12 +407,14 @@ describe("one ticket, one truth", () => {
     for (const ws of [wsA, wsB]) {
       const thread = await listTicketThread(tdb, ws, ticket.id);
       expect(thread).toHaveLength(1);
-      expect(thread[0].body).toContain("Approved");
-      expect(thread[0].authorWorkspaceId).toBe(wsB);
+      const [msg] = thread;
+      if (!msg) throw new Error("thread empty");
+      expect(msg.body).toContain("Approved");
+      expect(msg.authorWorkspaceId).toBe(wsB);
       // Identity is JOINED, so the OWNER can resolve a GUEST author its own
       // roster has never seen — the whole reason it isn't rendered client-side.
-      expect(thread[0].authorWorkspaceName).toBe(`SHR B ${S}`);
-      expect(thread[0].authorName).toBe("SHR Agent");
+      expect(msg.authorWorkspaceName).toBe(`SHR B ${S}`);
+      expect(msg.authorName).toBe("SHR Agent");
     }
 
     // ...and it stays OUT of the audit log, which is the point of the split:
@@ -958,8 +960,10 @@ describe("attachments", () => {
     // evidence through the ticket's gate, not its own workspace.
     for (const ws of [wsA, wsB]) {
       const thread = await listTicketThread(tdb, ws, ticket.id);
-      expect(thread[0].attachments).toHaveLength(1);
-      expect(thread[0].attachments[0].filename).toBe("shot.png");
+      const [msg] = thread;
+      if (!msg) throw new Error("thread empty");
+      expect(msg.attachments).toHaveLength(1);
+      expect(msg.attachments[0]?.filename).toBe("shot.png");
     }
     // The message already announced it — no separate attachment_added row, so
     // the log doesn't re-acquire the noise the thread was split out to remove.

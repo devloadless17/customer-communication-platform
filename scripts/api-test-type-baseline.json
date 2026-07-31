@@ -1,0 +1,18 @@
+{
+  "apps/api/src/messages/messages.service.ts": 4,
+  "apps/api/src/workspace-settings/whatsapp/whatsapp.service.ts": 1,
+  "apps/api/test/acquisition-sources.spec.ts": 1,
+  "apps/api/test/auth-tenant-fields.spec.ts": 3,
+  "apps/api/test/bsuid-inbound-identity.spec.ts": 1,
+  "apps/api/test/cta-url.spec.ts": 1,
+  "apps/api/test/inapp-recording.spec.ts": 2,
+  "apps/api/test/inbox-views.spec.ts": 3,
+  "apps/api/test/interactive-carousel.spec.ts": 2,
+  "apps/api/test/interactive-list.spec.ts": 1,
+  "apps/api/test/messenger-integrity.spec.ts": 1,
+  "apps/api/test/tickets.spec.ts": 15,
+  "apps/api/test/video-transcode.spec.ts": 3,
+  "apps/api/test/whatsapp-multi-waba.spec.ts": 3,
+  "apps/api/test/workspace-destroy-ai-blobs.spec.ts": 2,
+  "apps/api/test/workspace-switch.spec.ts": 2
+}
