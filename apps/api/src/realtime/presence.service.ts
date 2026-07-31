@@ -1,6 +1,9 @@
 import { Injectable } from "@nestjs/common";
 
-import { setOnlinePresenceResolver } from "@/lib/conversations/presence-bridge";
+import {
+  setOnlinePresenceEnumerator,
+  setOnlinePresenceResolver,
+} from "@/lib/conversations/presence-bridge";
 
 /**
  * Per-(team, user) socket-id tracker. The same agent commonly has two tabs
@@ -19,6 +22,15 @@ export class PresenceService {
     // round-robin picker) so it can prefer truly-connected agents — not just
     // whoever's flagged "available" in the DB. See presence-bridge.ts.
     setOnlinePresenceResolver((workspaceId) => new Set(this.snapshot(workspaceId)));
+    // And the cross-workspace enumeration the agent-presence sampler needs
+    // ("who is online anywhere, right now"). Bounded by connected agents.
+    setOnlinePresenceEnumerator(() => {
+      const out: Array<{ workspaceId: string; userId: string }> = [];
+      for (const [workspaceId, byUser] of this.byTeam) {
+        for (const userId of byUser.keys()) out.push({ workspaceId, userId });
+      }
+      return out;
+    });
   }
 
   // Per-conversation viewer set: conversationId → userId → socketIds.

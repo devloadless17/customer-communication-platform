@@ -17,6 +17,7 @@ import type {
   TeamReportAgent,
   TeamReportAgentDetail,
   TeamReportDaily,
+  TeamReportTeamRollup,
 } from "@ccp/shared/dtos";
 
 /**
@@ -85,21 +86,34 @@ export async function getTeamReport(
   const { from, to, tz, accountId } = range;
   await validateReportRange(workspaceId, range);
 
-  const [agents, daily, callsMissed, firstResponse] = await Promise.all([
-    queryTeamAgents(workspaceId, from, to, accountId),
-    queryTeamDaily(workspaceId, from, to, tz, accountId),
-    db.call.count({
-      where: {
-        workspaceId,
-        status: "missed",
-        ringingAt: { gte: from, lt: to },
-      },
-    }),
-    // Workspace-level first response (medians don't sum, so the tile can't be
-    // derived from the per-agent rows). Same query the overview runs — the two
-    // tabs' headline numbers must be equal by construction.
-    queryFirstResponse(workspaceId, from, to, accountId),
-  ]);
+  const [agents, daily, callsMissed, firstResponse, heatmap, teamsRaw] =
+    await Promise.all([
+      queryTeamAgents(workspaceId, from, to, accountId),
+      queryTeamDaily(workspaceId, from, to, tz, accountId),
+      db.call.count({
+        where: {
+          workspaceId,
+          status: "missed",
+          ringingAt: { gte: from, lt: to },
+        },
+      }),
+      // Workspace-level first response (medians don't sum, so the tile can't
+      // be derived from the per-agent rows). Same query the overview runs —
+      // the two tabs' headline numbers must be equal by construction.
+      queryFirstResponse(workspaceId, from, to, accountId),
+      queryHeatmap(workspaceId, from, to, tz, accountId),
+      db.team.findMany({
+        where: { workspaceId, archivedAt: null },
+        select: {
+          id: true,
+          name: true,
+          includeAllMembers: true,
+          eligibleRoles: true,
+          members: { select: { userId: true, enabled: true } },
+        },
+        orderBy: { name: "asc" },
+      }),
+    ]);
 
   const totals = agents.reduce(
     (acc, a) => {
@@ -139,7 +153,87 @@ export async function getTeamReport(
     totals,
     daily,
     agents,
+    heatmap,
+    teams: buildTeamRollups(teamsRaw, agents),
   };
+}
+
+/**
+ * Sum the per-agent rows over each assignment team's membership. Membership
+ * follows the SAME rule the routing pool uses (lib/assignment/pool.ts):
+ * `includeAllMembers` teams cover every roster member minus disabled
+ * overrides; explicit squads are exactly their enabled member rows; a
+ * non-empty `eligibleRoles` narrows either. A user on two teams counts in
+ * both — that is what "team output" means. Members outside every team land in
+ * a "No team" bucket; a workspace with no teams gets [] (the panel hides).
+ */
+function buildTeamRollups(
+  teams: Array<{
+    id: string;
+    name: string;
+    includeAllMembers: boolean;
+    eligibleRoles: string[];
+    members: Array<{ userId: string; enabled: boolean }>;
+  }>,
+  agents: TeamReportAgent[],
+): TeamReportTeamRollup[] {
+  if (teams.length === 0) return [];
+
+  const rollup = (
+    teamId: string | null,
+    name: string,
+    memberIds: Set<string>,
+  ): TeamReportTeamRollup => {
+    const acc: TeamReportTeamRollup = {
+      teamId,
+      name,
+      memberCount: memberIds.size,
+      assigned: 0,
+      closed: 0,
+      messagesSent: 0,
+      callsAnswered: 0,
+      talkTimeTotalSec: 0,
+      ticketsResolved: 0,
+    };
+    for (const a of agents) {
+      if (!memberIds.has(a.userId)) continue;
+      acc.assigned += a.conversations.assigned;
+      acc.closed += a.conversations.closed;
+      acc.messagesSent += a.messages.sent;
+      acc.callsAnswered += a.calls.answered;
+      acc.talkTimeTotalSec += a.calls.talkTimeTotalSec;
+      acc.ticketsResolved += a.tickets.resolved;
+    }
+    return acc;
+  };
+
+  // Current roster only — departed members have no current-team membership,
+  // so their historical numbers land in "No team" rather than being guessed
+  // onto a squad they may never have joined.
+  const rosterIds = agents.filter((a) => a.role !== null).map((a) => a.userId);
+  const roleById = new Map(agents.map((a) => [a.userId, a.role]));
+
+  const inAnyTeam = new Set<string>();
+  const out: TeamReportTeamRollup[] = [];
+  for (const t of teams) {
+    const overrideByUser = new Map(t.members.map((m) => [m.userId, m]));
+    const memberIds = new Set(
+      (t.includeAllMembers
+        ? rosterIds.filter((id) => overrideByUser.get(id)?.enabled !== false)
+        : t.members.filter((m) => m.enabled).map((m) => m.userId)
+      ).filter(
+        (id) =>
+          t.eligibleRoles.length === 0 ||
+          t.eligibleRoles.includes(roleById.get(id) ?? "agent"),
+      ),
+    );
+    for (const id of memberIds) inAnyTeam.add(id);
+    out.push(rollup(t.id, t.name, memberIds));
+  }
+
+  const unteamed = new Set(agents.map((a) => a.userId).filter((id) => !inAnyTeam.has(id)));
+  if (unteamed.size > 0) out.push(rollup(null, "No team", unteamed));
+  return out;
 }
 
 /**
@@ -217,6 +311,39 @@ export async function getTeamLiveSnapshot(
   };
 }
 
+/** The UTC day bucket an instant falls in — matches AgentPresenceDaily.date. */
+function utcDay(instant: Date): Date {
+  return new Date(
+    Date.UTC(instant.getUTCFullYear(), instant.getUTCMonth(), instant.getUTCDate()),
+  );
+}
+
+/**
+ * Inbound demand by (day-of-week, hour) in the CALLER's timezone — the
+ * busiest-hours heatmap. Inbound only: staffing follows when customers write,
+ * not when agents answer. Same tz conversion as the daily series.
+ */
+async function queryHeatmap(
+  workspaceId: string,
+  from: Date,
+  to: Date,
+  tz: string,
+  accountId?: string,
+): Promise<Array<{ dow: number; hour: number; inbound: number }>> {
+  return db.$queryRaw<Array<{ dow: number; hour: number; inbound: number }>>(Prisma.sql`
+    SELECT EXTRACT(dow  FROM ((m."timestamp" AT TIME ZONE 'UTC') AT TIME ZONE ${tz}))::int AS dow,
+           EXTRACT(hour FROM ((m."timestamp" AT TIME ZONE 'UTC') AT TIME ZONE ${tz}))::int AS hour,
+           count(*)::int AS inbound
+    FROM   "Message" m
+    ${messageAccountJoin(accountId)}
+    WHERE  m."workspaceId" = ${workspaceId}
+      AND  m."timestamp" >= ${from} AND m."timestamp" < ${to}
+      AND  m.direction = 'in'
+      ${messageAccountWhere(accountId)}
+    GROUP  BY 1, 2
+  `);
+}
+
 /**
  * The per-agent aggregation: independent per-actor aggregates (each anchored
  * on a different row/column, so one SQL join would multi-scan the tables)
@@ -244,6 +371,7 @@ async function queryTeamAgents(
     ticketsCreated,
     ticketsResolved,
     ticketsOpenNow,
+    presence,
   ] = await Promise.all([
     db.user.findMany({
       where: { workspaceMemberships: { some: { workspaceId } } },
@@ -403,6 +531,18 @@ async function queryTeamAgents(
       },
       _count: { _all: true },
     }),
+    // Online minutes: the sampler's UTC-day ledger summed over the covered
+    // days ([from, to) → inclusive day bounds; the sub-day edge is the
+    // documented approximation). Agents with no rows keep null — "not
+    // tracked" must not render as "0h online".
+    db.agentPresenceDaily.groupBy({
+      by: ["userId"],
+      where: {
+        workspaceId,
+        date: { gte: utcDay(from), lte: utcDay(new Date(to.getTime() - 1)) },
+      },
+      _sum: { onlineMinutes: true },
+    }),
   ]);
 
   const byId = new Map<string, TeamReportAgent>();
@@ -434,6 +574,7 @@ async function queryTeamAgents(
           firstResponseBreached: 0,
           resolutionBreached: 0,
         },
+        onlineMinutes: null,
       };
       byId.set(userId, r);
     }
@@ -492,6 +633,9 @@ async function queryTeamAgents(
   }
   for (const t of ticketsOpenNow) {
     if (t.assignedUserId) row(t.assignedUserId).tickets.openAssignedNow = t._count._all;
+  }
+  for (const p of presence) {
+    row(p.userId).onlineMinutes = p._sum.onlineMinutes ?? 0;
   }
 
   return [...byId.values()];

@@ -71,6 +71,21 @@ const GROUPS: Array<{ label: string; cols: ColumnDef[] }> = [
       },
     ],
   },
+  {
+    label: "Time",
+    cols: [
+      {
+        key: "online",
+        label: "Online",
+        // Ledger minutes → seconds for fmtDuration; null = not tracked (the
+        // sampler predates no data), which must not render as "0s online".
+        get: (a) => (a.onlineMinutes == null ? null : a.onlineMinutes * 60),
+        fmt: "duration",
+        sum: true,
+        groupStart: true,
+      },
+    ],
+  },
 ];
 
 const ALL_COLS: ColumnDef[] = GROUPS.flatMap((g) => g.cols);
@@ -113,10 +128,14 @@ export function TeamTable({
   const totals = useMemo(
     () =>
       new Map(
-        ALL_COLS.map((c) => [
-          c.key,
-          c.sum ? agents.reduce((n, a) => n + (c.get(a) ?? 0), 0) : null,
-        ]),
+        ALL_COLS.map((c) => {
+          if (!c.sum) return [c.key, null] as const;
+          const values = agents.map((a) => c.get(a));
+          // All-null stays null ("not tracked", e.g. Online before the
+          // sampler had data) — a fake 0 total misreads as "nobody was on".
+          if (values.every((v) => v == null)) return [c.key, null] as const;
+          return [c.key, values.reduce((n: number, v) => n + (v ?? 0), 0)] as const;
+        }),
       ),
     [agents],
   );

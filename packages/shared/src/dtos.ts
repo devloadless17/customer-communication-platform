@@ -326,6 +326,33 @@ export interface TeamReportAgent {
     firstResponseBreached: number;
     resolutionBreached: number;
   };
+  /**
+   * Minutes online over the range, summed from the 5-minute presence sampler's
+   * UTC-day ledger (AgentPresenceDaily). Null = NO samples for this agent in
+   * range — "not tracked" (e.g. before the sampler shipped) must not render as
+   * "0h online". Day-granular: a range starting at a browser's local midnight
+   * is approximated to the covered UTC days.
+   */
+  onlineMinutes: number | null;
+}
+
+/**
+ * Per-assignment-team rollup — the same range's activity summed over each
+ * team's members (a user on two teams counts in both; that is what "team
+ * output" means, not double-billing). `teamId: null` is the "No team" bucket
+ * for members outside every team. Medians deliberately absent: they don't
+ * sum, and a per-team median is a different query this panel doesn't need.
+ */
+export interface TeamReportTeamRollup {
+  teamId: string | null;
+  name: string;
+  memberCount: number;
+  assigned: number;
+  closed: number;
+  messagesSent: number;
+  callsAnswered: number;
+  talkTimeTotalSec: number;
+  ticketsResolved: number;
 }
 
 export interface TeamReport {
@@ -359,6 +386,14 @@ export interface TeamReport {
   daily: TeamReportDaily[];
   /** Unsorted contract — the client owns column sorting. */
   agents: TeamReportAgent[];
+  /**
+   * Inbound demand by (day-of-week, hour) in the requested timezone — the
+   * busiest-hours heatmap behind staffing decisions. `dow` follows Postgres
+   * EXTRACT(dow): 0 = Sunday. Cells with no traffic are absent.
+   */
+  heatmap: Array<{ dow: number; hour: number; inbound: number }>;
+  /** Empty when the workspace has no assignment teams (the panel hides). */
+  teams: TeamReportTeamRollup[];
 }
 
 export interface TeamReportAgentDetail extends TeamReportAgent {

@@ -146,6 +146,11 @@ export function AgentDetailSheet({
                   {a.email ? ` · ${a.email}` : ""}
                 </p>
               )}
+              {a.onlineMinutes != null && (
+                <p className="text-xs text-muted-foreground">
+                  Online {fmtDuration(a.onlineMinutes * 60)} in this range
+                </p>
+              )}
             </div>
           </div>
 

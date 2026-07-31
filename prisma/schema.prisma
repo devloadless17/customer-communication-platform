@@ -773,6 +773,7 @@ model Workspace {
 
   @@index([organizationId])
   messengerPersonas    MessengerPersona[]
+  agentPresenceDays    AgentPresenceDaily[]
 }
 
 // Join table: a user's membership + role in ONE workspace. A user (org-scoped)
@@ -1389,6 +1390,33 @@ model User {
   @@index([organizationId])
   /// Messenger personas minted for this agent (one per Page). See MessengerPersona.
   messengerPersonas   MessengerPersona[]
+  presenceDays        AgentPresenceDaily[]
+}
+
+// Per-(workspace, user, UTC day) online-time ledger behind the team report's
+// "Online" column. Written ONLY by the agent-presence-sample sweeper, which
+// every SAMPLE_INTERVAL_MS reads the in-memory socket presence registry and
+// increments `onlineMinutes` for each connected member. Sampling (not
+// session rows) on purpose: a crash can never leave a dangling open session
+// that inflates someone's hours — the worst a crash costs is one unsampled
+// interval. Granularity is the UTC day; the report sums whole days, so a
+// range starting at a browser's local midnight is approximated to ±one
+// partial day (documented on the DTO).
+model AgentPresenceDaily {
+  id            String   @id @default(cuid())
+  workspaceId   String
+  userId        String
+  date          DateTime @db.Date
+  onlineMinutes Int      @default(0)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId, date])
+  // Range scans for the team report: (workspace, day window), grouped by user.
+  @@index([workspaceId, date])
+  // FK index for the user relation's onDelete: Cascade.
+  @@index([userId])
 }
 
 // ---------------------------------------------------------------------------

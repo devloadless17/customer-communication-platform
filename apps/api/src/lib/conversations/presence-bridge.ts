@@ -23,3 +23,26 @@ export function setOnlinePresenceResolver(fn: OnlineResolver): void {
 export function getOnlineUserIds(workspaceId: string): Set<string> | null {
   return resolver ? resolver(workspaceId) : null;
 }
+
+/**
+ * Cross-workspace enumeration of everyone online, for the agent-presence
+ * sampler (lib/sweepers/agent-presence-sample.ts) — the per-workspace resolver
+ * above can't answer "who is online ANYWHERE" without knowing every workspace
+ * id. Same wiring pattern and same null contract: null = no enumerator in
+ * this process (a standalone worker), an empty array = genuinely nobody
+ * connected.
+ */
+type OnlineEnumerator = () => Array<{ workspaceId: string; userId: string }>;
+
+let enumerator: OnlineEnumerator | null = null;
+
+export function setOnlinePresenceEnumerator(fn: OnlineEnumerator): void {
+  enumerator = fn;
+}
+
+export function enumerateOnlineUsers(): Array<{
+  workspaceId: string;
+  userId: string;
+}> | null {
+  return enumerator ? enumerator() : null;
+}

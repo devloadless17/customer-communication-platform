@@ -142,6 +142,10 @@ import {
   stopConversationEventRetentionSweeper,
 } from "@/lib/sweepers/conversation-event-retention";
 import {
+  startAgentPresenceSampler,
+  stopAgentPresenceSampler,
+} from "@/lib/sweepers/agent-presence-sample";
+import {
   startWebchatVisitorRetentionSweeper,
   stopWebchatVisitorRetentionSweeper,
 } from "@/lib/sweepers/webchat-visitor-retention";
@@ -191,6 +195,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private outboundSendAttemptRetentionStarted = false;
   private workflowRunRetentionStarted = false;
   private conversationEventRetentionStarted = false;
+  private agentPresenceSamplerStarted = false;
   private webchatVisitorRetentionStarted = false;
   private messageRawPayloadRetentionStarted = false;
   private broadcastScheduleWorkerStarted = false;
@@ -450,6 +455,17 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       this.logger.error("Failed to start webchat-visitor retention sweeper", err);
     }
     try {
+      // 5-minute online-time sampler behind the team report's "Online" column
+      // (AgentPresenceDaily). Reads the in-memory presence registry, so it
+      // only produces rows in the api process that owns the sockets.
+      // AGENT_PRESENCE_SAMPLE=0 disables.
+      startAgentPresenceSampler();
+      this.agentPresenceSamplerStarted = true;
+      this.logger.log("Agent presence sampler started");
+    } catch (err) {
+      this.logger.error("Failed to start agent-presence sampler", err);
+    }
+    try {
       // OPT-IN rawPayload bloat control (DB-1). No-ops unless
       // MESSAGE_RAWPAYLOAD_RETENTION_DAYS is set, so the default keeps payloads
       // forever (CLAUDE.md rule #4). Logs only when enabled + something is nulled.
@@ -615,6 +631,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     try {
       if (this.conversationEventRetentionStarted)
         stopConversationEventRetentionSweeper();
+      if (this.agentPresenceSamplerStarted) stopAgentPresenceSampler();
       if (this.webchatVisitorRetentionStarted) stopWebchatVisitorRetentionSweeper();
       if (this.messageRawPayloadRetentionStarted)
         stopMessageRawPayloadRetentionSweeper();

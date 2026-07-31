@@ -870,7 +870,18 @@ export default function ApiDocsPage() {
           numbers under <code>name: null</code>; missed calls are reported in{" "}
           <code>totals.callsMissed</code> only (a missed call rings the team,
           not one agent). Durations are <code>null</code> when the range holds
-          no qualifying rows. Scope: <code>read:reports</code>.
+          no qualifying rows.
+          <br />
+          <br />
+          Also carried: <code>heatmap[]</code> — inbound volume by (day-of-week,
+          hour) in the requested timezone (<code>dow</code> 0 = Sunday);{" "}
+          <code>teams[]</code> — the same range summed per assignment team
+          (members outside every team land in a <code>teamId: null</code>{" "}
+          &ldquo;No team&rdquo; bucket; empty when the workspace has no teams);
+          and per-agent <code>onlineMinutes</code> — time online summed from a
+          5-minute presence sampler&apos;s UTC-day ledger, <code>null</code>{" "}
+          when the agent has no samples in range (&ldquo;not tracked&rdquo; is
+          not zero). Scope: <code>read:reports</code>.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/reports/team/agents/:userId">
           One agent&apos;s drill-down: their full <code>reports/team</code> row

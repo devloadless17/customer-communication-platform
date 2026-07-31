@@ -34,6 +34,8 @@ import {
   getTeamReport,
 } from "@/lib/analytics/team-report";
 import { sweepConversationEventRetentionOnce } from "@/lib/sweepers/conversation-event-retention";
+import { sampleAgentPresenceOnce } from "@/lib/sweepers/agent-presence-sample";
+import { setOnlinePresenceEnumerator } from "@/lib/conversations/presence-bridge";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
 if (existsSync("../../.env")) process.loadEnvFile("../../.env");
@@ -327,6 +329,26 @@ beforeAll(async () => {
     ],
   });
 
+  // --- An explicit squad holding only the agent — the "By team" rollup.
+  await prisma.team.create({
+    data: {
+      workspaceId,
+      name: `Tr Squad ${S}`,
+      includeAllMembers: false,
+      members: { create: { workspaceId, userId: agentId } },
+    },
+  });
+
+  // --- Presence ledger: 5h on D1's day + 2h on D2's day for the agent.
+  await prisma.agentPresenceDaily.createMany({
+    data: [
+      { workspaceId, userId: agentId, date: new Date(Date.UTC(2026, 6, 2)), onlineMinutes: 300 },
+      { workspaceId, userId: agentId, date: new Date(Date.UTC(2026, 6, 3)), onlineMinutes: 120 },
+      // Outside the window — must not leak into the sum.
+      { workspaceId, userId: agentId, date: new Date(Date.UTC(2026, 7, 1)), onlineMinutes: 999 },
+    ],
+  });
+
   // --- Sibling-workspace noise that must NOT appear in any aggregate.
   const x = await mkConversation({
     createdAt: D1,
@@ -346,6 +368,9 @@ beforeAll(async () => {
 afterAll(async () => {
   for (const ws of [workspaceId, otherWorkspaceId]) {
     await prisma.$transaction([
+      prisma.agentPresenceDaily.deleteMany({ where: { workspaceId: ws } }),
+      prisma.teamMember.deleteMany({ where: { workspaceId: ws } }),
+      prisma.team.deleteMany({ where: { workspaceId: ws } }),
       prisma.conversationEvent.deleteMany({ where: { workspaceId: ws } }),
       prisma.internalNote.deleteMany({ where: { workspaceId: ws } }),
       prisma.call.deleteMany({ where: { workspaceId: ws } }),
@@ -438,6 +463,59 @@ describe("team report", () => {
     expect(d1?.messagesSent).toBe(3); // A×2 + gone×1, all on D1's day
     const d2 = r.daily.find((d) => d.day === "2026-07-03");
     expect(d2?.conversationsClosed).toBe(2);
+
+    // Online minutes: 300 + 120 inside the window; the out-of-window row and
+    // the untracked members' null must both hold.
+    expect(agent!.onlineMinutes).toBe(420);
+    expect(idle!.onlineMinutes).toBeNull();
+    expect(gone!.onlineMinutes).toBeNull();
+
+    // Heatmap (UTC): both inbounds land at 2026-07-02T10:00Z — a Thursday.
+    expect(r.heatmap).toEqual([{ dow: 4, hour: 10, inbound: 2 }]);
+
+    // Team rollups: the explicit squad carries the agent's numbers; everyone
+    // else (idle + gone) lands in the "No team" bucket with gone's history.
+    const squad = r.teams.find((t) => t.teamId !== null);
+    expect(squad?.name).toContain("Tr Squad");
+    expect(squad?.memberCount).toBe(1);
+    expect(squad?.assigned).toBe(2);
+    expect(squad?.closed).toBe(1);
+    expect(squad?.messagesSent).toBe(2);
+    expect(squad?.callsAnswered).toBe(3);
+    expect(squad?.talkTimeTotalSec).toBe(180);
+    expect(squad?.ticketsResolved).toBe(1);
+    const noTeam = r.teams.find((t) => t.teamId === null);
+    expect(noTeam?.memberCount).toBe(2);
+    expect(noTeam?.closed).toBe(1);
+    expect(noTeam?.messagesSent).toBe(1);
+  });
+
+  it("presence sampler: no-op without an enumerator; increments today's ledger with one", async () => {
+    const countBefore = await prisma.agentPresenceDaily.count({ where: { workspaceId } });
+    // No enumerator wired in this test process → null → skip, write nothing.
+    await sampleAgentPresenceOnce();
+    expect(await prisma.agentPresenceDaily.count({ where: { workspaceId } })).toBe(
+      countBefore,
+    );
+
+    // Wire one reporting the idle member online; two ticks accumulate 10min.
+    setOnlinePresenceEnumerator(() => [{ workspaceId, userId: idleId }]);
+    try {
+      await sampleAgentPresenceOnce();
+      await sampleAgentPresenceOnce();
+    } finally {
+      setOnlinePresenceEnumerator(() => []);
+    }
+    const now = new Date();
+    const today = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+    );
+    const row = await prisma.agentPresenceDaily.findUnique({
+      where: {
+        workspaceId_userId_date: { workspaceId, userId: idleId, date: today },
+      },
+    });
+    expect(row?.onlineMinutes).toBe(10);
   });
 
   it("drill-down returns the same row plus a daily series that sums to it", async () => {

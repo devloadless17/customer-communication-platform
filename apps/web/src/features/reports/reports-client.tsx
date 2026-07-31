@@ -41,8 +41,11 @@ import {
 } from "@/features/reports/report-primitives";
 import {
   computeReportRange,
+  DEFAULT_RANGE,
+  rangeSelectionDays,
   ReportControls,
   useScopeAccounts,
+  type ReportRangeSelection,
 } from "@/features/reports/report-controls";
 import { ReportsNav } from "@/features/reports/reports-nav";
 import type { Channel } from "@ccp/shared/types";
@@ -77,7 +80,7 @@ function slaMet(bucket: { withSla: number; breached: number }): string | null {
 }
 
 export function ReportsClient() {
-  const [days, setDays] = useState<number>(30);
+  const [rangeSel, setRangeSel] = useState<ReportRangeSelection>(DEFAULT_RANGE);
   // Scope every panel to ONE of the workspace's numbers/Pages. A workspace
   // running a Sales and a Support line is two operations sharing a medium, and
   // a blended first-response time hides one drowning behind the other.
@@ -97,7 +100,7 @@ export function ReportsClient() {
   const [error, setError] = useState(false);
   // The range is computed once per selection (not per render) so the request
   // URL is stable and an eslint-exhaustive-deps refetch loop can't start.
-  const range = useMemo(() => computeReportRange(days), [days]);
+  const range = useMemo(() => computeReportRange(rangeSel), [rangeSel]);
 
   useEffect(() => {
     let cancelled = false;
@@ -145,8 +148,8 @@ export function ReportsClient() {
         description="How the workspace is performing — volumes, response times, agents, SLA, and the AI's share."
         action={
           <ReportControls
-            days={days}
-            onDaysChange={setDays}
+            value={rangeSel}
+            onChange={setRangeSel}
             accountId={accountId}
             onAccountChange={setAccountId}
           />
@@ -435,7 +438,7 @@ export function ReportsClient() {
           Not account-scoped by the picker above — these figures are per WhatsApp
           BUSINESS ACCOUNT (the WABA), which is a coarser thing than the per-number
           scope that filters our own message rows. */}
-      {hasWhatsapp && <WhatsappSpendPanel days={days} />}
+      {hasWhatsapp && <WhatsappSpendPanel days={rangeSelectionDays(rangeSel)} />}
 
       {/* WHERE customers came from. Not channel-filtered: the whole point is that
           it reads the same across WhatsApp, Messenger and Instagram — a Meta ad
