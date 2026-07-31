@@ -9,6 +9,7 @@ import {
   ArrowUpRight,
   Clock,
   Loader2,
+  Lock,
   MessageSquare,
   MessagesSquare,
   Paperclip,
@@ -119,6 +120,7 @@ export function TicketDetailClient({
   ticket: seed,
   events: seedEvents,
   thread: seedThread,
+  notes: seedNotes,
   threadUnreadSinceMessageId: seedUnread,
   viewerUserId,
   viewerWorkspaceId,
@@ -132,6 +134,9 @@ export function TicketDetailClient({
   events: TicketEvent[];
   /** The cross-department conversation, oldest first. */
   thread: TicketThreadMessage[];
+  /** THIS workspace's private notes. Another department's never arrive here —
+   *  the API scopes them to the workspace that wrote them. */
+  notes: TicketEvent[];
   /** Where this reader's "New replies" divider goes, or null. */
   threadUnreadSinceMessageId: string | null;
   viewerUserId: string;
@@ -151,6 +156,7 @@ export function TicketDetailClient({
   const [ticket, setTicket] = useState(seed);
   const [events, setEvents] = useState(seedEvents);
   const [thread, setThread] = useState(seedThread);
+  const [notes, setNotes] = useState(seedNotes);
   // Frozen at mount: the divider must stay put while you read the messages
   // under it, so the server's clear (below) must not make it jump away.
   const [unreadAnchor] = useState(seedUnread);
@@ -207,12 +213,14 @@ export function TicketDetailClient({
         ticket: Ticket;
         events: TicketEvent[];
         thread: TicketThreadMessage[];
+        notes: TicketEvent[];
       };
       if (!opts.eventsOnly) setTicket(body.ticket);
       setEvents(body.events);
       // The thread rides every reload: an optimistic row that lost its response
       // is reconciled here rather than left pending forever.
       setThread(body.thread);
+      setNotes(body.notes);
     },
     [seed.id],
   );
@@ -1126,13 +1134,47 @@ export function TicketDetailClient({
         </section>
       )}
 
-      <section className="rounded-xl border bg-card p-4">
-        <h2 className="mb-1 text-sm font-semibold">Internal note</h2>
+      {/* Internal notes. Their own panel, not log lines: a note is something
+          someone WROTE, and among twenty status flips it was unfindable — the
+          same complaint that moved the discussion into the thread. Private to
+          THIS workspace; the API never sends another department's. */}
+      <section className="rounded-xl border border-amber-500/30 bg-amber-500/[0.03] p-4">
+        <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold">
+          <Lock aria-hidden className="size-3.5 text-amber-600 dark:text-amber-500" />
+          Internal notes
+          {notes.length > 0 ? (
+            <span className="text-2xs font-normal text-muted-foreground">{notes.length}</span>
+          ) : null}
+        </h2>
         <p className="mb-2 text-2xs text-muted-foreground">
           {ticket.sharing
-            ? "Private to your workspace — neither the customer nor the other workspaces on this ticket see it. Use the comment box above to talk to them."
-            : "Only your workspace sees this — the customer never does."}
+            ? "Only your workspace sees these — not the customer, and not the other workspaces on this ticket. Use the thread to talk to them."
+            : "Only your workspace sees these — the customer never does."}
         </p>
+        {notes.length > 0 ? (
+          <ol className="mb-3 flex max-h-72 flex-col gap-2 overflow-y-auto">
+            {notes.map((n) => (
+              <li key={n.id} className="rounded-md border bg-background px-2.5 py-1.5">
+                <p className="flex flex-wrap items-baseline gap-x-1.5 text-3xs text-muted-foreground">
+                  <strong className="font-medium text-foreground">
+                    {n.actorName ?? "Automation"}
+                  </strong>
+                  <LocalTime iso={n.createdAt} format="listTime" />
+                </p>
+                <p className="mt-0.5 whitespace-pre-wrap break-words text-xs leading-relaxed">
+                  {n.body}
+                </p>
+                {n.attachments && n.attachments.length > 0 ? (
+                  <ul className="mt-1 flex flex-col gap-1">
+                    {n.attachments.map((a) => (
+                      <TicketAttachmentRow key={a.id} attachment={a} busy={busy} />
+                    ))}
+                  </ul>
+                ) : null}
+              </li>
+            ))}
+          </ol>
+        ) : null}
         <textarea
           value={note}
           disabled={busy}

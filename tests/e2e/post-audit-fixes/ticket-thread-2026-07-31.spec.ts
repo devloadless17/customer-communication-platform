@@ -97,6 +97,21 @@ test.describe("ticket thread", () => {
     };
     expect(finalTicket.ticket.version).toBe(0);
 
+    // ---- an internal note is a NOTE, not a log line -----------------------
+    const noted = `Private: do not quote this ${Date.now()}`;
+    await page.getByRole("textbox", { name: "Internal note" }).fill(noted);
+    await page.getByRole("button", { name: "Add note" }).click();
+    // It appears in its own panel, under its own heading...
+    const notesPanel = page.locator("section:has(h2:has-text('Internal notes'))");
+    await expect(notesPanel.getByText(noted)).toBeVisible({ timeout: 15_000 });
+    // ...and nowhere in the audit log, which is what made it unfindable.
+    const withLog = (await (await page.request.get(`/api/tickets/${ticket.id}`)).json()) as {
+      notes: Array<{ body?: string | null }>;
+      events: Array<{ body?: string | null; kind: string }>;
+    };
+    expect(withLog.notes.some((n) => n.body === noted)).toBe(true);
+    expect(withLog.events.some((e) => e.kind === "note")).toBe(false);
+
     // Leave the shared dev workspace as we found it.
     await page.request.delete(`/api/tickets/${ticket.id}`).catch(() => undefined);
     void request;
@@ -182,6 +197,27 @@ test.describe("ticket thread", () => {
         multipart: { body: answered },
       });
       expect(guestPost.ok(), `guest post: ${guestPost.status()}`).toBeTruthy();
+
+      // A note the OWNER wrote must not reach the guest's detail read — the
+      // composer promises exactly that, and the read that leaked it was the
+      // ticket detail envelope.
+      const ownerNote = `owner private ${stamp}`;
+      const backForNote = await api.post("/api/workspaces/active", {
+        data: { workspaceId: E2E_APP_WS_ID },
+      });
+      expect(backForNote.ok()).toBeTruthy();
+      expect(
+        (await api.post(`/api/tickets/${ticketId}/notes`, { data: { body: ownerNote } })).ok(),
+      ).toBeTruthy();
+      expect(
+        (await api.post("/api/workspaces/active", { data: { workspaceId: workspace.id } })).ok(),
+      ).toBeTruthy();
+      const guestSees = (await (await api.get(`/api/tickets/${ticketId}`)).json()) as {
+        notes: Array<{ body?: string | null }>;
+        events: Array<{ body?: string | null }>;
+      };
+      expect(guestSees.notes.some((n) => n.body === ownerNote)).toBe(false);
+      expect(guestSees.events.some((e) => e.body === ownerNote)).toBe(false);
 
       // Marking read is per-user and must not 404 for a guest either.
       expect((await api.post(`/api/tickets/${ticketId}/thread/read`)).ok()).toBeTruthy();

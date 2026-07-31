@@ -33,7 +33,7 @@ import { PrismaClient } from "@prisma/client";
 import { createTestPrismaClient } from "./_prisma";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { createTicket, deleteTicket, updateTicket } from "@/lib/tickets/mutations";
+import { addTicketNote, createTicket, deleteTicket, updateTicket } from "@/lib/tickets/mutations";
 import {
   bindGuestConversation,
   getGuestSnapshot,
@@ -45,7 +45,13 @@ import {
   getTicketAttachmentForRead,
   removeTicketAttachment,
 } from "@/lib/tickets/attachments";
-import { getTicket, getTicketCounts, listTickets, listTicketEvents } from "@/lib/tickets/queries";
+import {
+  getTicket,
+  getTicketCounts,
+  listTickets,
+  listTicketEvents,
+  listTicketNotes,
+} from "@/lib/tickets/queries";
 import {
   addTicketMessage,
   getThreadUnreadAnchor,
@@ -649,6 +655,108 @@ describe("a guest's own conversation", () => {
       conversationId: guestConvo,
     });
     expect(again).toEqual({ ok: false, reason: "already_bound" });
+  });
+});
+
+describe("internal notes stay internal", () => {
+  it("a note is private to the workspace that wrote it", async () => {
+    const { ticket } = await makeTicket();
+    await shareWithB(ticket.id);
+
+    const ownerSecret = `owner-only ${randomUUID()}`;
+    const guestSecret = `guest-only ${randomUUID()}`;
+    await addTicketNote(mdb, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId, workspaceId: wsA },
+      body: ownerSecret,
+    });
+    await addTicketNote(mdb, {
+      workspaceId: wsB,
+      ticketId: ticket.id,
+      actor: { userId, workspaceId: wsB },
+      body: guestSecret,
+    });
+
+    // The composer promises "neither the customer nor the other workspaces on
+    // this ticket see it". A note is where an agent writes the thing they would
+    // never say to the other department — and until 2026-07-31 nothing enforced
+    // it: notes carry the OWNER's workspaceId, so every note on a shared ticket
+    // was readable by every department on it.
+    const ownerNotes = await listTicketNotes(qdb, wsA, ticket.id);
+    expect(ownerNotes.map((n) => n.body)).toEqual([ownerSecret]);
+
+    const guestNotes = await listTicketNotes(qdb, wsB, ticket.id);
+    expect(guestNotes.map((n) => n.body)).toEqual([guestSecret]);
+
+    // Not through the log either, which is the read that leaked them.
+    for (const ws of [wsA, wsB]) {
+      const log = await listTicketEvents(qdb, ws, ticket.id);
+      expect(log.some((e) => e.body === ownerSecret || e.body === guestSecret)).toBe(false);
+    }
+  });
+
+  it("reads as its OWN list, not as audit-log entries", async () => {
+    const { ticket } = await makeTicket();
+    await shareWithB(ticket.id);
+    const mine = `note ${randomUUID()}`;
+    const theirs = `their note ${randomUUID()}`;
+    await addTicketNote(mdb, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId, workspaceId: wsA },
+      body: mine,
+    });
+    await addTicketNote(mdb, {
+      workspaceId: wsB,
+      ticketId: ticket.id,
+      actor: { userId, workspaceId: wsB },
+      body: theirs,
+    });
+
+    // The panel: mine, and only mine.
+    const notes = await listTicketNotes(qdb, wsA, ticket.id);
+    expect(notes.map((n) => n.body)).toEqual([mine]);
+    expect(await listTicketNotes(qdb, wsB, ticket.id)).toHaveLength(1);
+
+    // The log carries NEITHER — it answers "who changed what", and a note is
+    // something someone wrote. Same split as the thread.
+    const log = await listTicketEvents(qdb, wsA, ticket.id);
+    expect(log.some((e) => e.kind === "note")).toBe(false);
+  });
+
+  it("is not findable by another department's search", async () => {
+    const { ticket } = await makeTicket();
+    await shareWithB(ticket.id);
+    const secret = `zzq${randomUUID().replace(/-/g, "")}`;
+    await addTicketNote(mdb, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId, workspaceId: wsA },
+      body: `internal: ${secret}`,
+    });
+
+    // The author finds their own note...
+    const mine = await listTickets(qdb, wsA, { query: secret });
+    expect(mine.tickets.map((t) => t.id)).toContain(ticket.id);
+    // ...the other department does not. The body never rendered for them, but
+    // an unscoped arm made the MATCH itself the leak: search a phrase, learn
+    // which ticket someone wrote it on.
+    const theirs = await listTickets(qdb, wsB, { query: secret });
+    expect(theirs.tickets.map((t) => t.id)).not.toContain(ticket.id);
+  });
+
+  it("a legacy note with no author workspace stays with the ticket's owner", async () => {
+    const { ticket } = await makeTicket();
+    await shareWithB(ticket.id);
+    // Written before sharing existed, so `actorWorkspaceId` is null. Nobody but
+    // the owner could have authored it — there was nobody else.
+    const legacy = `legacy ${randomUUID()}`;
+    await prisma.ticketEvent.create({
+      data: { workspaceId: wsA, ticketId: ticket.id, kind: "note", body: legacy },
+    });
+    expect((await listTicketNotes(qdb, wsA, ticket.id)).map((n) => n.body)).toContain(legacy);
+    expect((await listTicketNotes(qdb, wsB, ticket.id)).map((n) => n.body)).not.toContain(legacy);
   });
 });
 

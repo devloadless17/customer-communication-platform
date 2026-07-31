@@ -1718,8 +1718,15 @@ export default function ApiDocsPage() {
           <code>read:tickets</code>.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/tickets/:id">
-          One ticket plus its full <code>events</code> timeline. Scope{" "}
-          <code>read:tickets</code>.
+          One ticket, plus the three things around it:{" "}
+          <code>{"{ ticket, events, thread, notes, threadUnreadSinceMessageId }"}</code>.{" "}
+          <code>events</code> is the audit log — who changed what;{" "}
+          <code>thread</code> is the cross-department conversation every workspace on the
+          ticket reads; <code>notes</code> is <strong>your workspace&apos;s private
+          notes only</strong> — another department&apos;s never appear, and neither kind of
+          writing is duplicated into <code>events</code>.{" "}
+          <code>threadUnreadSinceMessageId</code> is always <code>null</code> for an API key
+          (read state is per-user). Scope <code>read:tickets</code>.
         </Endpoint>
         <Endpoint
           method="POST"
@@ -1789,7 +1796,9 @@ export default function ApiDocsPage() {
           customer themselves. A separate route rather than a <code>PATCH</code> field
           because a note changes nothing about the ticket — it must not bump{" "}
           <code>version</code> (which would 409 a colleague&apos;s open editor) or move the
-          SLA clock. Scope <code>write:tickets</code>.
+          SLA clock. <strong>Private to the workspace that writes it</strong>: on a shared
+          ticket the other departments never see it — use{" "}
+          <code>/thread</code> to talk to them. Scope <code>write:tickets</code>.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/tickets/escalation-targets">
           The <strong>sibling workspaces</strong> of your organization a ticket can be

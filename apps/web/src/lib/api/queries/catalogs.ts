@@ -113,6 +113,8 @@ export async function getTicket(id: string): Promise<{
   events: TicketEventView[];
   /** The cross-department conversation, oldest first. */
   thread: TicketThreadMessage[];
+  /** THIS workspace's private notes — never another department's. */
+  notes: TicketEventView[];
   /** Where this reader's "New replies" divider goes, or null. */
   threadUnreadSinceMessageId: string | null;
 }> {

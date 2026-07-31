@@ -60,6 +60,7 @@ import {
   getTicket,
   getTicketCounts,
   listTicketEvents,
+  listTicketNotes,
   listTickets,
   ticketVisibilityWhere,
 } from "@/lib/tickets/queries";
@@ -249,18 +250,21 @@ export class TicketsService {
     ticket: Ticket;
     events: TicketEvent[];
     thread: TicketThreadMessage[];
+    /** THIS workspace's private notes — never another department's. */
+    notes: TicketEvent[];
     threadUnreadSinceMessageId: string | null;
   }> {
     await this.assertVisible(viewer, id);
     const ticket = await getTicket(this.db, workspaceId, id);
     if (!ticket) throw new NotFoundException({ error: "ticket_not_found" });
-    const [events, thread, anchor] = await Promise.all([
+    const [events, thread, notes, anchor] = await Promise.all([
       listTicketEvents(this.db, workspaceId, id),
       listTicketThread(this.db, workspaceId, id),
+      listTicketNotes(this.db, workspaceId, id),
       // An API key has no reader, so it never has an unread anchor.
       viewerUserId ? getThreadUnreadAnchor(this.db, id, viewerUserId) : Promise.resolve(null),
     ]);
-    return { ticket, events, thread, threadUnreadSinceMessageId: anchor };
+    return { ticket, events, thread, notes, threadUnreadSinceMessageId: anchor };
   }
 
   async create(

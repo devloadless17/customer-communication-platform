@@ -379,6 +379,30 @@ export function unreadRepliesWhere(viewerUserId: string): Prisma.TicketWhereInpu
  * department — an empty board and a zero rail badge on exactly the work that
  * was handed to them, which is the one case this whole feature exists for.
  */
+/**
+ * WHOSE internal note this is.
+ *
+ * A note is private to the workspace that wrote it — the composer promises
+ * exactly that ("neither the customer nor the other workspaces on this ticket
+ * see it"), and a note is where an agent writes the thing they would never say
+ * to the other department. Until 2026-07-31 nothing enforced it: notes are
+ * stored with the OWNER's `workspaceId` (one history per ticket) and only
+ * `actorWorkspaceId` says who wrote them, so every note on a shared ticket was
+ * readable by every department on it, and findable by ticket search.
+ *
+ * `actorWorkspaceId` is NULL on notes written before sharing existed. Only the
+ * owner could have written those — there was nobody else — so they stay with
+ * whoever owns the ticket (`TicketEvent.workspaceId` is the owner's).
+ *
+ * Composed as an AND element by both readers, never spread into a sibling
+ * position a later filter could overwrite (§18).
+ */
+export function noteVisibilityWhere(workspaceId: string): Prisma.TicketEventWhereInput {
+  return {
+    OR: [{ actorWorkspaceId: workspaceId }, { actorWorkspaceId: null, workspaceId }],
+  };
+}
+
 export function ticketVisibilityWhere(viewerUserId: string): Prisma.TicketWhereInput {
   return {
     OR: [
@@ -509,8 +533,31 @@ export async function listTickets(
         // relation rather than a denormalized copy — and a GUEST workspace has
         // no contact row, which is why the snapshot arm below exists.
         { contact: { name: { contains: q, mode: "insensitive" } } },
-        // The internal notes and the older migrated comments still on the log.
-        { events: { some: { body: { contains: q, mode: "insensitive" } } } },
+        // Event bodies that are genuinely shared — a handoff reason, say.
+        // `escalation_note` is skipped because its text is searched below as a
+        // thread message, and matching both would be one hit counted twice.
+        {
+          events: {
+            some: {
+              kind: { notIn: ["note", "escalation_note"] },
+              body: { contains: q, mode: "insensitive" },
+            },
+          },
+        },
+        // MY OWN notes. Scoped, because an unscoped arm let a guest find a
+        // ticket by text in the owner's private note — the body never rendered,
+        // but the match itself is the leak.
+        {
+          events: {
+            some: {
+              AND: [
+                { kind: "note" },
+                { body: { contains: q, mode: "insensitive" } },
+                noteVisibilityWhere(workspaceId),
+              ],
+            },
+          },
+        },
         // The THREAD — where the cross-department discussion actually is now.
         { threadMessages: { some: { body: { contains: q, mode: "insensitive" } } } },
         // A shared ticket's customer name for the GUEST, who sees only the
@@ -596,6 +643,34 @@ export async function getTicket(
   return row ? mapTicket(row, workspaceId) : null;
 }
 
+/**
+ * This workspace's internal notes on a ticket, oldest first.
+ *
+ * Its own read rather than a slice of the timeline, for the same reason the
+ * thread is its own entity: a note is something someone WROTE, and it was
+ * unfindable among the status changes. Private — see `noteVisibilityWhere`.
+ */
+export async function listTicketNotes(
+  db: Db,
+  workspaceId: string,
+  ticketId: string,
+): Promise<TicketEvent[]> {
+  const rows = await db.ticketEvent.findMany({
+    where: {
+      ticketId,
+      kind: "note",
+      // Reached through the TICKET's gate (a guest may note on a ticket shared
+      // with it), then narrowed to notes this workspace may read.
+      ticket: ticketAccessWhere(workspaceId),
+      AND: [noteVisibilityWhere(workspaceId)],
+    },
+    orderBy: { createdAt: "desc" },
+    take: 200,
+    select: TICKET_EVENT_SELECT,
+  });
+  return rows.reverse().map((e) => mapTicketEvent(e, ticketId));
+}
+
 /** A ticket's own timeline, oldest first (served by `(ticketId, createdAt)`). */
 export async function listTicketEvents(
   db: Db,
@@ -611,13 +686,15 @@ export async function listTicketEvents(
     // the viewer's would hand a guest an empty history for a ticket they can
     // legitimately work.
     //
-    // `escalation_note` is EXCLUDED: comments moved to their own entity
-    // (TicketMessage) so the discussion stops being buried in the audit log.
-    // The migrated rows are deliberately still here — deleting them would
-    // cascade-delete their attachments — but they render in the thread now.
+    // Neither CONTENT kind belongs in the audit log — it answers "who changed
+    // what", and burying the writing among twenty status flips is what made it
+    // unreadable. `escalation_note` (the pre-2026-07-31 comments) reads in the
+    // THREAD via its migrated `TicketMessage`; `note` reads in the notes panel,
+    // scoped to the workspace that wrote it. The rows deliberately stay in this
+    // table — deleting them would cascade-delete their attachments.
     where: {
       ticketId,
-      kind: { not: "escalation_note" },
+      kind: { notIn: ["escalation_note", "note"] },
       ticket: ticketAccessWhere(workspaceId),
     },
     orderBy: { createdAt: "desc" },
