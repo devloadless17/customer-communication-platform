@@ -52,6 +52,12 @@ const SURFACES = [
   // cannot vouch for, however green the total looks.
   { name: "reports", path: "/reports" },
   { name: "settings", path: "/settings" },
+  // Added 2026-07-31 (structure program): four whole feature landings had
+  // never been through the full rubric — same class as /reports above.
+  { name: "flags", path: "/flags" },
+  { name: "templates", path: "/templates" },
+  { name: "organization", path: "/organization" },
+  { name: "account", path: "/account" },
   { name: "team-chat", path: "/team" },
   { name: "inbox", path: "/inbox" },
 ] as const;
@@ -395,6 +401,10 @@ const SETTINGS_SUBPAGES = [
   "tags",
   "tickets",
   "whatsapp",
+  // Added 2026-07-31 — the two subpages the hand-named list had silently
+  // missed, found by the completeness guard below.
+  "activity",
+  "webchatwidget",
 ] as const;
 
 for (const page_ of SETTINGS_SUBPAGES) {
@@ -424,3 +434,92 @@ for (const page_ of SETTINGS_SUBPAGES) {
     expect(blocking.map((v) => `${v.impact}:${v.id}`), report.join("\n")).toEqual([]);
   });
 }
+
+/**
+ * Feature SUBPAGES — axe-only, same reasoning as SETTINGS_SUBPAGES: the hub
+ * pages above carry the full five-dimension rubric; their static subroutes
+ * get the accessibility gate so no reachable screen ships unscanned.
+ * (Added 2026-07-31, structure program.)
+ */
+const FEATURE_SUBPAGES = [
+  "/broadcasts/new",
+  "/broadcasts/groups",
+  "/broadcasts/groups/new",
+  "/templates/new",
+  "/templates/library",
+  "/templates/authentication",
+  "/organization/members",
+  "/organization/workspaces",
+  "/reports/campaigns",
+  "/account/notifications",
+  "/workflows/new",
+  // Found by the completeness guard on its first run — nested under a hub
+  // neither hand-list could express. The guard paying for itself immediately.
+  "/settings/integrations/webhooks",
+] as const;
+
+for (const path of FEATURE_SUBPAGES) {
+  test(`${path}: no serious or critical accessibility violations`, async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(path);
+    await settle(page);
+    const results = await new AxeBuilder({ page })
+      .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+      .analyze();
+    const blocking = results.violations.filter(
+      (v) => v.impact === "serious" || v.impact === "critical",
+    );
+    const report = blocking.map(
+      (v) =>
+        `[${v.impact}] ${v.id} — ${v.help} (${v.nodes.length} node(s))\n` +
+        v.nodes
+          .slice(0, 4)
+          .map((n) => `      ${n.target.join(" ")}\n        html: ${n.html.slice(0, 160)}`)
+          .join("\n"),
+    );
+    expect(blocking.map((v) => `${v.impact}:${v.id}`), report.join("\n")).toEqual([]);
+  });
+}
+
+/**
+ * COMPLETENESS GUARD — the lesson this rubric has now taught twice (the
+ * settings deep-sweep found 10/16 subpages failing; /reports sat unscanned
+ * through a whole feature landing): a surface the rubric does not NAME is a
+ * surface it cannot vouch for, however green the total looks. So the route
+ * list is DERIVED from the filesystem and every static (app) route must be
+ * claimed by a rubric tier or an explicit exclusion — adding a page without
+ * deciding its rubric coverage fails this test, in CI, before it ships.
+ */
+test("every static (app) route is named by a rubric tier or excluded with a reason", async () => {
+  const { readdirSync, statSync, existsSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const appRoot = join(__dirname, "../../../apps/web/src/app/(app)");
+
+  const routes: string[] = [];
+  const walk = (dir: string, route: string) => {
+    if (existsSync(join(dir, "page.tsx"))) routes.push(route || "/");
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      if (!statSync(full).isDirectory()) continue;
+      if (entry.startsWith("[")) continue; // dynamic — needs a real id; covered by its parent's tier
+      walk(full, `${route}/${entry}`);
+    }
+  };
+  walk(appRoot, "");
+
+  const covered = new Set<string>([
+    ...SURFACES.map((s) => s.path),
+    ...FEATURE_SUBPAGES,
+    ...SETTINGS_SUBPAGES.map((p) => `/settings/${p}`),
+  ]);
+  const EXCLUDED: Record<string, string> = {
+    "/settings/team": "redirect stub to /settings/members",
+    "/settings/workspace": "redirect stub to /settings",
+  };
+
+  const unclaimed = routes.filter((r) => !covered.has(r) && !(r in EXCLUDED));
+  expect(
+    unclaimed,
+    "route(s) with no rubric tier — add to SURFACES (full rubric), FEATURE_SUBPAGES / SETTINGS_SUBPAGES (axe gate), or EXCLUDED with a reason",
+  ).toEqual([]);
+});
