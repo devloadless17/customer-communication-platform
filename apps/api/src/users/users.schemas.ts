@@ -6,16 +6,6 @@ import {
 } from "@ccp/shared/auth/password-policy";
 import { isValidTimezone, parseTimeOfDay } from "@ccp/shared/work-hours";
 
-/**
- * Query for GET /api/users/stats. `period` windows the assigned / messages-sent
- * / closed counts (rolling windows ending now); `all` = all-time. The "active"
- * (currently-assigned) count ignores this — it's always point-in-time.
- */
-export const StatsQuerySchema = z.object({
-  period: z.enum(["day", "week", "month", "year", "all"]).default("all"),
-});
-export type StatsQuery = z.infer<typeof StatsQuerySchema>;
-
 export const UpdateUserSchema = z
   .object({
     role: z.string().optional(),

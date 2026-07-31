@@ -11,11 +11,15 @@ import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
  * other high-churn table has a retention sweep; this one was the gap (N2 in
  * tests/VERIFICATION-2026-07-29.md).
  *
- * Retention policy: delete rows older than the cutoff, full stop. Unlike the
- * outbox sweep there's no "keep failed rows" carve-out — every row is a
- * past-tense audit fact, not a pending work item. The history panel that reads
- * these only ever shows recent activity; a 90-day window keeps "who closed this
- * last quarter" answerable without unbounded growth. Tunable via
+ * Retention policy: delete rows older than the cutoff — with ONE carve-out:
+ * `kind = 'assigned'` rows are kept forever. They are the assignment ledger
+ * behind the team report's "conversations assigned per agent" aggregate
+ * (lib/analytics/team-report.ts); the max report range (90d) equals the
+ * default retention window, so sweeping them would undercount exactly at the
+ * range edge. They're tiny and low-volume, so exempting them is cheaper than
+ * a second table. Everything else is a past-tense audit fact the history
+ * panel only reads recently; a 90-day window keeps "who closed this last
+ * quarter" answerable without unbounded growth. Tunable via
  * CONVERSATION_EVENT_RETENTION_DAYS (default 90).
  *
  * Cadence: daily, batched, bounded — a large backlog can't lock the table.
@@ -50,7 +54,10 @@ async function runTick(label: string): Promise<void> {
   inFlight = true;
   try {
     // Mutex serializes batched DELETE against other heavy sweepers.
-    await withSweeperMutex("conversation-event-retention", sweepOnce);
+    await withSweeperMutex(
+      "conversation-event-retention",
+      sweepConversationEventRetentionOnce,
+    );
   } catch (err) {
     // Pool already ended (dev hot-reload / shutdown) — the work is
     // over, so stop instead of logging a stack trace every tick.
@@ -88,12 +95,17 @@ export function stopConversationEventRetentionSweeper(): void {
   }
 }
 
-async function sweepOnce(): Promise<void> {
+/** Exported for tests, matching the sibling sweepers' convention. */
+export async function sweepConversationEventRetentionOnce(): Promise<void> {
   const cutoff = new Date(Date.now() - retentionMs());
   let totalDeleted = 0;
   for (let i = 0; i < MAX_BATCHES; i++) {
     const stale = await db.conversationEvent.findMany({
-      where: { at: { lt: cutoff } },
+      // `assigned` rows are exempt: they are the permanent assignment ledger
+      // the team report's "conversations assigned per agent" aggregate reads
+      // (lib/analytics/team-report.ts). Deleting them past the 90d horizon
+      // would silently undercount a 90d report range. Tiny, low-volume rows.
+      where: { at: { lt: cutoff }, kind: { not: "assigned" } },
       select: { id: true },
       take: MAX_PER_SWEEP,
     });

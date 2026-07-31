@@ -14,7 +14,6 @@ import {
   Patch,
   Post,
   Put,
-  Query,
   Res,
   UploadedFile,
   UseGuards,
@@ -32,35 +31,23 @@ import { CurrentSession } from "../auth/current-session.decorator";
 import { RequireRole } from "../auth/role.guard";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
-import { zBody, zQuery } from "../common/zod-validation.pipe";
+import { zBody } from "../common/zod-validation.pipe";
 import {
   ResetUserPasswordSchema,
   SetUserAvailabilitySchema,
   SetUserWorkHoursSchema,
-  StatsQuerySchema,
   UpdateMyAvailabilitySchema,
   UpdateMyProfileSchema,
   UpdateUserSchema,
   type ResetUserPasswordInput,
   type SetUserAvailabilityInput,
   type SetUserWorkHoursInput,
-  type StatsQuery,
   type UpdateMyAvailabilityInput,
   type UpdateMyProfileInput,
   type UpdateUserInput,
 } from "./users.schemas";
 import { UserAvailabilityService } from "./user-availability.service";
 import { UsersService } from "./users.service";
-
-/**
- * Rolling-window start for the stats period, or null for all-time.
- */
-function periodSince(period: StatsQuery["period"]): Date | null {
-  if (period === "all") return null;
-  const days =
-    period === "day" ? 1 : period === "week" ? 7 : period === "month" ? 30 : 365;
-  return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-}
 
 /**
  * Team member roster + management.
@@ -87,37 +74,8 @@ export class UsersController {
     return { users };
   }
 
-  /**
-   * Per-member activity (active assignments + windowed assigned / messages-sent
-   * / closed) for the team-activity settings page. Gated by the
-   * admin-configurable `teamActivity:view` capability (default: admin + manager;
-   * agents off unless granted). `?period` windows the counts; `all` = all-time.
-   * No GET `:id` route exists, so the static `stats` segment can't be shadowed.
-   */
-  @RequireCapability("teamActivity:view")
-  @Get("stats")
-  async stats(
-    @CurrentSession() session: ApiSession,
-    @Query(zQuery(StatsQuerySchema)) query: StatsQuery,
-  ) {
-    const stats = await this.users.getMemberStats(
-      session.workspaceId,
-      periodSince(query.period),
-    );
-    return { stats, period: query.period };
-  }
-
-  /**
-   * Live "current activity" — open chats assigned per user, right now. Cheap
-   * single query; the team-activity page re-polls it on assignment/status
-   * socket events. Same capability gate as the full report.
-   */
-  @RequireCapability("teamActivity:view")
-  @Get("active-assignments")
-  async activeAssignments(@CurrentSession() session: ApiSession) {
-    const counts = await this.users.getActiveAssignments(session.workspaceId);
-    return { counts };
-  }
+  // Per-member activity moved to /api/reports/team (+ /team/live) — the
+  // /reports/team page superseded the settings-activity table 2026-07-31.
 
   /**
    * Avatar serving — authenticated SAME-ORIGIN stream of the private avatar

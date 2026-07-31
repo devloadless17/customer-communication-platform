@@ -850,6 +850,42 @@ export default function ApiDocsPage() {
           zero seconds. Scope: <code>read:reports</code> (grants no access to
           message content).
         </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/reports/team">
+          Team performance report — the same aggregates (and the same response
+          shape) as the in-app Reports → Team page: one row per agent covering
+          conversations (assigned, closed, open now, first replies,
+          first-response and resolution times as average + median seconds),
+          messages (sent — broadcast blasts excluded — and internal notes),
+          calls (placed, answered, total and average talk time), and tickets
+          (created, resolved, currently assigned, SLA breaches among tickets
+          they resolved), plus workspace totals and a per-day series. Same
+          query contract as <code>reports/overview</code>: required{" "}
+          <code>?from=</code>/<code>?to=</code>, optional <code>?tz=</code> and{" "}
+          <code>?accountId=</code>.
+          <br />
+          <br />
+          <code>?accountId=</code> scopes the message- and conversation-anchored
+          metrics only — calls, tickets and notes carry no account and always
+          cover the whole workspace. Departed members keep their historical
+          numbers under <code>name: null</code>; missed calls are reported in{" "}
+          <code>totals.callsMissed</code> only (a missed call rings the team,
+          not one agent). Durations are <code>null</code> when the range holds
+          no qualifying rows. Scope: <code>read:reports</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/reports/team/agents/:userId">
+          One agent&apos;s drill-down: their full <code>reports/team</code> row
+          plus their own per-day series (messages sent, conversations closed)
+          over the same range. Resolves for departed members with historical
+          activity too; 404 <code>agent_not_found</code> otherwise. Same query
+          parameters as <code>reports/team</code>. Scope:{" "}
+          <code>read:reports</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/reports/team/live">
+          Point-in-time team activity snapshot: per agent, open conversations
+          currently assigned and calls currently ringing or in progress. No
+          parameters — this is &ldquo;right now&rdquo;, not a range. Agents with
+          nothing active are absent. Scope: <code>read:reports</code>.
+        </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/reports/whatsapp-analytics">
           <strong>Meta&apos;s own</strong> account-level analytics, per WhatsApp
           Business Account: what Meta <em>delivered and charged for</em>. A

@@ -11,6 +11,11 @@ import {
 import { acquisitionSources } from "@/lib/analytics/acquisition-sources";
 import { campaignRollup, listCampaigns } from "@/lib/analytics/campaign-rollup";
 import { getWorkspaceReport, ReportRangeError } from "@/lib/analytics/reports";
+import {
+  getTeamAgentDetail,
+  getTeamLiveSnapshot,
+  getTeamReport,
+} from "@/lib/analytics/team-report";
 import { getWabaAnalytics } from "@/lib/analytics/waba-analytics";
 
 import { RequireCapability } from "../auth/capability.guard";
@@ -33,10 +38,17 @@ import {
  *   GET /api/reports/overview?from&to&tz — every dashboard panel in one
  *     round-trip (volume, channels, first-response, resolution, per-agent,
  *     ticket SLA, AI share). Shape: WorkspaceReport (@ccp/shared/dtos).
+ *   GET /api/reports/team?from&to&tz — the /reports/team page in one
+ *     round-trip: per-agent conversations/messages/calls/tickets, workspace
+ *     totals + daily series. Shape: TeamReport (@ccp/shared/dtos).
+ *   GET /api/reports/team/agents/:userId — one agent's row + their own daily
+ *     series (the table's drill-down). Shape: TeamReportAgentDetail.
+ *   GET /api/reports/team/live — point-in-time open-assigned + active-call
+ *     counts for the live "now" strip. Shape: TeamLiveSnapshot.
  *
- * Gated by the SAME `teamActivity:view` capability as the member-stats page —
- * both answer "how is the team performing", so one admin-configurable switch
- * governs who sees either (default: admin + manager).
+ * Gated by the SAME `teamActivity:view` capability throughout — every route
+ * answers "how is the team performing", so one admin-configurable switch
+ * governs who sees any of it (default: admin + manager).
  */
 @Controller("api/reports")
 @UseGuards(SessionGuard)
@@ -60,6 +72,75 @@ export class ReportsController {
       }
       throw err;
     }
+  }
+
+  /**
+   * TEAM REPORT — per-agent activity over an arbitrary range. Same query
+   * contract as /overview (from/to/tz/accountId, ReportRangeError → 400);
+   * metric definitions live on lib/analytics/team-report.ts.
+   */
+  @RequireCapability("teamActivity:view")
+  @Get("team")
+  async team(
+    @CurrentSession() session: ApiSession,
+    @Query(zQuery(ReportOverviewQuerySchema)) query: ReportOverviewQuery,
+  ) {
+    try {
+      return await getTeamReport(session.workspaceId, {
+        from: new Date(query.from),
+        to: new Date(query.to),
+        tz: query.tz,
+        accountId: query.accountId,
+      });
+    } catch (err) {
+      if (err instanceof ReportRangeError) {
+        throw new BadRequestException({ error: "invalid_range", detail: err.message });
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * One agent's drill-down: their table row plus their own per-day series.
+   * 404s for a userId with no roster entry AND no historical activity — a
+   * departed member with history still resolves (the sheet must open for
+   * "Former member" rows too).
+   */
+  @RequireCapability("teamActivity:view")
+  @Get("team/agents/:userId")
+  async teamAgent(
+    @CurrentSession() session: ApiSession,
+    @Param("userId") userId: string,
+    @Query(zQuery(ReportOverviewQuerySchema)) query: ReportOverviewQuery,
+  ) {
+    if (!userId || userId.length > 64) {
+      throw new BadRequestException({ error: "invalid_user_id" });
+    }
+    try {
+      const detail = await getTeamAgentDetail(session.workspaceId, userId, {
+        from: new Date(query.from),
+        to: new Date(query.to),
+        tz: query.tz,
+        accountId: query.accountId,
+      });
+      if (!detail) throw new NotFoundException({ error: "agent_not_found" });
+      return detail;
+    } catch (err) {
+      if (err instanceof ReportRangeError) {
+        throw new BadRequestException({ error: "invalid_range", detail: err.message });
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Live snapshot for the "now" strip — cheap enough to re-poll on every
+   * assignment/status/call socket event (the client debounces).
+   */
+  @RequireCapability("teamActivity:view")
+  @Get("team/live")
+  async teamLive(@CurrentSession() session: ApiSession) {
+    return getTeamLiveSnapshot(session.workspaceId);
   }
 
   /**

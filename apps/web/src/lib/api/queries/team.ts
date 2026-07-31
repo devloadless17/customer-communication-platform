@@ -4,10 +4,8 @@ import { cache } from "react";
 
 
 import { api } from "../../api-client";
-import type {
-  Role,
-  User,
-} from "@ccp/shared/types";
+import type { User } from "@ccp/shared/types";
+import type { TeamLiveSnapshot } from "@ccp/shared/dtos";
 
 /**
  * Inline DTOs that the API ships but apps/api defines locally in its
@@ -68,32 +66,12 @@ export const getTeamWorkHours = cache(async (): Promise<unknown> => {
   return workHours ?? null;
 });
 
-/** Period window for the team-activity report. `all` = all-time. */
-export type StatsPeriod = "day" | "week" | "month" | "year" | "all";
-
-/** Per-member activity for the team-activity settings page (admin-only). */
-export interface MemberStat {
-  userId: string;
-  name: string;
-  email: string;
-  role: Role;
-  deactivated: boolean;
-  /** Chats currently assigned (point-in-time, ignores the period). */
-  activeAssigned: number;
-  /** Assignment actions to them within the period. */
-  assigned: number;
-  /** Outbound messages they sent within the period. */
-  messagesSent: number;
-  /** Conversations they closed within the period. */
-  closed: number;
-}
-
-export const getMemberStats = cache(
-  async (period: StatsPeriod = "all"): Promise<MemberStat[]> => {
-    const { stats } = await api<{ stats: MemberStat[] }>(
-      `/api/users/stats?period=${period}`,
-    );
-    return stats;
-  },
-);
+/**
+ * Point-in-time seed for the /reports/team live "now" strip — the client then
+ * re-polls the same endpoint on assignment/status/call socket events. RSC-side
+ * so the strip's first paint carries real counts instead of a flash of zeros.
+ */
+export const getTeamLive = cache(async (): Promise<TeamLiveSnapshot> => {
+  return api<TeamLiveSnapshot>("/api/reports/team/live");
+});
 

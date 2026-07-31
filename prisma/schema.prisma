@@ -4619,6 +4619,12 @@ model ConversationEvent {
   // hard-deleting a teammate seq-scans this (large, append-only) audit table
   // to null their attribution. Migration 20260611130100.
   @@index([userId])
+  // Team-report "conversations assigned per agent in window": the aggregate
+  // filters (workspaceId, kind='assigned') over an `at` range and groups by
+  // the assignee inside `after`. Note kind='assigned' rows are exempt from
+  // the retention sweeper — they are the permanent assignment ledger.
+  // lib/analytics/team-report.ts.
+  @@index([workspaceId, kind, at])
 }
 
 // ---------------------------------------------------------------------------
@@ -5186,6 +5192,10 @@ model Call {
   // "Currently ringing" + "calls today" queues: filter by (workspaceId, status)
   // ordered by recency. Also serves the 5-calls-per-24h pre-flight gauntlet.
   @@index([workspaceId, status, ringingAt(sort: Desc)])
+  // Team-report windowed scans (calls placed/answered per agent in a date
+  // range) filter no status, so the composite above can't serve them — its
+  // status column sits before the range column. lib/analytics/team-report.ts.
+  @@index([workspaceId, ringingAt])
   @@index([workspaceId])
 }
 

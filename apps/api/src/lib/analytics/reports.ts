@@ -72,10 +72,21 @@ export interface ReportRange {
   accountId?: string;
 }
 
-export async function getWorkspaceReport(
+/**
+ * Shared gate for every ranged report (overview + team). Rejects inverted /
+ * oversized ranges and junk timezones with a legible `ReportRangeError`, and
+ * verifies a requested `accountId` belongs to THIS workspace.
+ *
+ * TENANT SCOPE. `accountId` arrives from a query string, so it is validated
+ * against the workspace before it reaches any raw SQL predicate. Every query
+ * also carries `workspaceId` independently, so a foreign id could only ever
+ * have matched nothing — but an unknown id silently returning an empty report
+ * reads as "the Sales line did nothing", which is worse than an error.
+ */
+export async function validateReportRange(
   workspaceId: string,
   range: ReportRange,
-): Promise<WorkspaceReport> {
+): Promise<void> {
   const { from, to, tz, accountId } = range;
   if (!(from < to)) throw new ReportRangeError("`from` must be before `to`");
   if (to.getTime() - from.getTime() > MAX_RANGE_DAYS * 24 * 60 * 60 * 1000) {
@@ -87,12 +98,6 @@ export async function getWorkspaceReport(
   if (!/^[A-Za-z0-9_+/-]{1,64}$/.test(tz)) {
     throw new ReportRangeError("invalid timezone");
   }
-
-  // TENANT SCOPE. `accountId` arrives from a query string, so it is validated
-  // against THIS workspace before it reaches nine raw SQL predicates. Every
-  // query also carries `workspaceId` independently, so a foreign id could only
-  // ever have matched nothing — but an unknown id silently returning an empty
-  // report reads as "the Sales line did nothing", which is worse than an error.
   if (accountId) {
     const owned = await db.channelConnection.findFirst({
       where: { id: accountId, workspaceId },
@@ -100,6 +105,14 @@ export async function getWorkspaceReport(
     });
     if (!owned) throw new ReportRangeError("unknown channel account");
   }
+}
+
+export async function getWorkspaceReport(
+  workspaceId: string,
+  range: ReportRange,
+): Promise<WorkspaceReport> {
+  const { from, to, tz, accountId } = range;
+  await validateReportRange(workspaceId, range);
 
   const [daily, channels, accounts, convCounts, firstResponse, resolution, agents, sla, ai, aiOnly] =
     await Promise.all([
@@ -152,13 +165,16 @@ export async function getWorkspaceReport(
  *
  * The join is emitted ONLY when filtering, so an unfiltered report runs the
  * exact plan it ran before this existed.
+ *
+ * Exported for lib/analytics/team-report.ts — the team report's message
+ * aggregates must scope identically or the two report tabs disagree.
  */
-function messageAccountJoin(accountId: string | undefined) {
+export function messageAccountJoin(accountId: string | undefined) {
   return accountId
     ? Prisma.sql`JOIN "Conversation" c ON c.id = m."conversationId"`
     : Prisma.empty;
 }
-function messageAccountWhere(accountId: string | undefined) {
+export function messageAccountWhere(accountId: string | undefined) {
   return accountId
     ? Prisma.sql`AND COALESCE(m."channelConnectionId", c."channelConnectionId") = ${accountId}`
     : Prisma.empty;
@@ -175,7 +191,7 @@ function messageAccountWhere(accountId: string | undefined) {
  * better answer available — the metric is a property of the thread, and the
  * thread has a single current owner.
  */
-function conversationAccountWhere(accountId: string | undefined, alias = "") {
+export function conversationAccountWhere(accountId: string | undefined, alias = "") {
   const col = alias ? Prisma.raw(`${alias}."channelConnectionId"`) : Prisma.raw(`"channelConnectionId"`);
   return accountId ? Prisma.sql`AND ${col} = ${accountId}` : Prisma.empty;
 }
@@ -291,7 +307,9 @@ async function queryConversationCounts(
   return { opened, closed };
 }
 
-async function queryFirstResponse(workspaceId: string, from: Date, to: Date, accountId?: string) {
+/** Exported for lib/analytics/team-report.ts — the team page's headline
+ *  first-response tile must equal the overview's, not a re-derivation. */
+export async function queryFirstResponse(workspaceId: string, from: Date, to: Date, accountId?: string) {
   const rows = await db.$queryRaw<
     Array<{ answered: number; avg_sec: number | null; median_sec: number | null }>
   >(Prisma.sql`

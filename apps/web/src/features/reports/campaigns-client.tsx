@@ -2,10 +2,11 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { ArrowLeft, ChevronRight, Loader2, Megaphone } from "lucide-react";
+import { ChevronRight, Loader2, Megaphone } from "lucide-react";
 
 import { PageHeader } from "@/components/layouts/page-header";
 import { LocalTime } from "@/components/local-time";
+import { ReportsNav } from "@/features/reports/reports-nav";
 import { apiFetch } from "@/lib/api/client-fetch";
 
 /**
@@ -55,13 +56,7 @@ export function CampaignsClient() {
   // reads as a different app.
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-5 px-4 py-6 sm:px-6 md:px-8">
-      <Link
-        href="/reports"
-        className="inline-flex items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <ArrowLeft className="size-3.5" />
-        Reports
-      </Link>
+      <ReportsNav />
 
       <PageHeader
         title="Campaigns"

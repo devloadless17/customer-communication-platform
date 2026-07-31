@@ -30,7 +30,17 @@ import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { AcquisitionPanel } from "@/features/reports/acquisition-panel";
 import { WhatsappSpendPanel } from "@/features/reports/whatsapp-spend-panel";
 import { useChannelAccounts } from "@/features/channels/contexts/channel-accounts-context";
-import { cn } from "@ccp/shared/utils";
+import {
+  fillDays,
+  fmtDuration,
+  MiniStat,
+  Panel,
+  PanelEmpty,
+  PanelSkeleton,
+  StatTile,
+} from "@/features/reports/report-primitives";
+import { ReportControls, useScopeAccounts } from "@/features/reports/report-controls";
+import { ReportsNav } from "@/features/reports/reports-nav";
 import type { Channel } from "@ccp/shared/types";
 import type { WorkspaceReport } from "@ccp/shared/dtos";
 
@@ -45,12 +55,6 @@ import type { WorkspaceReport } from "@ccp/shared/dtos";
  * alike (the DTO's contract).
  */
 
-const RANGES = [
-  { days: 7, label: "7 days" },
-  { days: 30, label: "30 days" },
-  { days: 90, label: "90 days" },
-] as const;
-
 const VOLUME_SERIES = [
   { key: "inbound", label: "Received", color: SERIES_COLORS[0] },
   { key: "outbound", label: "Sent", color: SERIES_COLORS[1] },
@@ -58,47 +62,14 @@ const VOLUME_SERIES = [
 
 const CHART_HEIGHT = 260;
 
-function fmtDuration(sec: number | null): string {
-  if (sec == null) return "—";
-  if (sec < 60) return `${Math.round(sec)}s`;
-  if (sec < 3600) return `${Math.floor(sec / 60)}m ${Math.round(sec % 60)}s`;
-  if (sec < 86_400) return `${Math.floor(sec / 3600)}h ${Math.round((sec % 3600) / 60)}m`;
-  return `${Math.floor(sec / 86_400)}d ${Math.round((sec % 86_400) / 3600)}h`;
-}
+/** The overview shows the top carriers; the full table lives on /reports/team. */
+const AGENT_PREVIEW_ROWS = 5;
 
 /** "98%" attainment, or null when the range has no SLA-tracked tickets. */
 function slaMet(bucket: { withSla: number; breached: number }): string | null {
   if (bucket.withSla === 0) return null;
   const met = bucket.withSla - bucket.breached;
   return `${Math.round((met / bucket.withSla) * 100)}%`;
-}
-
-/** Fill absent days so a quiet weekend renders as zero bars, not a gap the
- *  x-axis silently skips (which would make Mon look adjacent to Fri). */
-function fillDays(
-  daily: WorkspaceReport["volume"]["daily"],
-  from: Date,
-  to: Date,
-): Array<{ day: string; label: string; inbound: number; outbound: number }> {
-  const byDay = new Map(daily.map((d) => [d.day, d]));
-  const out: Array<{ day: string; label: string; inbound: number; outbound: number }> = [];
-  const cursor = new Date(from);
-  cursor.setHours(0, 0, 0, 0);
-  while (cursor <= to) {
-    const y = cursor.getFullYear();
-    const m = String(cursor.getMonth() + 1).padStart(2, "0");
-    const d = String(cursor.getDate()).padStart(2, "0");
-    const key = `${y}-${m}-${d}`;
-    const row = byDay.get(key);
-    out.push({
-      day: key,
-      label: cursor.toLocaleDateString(undefined, { month: "short", day: "numeric" }),
-      inbound: row?.inbound ?? 0,
-      outbound: row?.outbound ?? 0,
-    });
-    cursor.setDate(cursor.getDate() + 1);
-  }
-  return out;
 }
 
 export function ReportsClient() {
@@ -109,16 +80,7 @@ export function ReportsClient() {
   // Null = the whole workspace, which stays the default.
   const [accountId, setAccountId] = useState<string | null>(null);
   const { all: allAccounts } = useChannelAccounts();
-  // Only offer accounts on channels that actually hold more than one — the
-  // same "attribution is a disambiguator" rule the inbox chip follows, so a
-  // single-number workspace sees no new control at all.
-  const scopeAccounts = useMemo(() => {
-    const perChannel = new Map<string, number>();
-    for (const a of allAccounts) {
-      if (a.isActive) perChannel.set(a.channel, (perChannel.get(a.channel) ?? 0) + 1);
-    }
-    return allAccounts.filter((a) => a.isActive && (perChannel.get(a.channel) ?? 0) > 1);
-  }, [allAccounts]);
+  const scopeAccounts = useScopeAccounts();
   // Gate the Meta spend panel on actually HAVING WhatsApp. Letting the panel
   // decide for itself meant rendering its header and skeleton, then removing the
   // whole section once Meta answered with no accounts — a visible collapse on a
@@ -168,59 +130,26 @@ export function ReportsClient() {
   }, [range, accountId]);
 
   const daily = useMemo(
-    () => (report ? fillDays(report.volume.daily, range.from, range.to) : []),
+    () =>
+      report
+        ? fillDays(report.volume.daily, range.from, range.to, ["inbound", "outbound"])
+        : [],
     [report, range],
   );
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-5 px-4 py-6 sm:px-6 md:px-8">
+      <ReportsNav />
       <PageHeader
         title="Reports"
         description="How the workspace is performing — volumes, response times, agents, SLA, and the AI's share."
         action={
-          <div className="flex items-center gap-2">
-            {/* Account scope. Hidden entirely unless some channel actually
-                holds more than one account — a single-number workspace has
-                nothing to disambiguate and the control would be pure noise. */}
-            {scopeAccounts.length > 0 && (
-              <select
-                value={accountId ?? ""}
-                onChange={(e) => setAccountId(e.target.value || null)}
-                aria-label="Scope the report to one account"
-                className="h-8 rounded-lg border border-border bg-card px-2 text-xs"
-              >
-                <option value="">All accounts</option>
-                {scopeAccounts.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name}
-                  </option>
-                ))}
-              </select>
-            )}
-          <div
-            role="radiogroup"
-            aria-label="Report range"
-            className="flex items-center gap-0.5 rounded-lg border border-border bg-card p-0.5"
-          >
-            {RANGES.map((r) => (
-              <button
-                key={r.days}
-                type="button"
-                role="radio"
-                aria-checked={days === r.days}
-                onClick={() => setDays(r.days)}
-                className={cn(
-                  "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
-                  days === r.days
-                    ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:bg-accent hover:text-foreground",
-                )}
-              >
-                {r.label}
-              </button>
-            ))}
-          </div>
-          </div>
+          <ReportControls
+            days={days}
+            onDaysChange={setDays}
+            accountId={accountId}
+            onAccountChange={setAccountId}
+          />
         }
       />
 
@@ -442,8 +371,21 @@ export function ReportsClient() {
             </div>
           </div>
 
-          {/* Per-agent table. */}
-          <Panel title="Agents">
+          {/* Per-agent preview — the top carriers only. The full sortable
+              table (calls, tickets, notes, drill-down) lives on /reports/team;
+              duplicating it here would drift as that table grows columns. */}
+          <Panel
+            title="Agents"
+            action={
+              <Link
+                href="/reports/team"
+                className="inline-flex items-center gap-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+              >
+                View full team report
+                <ChevronRight className="size-3.5" />
+              </Link>
+            }
+          >
             {report === null ? (
               <PanelSkeleton rows={4} />
             ) : report.agents.length === 0 ? (
@@ -461,7 +403,7 @@ export function ReportsClient() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border">
-                    {report.agents.map((a) => (
+                    {report.agents.slice(0, AGENT_PREVIEW_ROWS).map((a) => (
                       <tr key={a.userId}>
                         <td className="py-2 font-medium">
                           {a.name ?? <span className="text-muted-foreground">Former member</span>}
@@ -474,6 +416,11 @@ export function ReportsClient() {
                     ))}
                   </tbody>
                 </table>
+                {report.agents.length > AGENT_PREVIEW_ROWS && (
+                  <p className="pt-2 text-2xs text-muted-foreground">
+                    Top {AGENT_PREVIEW_ROWS} of {report.agents.length} agents by messages sent.
+                  </p>
+                )}
               </div>
             )}
           </Panel>
@@ -519,58 +466,3 @@ export function ReportsClient() {
   );
 }
 
-function StatTile({
-  label,
-  value,
-  hint,
-}: {
-  label: string;
-  /** null = still loading (skeleton). */
-  value: string | null;
-  hint?: string;
-}) {
-  return (
-    <div className="flex flex-col gap-1 rounded-xl border border-border bg-card px-4 py-3.5">
-      {value === null ? (
-        <div className="h-7 w-14 animate-pulse rounded bg-muted/40" />
-      ) : (
-        <div className="tabular-nums text-2xl font-semibold">{value}</div>
-      )}
-      <div className="text-xs text-muted-foreground">{label}</div>
-      {hint && value !== null && <div className="text-2xs text-muted-foreground">{hint}</div>}
-    </div>
-  );
-}
-
-function MiniStat({ label, value, hint }: { label: string; value: string; hint?: string }) {
-  return (
-    <div className="min-w-0">
-      <div className="tabular-nums text-xl font-semibold">{value}</div>
-      <div className="text-xs text-muted-foreground">{label}</div>
-      {hint && <div className="mt-0.5 text-2xs text-muted-foreground">{hint}</div>}
-    </div>
-  );
-}
-
-function Panel({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section className="rounded-xl border border-border bg-card p-5">
-      <h3 className="text-sm font-semibold">{title}</h3>
-      <div className="mt-3">{children}</div>
-    </section>
-  );
-}
-
-function PanelSkeleton({ rows }: { rows: number }) {
-  return (
-    <div className="flex flex-col gap-2">
-      {Array.from({ length: rows }, (_, i) => (
-        <div key={i} className="h-6 animate-pulse rounded bg-muted/30" />
-      ))}
-    </div>
-  );
-}
-
-function PanelEmpty({ message }: { message: string }) {
-  return <p className="py-4 text-center text-xs text-muted-foreground">{message}</p>;
-}

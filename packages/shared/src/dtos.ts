@@ -265,6 +265,120 @@ export interface WorkspaceReport {
 }
 
 // ---------------------------------------------------------------------------
+// Team performance report (`GET /api/reports/team`, /v1 parity at
+// `GET /v1/reports/team`). Metric definitions live on
+// apps/api/src/lib/analytics/team-report.ts — durations in SECONDS, null when
+// the range holds no qualifying rows (render as "—", never as 0).
+//
+// `accountId` scope applies ONLY to message/conversation metrics — Call,
+// Ticket and InternalNote carry no account column, so those blocks always
+// cover the whole workspace regardless of scope.
+// ---------------------------------------------------------------------------
+
+export interface TeamReportDaily {
+  /** YYYY-MM-DD in the requested timezone; days with no activity are absent
+   *  (the chart fills gaps client-side). */
+  day: string;
+  messagesSent: number;
+  conversationsClosed: number;
+}
+
+export interface TeamReportAgent {
+  userId: string;
+  /** Resolved at read time; null = the member has since left the workspace. */
+  name: string | null;
+  /** Null for departed members (no roster row to read from). */
+  email: string | null;
+  role: Role | null;
+  deactivated: boolean;
+  conversations: {
+    /** Assignment events TO this agent in range (audit ledger — counts
+     *  reassignments, not just first assignment). */
+    assigned: number;
+    closed: number;
+    /** Point-in-time: open conversations currently assigned (ignores range). */
+    openNow: number;
+    /** Conversations created in range this agent answered first. */
+    firstReplies: number;
+    avgFirstResponseSec: number | null;
+    medianFirstResponseSec: number | null;
+    avgResolutionSec: number | null;
+    medianResolutionSec: number | null;
+  };
+  messages: {
+    /** Outbound authored in range; broadcast blasts excluded. */
+    sent: number;
+    notesAuthored: number;
+  };
+  calls: {
+    placed: number;
+    answered: number;
+    talkTimeTotalSec: number;
+    talkTimeAvgSec: number | null;
+  };
+  tickets: {
+    created: number;
+    resolved: number;
+    /** Point-in-time: open tickets currently assigned (ignores range). */
+    openAssignedNow: number;
+    /** SLA breach flags among tickets this agent RESOLVED in range — one
+     *  attribution rule (the resolver), one time anchor (resolvedAt). */
+    firstResponseBreached: number;
+    resolutionBreached: number;
+  };
+}
+
+export interface TeamReport {
+  range: {
+    from: string;
+    to: string;
+    tz: string;
+    accountId: string | null;
+  };
+  totals: {
+    messagesSent: number;
+    notesAuthored: number;
+    conversationsAssigned: number;
+    conversationsClosed: number;
+    callsPlaced: number;
+    callsAnswered: number;
+    /** Workspace-level only — a missed call rings the team, not one agent. */
+    callsMissed: number;
+    talkTimeTotalSec: number;
+    ticketsCreated: number;
+    ticketsResolved: number;
+    /** Workspace-level first response over conversations created in range —
+     *  the same numbers as WorkspaceReport.firstResponse (medians don't sum,
+     *  so this cannot be derived from the per-agent rows). */
+    firstResponse: {
+      answeredConversations: number;
+      avgSec: number | null;
+      medianSec: number | null;
+    };
+  };
+  daily: TeamReportDaily[];
+  /** Unsorted contract — the client owns column sorting. */
+  agents: TeamReportAgent[];
+}
+
+export interface TeamReportAgentDetail extends TeamReportAgent {
+  /** This agent's own per-day series over the same range. */
+  daily: TeamReportDaily[];
+}
+
+/** Point-in-time snapshot for the live "now" strip (`GET /api/reports/team/live`). */
+export interface TeamLiveSnapshot {
+  generatedAt: string;
+  agents: Array<{
+    userId: string;
+    /** Open conversations currently assigned. */
+    openAssigned: number;
+    /** Calls currently ringing or in progress attributed to this agent. */
+    activeCalls: number;
+  }>;
+}
+
+// ---------------------------------------------------------------------------
 // In-conversation message search.
 // ---------------------------------------------------------------------------
 

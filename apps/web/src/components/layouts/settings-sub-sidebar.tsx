@@ -2,7 +2,6 @@
 
 import { usePathname } from "next/navigation";
 import {
-  BarChart3,
   Bot,
   Flag,
   Layers,
@@ -84,14 +83,8 @@ export function SettingsSubSidebar({
             active={isActive("/settings/assignment")}
           />
         )}
-        {permissions["teamActivity:view"] && (
-          <SubSidebarItem
-            href="/settings/activity"
-            label="Activity"
-            leading={<BarChart3 className="size-4" />}
-            active={isActive("/settings/activity")}
-          />
-        )}
+        {/* Team activity lives at /reports/team now (the old /settings/activity
+            redirects) — analytics belongs with Reports, not configuration. */}
       </SubSidebarSection>
 
       {isAdmin && (

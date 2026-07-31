@@ -19,6 +19,11 @@ import {
 import { acquisitionSources, contactAcquisition } from "@/lib/analytics/acquisition-sources";
 import { campaignRollup, listCampaigns } from "@/lib/analytics/campaign-rollup";
 import { getWorkspaceReport, ReportRangeError } from "@/lib/analytics/reports";
+import {
+  getTeamAgentDetail,
+  getTeamLiveSnapshot,
+  getTeamReport,
+} from "@/lib/analytics/team-report";
 import { getWabaAnalytics } from "@/lib/analytics/waba-analytics";
 import {
   AcquisitionQuerySchema,
@@ -1232,6 +1237,74 @@ export class ExternalV1Controller {
       }
       throw err;
     }
+  }
+
+  /**
+   * Team performance report — same aggregates and SAME response shape as the
+   * internal /api/reports/team (TeamReport in @ccp/shared/dtos). One source of
+   * truth on purpose, like reports/overview above.
+   */
+  @Get("reports/team")
+  @RequireScope("read:reports")
+  async reportTeam(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query(zQuery(ReportOverviewQuerySchema)) query: ReportOverviewQuery,
+  ) {
+    try {
+      return await getTeamReport(auth.workspaceId, {
+        from: new Date(query.from),
+        to: new Date(query.to),
+        tz: query.tz,
+        accountId: query.accountId,
+      });
+    } catch (err) {
+      if (err instanceof ReportRangeError) {
+        throw new BadRequestException({ error: "invalid_range", detail: err.message });
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * One agent's drill-down row + their own daily series — parity with the
+   * internal /api/reports/team/agents/:userId (TeamReportAgentDetail).
+   */
+  @Get("reports/team/agents/:userId")
+  @RequireScope("read:reports")
+  async reportTeamAgent(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("userId") userId: string,
+    @Query(zQuery(ReportOverviewQuerySchema)) query: ReportOverviewQuery,
+  ) {
+    if (!userId || userId.length > 64) {
+      throw new BadRequestException({ error: "invalid_user_id" });
+    }
+    try {
+      const detail = await getTeamAgentDetail(auth.workspaceId, userId, {
+        from: new Date(query.from),
+        to: new Date(query.to),
+        tz: query.tz,
+        accountId: query.accountId,
+      });
+      if (!detail) throw new NotFoundException({ error: "agent_not_found" });
+      return detail;
+    } catch (err) {
+      if (err instanceof ReportRangeError) {
+        throw new BadRequestException({ error: "invalid_range", detail: err.message });
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Point-in-time team activity snapshot (open assigned chats + active calls
+   * per agent) — parity with the internal /api/reports/team/live
+   * (TeamLiveSnapshot).
+   */
+  @Get("reports/team/live")
+  @RequireScope("read:reports")
+  async reportTeamLive(@CurrentApiKey() auth: ApiKeyContext) {
+    return getTeamLiveSnapshot(auth.workspaceId);
   }
 
   /**
