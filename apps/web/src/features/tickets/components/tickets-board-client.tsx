@@ -8,6 +8,7 @@ import {
   ArrowUpRight,
   Clock,
   Loader2,
+  MessagesSquare,
   Search,
   Ticket as TicketIcon,
 } from "lucide-react";
@@ -70,10 +71,14 @@ const PRIORITY_CLASSES: Record<TicketPriority, string> = {
 export function TicketsBoardClient({
   users,
   teams,
+  viewerUserId,
 }: {
   users: User[];
   /** Teams (AssignmentPolicy) — drives the queue filter. */
   teams: Array<{ id: string; name: string; isDefault: boolean }>;
+  /** Whose "new reply" badges these are. Read state is per-PERSON, so a frame
+   *  meant for a colleague must not light this board. */
+  viewerUserId: string;
 }) {
   const params = useSearchParams();
   const [tickets, setTickets] = useState<Ticket[]>([]);
@@ -107,11 +112,17 @@ export function TicketsBoardClient({
   const breachedOnly = view === "breached";
   // Work another department escalated to us — the guest side of a shared ticket.
   const sharedOnly = view === "shared";
+  /** Tickets somebody replied to me on and I haven't read. Per-USER, so it is
+   *  a server-side filter rather than something the board can derive. */
+  const unreadOnly = view === "unread";
   // A single-status view shows just that column; otherwise the whole board.
   const columns = useMemo(
     () => (statusParam && TICKET_STATUSES.includes(statusParam) ? [statusParam] : BOARD_COLUMNS),
     [statusParam],
   );
+
+  /** Ids on the board with a thread reply this viewer hasn't read. */
+  const [unreadIds, setUnreadIds] = useState<Set<string>>(() => new Set());
 
   // Guards a late response for a filter the user has since changed away from —
   // the classic out-of-order-fetch bug.
@@ -127,10 +138,11 @@ export function TicketsBoardClient({
     if (priority) p.set("priority", priority);
     if (breachedOnly) p.set("breached", "true");
     if (sharedOnly) p.set("shared", "true");
+    if (unreadOnly) p.set("unread", "true");
     if (debouncedSearch) p.set("q", debouncedSearch);
     if (viewId) p.set("viewId", viewId);
     return p;
-  }, [assignee, teamFilter, priority, breachedOnly, sharedOnly, debouncedSearch, viewId, columns]);
+  }, [assignee, teamFilter, priority, breachedOnly, sharedOnly, unreadOnly, debouncedSearch, viewId, columns]);
 
   const load = useCallback(async () => {
     const token = ++requestToken.current;
@@ -138,9 +150,13 @@ export function TicketsBoardClient({
     try {
       const res = await apiFetch(`/api/tickets?${query.toString()}`);
       if (!res.ok) throw new Error("Couldn't load tickets");
-      const body = (await res.json()) as { tickets: Ticket[] };
+      const body = (await res.json()) as { tickets: Ticket[]; unreadTicketIds?: string[] };
       if (token !== requestToken.current) return;
       setTickets(body.tickets);
+      // Carried in the ENVELOPE, not on the Ticket DTO: `ticket:changed`
+      // broadcasts one Ticket to a whole workspace room, so a per-user field on
+      // it would show everyone the reader's own badge.
+      setUnreadIds(new Set(body.unreadTicketIds ?? []));
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Couldn't load tickets");
     } finally {
@@ -219,12 +235,53 @@ export function TicketsBoardClient({
       if (!known || !columns.includes(payload.ticket.status)) scheduleReload();
       else void loadCounts();
     };
+    /**
+     * A reply. It moves no ticket state — no `ticket:changed`, no version bump
+     * — so the board learns about it here or not at all.
+     *
+     * `notifiedUserIds` gates it: without that check every open board in both
+     * workspaces would light a pill for a conversation between two other
+     * people. Same role `mentionedUserIds` plays on team chat's activity frame.
+     */
+    const onReply = (payload: { ticketId: string; ticketNumber: number; notifiedUserIds: string[] }) => {
+      if (!payload.notifiedUserIds.includes(viewerUserId)) return;
+      setUnreadIds((prev) => {
+        if (prev.has(payload.ticketId)) return prev;
+        const next = new Set(prev);
+        next.add(payload.ticketId);
+        return next;
+      });
+      void loadCounts();
+      // Named, and clickable — a badge tells you something happened; this tells
+      // you WHERE, which is what you actually need to act on it.
+      toast.info(`New reply on #${payload.ticketNumber}`);
+      // A card we don't hold (the reply is on a ticket outside this filter, or
+      // one that just arrived) needs the server's answer.
+      setTickets((prev) => {
+        if (!prev.some((t) => t.id === payload.ticketId)) scheduleReload();
+        return prev;
+      });
+    };
+    /** This viewer read it — in this tab or another. */
+    const onRead = (payload: { ticketId: string }) => {
+      setUnreadIds((prev) => {
+        if (!prev.has(payload.ticketId)) return prev;
+        const next = new Set(prev);
+        next.delete(payload.ticketId);
+        return next;
+      });
+      void loadCounts();
+    };
     socket.on("ticket:changed", onTicket);
+    socket.on("ticket:thread:message", onReply);
+    socket.on("ticket:thread:read", onRead);
     return () => {
       if (timer) clearTimeout(timer);
       socket.off("ticket:changed", onTicket);
+      socket.off("ticket:thread:message", onReply);
+      socket.off("ticket:thread:read", onRead);
     };
-  }, [load, loadCounts, columns]);
+  }, [load, loadCounts, columns, viewerUserId]);
 
   const move = async (ticket: Ticket, status: TicketStatus) => {
     setBusyId(ticket.id);
@@ -416,7 +473,7 @@ export function TicketsBoardClient({
         {/* Only offered when there IS a narrowing to save — a "Save view" button
             on an unfiltered board saves nothing. */}
         {!viewId &&
-        (priority || teamFilter || assignee || breachedOnly || sharedOnly || debouncedSearch) ? (
+        (priority || teamFilter || assignee || breachedOnly || sharedOnly || unreadOnly || debouncedSearch) ? (
           <button
             type="button"
             disabled={bulkBusy}
@@ -575,6 +632,7 @@ export function TicketsBoardClient({
               status={status}
               tickets={byStatus.get(status) ?? []}
               busyId={busyId}
+              unreadIds={unreadIds}
               users={users}
               onMove={move}
               onDropTicket={dropTicket}
@@ -635,6 +693,7 @@ function Column({
   status,
   tickets,
   busyId,
+  unreadIds,
   users,
   onMove,
   onDropTicket,
@@ -644,6 +703,8 @@ function Column({
   status: TicketStatus;
   tickets: Ticket[];
   busyId: string | null;
+  /** Which cards carry an unread thread reply for this viewer. */
+  unreadIds: Set<string>;
   users: User[];
   onMove: (ticket: Ticket, status: TicketStatus) => void;
   onDropTicket: (ticketId: string, status: TicketStatus) => void;
@@ -694,6 +755,7 @@ function Column({
             key={t.id}
             ticket={t}
             busy={busyId === t.id}
+            unread={unreadIds.has(t.id)}
             users={users}
             onMove={onMove}
             selected={selected.has(t.id)}
@@ -710,6 +772,7 @@ function Column({
 function Card({
   ticket,
   busy,
+  unread,
   users,
   onMove,
   selected,
@@ -717,6 +780,8 @@ function Card({
 }: {
   ticket: Ticket;
   busy: boolean;
+  /** Somebody replied in the thread and this viewer hasn't read it. */
+  unread: boolean;
   users: User[];
   onMove: (ticket: Ticket, status: TicketStatus) => void;
   selected: boolean;
@@ -754,6 +819,12 @@ function Card({
         />
         <span className="text-3xs tabular-nums text-muted-foreground">#{ticket.number}</span>
         <ChannelBadge channel={ticket.channel as Channel} />
+        {unread && (
+          <span className="inline-flex items-center gap-0.5 rounded-full bg-sky-500/15 px-1.5 py-px text-3xs font-semibold text-sky-600 dark:text-sky-400">
+            <MessagesSquare aria-hidden className="size-2.5" />
+            New reply
+          </span>
+        )}
         <span className={cn("ml-auto text-3xs capitalize", PRIORITY_CLASSES[ticket.priority])}>
           {ticket.priority}
         </span>

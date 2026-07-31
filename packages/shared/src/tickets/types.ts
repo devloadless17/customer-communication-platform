@@ -278,14 +278,54 @@ export interface TicketAttachment {
   sizeBytes: number;
   /** Same-origin streaming URL — `/api/tickets/:ticketId/attachments/:id`. */
   url: string;
-  /** The timeline entry it came in with, or null for a ticket-level file. */
+  /** The timeline entry it came in with. Only pre-2026-07-31 comment files —
+   *  nothing writes it now. */
   eventId: string | null;
+  /** The THREAD message it came in with, or null for a ticket-level file.
+   *  A file belongs to the sentence that explains it, so the Files section
+   *  shows only what has neither pointer. */
+  messageId: string | null;
   uploadedById: string | null;
   uploadedByName: string | null;
   /** Which workspace added it — a shared ticket's files come from both. */
   workspaceName: string | null;
   /** ISO. */
   createdAt: string;
+}
+
+/**
+ * One message in a ticket's THREAD — the conversation between the departments
+ * working the issue.
+ *
+ * Distinct from `TicketEvent`, which is the audit log ("Ali changed the
+ * status"). Mixing them is what made the answer to "what did Billing say?"
+ * something you had to hunt for.
+ *
+ * Author identity is JOINED at read time, not snapshotted like
+ * `TicketEvent.after`: an event describes a past state and must keep reading
+ * correctly after a rename, whereas a chat author is a live identity that
+ * should follow one. It is carried ON the message because the reader's roster
+ * (`listTeamMembers`) only holds their OWN workspace — a guest cannot resolve
+ * an owner-workspace author locally.
+ */
+export interface TicketThreadMessage {
+  id: string;
+  body: string;
+  authorUserId: string | null;
+  /** Null for an API-key/automation author — the UI renders "Automation". */
+  authorName: string | null;
+  authorAvatarUrl: string | null;
+  authorWorkspaceId: string | null;
+  /** Which department spoke. Rendered as a chip on a shared ticket. */
+  authorWorkspaceName: string | null;
+  attachments: TicketAttachment[];
+  /** ISO. */
+  createdAt: string;
+  /** Echoed back so an optimistic row can be swapped for the real one. */
+  clientTempId?: string;
+  /** Client-only: an optimistic row still in flight / that failed to send. */
+  pending?: boolean;
+  failed?: boolean;
 }
 
 /** One timeline row on the ticket detail page. */
@@ -347,6 +387,12 @@ export interface TicketCounts {
   untriaged: number;
   /** Active tickets another workspace escalated to us. */
   sharedWithUs: number;
+  /**
+   * Tickets where someone ELSE replied in the thread and this user hasn't
+   * looked yet — the "you were answered" signal. Per-user, so it is 0 for an
+   * API key (which has no agent identity), exactly like `mineActive`.
+   */
+  unreadReplies: number;
   /** Non-terminal tickets past a due date. */
   breached: number;
   /** Count keyed by status. Statuses with zero are omitted. */

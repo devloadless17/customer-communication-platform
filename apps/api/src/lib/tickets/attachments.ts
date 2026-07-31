@@ -48,9 +48,9 @@ export interface AddAttachmentArgs {
   workspaceId: string;
   ticketId: string;
   actor: TicketActor;
-  /** The timeline entry this file came in with (a comment), or omitted for a
-   *  file attached directly to the ticket. */
-  eventId?: string | null;
+  /** The THREAD message this file came in with, or omitted for a file attached
+   *  directly to the ticket. */
+  messageId?: string | null;
   bytes: Buffer;
   filename: string;
   mimeType: string;
@@ -117,7 +117,7 @@ export async function addTicketAttachment(
         // Billing"), not the read scope.
         workspaceId: args.workspaceId,
         ticketId: ticket.id,
-        eventId: args.eventId ?? null,
+        messageId: args.messageId ?? null,
         blobKey: blob.key,
         blobUrl: blob.url,
         filename: args.filename.slice(0, 260),
@@ -129,10 +129,11 @@ export async function addTicketAttachment(
       select: ATTACHMENT_SELECT_FIELDS,
     });
 
-    // A file that arrived WITH a comment is already announced by that comment —
-    // a second log line for the same act is the timeline noise the ticket
-    // history exists to avoid. A ticket-level file gets its own entry.
-    if (!args.eventId) {
+    // A file that arrived WITH a thread message is already announced by that
+    // message — a log line for the same act is the timeline noise the history
+    // exists to avoid, and it would show up in the wrong place besides. Only a
+    // ticket-LEVEL file earns an entry.
+    if (!args.messageId) {
       await writeTicketEvent(tx, ticket.workspaceId, ticket.id, "attachment_added", args.actor, null, {
         attachmentId: row.id,
         // Snapshotted so the log still reads after the file is deleted.

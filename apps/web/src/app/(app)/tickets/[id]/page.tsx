@@ -68,7 +68,7 @@ export default async function TicketDetailPage({
     // Sibling workspaces drive the escalation picker — same degradation.
     soft("escalation targets", [], () => listEscalationTargets()),
   ]);
-  const { ticket, events } = detail;
+  const { ticket, events, thread, threadUnreadSinceMessageId } = detail;
   // Delete is destructive and reserved for the people who supervise the queue —
   // matches the API's admin/manager gate, so the button only shows when the
   // click will actually work.
@@ -82,6 +82,10 @@ export default async function TicketDetailPage({
       <TicketDetailClient
         ticket={ticket}
         events={events}
+        thread={thread}
+        threadUnreadSinceMessageId={threadUnreadSinceMessageId}
+        viewerUserId={session.user.id}
+        viewerWorkspaceId={session.workspaceId}
         users={users}
         tags={tags}
         teams={teams}

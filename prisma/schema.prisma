@@ -724,6 +724,9 @@ model Workspace {
   ticketSharesIn          TicketShare[]            @relation("TicketSharesIn")
   ticketAttachments       TicketAttachment[]
   ticketEventsActedIn     TicketEvent[]            @relation("TicketEventActorWorkspace")
+  ticketMessages          TicketMessage[]
+  ticketMessagesAuthored  TicketMessage[]          @relation("TicketMessageAuthorWorkspace")
+  ticketThreadUnreads     TicketThreadUnread[]
   audienceGroups          AudienceGroup[]
   workflows               Workflow[]
   workflowRuns            WorkflowRun[]
@@ -1352,6 +1355,8 @@ model User {
   // survives its author leaving; personal views are cleaned up explicitly.
   createdInboxViews       InboxView[]              @relation("CreatedInboxViews")
   createdTicketViews      TicketView[]             @relation("CreatedTicketViews")
+  ticketMessages          TicketMessage[]          @relation("TicketMessageAuthor")
+  ticketThreadUnreads     TicketThreadUnread[]
   // Audit-log authorship. Nullable on the event row + SetNull so deleting a
   // user keeps the audit trail; the timeline just renders "Removed user".
   authoredEvents          ConversationEvent[]
@@ -3522,9 +3527,10 @@ enum TicketEventKind {
   // Access was revoked; the guest workspace can no longer see the ticket. The
   // row stays as history — who had the key, and until when.
   escalation_revoked
-  // A comment on the ticket. On a SHARED ticket everyone with access sees it —
-  // that is the conversation between the departments. Distinct from `note`,
-  // which stays inside the workspace that wrote it.
+  // RETIRED 2026-07-31 — comments moved to their own entity (TicketMessage) so
+  // the discussion stops being buried in the audit log. Postgres cannot drop an
+  // enum value, and the migrated rows are kept (see TicketAttachment.eventId),
+  // so this stays; `listTicketEvents` excludes it and nothing writes it.
   escalation_note
   // Retired (2026-07-30, the twin-pair design): a shared ticket has ONE status,
   // so a status change is a plain `status_changed` row on it. Kept because
@@ -3684,8 +3690,11 @@ model Ticket {
   // Which sibling workspaces have been granted access to THIS ticket (see
   // TicketShare). Empty for the overwhelming majority — a ticket only becomes
   // cross-workspace when someone deliberately escalates it.
-  shares      TicketShare[]
-  attachments TicketAttachment[]
+  shares       TicketShare[]
+  attachments  TicketAttachment[]
+  // The cross-department conversation, and who still has an unread reply on it.
+  threadMessages TicketMessage[]
+  threadUnreads  TicketThreadUnread[]
   // The SLA breach sweeper scans ACROSS workspaces for tickets whose clock has
   // run out and that aren't already flagged. That is a tiny fraction of rows,
   // so it is served by two PARTIAL indexes Prisma cannot express (raw SQL in
@@ -3793,10 +3802,16 @@ model TicketAttachment {
   // read scope — see the note above.
   workspaceId String
   ticketId    String
-  // The timeline entry this file came in with (a comment or note), or null for
-  // a file attached at raise time / directly to the ticket. Cascade: deleting
-  // the event that carried it deletes the file record with it.
+  // RETIRED as a write target (2026-07-31): comments moved from TicketEvent to
+  // TicketMessage, so new comment files carry `messageId` instead. Existing
+  // rows keep it — the migrated events are deliberately NOT deleted, because
+  // this relation is Cascade and dropping them would take the attachment rows
+  // with them, after which the blob-orphan sweeper deletes the customer's
+  // uploaded files 24h later (the failure class §18 records four times).
   eventId     String?
+  // The THREAD message this file came in with — "the screenshot attached to
+  // that reply". Null for a file attached directly to the ticket.
+  messageId   String?
 
   // Canonical R2 key — the authority, same rule as Message.mediaKey. Registered
   // in the blob-orphan sweeper's cross-check (four historical incidents of
@@ -3818,13 +3833,15 @@ model TicketAttachment {
 
   workspace  Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   ticket     Ticket       @relation(fields: [ticketId], references: [id], onDelete: Cascade)
-  event      TicketEvent? @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  event      TicketEvent?   @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  message    TicketMessage? @relation(fields: [messageId], references: [id], onDelete: Cascade)
   uploadedBy User?        @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
 
   // The detail page reads a ticket's files oldest-first; the timeline joins by
   // event.
   @@index([ticketId, createdAt])
   @@index([eventId])
+  @@index([messageId])
   @@index([workspaceId])
   @@index([uploadedById])
 }
@@ -3871,6 +3888,99 @@ model TicketView {
   // apps/api/test/partial-indexes.spec.ts.
   @@index([workspaceId, visibility, position])
   @@index([createdById])
+}
+
+// A message in a ticket's THREAD — the conversation between the departments
+// working one customer's issue.
+//
+// SEPARATE from TicketEvent on purpose, and the separation is what makes both
+// readable. `TicketEvent` is the audit trail: append-only, "who changed what".
+// This is the discussion: "Ali asked, Sara answered". Rendering them in one
+// list — which is what shipping comments as `escalation_note` events did —
+// buries the answer among twenty status flips, and the log's 500-row read cap
+// is SHARED, so on a busy ticket the conversation is what gets pushed out.
+//
+// It also keeps the audit trail honest: read-state, optimistic-send ids and
+// (one day) editing do not belong hanging off an append-only audit row.
+model TicketMessage {
+  id String @id @default(cuid())
+  // The ticket's OWNING workspace — the same convention as TicketEvent: one
+  // thread per ticket, carrying the owner's id however many departments write
+  // in it. Reads reach it through `ticketAccessWhere()` on the parent ticket,
+  // never a bare workspaceId filter.
+  workspaceId String
+  ticketId    String
+  // WHICH department spoke. Nullable only to accept the backfill of comments
+  // written before shares existed.
+  authorWorkspaceId String?
+  authorUserId      String?
+  authorApiKeyId    String?
+  body              String  @db.Text
+  // Optimistic-send idempotency, the same contract as TeamChannelMessage: a
+  // retry of the same (ticket, author, tempId) returns the existing row rather
+  // than posting twice. NULLs are distinct in Postgres, so API-key and
+  // backfilled rows never collide on it.
+  clientTempId String?
+  createdAt    DateTime @default(now())
+
+  workspace       Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ticket          Ticket     @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  // SetNull: the conversation outlives whoever left. The UI renders "Removed
+  // user" the same way the timeline does.
+  author          User?      @relation("TicketMessageAuthor", fields: [authorUserId], references: [id], onDelete: SetNull)
+  authorWorkspace Workspace? @relation("TicketMessageAuthorWorkspace", fields: [authorWorkspaceId], references: [id], onDelete: SetNull)
+  attachments     TicketAttachment[]
+  // The unread markers anchored on this message ("New replies" divider).
+  unreadAnchors   TicketThreadUnread[] @relation("TicketThreadUnreadSince")
+
+  @@unique([ticketId, authorUserId, clientTempId], map: "TicketMessage_send_idem_key")
+  // The thread read: one ticket's messages, oldest first.
+  @@index([ticketId, createdAt])
+  @@index([workspaceId])
+  @@index([authorUserId])
+  @@index([authorWorkspaceId])
+}
+
+// "This person has an unread reply on this ticket."
+//
+// A MARKER row, deliberately not a `lastReadAt` watermark like
+// TeamChannelReadReceipt. A watermark forces the badge query to compare a
+// column on the receipt against a column reachable only through a relation
+// (`lastReadAt < MAX(message.createdAt)`), which Prisma cannot express — so it
+// forces raw SQL, and raw SQL forces a SECOND hand-written copy of
+// "mine OR shared with me". That is exactly what `ticketAccessWhere()` exists
+// to prevent (§18), and three of its four failure modes fail OPEN.
+//
+// The watermark's own justification does not apply here either: it exists
+// because a chat channel has thousands of messages and dozens of members. A
+// ticket thread has 2-6 participants and a handful of replies, so one row per
+// (person, ticket) is cheaper AND exact.
+//
+// Not a denormalization of anything derivable — it IS the state — so §7's
+// "every denormalization needs a reconciler" does not attach and there is
+// deliberately no drift sweeper.
+model TicketThreadUnread {
+  id String @id @default(cuid())
+  // The ticket's OWNING workspace, same convention as above — NOT the
+  // reader's tenant. The reader is `userId`.
+  workspaceId String
+  ticketId    String
+  userId      String
+  // The message that made it unread. Insert is `skipDuplicates`, so a second
+  // reply keeps the FIRST one — the divider sits at the first thing you
+  // missed, not the last.
+  sinceMessageId String
+  createdAt      DateTime @default(now())
+
+  workspace    Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ticket       Ticket        @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sinceMessage TicketMessage @relation("TicketThreadUnreadSince", fields: [sinceMessageId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, ticketId])
+  @@index([ticketId])
+  @@index([workspaceId])
+  @@index([sinceMessageId])
 }
 
 // One SLA commitment per priority. Modelled per-priority rather than as a

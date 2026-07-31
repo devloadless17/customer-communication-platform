@@ -24,7 +24,7 @@ import { TICKET_ACTIVE_STATUSES, TICKET_SOURCES } from "@ccp/shared/tickets/type
  * shape. Same contract as lib/message-flags/queries.ts.
  */
 
-type Db = Pick<PrismaClient, "ticket" | "ticketEvent">;
+type Db = Pick<PrismaClient, "ticket" | "ticketEvent" | "ticketThreadUnread">;
 
 /** Board/list page size. Keyset-paginated, so this is a hard per-request bound. */
 export const TICKET_PAGE = 50;
@@ -41,6 +41,7 @@ export const ATTACHMENT_SELECT_FIELDS = {
   kind: true,
   sizeBytes: true,
   eventId: true,
+  messageId: true,
   uploadedById: true,
   createdAt: true,
   uploadedBy: { select: { name: true } },
@@ -54,6 +55,7 @@ type AttachmentRow = {
   kind: string;
   sizeBytes: number;
   eventId: string | null;
+  messageId: string | null;
   uploadedById: string | null;
   createdAt: Date;
   uploadedBy: { name: string } | null;
@@ -71,6 +73,7 @@ export function mapAttachment(a: AttachmentRow, ticketId: string): TicketAttachm
     sizeBytes: a.sizeBytes,
     url: `/api/tickets/${ticketId}/attachments/${a.id}`,
     eventId: a.eventId,
+    messageId: a.messageId,
     uploadedById: a.uploadedById,
     uploadedByName: a.uploadedBy?.name ?? null,
     workspaceName: a.workspace?.name ?? null,
@@ -353,11 +356,37 @@ export function untriagedWhere(workspaceId: string): Prisma.TicketWhereInput {
   };
 }
 
+/**
+ * Tickets where someone ELSE replied in the thread and this user has not looked.
+ *
+ * One `some` over the marker table — no watermark comparison, so it composes
+ * into the same Prisma `where` as everything else and needs no raw SQL (which
+ * would have meant a second hand-written copy of the access predicate).
+ */
+export function unreadRepliesWhere(viewerUserId: string): Prisma.TicketWhereInput {
+  return { threadUnreads: { some: { userId: viewerUserId } } };
+}
+
+/**
+ * What a RESTRICTED agent (role `agent` + visibility `assigned`) may see on the
+ * board. Wraps the conversation rule and adds the two ways a ticket can be
+ * yours without the conversation being yours.
+ *
+ * The last two arms are load-bearing in the one-ticket model: a ticket
+ * escalated INTO your workspace keeps the OWNER's conversation, assigned to an
+ * agent in the owner's workspace. Matching on the conversation alone therefore
+ * hid every escalated-in ticket from every restricted agent in the receiving
+ * department — an empty board and a zero rail badge on exactly the work that
+ * was handed to them, which is the one case this whole feature exists for.
+ */
 export function ticketVisibilityWhere(viewerUserId: string): Prisma.TicketWhereInput {
   return {
     OR: [
       { conversation: { assignedUserId: viewerUserId } },
-      { conversationId: null, assignedUserId: viewerUserId },
+      // Assigned the WORK, whoever owns the thread it came from.
+      { assignedUserId: viewerUserId },
+      // ...or assigned it on your department's side of a shared ticket.
+      { shares: { some: { assignedUserId: viewerUserId } } },
     ],
   };
 }
@@ -388,6 +417,11 @@ export interface ListTicketsFilters {
   sharedWithUsOnly?: boolean;
   /** Only work nobody in this workspace has claimed yet (either side). */
   untriagedOnly?: boolean;
+  /** Only tickets with a thread reply this viewer has not read. */
+  unreadRepliesFor?: string;
+  /** Whose unread markers to report in the envelope. Absent for an API key —
+   *  read state is per-USER and a key has no user. */
+  viewerUserId?: string;
   /**
    * Agent conversation-visibility boundary: restrict to tickets whose PARENT
    * CONVERSATION is assigned to this user.
@@ -415,7 +449,13 @@ export async function listTickets(
   db: Db,
   workspaceId: string,
   filters: ListTicketsFilters = {},
-): Promise<{ tickets: Ticket[]; nextCursor: { createdAt: string; id: string } | null }> {
+): Promise<{
+  tickets: Ticket[];
+  nextCursor: { createdAt: string; id: string } | null;
+  /** Ids on THIS page with a thread reply the viewer hasn't read. Envelope-only
+   *  — see the comment at the return. */
+  unreadTicketIds: string[];
+}> {
   const limit = Math.min(filters.limit ?? TICKET_PAGE, TICKET_PAGE);
   const and: Prisma.TicketWhereInput[] = [];
 
@@ -469,8 +509,10 @@ export async function listTickets(
         // relation rather than a denormalized copy — and a GUEST workspace has
         // no contact row, which is why the snapshot arm below exists.
         { contact: { name: { contains: q, mode: "insensitive" } } },
-        // The comment/note thread — where the actual discussion is.
+        // The internal notes and the older migrated comments still on the log.
         { events: { some: { body: { contains: q, mode: "insensitive" } } } },
+        // The THREAD — where the cross-department discussion actually is now.
+        { threadMessages: { some: { body: { contains: q, mode: "insensitive" } } } },
         // A shared ticket's customer name for the GUEST, who sees only the
         // frozen snapshot. `string_contains` is case-SENSITIVE (Postgres JSONB
         // has no case-insensitive containment), so this arm is a best-effort
@@ -489,6 +531,7 @@ export async function listTickets(
     and.push({ shares: { some: { guestWorkspaceId: workspaceId } }, workspaceId: { not: workspaceId } });
   }
   if (filters.untriagedOnly) and.push(untriagedWhere(workspaceId));
+  if (filters.unreadRepliesFor) and.push(unreadRepliesWhere(filters.unreadRepliesFor));
   if (filters.restrictToConversationsAssignedTo) {
     and.push(ticketVisibilityWhere(filters.restrictToConversationsAssignedTo));
   }
@@ -516,9 +559,28 @@ export async function listTickets(
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
   const last = hasMore ? page[page.length - 1] : undefined;
+
+  /**
+   * Which of THESE cards have a reply this viewer hasn't read.
+   *
+   * In the list ENVELOPE, never on the `Ticket` DTO: `ticket:changed`
+   * broadcasts one Ticket to a whole workspace room, so a per-user field on it
+   * would be read by everyone as if it were theirs. One indexed query over the
+   * page's ids, not a join.
+   */
+  let unreadTicketIds: string[] = [];
+  if (filters.viewerUserId && page.length > 0) {
+    const marks = await db.ticketThreadUnread.findMany({
+      where: { userId: filters.viewerUserId, ticketId: { in: page.map((t) => t.id) } },
+      select: { ticketId: true },
+    });
+    unreadTicketIds = marks.map((m) => m.ticketId);
+  }
+
   return {
     tickets: page.map((row) => mapTicket(row, workspaceId)),
     nextCursor: last ? { createdAt: last.createdAt.toISOString(), id: last.id } : null,
+    unreadTicketIds,
   };
 }
 
@@ -548,7 +610,16 @@ export async function listTicketEvents(
     // shared ticket every row carries the OWNER's workspaceId, so filtering by
     // the viewer's would hand a guest an empty history for a ticket they can
     // legitimately work.
-    where: { ticketId, ticket: ticketAccessWhere(workspaceId) },
+    //
+    // `escalation_note` is EXCLUDED: comments moved to their own entity
+    // (TicketMessage) so the discussion stops being buried in the audit log.
+    // The migrated rows are deliberately still here — deleting them would
+    // cascade-delete their attachments — but they render in the thread now.
+    where: {
+      ticketId,
+      kind: { not: "escalation_note" },
+      ticket: ticketAccessWhere(workspaceId),
+    },
     orderBy: { createdAt: "desc" },
     take: 500,
     select: TICKET_EVENT_SELECT,
@@ -580,7 +651,8 @@ export async function getTicketCounts(
       ? [ticketVisibilityWhere(restrictToConversationsAssignedTo)]
       : []),
   ];
-  const [byStatusRows, mineActive, breached, untriaged, sharedWithUs] = await Promise.all([
+  const [byStatusRows, mineActive, breached, untriaged, sharedWithUs, unreadReplies] =
+    await Promise.all([
     db.ticket.groupBy({
       by: ["status"],
       where: { AND: scope },
@@ -624,6 +696,11 @@ export async function getTicketCounts(
         ],
       },
     }),
+    // "Someone answered you." ANDed into the same `scope` that already carries
+    // ticketAccessWhere(), so revoking a share drops the ticket out of the
+    // ex-guest's count even though the marker row survives — the gate does the
+    // work, and there is no second copy of the tenancy rule.
+    db.ticket.count({ where: { AND: [...scope, unreadRepliesWhere(viewerUserId)] } }),
   ]);
 
   const byStatus: Partial<Record<TicketStatus, number>> = {};
@@ -634,5 +711,5 @@ export async function getTicketCounts(
     byStatus[row.status] = n;
     if ((TICKET_ACTIVE_STATUSES as readonly string[]).includes(row.status)) totalActive += n;
   }
-  return { totalActive, mineActive, breached, untriaged, sharedWithUs, byStatus };
+  return { totalActive, mineActive, breached, untriaged, sharedWithUs, unreadReplies, byStatus };
 }

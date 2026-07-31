@@ -162,7 +162,7 @@ import {
 } from "@/workspace-settings/whatsapp/whatsapp.schemas";
 import { TicketsService } from "@/tickets/tickets.service";
 import {
-  AddEscalationCommentSchema,
+  PostThreadMessageSchema,
   CreateTicketViewSchema,
   UpdateTicketViewSchema,
   CreateTicketFieldSchema,
@@ -174,7 +174,7 @@ import {
   UpdateTicketFieldSchema,
   UpdateTicketSchema,
   UpsertSlaPolicySchema,
-  type AddEscalationCommentInput,
+  type PostThreadMessageInput,
   type CreateTicketViewInput,
   type UpdateTicketViewInput,
   type CreateTicketFieldInput,
@@ -1389,20 +1389,31 @@ export class ExternalV1Controller {
     return this.tickets.escalate(auth.workspaceId, { apiKeyId: auth.apiKeyId }, id, body);
   }
 
-  /** A comment every workspace with access to the ticket sees (unlike /notes). */
-  @Post("tickets/:id/escalation-comments")
+  /**
+   * Post to a ticket's THREAD — the conversation every workspace with access to
+   * the ticket sees (unlike /notes, which stays in one workspace).
+   */
+  @Post("tickets/:id/thread")
   @RequireScope("write:tickets")
-  async addEscalationCommentV1(
+  async postTicketThreadMessageV1(
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
-    @Body(zBody(AddEscalationCommentSchema)) body: AddEscalationCommentInput,
+    @Body(zBody(PostThreadMessageSchema)) body: PostThreadMessageInput,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
     this.guardChainDepth(xCcpDepth);
-    // No files on the /v1 comment route: a partner posts JSON, and a multipart
-    // API surface for an integration nobody asked for is scope we would have to
-    // keep working. The in-app composer covers files.
-    return this.tickets.addComment(auth.workspaceId, { apiKeyId: auth.apiKeyId }, id, body.body);
+    // JSON only: a partner posts text, and a multipart API surface nobody asked
+    // for is scope we would have to keep working. The in-app composer covers
+    // files. No read route either — read state is per-USER, and an API key has
+    // no user to mark read for.
+    return this.tickets.postThreadMessage(
+      auth.workspaceId,
+      { apiKeyId: auth.apiKeyId },
+      id,
+      body.body,
+      [],
+      body.clientTempId,
+    );
   }
 
   /** Revoke a workspace's access to a shared ticket. */

@@ -83,6 +83,12 @@ export const ListTicketsQuerySchema = z.object({
     .enum(["true", "false"])
     .optional()
     .transform((v) => v === "true"),
+  /** Only tickets somebody replied to YOU on and you haven't read. Per-user,
+   *  so it resolves server-side from the session like `assignee=me`. */
+  unread: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((v) => v === "true"),
   /** Only work nobody in this workspace has claimed yet (either side). */
   untriaged: z
     .enum(["true", "false"])
@@ -246,10 +252,16 @@ export const EscalateTicketSchema = z.object({
 });
 export type EscalateTicketInput = z.infer<typeof EscalateTicketSchema>;
 
-/** A comment on the ticket — every workspace with access sees it, unlike an
- *  internal note. Sent as multipart when it carries files, so the body arrives
- *  as a form field. */
-export const AddEscalationCommentSchema = z.object({
+/**
+ * A message in the ticket's THREAD — every workspace with access sees it,
+ * unlike an internal note. Sent as multipart when it carries files, so the body
+ * arrives as a form field.
+ *
+ * `clientTempId` is the optimistic-send token: the same one twice returns the
+ * message that already landed instead of posting a duplicate.
+ */
+export const PostThreadMessageSchema = z.object({
   body: z.string().trim().min(1).max(5000),
+  clientTempId: z.string().trim().min(1).max(80).optional(),
 });
-export type AddEscalationCommentInput = z.infer<typeof AddEscalationCommentSchema>;
+export type PostThreadMessageInput = z.infer<typeof PostThreadMessageSchema>;

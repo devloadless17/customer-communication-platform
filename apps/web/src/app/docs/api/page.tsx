@@ -1812,25 +1812,32 @@ export default function ApiDocsPage() {
           private. Any workspace with access may escalate onward to a third.{" "}
           <code>cause</code> is required — it fills the ticket&apos;s cause when it has none
           yet, and the cause is <strong>written once</strong> (later writes return{" "}
-          <code>400 cause_immutable</code>; use comments instead).{" "}
-          <code>409 already_shared</code> when that workspace already has access.
-          Optional <code>subject</code> overrides the twin&apos;s title. One escalation per
-          ticket lifetime (<code>409 already_escalated</code>); an escalation target cannot
-          be escalated onward (<code>400 cannot_escalate_escalated_ticket</code>). Fires{" "}
-          <code>ticket.changed</code> with <code>action: &quot;escalated&quot;</code> on the
-          source. Scope <code>write:tickets</code>.
+          <code>400 cause_immutable</code>; updates travel in the thread instead).{" "}
+          <code>409 already_shared</code> when that workspace already has access, and{" "}
+          <code>404</code> for a target outside your organization — a cross-org id answers
+          exactly like one that doesn&apos;t exist. Fires <code>ticket.changed</code> with{" "}
+          <code>action: &quot;escalated&quot;</code>. Scope <code>write:tickets</code>.
         </Endpoint>
         <Endpoint
           method="POST"
-          path="/api/external/v1/tickets/:id/escalation-comments"
-          body={{ body: "Refund approved — tell them it lands in 3–5 business days." }}
+          path="/api/external/v1/tickets/:id/thread"
+          body={{
+            body: "Refund approved — tell them it lands in 3–5 business days.",
+            clientTempId: "optional — send the same one to retry safely",
+          }}
         >
-          A comment <strong>every workspace with access to the ticket sees</strong> — the
-          conversation between the departments, unlike <code>/notes</code>, which stays
-          private to one workspace. Like a note it is not a ticket update: no{" "}
-          <code>version</code> bump, no SLA movement. In-app this route also accepts
-          multipart with a <code>files</code> field so a reply can carry its evidence; over{" "}
-          <code>/v1</code> it is JSON-only. Scope <code>write:tickets</code>.
+          Post to the ticket&apos;s <strong>thread</strong> — the conversation{" "}
+          <strong>every workspace with access to the ticket sees</strong>, unlike{" "}
+          <code>/notes</code>, which stays private to one workspace. Not a ticket update:
+          no <code>version</code> bump, no SLA movement, and it fires{" "}
+          <code>ticket.thread_message_created</code> rather than{" "}
+          <code>ticket.changed</code>. Returns <code>{"{ message }"}</code>. Sending the
+          same <code>clientTempId</code> twice returns the message that already landed
+          instead of posting a duplicate, and notifies nobody a second time. In-app this
+          route also accepts multipart with a <code>files</code> field so a reply can carry
+          its evidence; over <code>/v1</code> it is JSON-only. There is no read-marking
+          route here — unread is per-USER and an API key has no user. Scope{" "}
+          <code>write:tickets</code>.
         </Endpoint>
         <Endpoint
           method="POST"
@@ -1843,7 +1850,7 @@ export default function ApiDocsPage() {
           message them from your own number, and the owner&apos;s thread is untouched.
           Returns <code>{"{ ticket, conversationId }"}</code>.{" "}
           <code>400 no_phone_in_snapshot</code> when the customer&apos;s original channel
-          identity has no phone (answer with a comment instead);{" "}
+          identity has no phone (answer in the thread instead);{" "}
           <code>400 not_a_guest</code> when the ticket is already yours. Scope{" "}
           <code>write:tickets</code>.
         </Endpoint>

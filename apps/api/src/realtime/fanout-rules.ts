@@ -222,6 +222,40 @@ export const FANOUT_RULES: FanoutRuleMap = {
     }
   },
 
+  /**
+   * A reply in a ticket's THREAD.
+   *
+   * Same audience and derivation as `ticket.changed` — the owner's workspace
+   * room plus every workspace the ticket is shared with, read off the event
+   * (never re-queried) — because a shared ticket is one row several
+   * departments work, and that audience is exactly who may already read it.
+   *
+   * The frame carries `notifiedUserIds` so a client can tell "someone replied
+   * somewhere" from "someone replied to YOU": the first patches an open thread,
+   * the second also refreshes the badge and raises a toast. Without it every
+   * connected client in both workspaces would refetch its counts on every reply.
+   */
+  "ticket.thread_message_created": (e, emitter) => {
+    const frame = {
+      workspaceId: e.workspaceId,
+      ticketId: e.ticketId,
+      ticketNumber: e.ticketNumber,
+      message: e.message,
+      notifiedUserIds: e.notifiedUserIds,
+      ...(e.message.clientTempId ? { clientTempId: e.message.clientTempId } : {}),
+    };
+    emitter.emitToWorkspace(e.workspaceId, "ticket:thread:message", frame);
+    for (const guestWorkspaceId of new Set(e.sharedWithWorkspaceIds ?? [])) {
+      if (guestWorkspaceId === e.workspaceId) continue;
+      emitter.emitToWorkspace(guestWorkspaceId, "ticket:thread:message", {
+        ...frame,
+        // Named for the RECEIVING workspace: the client filters frames by its
+        // own active workspace, same rule as `ticket:changed`.
+        workspaceId: guestWorkspaceId,
+      });
+    }
+  },
+
   "message.flag_changed": (e, emitter) => {
     emitter.emitAboutConversation(e.workspaceId,
       e.conversationId, "message:flag", {

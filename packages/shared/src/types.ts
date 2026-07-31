@@ -22,6 +22,7 @@ export type {
   TicketSource,
   TicketStatus,
   TicketTag,
+  TicketThreadMessage,
 } from "./tickets/types";
 import type { AvailabilitySource, WorkHours, WorkHoursMode } from "./work-hours";
 

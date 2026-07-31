@@ -112,8 +112,8 @@ function useInboxUnread(): number {
  * `untriagedWhere`). Same authoritative-seed + debounce-refetch +
  * reconnect-reseed shape as useInboxUnread.
  */
-function useNewTickets(): number {
-  const [count, setCount] = useState(0);
+function useNewTickets(): { count: number; replied: boolean } {
+  const [state, setState] = useState({ count: 0, replied: false });
   useEffect(() => {
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -121,9 +121,16 @@ function useNewTickets(): number {
       try {
         const res = await apiFetch("/api/tickets/counts");
         if (!res.ok) return;
-        const json = (await res.json()) as { counts?: { untriaged?: unknown } };
+        const json = (await res.json()) as {
+          counts?: { untriaged?: unknown; unreadReplies?: unknown };
+        };
         const n = json.counts?.untriaged;
-        if (alive && typeof n === "number") setCount(n);
+        const replies = json.counts?.unreadReplies;
+        if (!alive) return;
+        setState({
+          count: typeof n === "number" ? n : 0,
+          replied: typeof replies === "number" && replies > 0,
+        });
       } catch {
         // nav badge is best-effort — ignore transient fetch failures
       }
@@ -135,15 +142,21 @@ function useNewTickets(): number {
     void refetch();
     const socket = getClientSocket();
     socket.on("ticket:changed", debounced);
+    // A reply changes no ticket state, so it never fires `ticket:changed` —
+    // without these two the dot would only appear on the next unrelated write.
+    socket.on("ticket:thread:message", debounced);
+    socket.on("ticket:thread:read", debounced);
     socket.on("connect", debounced);
     return () => {
       alive = false;
       if (timer) clearTimeout(timer);
       socket.off("ticket:changed", debounced);
+      socket.off("ticket:thread:message", debounced);
+      socket.off("ticket:thread:read", debounced);
       socket.off("connect", debounced);
     };
   }, []);
-  return count;
+  return state;
 }
 
 /**
@@ -479,9 +492,10 @@ export function AppRail({
                 : item.href === "/team"
                   ? teamMentions
                   : item.href === "/tickets"
-                    ? newTickets
+                    ? newTickets.count
                     : 0
             }
+            dot={item.href === "/tickets" && newTickets.replied}
           />
         ))}
       </nav>
@@ -602,6 +616,7 @@ function RailLink({
   collapsed,
   showLabels,
   badge = 0,
+  dot = false,
 }: {
   item: RailItem;
   pathname: string;
@@ -609,6 +624,12 @@ function RailLink({
   showLabels: boolean;
   /** Unread count to surface as a small pill (Inbox only today). 0 = hidden. */
   badge?: number;
+  /**
+   * A separate, countless signal alongside the pill — "somebody replied to
+   * you". Not summed into `badge`: new work and an answer you are waiting on
+   * are different things, and one ticket can be both.
+   */
+  dot?: boolean;
 }) {
   const { href, label, icon: Icon, match } = item;
   const matchAll = useMemo(() => [href, ...(match ?? [])], [href, match]);
@@ -617,6 +638,8 @@ function RailLink({
   );
   const hasBadge = badge > 0;
   const badgeText = badge > 99 ? "99+" : String(badge);
+  // Sits where the pill would if there were no count, so the two never overlap.
+  const dotClass = hasBadge ? "-left-1 -top-1" : "-right-1 -top-1";
 
   const link = (
     <Link
@@ -629,7 +652,9 @@ function RailLink({
           : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
       )}
       aria-current={active ? "page" : undefined}
-      aria-label={hasBadge ? `${label} (${badge} unread)` : label}
+      aria-label={[label, hasBadge ? `${badge} unread` : null, dot ? "new replies" : null]
+        .filter(Boolean)
+        .join(" — ")}
     >
       <span className="relative shrink-0">
         <Icon className="size-4.5" />
@@ -641,6 +666,14 @@ function RailLink({
             {badgeText}
           </span>
         )}
+        {dot && collapsed && (
+          <span
+            className={cn(
+              "absolute size-2 rounded-full bg-sky-500 ring-2 ring-sidebar",
+              dotClass,
+            )}
+          />
+        )}
       </span>
       {showLabels && (
         <span
@@ -651,9 +684,14 @@ function RailLink({
         </span>
       )}
       {/* Expanded: the count sits at the row's right edge, past the label. */}
-      {hasBadge && showLabels && (
-        <span className="ml-auto flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1.5 text-2xs font-semibold leading-none text-primary-foreground">
-          {badgeText}
+      {(hasBadge || dot) && showLabels && (
+        <span className="ml-auto flex items-center gap-1">
+          {dot && <span className="size-2 rounded-full bg-sky-500" />}
+          {hasBadge && (
+            <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1.5 text-2xs font-semibold leading-none text-primary-foreground">
+              {badgeText}
+            </span>
+          )}
         </span>
       )}
       {/* Active indicator — a bolder bar pinned to the inner left edge of the

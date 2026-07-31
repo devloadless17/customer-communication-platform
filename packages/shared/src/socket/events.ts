@@ -21,6 +21,7 @@ import type {
   MessageStatus,
   Ticket,
   TicketStatus,
+  TicketThreadMessage,
   User,
   UserAvailabilityStatus,
 } from "../types";
@@ -205,6 +206,47 @@ export interface ServerToClientEvents {
     previousStatus: TicketStatus | null;
     breachedLeg?: "first_response" | "resolution";
     openTicketCount: number;
+  }) => void;
+
+  /**
+   * Someone replied in a ticket's THREAD — the conversation between the
+   * departments working the issue.
+   *
+   * WORKSPACE-room scoped like `ticket:changed`, and to the owner's room PLUS
+   * every workspace the ticket is shared with: a shared ticket is one row that
+   * several departments work, and the audience is exactly who may already read
+   * it. Human cadence (a handful of replies per ticket per day), so the team
+   * frame costs nothing.
+   *
+   * `notifiedUserIds` is the badge/toast gate — the users whose unread marker
+   * this reply just created (never the author). Without it every connected
+   * client in both workspaces would refetch its ticket counts on every reply,
+   * the same role `mentionedUserIds` plays on `team:channel:activity`.
+   */
+  "ticket:thread:message": (payload: {
+    /** Named for the RECEIVING workspace, like `ticket:changed`. */
+    workspaceId: string;
+    ticketId: string;
+    /** So a toast can name "#42" without a follow-up fetch. */
+    ticketNumber: number;
+    message: TicketThreadMessage;
+    notifiedUserIds: string[];
+    /** Echoed so the sender's own tabs swap their optimistic row. */
+    clientTempId?: string;
+  }) => void;
+
+  /**
+   * A reader cleared their unread marker on a ticket thread.
+   *
+   * LOCALLY DISPATCHED, never emitted by the server — the reading tab fires it
+   * at itself (`dispatchLocalSocketEvent`) so its own badge drops instantly,
+   * the same discipline the inbox uses for read state. A second tab converges
+   * on the next frame or on reconnect, both of which re-seed from the server.
+   */
+  "ticket:thread:read": (payload: {
+    workspaceId: string;
+    ticketId: string;
+    readByUserId: string;
   }) => void;
 
   /**

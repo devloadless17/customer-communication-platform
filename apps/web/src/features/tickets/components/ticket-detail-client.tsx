@@ -10,10 +10,10 @@ import {
   Clock,
   Loader2,
   MessageSquare,
+  MessagesSquare,
   Paperclip,
   Trash2,
   Users,
-  X,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -23,7 +23,7 @@ import { Input } from "@/components/ui/input";
 import { LocalTime } from "@/components/local-time";
 import { ChannelBadge } from "@/features/inbox/components/channel-badge";
 import { apiFetch } from "@/lib/api/client-fetch";
-import { getClientSocket } from "@/lib/socket-client";
+import { dispatchLocalSocketEvent, getClientSocket } from "@/lib/socket-client";
 import { toast } from "@/lib/toast";
 import { cn } from "@ccp/shared/utils";
 import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
@@ -36,7 +36,12 @@ import {
   type TicketEvent,
   type TicketPriority,
   type TicketStatus,
+  type TicketThreadMessage,
 } from "@ccp/shared/tickets/types";
+
+import { TicketAttachmentRow } from "./ticket-attachment-row";
+import { TicketThread } from "./ticket-thread";
+import { TicketThreadComposer } from "./ticket-thread-composer";
 
 /**
  * The ticket detail.
@@ -89,6 +94,8 @@ const EVENT_LABELS: Record<string, string> = {
   note: "left a note",
   escalated: "gave another workspace access",
   escalation_revoked: "removed a workspace's access",
+  // RETIRED 2026-07-31 — comments became TicketMessage rows and are excluded
+  // from the log. Kept for pre-migration rows nothing rewrites.
   escalation_note: "commented",
   attachment_added: "attached a file",
   attachment_removed: "removed a file",
@@ -97,6 +104,10 @@ const EVENT_LABELS: Record<string, string> = {
   escalation_status: "changed the status in the other workspace",
   escalation_severed: "the linked ticket was deleted",
 };
+
+/** A ticket-level file: one that isn't already rendering inside a thread
+ *  message or a migrated log entry, where it would show twice. */
+const isTicketLevel = (a: TicketAttachment) => !a.eventId && !a.messageId;
 
 /** A string field off an event's before/after JSON, or null. */
 function eventStr(v: Record<string, unknown> | null | undefined, key: string): string | null {
@@ -107,6 +118,10 @@ function eventStr(v: Record<string, unknown> | null | undefined, key: string): s
 export function TicketDetailClient({
   ticket: seed,
   events: seedEvents,
+  thread: seedThread,
+  threadUnreadSinceMessageId: seedUnread,
+  viewerUserId,
+  viewerWorkspaceId,
   users,
   tags,
   teams,
@@ -115,6 +130,14 @@ export function TicketDetailClient({
 }: {
   ticket: Ticket;
   events: TicketEvent[];
+  /** The cross-department conversation, oldest first. */
+  thread: TicketThreadMessage[];
+  /** Where this reader's "New replies" divider goes, or null. */
+  threadUnreadSinceMessageId: string | null;
+  viewerUserId: string;
+  /** The workspace being VIEWED from — a guest department reads the same
+   *  ticket from its own side, so this is not `ticket.sharing.ownerWorkspaceId`. */
+  viewerWorkspaceId: string;
   users: User[];
   tags: Tag[];
   /** Teams (AssignmentPolicy) this ticket can be handed to. */
@@ -127,6 +150,10 @@ export function TicketDetailClient({
   const router = useRouter();
   const [ticket, setTicket] = useState(seed);
   const [events, setEvents] = useState(seedEvents);
+  const [thread, setThread] = useState(seedThread);
+  // Frozen at mount: the divider must stay put while you read the messages
+  // under it, so the server's clear (below) must not make it jump away.
+  const [unreadAnchor] = useState(seedUnread);
   const [busy, setBusy] = useState(false);
   const [subject, setSubject] = useState(seed.subject ?? "");
   // The cause — why this ticket exists. Seeded once and saved on blur when it
@@ -143,9 +170,7 @@ export function TicketDetailClient({
   // cause is required — it is everything the receiving workspace gets.
   const [escTargetId, setEscTargetId] = useState<string>("");
   const [escCause, setEscCause] = useState("");
-  const [escComment, setEscComment] = useState("");
   // Files picked for the next comment, and for direct ticket attachment.
-  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const { confirm, confirmDialog } = useConfirm();
 
   async function removeTicket() {
@@ -178,9 +203,16 @@ export function TicketDetailClient({
     async (opts: { eventsOnly?: boolean } = {}) => {
       const res = await apiFetch(`/api/tickets/${seed.id}`);
       if (!res.ok) return;
-      const body = (await res.json()) as { ticket: Ticket; events: TicketEvent[] };
+      const body = (await res.json()) as {
+        ticket: Ticket;
+        events: TicketEvent[];
+        thread: TicketThreadMessage[];
+      };
       if (!opts.eventsOnly) setTicket(body.ticket);
       setEvents(body.events);
+      // The thread rides every reload: an optimistic row that lost its response
+      // is reconciled here rather than left pending forever.
+      setThread(body.thread);
     },
     [seed.id],
   );
@@ -214,6 +246,67 @@ export function TicketDetailClient({
       socket.off("ticket:changed", onTicket);
     };
   }, [seed.id, router, reload]);
+
+  /**
+   * Live replies, and clearing this reader's unread marker.
+   *
+   * Marking read is gated on the tab actually being VISIBLE (§10): a reply that
+   * arrives while this page sits in a background tab must not clear a badge for
+   * something nobody looked at. So: on mount, whenever the tab becomes visible,
+   * and on each arriving reply while visible.
+   */
+  useEffect(() => {
+    const socket = getClientSocket();
+    let cleared = false;
+
+    const markRead = async () => {
+      if (document.visibilityState !== "visible") return;
+      // Nothing to clear until a reply we haven't read exists — a POST per
+      // visibility flip on a quiet ticket is pure noise.
+      if (cleared) return;
+      cleared = true;
+      await apiFetch(`/api/tickets/${seed.id}/thread/read`, { method: "POST" }).catch(
+        () => undefined,
+      );
+      // Dispatched at ourselves so the rail badge and the board drop it now.
+      // The server never emits this frame: read state is per-user, and one
+      // reader's clear is nobody else's business.
+      dispatchLocalSocketEvent("ticket:thread:read", {
+        workspaceId: viewerWorkspaceId,
+        ticketId: seed.id,
+        readByUserId: viewerUserId,
+      });
+    };
+
+    const onMessage = (payload: {
+      ticketId: string;
+      message: TicketThreadMessage;
+      clientTempId?: string;
+    }) => {
+      if (payload.ticketId !== seed.id) return;
+      setThread((prev) => {
+        // Already here — our own POST response beat the frame, or the frame
+        // arrived twice. Either way the id is the identity.
+        if (prev.some((m) => m.id === payload.message.id)) return prev;
+        const without = payload.clientTempId
+          ? prev.filter((m) => m.clientTempId !== payload.clientTempId)
+          : prev;
+        return [...without, payload.message];
+      });
+      // Reading it as it lands is exactly the case the marker exists for.
+      cleared = false;
+      void markRead();
+    };
+
+    const onVisible = () => void markRead();
+    socket.on("ticket:thread:message", onMessage);
+    document.addEventListener("visibilitychange", onVisible);
+    if (seedUnread) void markRead();
+    return () => {
+      socket.off("ticket:thread:message", onMessage);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [seed.id, viewerWorkspaceId, seedUnread, viewerUserId]);
 
   const patch = async (body: Record<string, unknown>) => {
     setBusy(true);
@@ -290,32 +383,64 @@ export function TicketDetailClient({
   };
 
   /**
-   * Comment on the ticket. On a shared ticket everyone with access sees it.
-   * Sent as multipart so a reply can carry its evidence — the files are filed
-   * against the comment and render with it.
+   * Post to the ticket's THREAD — the conversation every workspace on the
+   * ticket reads. Optimistic: the row lands immediately under a `clientTempId`
+   * and is swapped for the server's, which is what makes a retry safe (the
+   * same token twice returns the message that already landed instead of
+   * posting a second one).
+   *
+   * Deliberately NOT `setBusy` — busy disables the whole page, and a reply
+   * changes nothing about the work. Sent as multipart so it can carry evidence.
    */
-  const addComment = async (body: string, files: File[]) => {
-    setBusy(true);
-    try {
-      const form = new FormData();
-      form.append("body", body);
-      for (const f of files) form.append("files", f);
-      // No content-type header: the browser must set the multipart boundary.
-      const res = await apiFetch(`/api/tickets/${ticket.id}/escalation-comments`, {
-        method: "POST",
-        body: form,
-      });
-      if (!res.ok) {
-        const d = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
-        throw new Error(d.detail || d.error || "Couldn't post the comment");
+  const postThreadMessage = useCallback(
+    async (body: string, files: File[], reuseTempId?: string) => {
+      const clientTempId = reuseTempId ?? `tmp_${Math.random().toString(36).slice(2)}_${Date.now()}`;
+      const optimistic: TicketThreadMessage = {
+        id: clientTempId,
+        body,
+        authorUserId: viewerUserId,
+        authorName: null,
+        authorAvatarUrl: null,
+        authorWorkspaceId: null,
+        authorWorkspaceName: null,
+        attachments: [],
+        createdAt: new Date().toISOString(),
+        clientTempId,
+        pending: true,
+      };
+      setThread((prev) => [
+        // A retry re-sends an existing failed row rather than adding a twin.
+        ...prev.filter((m) => m.clientTempId !== clientTempId),
+        optimistic,
+      ]);
+      try {
+        const form = new FormData();
+        form.append("body", body);
+        form.append("clientTempId", clientTempId);
+        for (const f of files) form.append("files", f);
+        // No content-type header: the browser must set the multipart boundary.
+        const res = await apiFetch(`/api/tickets/${seed.id}/thread`, { method: "POST", body: form });
+        if (!res.ok) throw new Error("send failed");
+        const data = (await res.json()) as { message: TicketThreadMessage };
+        setThread((prev) => {
+          // The realtime frame can beat this response back — dedupe on the id
+          // rather than blindly swapping, or the reply renders twice.
+          const without = prev.filter(
+            (m) => m.clientTempId !== clientTempId && m.id !== data.message.id,
+          );
+          return [...without, data.message];
+        });
+      } catch {
+        setThread((prev) =>
+          prev.map((m) =>
+            m.clientTempId === clientTempId ? { ...m, pending: false, failed: true } : m,
+          ),
+        );
+        toast.error("Couldn't send that — tap Retry");
       }
-      await reload();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Couldn't post the comment");
-    } finally {
-      setBusy(false);
-    }
-  };
+    },
+    [seed.id, viewerUserId],
+  );
 
   /** Attach files to the ticket itself (no comment). */
   const attachFiles = async (files: File[]) => {
@@ -407,6 +532,14 @@ export function TicketDetailClient({
   };
 
   const breached = ticket.sla.firstResponseBreached || ticket.sla.resolutionBreached;
+
+  /** Who reads the thread. Empty on an unshared ticket — nobody outside this
+   *  workspace has access, so promising an audience would be a lie. */
+  const threadAudience = ticket.sharing
+    ? ticket.sharing.role === "owner"
+      ? ticket.sharing.guests.map((g) => g.workspaceName).join(", ")
+      : ticket.sharing.ownerWorkspaceName
+    : "";
 
   return (
     // Two tracks on desktop: the WORK (fields, handoffs, escalation, notes)
@@ -529,7 +662,42 @@ export function TicketDetailClient({
       </div>
 
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
-        <div className="flex min-w-0 flex-1 flex-col gap-4">
+        {/* THE THREAD — the main pane. This is where the departments working
+            this ticket talk to each other; the log is a secondary at the
+            bottom of the rail, because "who changed what" is a different
+            question from "what did Billing say". */}
+        <div className="flex min-w-0 flex-1 flex-col gap-3">
+          <section className="flex min-h-0 flex-col rounded-xl border bg-card p-4">
+            <div className="mb-2 flex items-baseline gap-2">
+              <h2 className="flex items-center gap-1.5 text-sm font-semibold">
+                <MessagesSquare aria-hidden className="size-4" />
+                Thread
+              </h2>
+              <p className="text-2xs text-muted-foreground">
+                {ticket.sharing
+                  ? "Everyone working this ticket sees these — the customer never does."
+                  : "Internal discussion on this ticket. The customer never sees it."}
+              </p>
+            </div>
+            <div className="min-h-0 flex-1 lg:max-h-[calc(100dvh-24rem)] lg:overflow-y-auto">
+              <TicketThread
+                messages={thread}
+                busy={busy}
+                unreadSinceMessageId={unreadAnchor}
+                audience={threadAudience}
+                onRetry={(m) => void postThreadMessage(m.body, [], m.clientTempId)}
+              />
+            </div>
+          </section>
+          <TicketThreadComposer
+            busy={busy}
+            audience={threadAudience}
+            onSubmit={(body, files) => void postThreadMessage(body, files)}
+          />
+        </div>
+
+        {/* The WORK: everything you decide about this ticket, plus the log. */}
+        <aside className="flex w-full shrink-0 flex-col gap-4 lg:w-96">
 
       <section className="grid gap-3 rounded-xl border bg-card p-4 sm:grid-cols-2">
         <Field label="Status">
@@ -822,25 +990,6 @@ export function TicketDetailClient({
             </details>
           ) : null}
 
-          <CommentComposer
-            busy={busy}
-            audience={
-              ticket.sharing.role === "owner"
-                ? ticket.sharing.guests.map((g) => g.workspaceName).join(", ")
-                : ticket.sharing.ownerWorkspaceName
-            }
-            value={escComment}
-            onChange={setEscComment}
-            files={pendingFiles}
-            onFiles={setPendingFiles}
-            onSubmit={() => {
-              const body = escComment.trim();
-              const files = pendingFiles;
-              setEscComment("");
-              setPendingFiles([]);
-              void addComment(body, files);
-            }}
-          />
         </section>
       ) : escalationTargets.length > 0 ? (
         <section className="rounded-xl border bg-card p-4">
@@ -899,9 +1048,10 @@ export function TicketDetailClient({
         </section>
       ) : null}
 
-      {/* Files. Ticket-level attachments (a comment's files render with the
-          comment, in the history). Every party to a shared ticket sees them —
-          the ticket is meant to carry the whole issue. */}
+      {/* Files on the TICKET itself. A file posted in the thread renders with
+          the message that explains it, so it is excluded here rather than
+          listed twice. Every party to a shared ticket sees all of them — the
+          ticket is meant to carry the whole issue. */}
       <section className="rounded-xl border bg-card p-4">
         <h2 className="mb-1 text-sm font-semibold">Files</h2>
         <p className="mb-2 text-2xs text-muted-foreground">
@@ -909,12 +1059,12 @@ export function TicketDetailClient({
             ? "Visible to every workspace working this ticket."
             : "Screenshots, invoices, forms — whatever the issue needs."}
         </p>
-        {ticket.attachments.filter((a) => !a.eventId).length > 0 ? (
+        {ticket.attachments.filter(isTicketLevel).length > 0 ? (
           <ul className="mb-2 flex flex-col gap-1.5">
             {ticket.attachments
-              .filter((a) => !a.eventId)
+              .filter(isTicketLevel)
               .map((a) => (
-                <AttachmentRow
+                <TicketAttachmentRow
                   key={a.id}
                   attachment={a}
                   busy={busy}
@@ -1007,14 +1157,16 @@ export function TicketDetailClient({
         </button>
       </section>
 
-        </div>
-
-        {/* The history rail. Sticky beside the work on desktop; a long
-            timeline scrolls INSIDE the rail rather than pushing the page. */}
-        <aside className="w-full shrink-0 lg:sticky lg:top-0 lg:w-80">
-      <section className="flex flex-col rounded-xl border bg-card p-4 lg:max-h-[calc(100dvh-7rem)]">
-        <h2 className="mb-2 text-sm font-semibold">History</h2>
-        <ol className="flex min-h-0 flex-col gap-2 lg:overflow-y-auto">
+      {/* The audit log. COLLAPSED by default: it answers "who changed what",
+          which you go looking for — unlike the thread, which you read. */}
+      <details className="rounded-xl border bg-card p-4">
+        <summary className="cursor-pointer text-sm font-semibold">
+          History
+          <span className="ml-1.5 font-normal text-2xs text-muted-foreground">
+            {events.length}
+          </span>
+        </summary>
+        <ol className="mt-2 flex max-h-96 flex-col gap-2 overflow-y-auto">
           {events.map((e) => (
             <li key={e.id} className="flex flex-wrap items-baseline gap-x-2 text-2xs">
               <span className="text-muted-foreground">
@@ -1076,7 +1228,7 @@ export function TicketDetailClient({
               {e.attachments && e.attachments.length > 0 ? (
                 <ul className="mt-1 flex basis-full flex-col gap-1">
                   {e.attachments.map((a) => (
-                    <AttachmentRow key={a.id} attachment={a} busy={busy} />
+                    <TicketAttachmentRow key={a.id} attachment={a} busy={busy} />
                   ))}
                 </ul>
               ) : null}
@@ -1086,7 +1238,7 @@ export function TicketDetailClient({
             <li className="text-2xs text-muted-foreground">Nothing yet.</li>
           )}
         </ol>
-      </section>
+      </details>
         </aside>
       </div>
 
@@ -1099,58 +1251,6 @@ export function TicketDetailClient({
       {confirmDialog}
     </div>
   );
-}
-
-/** One attachment row: open it, or (when removable) drop it. */
-function AttachmentRow({
-  attachment,
-  busy,
-  onRemove,
-}: {
-  attachment: TicketAttachment;
-  busy: boolean;
-  onRemove?: () => void;
-}) {
-  return (
-    <li className="flex items-center gap-2 rounded-md border bg-background px-2 py-1 text-2xs">
-      <Paperclip aria-hidden className="size-3 shrink-0 text-muted-foreground" />
-      <a
-        href={attachment.url}
-        target="_blank"
-        rel="noreferrer"
-        className="min-w-0 flex-1 truncate hover:underline"
-      >
-        {attachment.filename}
-      </a>
-      <span className="shrink-0 text-3xs text-muted-foreground">
-        {formatBytes(attachment.sizeBytes)}
-        {attachment.workspaceName ? ` · ${attachment.workspaceName}` : ""}
-      </span>
-      <a
-        href={`${attachment.url}?download=1`}
-        className="shrink-0 text-3xs text-muted-foreground hover:text-foreground"
-      >
-        Download
-      </a>
-      {onRemove ? (
-        <button
-          type="button"
-          disabled={busy}
-          onClick={onRemove}
-          aria-label={`Remove ${attachment.filename}`}
-          className="shrink-0 cursor-pointer text-muted-foreground hover:text-destructive disabled:opacity-50"
-        >
-          <X aria-hidden className="size-3" />
-        </button>
-      ) : null}
-    </li>
-  );
-}
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /**
@@ -1187,82 +1287,6 @@ function FilePicker({
         }}
       />
     </label>
-  );
-}
-
-/** The cross-department comment box: text plus the files it refers to. */
-function CommentComposer({
-  busy,
-  audience,
-  value,
-  onChange,
-  files,
-  onFiles,
-  onSubmit,
-}: {
-  busy: boolean;
-  audience: string;
-  value: string;
-  onChange: (v: string) => void;
-  files: File[];
-  onFiles: (f: File[]) => void;
-  onSubmit: () => void;
-}) {
-  return (
-    <div className="flex flex-col gap-2">
-      <textarea
-        value={value}
-        disabled={busy}
-        onChange={(e) => onChange(e.target.value)}
-        rows={2}
-        maxLength={5000}
-        placeholder="Reply on this ticket… e.g. Refund approved — tell them it lands in 3–5 business days."
-        className="w-full rounded-md border bg-background px-2 py-1.5 text-xs"
-        aria-label="Comment on this ticket"
-      />
-      {files.length > 0 ? (
-        <ul className="flex flex-col gap-1">
-          {files.map((f, i) => (
-            <li
-              key={`${f.name}-${i}`}
-              className="flex items-center gap-2 rounded-md border bg-background px-2 py-1 text-2xs"
-            >
-              <Paperclip aria-hidden className="size-3 shrink-0 text-muted-foreground" />
-              <span className="min-w-0 flex-1 truncate">{f.name}</span>
-              <span className="shrink-0 text-3xs text-muted-foreground">
-                {formatBytes(f.size)}
-              </span>
-              <button
-                type="button"
-                onClick={() => onFiles(files.filter((_, j) => j !== i))}
-                aria-label={`Remove ${f.name}`}
-                className="shrink-0 cursor-pointer text-muted-foreground hover:text-destructive"
-              >
-                <X aria-hidden className="size-3" />
-              </button>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          disabled={busy || (value.trim().length === 0 && files.length === 0)}
-          onClick={onSubmit}
-          className="h-8 cursor-pointer rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-50"
-        >
-          Post comment
-        </button>
-        <FilePicker
-          busy={busy}
-          label="Attach"
-          onPick={(picked) => onFiles([...files, ...picked])}
-        />
-        {audience ? (
-          <span className="text-3xs text-muted-foreground">Visible to {audience}</span>
-        ) : null}
-      </div>
-    </div>
   );
 }
 

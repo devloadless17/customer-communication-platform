@@ -46,6 +46,7 @@ import type {
   TicketEvent as TicketEventView,
   TicketFieldDefinition,
   TicketSlaPolicy,
+  TicketThreadMessage,
 } from "@ccp/shared/tickets/types";
 
 /**
@@ -243,10 +244,15 @@ export interface OrganizationOverview {
 }
 
 /** One ticket plus its timeline. Throws (→ notFound) when it isn't ours. */
-export async function getTicket(
-  id: string,
-): Promise<{ ticket: TicketView; events: TicketEventView[] }> {
-  return api<{ ticket: TicketView; events: TicketEventView[] }>(`/api/tickets/${id}`);
+export async function getTicket(id: string): Promise<{
+  ticket: TicketView;
+  events: TicketEventView[];
+  /** The cross-department conversation, oldest first. */
+  thread: TicketThreadMessage[];
+  /** Where this reader's "New replies" divider goes, or null. */
+  threadUnreadSinceMessageId: string | null;
+}> {
+  return api(`/api/tickets/${id}`);
 }
 
 /** Which workspace of the caller's org holds this ticket id (access-gated). */

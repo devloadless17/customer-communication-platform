@@ -11,6 +11,7 @@ import type {
   TicketAttachment as TicketAttachmentView,
   TicketCounts,
   TicketEvent,
+  TicketThreadMessage,
   TicketFieldDefinition,
   TicketSlaPolicy,
 } from "@ccp/shared/tickets/types";
@@ -28,7 +29,6 @@ import {
   type TicketOutcome,
 } from "@/lib/tickets/mutations";
 import {
-  addTicketComment,
   bindGuestConversation,
   getGuestSnapshot,
   revokeTicketShare,
@@ -41,6 +41,12 @@ import {
   removeTicketAttachment,
 } from "@/lib/tickets/attachments";
 import { ticketByIdWhere } from "@/lib/tickets/access";
+import {
+  addTicketMessage,
+  getThreadUnreadAnchor,
+  listTicketThread,
+  markThreadRead,
+} from "@/lib/tickets/thread";
 import {
   createTicketView,
   deleteTicketView,
@@ -144,7 +150,13 @@ export class TicketsService {
     viewerUserId: string,
     query: ListTicketsQuery,
     viewer?: ConversationViewer,
-  ): Promise<{ tickets: Ticket[]; nextCursor: { createdAt: string; id: string } | null }> {
+  ): Promise<{
+    tickets: Ticket[];
+    nextCursor: { createdAt: string; id: string } | null;
+    /** Ids on this page with a thread reply the CALLER hasn't read. Always
+     *  empty for an API key — read state is per-user and a key has no user. */
+    unreadTicketIds: string[];
+  }> {
     // `me` → the caller, `none` → unassigned (an explicit null, which the query
     // layer distinguishes from "don't filter"), anything else → that id.
     const assignedUserId =
@@ -181,6 +193,11 @@ export class TicketsService {
       ...(assignedUserId !== undefined ? { assignedUserId } : {}),
       ...(assignedTeamId !== undefined ? { assignedTeamId } : {}),
       ...(restrictedTo ? { restrictToConversationsAssignedTo: restrictedTo } : {}),
+      // Both of these are per-USER, resolved from the session rather than from
+      // client input: an API key has no user, so it gets neither the filter nor
+      // somebody else's badges.
+      ...(query.unread && viewerUserId ? { unreadRepliesFor: viewerUserId } : {}),
+      ...(viewerUserId ? { viewerUserId } : {}),
     });
   }
 
@@ -217,16 +234,33 @@ export class TicketsService {
     );
   }
 
+  /**
+   * One ticket: the work, the THREAD (the cross-department conversation), the
+   * log, and where this reader's "New replies" divider goes. One round-trip —
+   * the page renders all of it at once and a second fetch would just add a
+   * spinner to the surface people came to read.
+   */
   async get(
     workspaceId: string,
     id: string,
     viewer?: ConversationViewer,
-  ): Promise<{ ticket: Ticket; events: TicketEvent[] }> {
+    viewerUserId?: string,
+  ): Promise<{
+    ticket: Ticket;
+    events: TicketEvent[];
+    thread: TicketThreadMessage[];
+    threadUnreadSinceMessageId: string | null;
+  }> {
     await this.assertVisible(viewer, id);
     const ticket = await getTicket(this.db, workspaceId, id);
     if (!ticket) throw new NotFoundException({ error: "ticket_not_found" });
-    const events = await listTicketEvents(this.db, workspaceId, id);
-    return { ticket, events };
+    const [events, thread, anchor] = await Promise.all([
+      listTicketEvents(this.db, workspaceId, id),
+      listTicketThread(this.db, workspaceId, id),
+      // An API key has no reader, so it never has an unread anchor.
+      viewerUserId ? getThreadUnreadAnchor(this.db, id, viewerUserId) : Promise.resolve(null),
+    ]);
+    return { ticket, events, thread, threadUnreadSinceMessageId: anchor };
   }
 
   async create(
@@ -536,38 +570,71 @@ export class TicketsService {
   }
 
   /**
-   * Post a comment on the ticket. On a SHARED ticket every workspace with
-   * access sees it — that is the conversation between the departments.
-   * Optionally carries files, which are filed against the comment so they
-   * render with it.
+   * Post a message to the ticket's THREAD — the conversation between the
+   * departments. Everyone with access to the ticket sees it (an internal
+   * `/notes` entry is the other tool: it stays in the workspace that wrote it).
+   * Files ride along and are filed against the message so they render with it.
    */
-  async addComment(
+  async postThreadMessage(
     workspaceId: string,
     actor: TicketActor,
     id: string,
     body: string,
     files: UploadedFile[] = [],
+    clientTempId?: string,
     viewer?: ConversationViewer,
-  ): Promise<{ ok: true; attachments: TicketAttachmentView[] }> {
+  ): Promise<{ ok: true; message: TicketThreadMessage }> {
     await this.assertVisible(viewer, id);
-    const outcome = await addTicketComment(this.db, {
+    const outcome = await addTicketMessage(this.db, {
       workspaceId,
       ticketId: id,
       actor: { ...actor, workspaceId },
       body,
+      ...(clientTempId ? { clientTempId } : {}),
+      // Filed BEFORE the realtime frame goes out (see the option's docblock),
+      // so every party receives the reply complete with its evidence rather
+      // than text now and files on their next reload.
+      ...(files.length > 0
+        ? { attach: (messageId: string) => this.attachFiles(workspaceId, actor, id, files, messageId) }
+        : {}),
     });
     if (!outcome.ok) {
-      if (outcome.reason === "empty_comment") {
-        throw new BadRequestException({ error: "empty_comment" });
+      if (outcome.reason === "empty_message") {
+        throw new BadRequestException({ error: "empty_message" });
       }
       throw new NotFoundException({ error: outcome.reason });
     }
-    const attachments = await this.attachFiles(workspaceId, actor, id, files, outcome.eventId);
-    return { ok: true, attachments };
+    return { ok: true, message: outcome.message };
   }
 
   /**
-   * Attach files to a ticket (at raise time, or to a comment).
+   * Clear this reader's unread marker on a ticket's thread.
+   *
+   * The CALLER decides "genuinely on screen" (§10: a hidden tab must never
+   * clear a reply nobody saw).
+   *
+   * No server frame is emitted. The reading tab clears its own badge with a
+   * LOCAL `ticket:thread:read` dispatch — the same discipline the inbox uses
+   * for read state ("the list badge clears via a local dispatch, not the
+   * one-shot server frame"), and it avoids injecting the realtime emitter into
+   * a service that otherwise talks only to the bus. Accepted tradeoff: a second
+   * tab keeps its badge until the next frame or reconnect, both of which
+   * re-seed from the server.
+   */
+  async markThreadRead(
+    workspaceId: string,
+    userId: string,
+    id: string,
+    viewer?: ConversationViewer,
+  ): Promise<{ ok: true }> {
+    await this.assertVisible(viewer, id);
+    const outcome = await markThreadRead(this.db, { workspaceId, ticketId: id, userId });
+    if (!outcome.ok) throw new NotFoundException({ error: outcome.reason });
+    return { ok: true };
+  }
+
+  /**
+   * Attach files to a ticket (at raise time, or to a thread message).
    *
    * Partial success is deliberate and reported: a ticket raised with three
    * screenshots where one is a rejected type must not lose the other two, and
@@ -578,7 +645,7 @@ export class TicketsService {
     actor: TicketActor,
     ticketId: string,
     files: UploadedFile[],
-    eventId?: string | null,
+    messageId?: string | null,
   ): Promise<TicketAttachmentView[]> {
     const out: TicketAttachmentView[] = [];
     for (const file of files) {
@@ -586,7 +653,7 @@ export class TicketsService {
         workspaceId,
         ticketId,
         actor: { ...actor, workspaceId },
-        ...(eventId ? { eventId } : {}),
+        ...(messageId ? { messageId } : {}),
         bytes: file.buffer,
         filename: file.originalname,
         mimeType: file.mimetype,

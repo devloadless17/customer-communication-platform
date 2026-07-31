@@ -6,6 +6,7 @@ import {
   AlertTriangle,
   CircleDot,
   Inbox,
+  MessagesSquare,
   PauseCircle,
   Filter,
   Settings2,
@@ -99,10 +100,17 @@ export function TicketsSubSidebar() {
       }, 400);
     };
     socket.on("ticket:changed", onChange);
+    // A thread reply moves no ticket state, so it never fires `ticket:changed`
+    // — without these the "Replied to you" count would only refresh on the next
+    // unrelated write.
+    socket.on("ticket:thread:message", onChange);
+    socket.on("ticket:thread:read", onChange);
     return () => {
       alive = false;
       if (timer) clearTimeout(timer);
       socket.off("ticket:changed", onChange);
+      socket.off("ticket:thread:message", onChange);
+      socket.off("ticket:thread:read", onChange);
     };
   }, []);
 
@@ -134,6 +142,18 @@ export function TicketsSubSidebar() {
           leading={<UserX className="size-4" />}
           active={isView("unassigned", null)}
         />
+        {/* Someone answered YOU. Per-user (unlike every other count here), and
+            rendered only when there is something waiting — an always-on zero is
+            chrome nobody reads. */}
+        {counts?.unreadReplies ? (
+          <SubSidebarItem
+            href="/tickets?view=unread"
+            label="Replied to you"
+            leading={<MessagesSquare className="size-4" />}
+            active={isView("unread", null)}
+            trailing={badge(counts.unreadReplies)}
+          />
+        ) : null}
         {/* Work another department asked us for. Rendered only when there IS
             any — an empty view is clutter for the majority of workspaces that
             never receive an escalation. */}

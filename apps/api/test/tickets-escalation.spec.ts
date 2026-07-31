@@ -19,9 +19,14 @@
  *      customer), leaving the owner's thread untouched.
  *   7. Attachments are visible to every party and gated by the ticket, not the
  *      uploader's workspace.
+ *   8. The THREAD is the cross-department conversation: one message list both
+ *      sides read, author identity resolved ACROSS the workspace boundary, an
+ *      unread marker for every participant except the writer, and NO
+ *      `ticket.changed` — a reply moves no ticket state.
  *
  *   pnpm --filter @ccp/api exec vitest run test/tickets-escalation.spec.ts
  */
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 
 import { PrismaClient } from "@prisma/client";
@@ -30,7 +35,6 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createTicket, deleteTicket, updateTicket } from "@/lib/tickets/mutations";
 import {
-  addTicketComment,
   bindGuestConversation,
   getGuestSnapshot,
   revokeTicketShare,
@@ -42,7 +46,14 @@ import {
   removeTicketAttachment,
 } from "@/lib/tickets/attachments";
 import { getTicket, getTicketCounts, listTickets, listTicketEvents } from "@/lib/tickets/queries";
+import {
+  addTicketMessage,
+  getThreadUnreadAnchor,
+  listTicketThread,
+  markThreadRead,
+} from "@/lib/tickets/thread";
 import { setSharedDb } from "@/lib/db";
+import { subscribe } from "@/lib/events/bus";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
 if (existsSync("../../.env")) process.loadEnvFile("../../.env");
@@ -109,6 +120,33 @@ async function shareWithB(ticketId: string, cause = "Billing must approve the re
   if (!out.ok) throw new Error(`share failed: ${out.reason}`);
   return out;
 }
+
+const tdb = prisma as unknown as Parameters<typeof addTicketMessage>[0];
+
+/** Post to a ticket's thread, failing loudly so a broken test reads as broken. */
+async function say(
+  workspaceId: string,
+  ticketId: string,
+  body: string,
+  actorUserId: string = userId,
+  clientTempId?: string,
+) {
+  const out = await addTicketMessage(tdb, {
+    workspaceId,
+    ticketId,
+    actor: { userId: actorUserId, workspaceId },
+    body,
+    ...(clientTempId ? { clientTempId } : {}),
+  });
+  if (!out.ok) throw new Error(`thread post failed: ${out.reason}`);
+  return out;
+}
+
+const unreadFor = (ticketId: string) =>
+  prisma.ticketThreadUnread.findMany({
+    where: { ticketId },
+    select: { userId: true, sinceMessageId: true },
+  });
 
 const eventsOf = (ticketId: string) =>
   prisma.ticketEvent.findMany({
@@ -360,26 +398,45 @@ describe("one ticket, one truth", () => {
     expect(guestLog.some((e) => e.actorWorkspaceName === `SHR B ${S}`)).toBe(true);
   });
 
-  it("comments are one shared entry, visible to every party", async () => {
+  it("the THREAD is one message list both departments read", async () => {
     const { ticket } = await makeTicket();
     await shareWithB(ticket.id);
-    const posted = await addTicketComment(db, {
-      workspaceId: wsB,
-      ticketId: ticket.id,
-      actor: { userId, workspaceId: wsB },
-      body: "Approved — tell them 3–5 business days.",
-    });
-    expect(posted.ok).toBe(true);
+    await say(wsB, ticket.id, "Approved — tell them 3–5 business days.");
 
-    // ONE row, not one per side.
-    const comments = (await eventsOf(ticket.id)).filter((e) => e.kind === "escalation_note");
-    expect(comments).toHaveLength(1);
-    expect(comments[0].actorWorkspaceId).toBe(wsB);
-    // Both sides read it.
+    // ONE message, not one per side, and it names the department that spoke.
+    for (const ws of [wsA, wsB]) {
+      const thread = await listTicketThread(tdb, ws, ticket.id);
+      expect(thread).toHaveLength(1);
+      expect(thread[0].body).toContain("Approved");
+      expect(thread[0].authorWorkspaceId).toBe(wsB);
+      // Identity is JOINED, so the OWNER can resolve a GUEST author its own
+      // roster has never seen — the whole reason it isn't rendered client-side.
+      expect(thread[0].authorWorkspaceName).toBe(`SHR B ${S}`);
+      expect(thread[0].authorName).toBe("SHR Agent");
+    }
+
+    // ...and it stays OUT of the audit log, which is the point of the split:
+    // you no longer read twenty status flips to find the reply.
     for (const ws of [wsA, wsB]) {
       const log = await listTicketEvents(qdb, ws, ticket.id);
-      expect(log.some((e) => e.body?.includes("Approved"))).toBe(true);
+      expect(log.some((e) => e.body?.includes("Approved"))).toBe(false);
     }
+  });
+
+  it("keeps a workspace with no share out of the thread, both ways", async () => {
+    const { ticket } = await makeTicket();
+    await shareWithB(ticket.id);
+    await say(wsA, ticket.id, "any update?");
+
+    expect(await listTicketThread(tdb, wsC, ticket.id)).toEqual([]);
+    const posted = await addTicketMessage(tdb, {
+      workspaceId: wsC,
+      ticketId: ticket.id,
+      actor: { userId, workspaceId: wsC },
+      body: "sneaking in",
+    });
+    expect(posted).toEqual({ ok: false, reason: "ticket_not_found" });
+    expect(await prisma.ticketMessage.count({ where: { ticketId: ticket.id } })).toBe(1);
   });
 });
 
@@ -593,6 +650,252 @@ describe("a guest's own conversation", () => {
   });
 });
 
+describe("thread notifications", () => {
+  /**
+   * A reply must reach the people who are waiting on it — and NOBODY else.
+   * The four arms exist because each is a real person the old design left in
+   * the dark: the two assignees, the ESCALATOR (who asked the question and is
+   * often neither assignee nor poster), and anyone already in the conversation.
+   */
+  async function makeParticipants() {
+    const escalator = await prisma.user.create({
+      data: {
+        name: "SHR Escalator",
+        email: `shr-esc-${randomUUID()}@example.test`,
+        organizationId: orgId,
+      },
+      select: { id: true },
+    });
+    const guestAssignee = await prisma.user.create({
+      data: {
+        name: "SHR Billing",
+        email: `shr-bill-${randomUUID()}@example.test`,
+        organizationId: orgId,
+      },
+      select: { id: true },
+    });
+    const owner = await prisma.user.create({
+      data: {
+        name: "SHR Owner Agent",
+        email: `shr-own-${randomUUID()}@example.test`,
+        organizationId: orgId,
+      },
+      select: { id: true },
+    });
+    await prisma.workspaceMember.createMany({
+      data: [
+        { userId: escalator.id, workspaceId: wsA, role: "agent" },
+        { userId: guestAssignee.id, workspaceId: wsB, role: "agent" },
+        { userId: owner.id, workspaceId: wsA, role: "agent" },
+      ],
+    });
+    // Every person is FRESH per test: `unreadReplies` counts across the whole
+    // workspace, so reusing the shared agent would let one test's markers
+    // inflate the next one's assertion.
+    return { escalator: escalator.id, guestAssignee: guestAssignee.id, owner: owner.id };
+  }
+
+  it("marks every participant unread except the author", async () => {
+    const { escalator, guestAssignee } = await makeParticipants();
+    const { ticket } = await makeTicket();
+
+    // Arm 1: the owner side's assignee.
+    await updateTicket(mdb, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId, workspaceId: wsA },
+      assignedUserId: userId,
+    });
+    // Arm 3: the ESCALATOR — the share's creator, who is neither assignee.
+    const share = await shareTicket(db, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId: escalator, workspaceId: wsA },
+      targetWorkspaceId: wsB,
+      cause: "Billing must approve the refund",
+    });
+    if (!share.ok) throw new Error("share failed");
+    // Arm 2: the guest department's own assignee.
+    await updateTicket(mdb, {
+      workspaceId: wsB,
+      ticketId: ticket.id,
+      actor: { userId: guestAssignee, workspaceId: wsB },
+      assignedUserId: guestAssignee,
+    });
+
+    const first = await say(wsB, ticket.id, "Approved, 3–5 days.", guestAssignee);
+    // Everyone waiting, and never the writer.
+    expect(new Set(first.notifiedUserIds)).toEqual(new Set([userId, escalator]));
+    expect(first.notifiedUserIds).not.toContain(guestAssignee);
+    expect(new Set((await unreadFor(ticket.id)).map((u) => u.userId))).toEqual(
+      new Set([userId, escalator]),
+    );
+
+    // Arm 4: whoever has already spoken joins the participant set. The owner's
+    // assignee answers, so the GUEST assignee is now the one told.
+    const second = await say(wsA, ticket.id, "thanks, telling them now", userId);
+    expect(second.notifiedUserIds).toContain(guestAssignee);
+    expect(second.notifiedUserIds).not.toContain(userId);
+
+    // The escalator missed BOTH, and their divider stays anchored at the FIRST
+    // thing they missed — an unread that walks forward hides what you skipped.
+    expect(await getThreadUnreadAnchor(tdb, ticket.id, escalator)).toBe(first.message.id);
+  });
+
+  it("counts unread replies per PERSON, and clears on read", async () => {
+    const { guestAssignee, owner } = await makeParticipants();
+    const { ticket } = await makeTicket();
+    await updateTicket(mdb, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId, workspaceId: wsA },
+      assignedUserId: owner,
+    });
+    await shareWithB(ticket.id);
+    await say(wsB, ticket.id, "we need the invoice", guestAssignee);
+
+    // The person waiting sees it; the person who wrote it does not.
+    expect((await getTicketCounts(qdb, wsA, owner)).unreadReplies).toBe(1);
+    expect((await getTicketCounts(qdb, wsB, guestAssignee)).unreadReplies).toBe(0);
+
+    // Reading is per-user and idempotent.
+    const read = { workspaceId: wsA, ticketId: ticket.id, userId: owner };
+    expect(await markThreadRead(tdb, read)).toEqual({ ok: true, cleared: true });
+    expect(await markThreadRead(tdb, read)).toEqual({ ok: true, cleared: false });
+    expect((await getTicketCounts(qdb, wsA, owner)).unreadReplies).toBe(0);
+
+    // A workspace with no access can't clear someone's marker through a ticket
+    // id it guessed.
+    await say(wsB, ticket.id, "still waiting", guestAssignee);
+    expect(
+      await markThreadRead(tdb, { workspaceId: wsC, ticketId: ticket.id, userId: owner }),
+    ).toEqual({ ok: false, reason: "ticket_not_found" });
+    expect((await getTicketCounts(qdb, wsA, owner)).unreadReplies).toBe(1);
+  });
+
+  it("drops out of an ex-guest's count when the share is revoked", async () => {
+    const { guestAssignee } = await makeParticipants();
+    const { ticket } = await makeTicket();
+    await shareWithB(ticket.id);
+    await updateTicket(mdb, {
+      workspaceId: wsB,
+      ticketId: ticket.id,
+      actor: { userId: guestAssignee, workspaceId: wsB },
+      assignedUserId: guestAssignee,
+    });
+    await say(wsA, ticket.id, "any progress?", userId);
+    expect((await getTicketCounts(qdb, wsB, guestAssignee)).unreadReplies).toBe(1);
+
+    const revoked = await revokeTicketShare(db, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      guestWorkspaceId: wsB,
+      actor: { userId, workspaceId: wsA },
+    });
+    expect(revoked.ok).toBe(true);
+    // The marker row survives (it is not a denormalization of access), but the
+    // count is gated by the SAME ticketAccessWhere() as the board, so losing
+    // access loses the badge — no second copy of the tenancy rule to drift.
+    expect((await getTicketCounts(qdb, wsB, guestAssignee)).unreadReplies).toBe(0);
+  });
+
+  it("retries the same clientTempId without posting or notifying twice", async () => {
+    const { guestAssignee, owner } = await makeParticipants();
+    const { ticket } = await makeTicket();
+    await updateTicket(mdb, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId, workspaceId: wsA },
+      assignedUserId: owner,
+    });
+    await shareWithB(ticket.id);
+
+    const temp = `tmp-${randomUUID()}`;
+    const first = await say(wsB, ticket.id, "on it", guestAssignee, temp);
+    await markThreadRead(tdb, { workspaceId: wsA, ticketId: ticket.id, userId: owner });
+
+    // The optimistic composer's retry after a dropped response.
+    const again = await say(wsB, ticket.id, "on it", guestAssignee, temp);
+    expect(again.message.id).toBe(first.message.id);
+    expect(await prisma.ticketMessage.count({ where: { ticketId: ticket.id } })).toBe(1);
+    // ...and critically it does NOT re-badge a reply the reader already read.
+    expect(again.notifiedUserIds).toEqual([]);
+    expect((await getTicketCounts(qdb, wsA, owner)).unreadReplies).toBe(0);
+  });
+
+  it("ships the reply COMPLETE with its files on the realtime frame", async () => {
+    const { ticket } = await makeTicket();
+    await shareWithB(ticket.id);
+    const png = Buffer.from(
+      "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a4944415478da6360000002000180fe8ecf0000000049454e44ae426082",
+      "hex",
+    );
+
+    const frames: number[] = [];
+    const off = subscribe("ticket.thread_message_created", async (e) => {
+      if (e.ticketId === ticket.id) frames.push(e.message.attachments.length);
+    });
+    try {
+      const posted = await addTicketMessage(tdb, {
+        workspaceId: wsB,
+        ticketId: ticket.id,
+        actor: { userId, workspaceId: wsB },
+        body: "here is the invoice",
+        attach: (messageId) =>
+          addTicketAttachment(adb, {
+            workspaceId: wsB,
+            ticketId: ticket.id,
+            actor: { userId, workspaceId: wsB },
+            messageId,
+            bytes: png,
+            filename: "invoice.png",
+            mimeType: "image/png",
+          }).then((r) => (r.ok ? [r.attachment] : [])),
+      });
+      if (!posted.ok) throw new Error("post failed");
+      expect(posted.message.attachments).toHaveLength(1);
+    } finally {
+      off();
+    }
+    // Attaching AFTER the publish shipped every other client a reply whose
+    // evidence only appeared on their next reload.
+    expect(frames).toEqual([1]);
+  });
+
+  it("publishes a thread event and NO ticket.changed — a reply is not a change", async () => {
+    const { ticket } = await makeTicket();
+    await shareWithB(ticket.id);
+    const before = await prisma.outboundEvent.count({
+      where: { workspaceId: wsA, type: "ticket.changed" },
+    });
+
+    const seen: string[] = [];
+    const off = subscribe("ticket.thread_message_created", async (e) => {
+      if (e.ticketId === ticket.id) seen.push(e.message.body);
+    });
+    try {
+      await say(wsB, ticket.id, "replying, not changing anything");
+    } finally {
+      off();
+    }
+    expect(seen).toEqual(["replying, not changing anything"]);
+
+    // `ticket.changed` goes through the OUTBOX, so a row is the proof. A reply
+    // republishing the whole Ticket made every board, sub-sidebar and rail in
+    // every participating workspace re-run its counts — on the highest
+    // frequency write the ticket has.
+    expect(
+      await prisma.outboundEvent.count({ where: { workspaceId: wsA, type: "ticket.changed" } }),
+    ).toBe(before);
+    // ...and it moves no ticket state, so no colleague's open editor 409s.
+    const after = await prisma.ticket.findUnique({
+      where: { id: ticket.id },
+      select: { version: true },
+    });
+    expect(after?.version).toBe(ticket.version);
+  });
+});
+
 describe("attachments", () => {
   const png = Buffer.from(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a4944415478da6360000002000180fe8ecf0000000049454e44ae426082",
@@ -636,30 +939,31 @@ describe("attachments", () => {
     expect((logged?.after as { filename?: string })?.filename).toBe("receipt.png");
   });
 
-  it("attach to a COMMENT and render with it (no duplicate log line)", async () => {
+  it("attach to a THREAD MESSAGE and render with it (no duplicate log line)", async () => {
     const { ticket } = await makeTicket();
-    const comment = await addTicketComment(db, {
-      workspaceId: wsA,
-      ticketId: ticket.id,
-      actor: { userId, workspaceId: wsA },
-      body: "here's the screenshot",
-    });
-    if (!comment.ok) throw new Error("comment failed");
+    await shareWithB(ticket.id);
+    const posted = await say(wsA, ticket.id, "here's the screenshot");
     const added = await addTicketAttachment(adb, {
       workspaceId: wsA,
       ticketId: ticket.id,
       actor: { userId, workspaceId: wsA },
-      eventId: comment.eventId,
+      messageId: posted.message.id,
       bytes: png,
       filename: "shot.png",
       mimeType: "image/png",
     });
     expect(added.ok).toBe(true);
 
+    // It rides the message for BOTH departments — a guest reads the owner's
+    // evidence through the ticket's gate, not its own workspace.
+    for (const ws of [wsA, wsB]) {
+      const thread = await listTicketThread(tdb, ws, ticket.id);
+      expect(thread[0].attachments).toHaveLength(1);
+      expect(thread[0].attachments[0].filename).toBe("shot.png");
+    }
+    // The message already announced it — no separate attachment_added row, so
+    // the log doesn't re-acquire the noise the thread was split out to remove.
     const events = await listTicketEvents(qdb, wsA, ticket.id);
-    const commentRow = events.find((e) => e.id === comment.eventId);
-    expect(commentRow?.attachments).toHaveLength(1);
-    // The comment already announced it — no separate attachment_added row.
     expect(events.filter((e) => e.kind === "attachment_added")).toHaveLength(0);
   });
 

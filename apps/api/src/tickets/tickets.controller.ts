@@ -26,7 +26,7 @@ import { zBody, zQuery } from "../common/zod-validation.pipe";
 import { RequireRole } from "../auth/role.guard";
 import { RoleGuard } from "../auth/role.guard";
 import {
-  AddEscalationCommentSchema,
+  PostThreadMessageSchema,
   CreateTicketViewSchema,
   UpdateTicketViewSchema,
   MAX_FILES_PER_REQUEST,
@@ -40,7 +40,7 @@ import {
   AddTicketNoteSchema,
   UpdateTicketSchema,
   UpsertSlaPolicySchema,
-  type AddEscalationCommentInput,
+  type PostThreadMessageInput,
   type CreateTicketViewInput,
   type UpdateTicketViewInput,
   type CreateTicketFieldInput,
@@ -71,7 +71,8 @@ import { TicketsService } from "./tickets.service";
  *   POST   /api/tickets/:id/notes    — internal note (this workspace only)
  *   POST   /api/tickets/:id/escalate — grant a sibling workspace access
  *   DELETE /api/tickets/:id/shares/:wsId — revoke that access
- *   POST   /api/tickets/:id/escalation-comments — comment everyone with access sees (+files)
+ *   POST   /api/tickets/:id/thread — reply in the cross-department thread (+files)
+ *   POST   /api/tickets/:id/thread/read — clear my unread marker
  *   POST   /api/tickets/:id/attachments — attach files to the ticket
  *   GET    /api/tickets/:id/attachments/:aid — stream one file (same-origin)
  *   DELETE /api/tickets/:id/attachments/:aid — remove one
@@ -143,7 +144,7 @@ export class TicketsController {
 
   @Get(":id")
   async get(@CurrentSession() session: ApiSession, @Param("id") id: string) {
-    return this.tickets.get(session.workspaceId, id, session);
+    return this.tickets.get(session.workspaceId, id, session, session.userId);
   }
 
   /**
@@ -201,36 +202,46 @@ export class TicketsController {
   }
 
   /**
-   * Comment on the ticket. On a SHARED ticket every workspace with access sees
-   * it — that is the conversation between the departments; an internal `/notes`
-   * entry stays in this workspace. Like a note it is not a ticket update: no
-   * `version` bump, no SLA movement.
+   * Post to the ticket's THREAD — the conversation between the departments.
+   * Everyone with access sees it; an internal `/notes` entry stays in this
+   * workspace. Like a note it is not a ticket update: no `version` bump, no
+   * SLA movement.
    *
-   * Accepts multipart so a reply can carry its evidence: the files are filed
-   * against the comment and render with it. `FilesInterceptor` + memoryStorage
-   * (see UploadedFile) — small, capped, few.
+   * Multipart so a reply can carry its evidence; the files are filed against
+   * the message and render with it. `clientTempId` makes a retry idempotent.
    */
-  @Post(":id/escalation-comments")
+  @Post(":id/thread")
   @UseInterceptors(
     FilesInterceptor("files", MAX_FILES_PER_REQUEST, {
       storage: memoryStorage(),
       limits: { fileSize: TICKET_ATTACHMENT_MAX_BYTES },
     }),
   )
-  async addEscalationComment(
+  async postThreadMessage(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
-    @Body(zBody(AddEscalationCommentSchema)) body: AddEscalationCommentInput,
+    @Body(zBody(PostThreadMessageSchema)) body: PostThreadMessageInput,
     @UploadedFiles() files?: UploadedFile[],
   ) {
-    return this.tickets.addComment(
+    return this.tickets.postThreadMessage(
       session.workspaceId,
       { userId: session.userId },
       id,
       body.body,
       files ?? [],
+      body.clientTempId,
       session,
     );
+  }
+
+  /**
+   * Clear this reader's "unread reply" marker. Called from the detail page
+   * only, and only while the tab is actually visible — §10's rule that a
+   * hidden tab must never clear something nobody saw.
+   */
+  @Post(":id/thread/read")
+  async markThreadRead(@CurrentSession() session: ApiSession, @Param("id") id: string) {
+    return this.tickets.markThreadRead(session.workspaceId, session.userId, id, session);
   }
 
   /**

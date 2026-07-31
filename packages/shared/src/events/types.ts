@@ -27,6 +27,7 @@ import type {
   MessageStatus,
   Ticket,
   TicketStatus,
+  TicketThreadMessage,
   User,
 } from "../types";
 import type { TeamChannelMessageDto } from "../socket/events";
@@ -770,6 +771,38 @@ export interface TicketChangedEvent {
   skipOutboundWebhook?: boolean;
 }
 
+/**
+ * Someone replied in a ticket's THREAD.
+ *
+ * Its own event rather than another `ticket.changed`: a comment moves no ticket
+ * state, and republishing the whole `Ticket` on every reply made every board,
+ * sub-sidebar and rail in EVERY participating workspace re-run its counts — on
+ * the highest-frequency ticket write there is.
+ *
+ * A LEAF event (§9): the only subscriber is realtime fanout. Nothing mutates in
+ * response, so there is no chain to guard and no `silent` flag to carry.
+ */
+export interface TicketThreadMessageCreatedEvent {
+  /** The ticket's OWNING workspace. */
+  workspaceId: string;
+  ticketId: string;
+  /** So a toast can say "#42" without a follow-up read. */
+  ticketNumber: number;
+  message: TicketThreadMessage;
+  /**
+   * Sibling workspaces the ticket is shared with — the fanout audience, carried
+   * ON the event for the same reason as `TicketChangedEvent.sharedWithWorkspaceIds`.
+   */
+  sharedWithWorkspaceIds?: string[];
+  /**
+   * Users whose unread marker this reply just created (never the author). Gates
+   * the badge refetch and the toast, the same role `mentionedUserIds` plays on
+   * `team:channel:activity` — without it every connected client in both
+   * workspaces refetches its counts on every reply.
+   */
+  notifiedUserIds: string[];
+}
+
 export interface NoteDeletedEvent {
   workspaceId: string;
   conversationId: string;
@@ -1451,6 +1484,7 @@ export interface DomainEventMap {
   "message.media_ready": MessageMediaReadyEvent;
   "message.flag_changed": MessageFlagChangedEvent;
   "ticket.changed": TicketChangedEvent;
+  "ticket.thread_message_created": TicketThreadMessageCreatedEvent;
   "conversation.assigned": ConversationAssignedEvent;
   "conversation.status_changed": ConversationStatusChangedEvent;
   "conversation.ai_changed": ConversationAiChangedEvent;
