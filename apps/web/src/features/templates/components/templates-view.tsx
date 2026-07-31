@@ -356,7 +356,7 @@ export function TemplatesView({
           </div>
           <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
             Connect your number in{" "}
-            <Link href="/settings/whatsapp?expand=advanced" className="text-primary hover:underline">
+            <Link href="/settings/whatsapp?expand=advanced" className="text-primary underline underline-offset-2 hover:no-underline">
               Settings → WhatsApp
             </Link>{" "}
             to load and create templates.
@@ -371,7 +371,7 @@ export function TemplatesView({
           </div>
           <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
             Templates live at the WABA level. Add your ID in{" "}
-            <Link href="/settings/whatsapp?expand=advanced" className="text-primary hover:underline">
+            <Link href="/settings/whatsapp?expand=advanced" className="text-primary underline underline-offset-2 hover:no-underline">
               Settings → WhatsApp
             </Link>
             .
@@ -691,12 +691,21 @@ function StatusFilterTabs({
             className={cn(
               "rounded px-2.5 py-1 text-xs font-medium transition-colors",
               active
-                ? "bg-primary/10 text-primary"
+                // Solid, not bg-primary/10 + text-primary: axe measured that
+                // token-at-10% pair under AA (the same opacity-modifier class
+                // the 07-29 rubric pass documented). primary-foreground on
+                // primary is contrast-safe by construction.
+                ? "bg-primary text-primary-foreground"
                 : "text-muted-foreground hover:bg-accent hover:text-foreground",
             )}
           >
             {t.label}
-            <span className="ml-1.5 tabular-nums text-[10.5px] text-muted-foreground">
+            <span
+              className={cn(
+                "ml-1.5 tabular-nums text-[10.5px]",
+                active ? "text-primary-foreground" : "text-muted-foreground",
+              )}
+            >
               {count}
             </span>
           </button>
@@ -960,7 +969,7 @@ function DetailDrawer({
                         href="https://business.facebook.com/latest/whatsapp_manager/message_templates"
                         target="_blank"
                         rel="noreferrer"
-                        className="text-primary hover:underline"
+                        className="text-primary underline underline-offset-2 hover:no-underline"
                       >
                         WhatsApp Manager
                       </a>{" "}
