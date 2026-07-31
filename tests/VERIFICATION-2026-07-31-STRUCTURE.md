@@ -87,7 +87,7 @@ NUMBER, the messaging limit per PORTFOLIO).
 | S2 | Org / workspaces / membership / session | service-less controllers; users.service grab-bag; duplicated tx idiom; single-definition rules verified at HEAD | ✅ **2026-07-31** — users split done; single-definitions verified; 2 R-only acceptances recorded |
 | S3 | Assignment + availability | structural claims at HEAD; round-robin shim; cache-invalidation convention; naming residue | ✅ **2026-07-31** — dead exports removed (`c0c3c703`); cache convention verified 10/10; carried LOW refuted |
 | S4 | Team/Workspace naming residue | `/api/admin/teams` rename (both sides); `Team.<field>` comments; `team.*` events = contracts (list-only); AssignmentPolicy→Team promotion (recommendation only) | ✅ **2026-07-31** — route/DTO/component rename landed (`ed0c81b0`); events + identifier residue carried to approval list |
-| S5 | Team chat structure | 2,083 L god-service; RealtimeGateway direct injection (the ONE EventBus bypass); "#general" ×3; postMessage dedup | ☐ |
+| S5 | Team chat structure | 2,083 L god-service; RealtimeGateway direct injection (the ONE EventBus bypass); "#general" ×3; postMessage dedup | ✅ **2026-07-31** — gateway bypass closed (`81f7a884`); "#general ×3" refuted; split → approval list |
 | S6 | Realtime & client state | contact-panel fake reducer consumer → rewire + pin; convergence-policy duplication (list-only) | ☐ |
 | S7 | Frontend fetching & loading perf | RSC waterfalls; getOrganizationOverview cache(); soft() consistency; force-dynamic; metadata; use-call fetch | ☐ |
 | S8 | Route loading & error boundaries | loading.tsx / error.tsx program; /calls dead segment; inbox layout doc-lie | ☐ |
@@ -260,9 +260,48 @@ NUMBER, the messaging limit per PORTFOLIO).
   process-local mutable state in resolve.ts (reservations, pick lock, config
   cache) is exactly as its scaling-cliff docs describe; nothing drifted.
 
+### S5 — team chat structure — ✅ CLOSED (2026-07-31)
+
+**Method: R (adversarial) + refactor (`81f7a884`); E deferred to the close-out
+team-chat e2e batch (70 tests) — no unit specs exist for this domain.**
+
+- **The one EventBus bypass — FIXED.** `ChannelsService` was the only service
+  in the codebase injecting `RealtimeGateway` directly, and reading it showed
+  the whole dependency existed for ONE call: `evictUserFromChannelRoom` on
+  member removal (revoking a kicked member's live room membership). That is
+  room-membership control, not emission — but it belongs WITH the frame that
+  announces the removal, so it moved into the `team_channel.members_changed`
+  fanout rule via a new emitter method that iterates the room and matches
+  `socket.data` (the exact style of `evictStaleFromConversationRoom`, the
+  precedent the conversation-assigned rule already set). The gateway's
+  presence-based copy had no other caller and was deleted; its one comment
+  reference now points at the emitter. Ordering preserved (frames, then
+  eviction). ChannelsService now depends on `DbService + EventBus` only —
+  the bus→fanout seam has zero bypasses again.
+- **"#general defined in 3 places" — REFUTED by reading.** There is ONE
+  definition (`lib/team-chat/queries.getDefaultChannel`, whose
+  membership-filtered fallback comment documents a real leak class), one pure
+  delegation (`ChannelsService.getDefault`), and one deliberately TX-SCOPED
+  occurrence of the `isDefault: true` predicate in `joinDefaultChannel` —
+  which must run on the caller's transaction client and therefore cannot call
+  the query helper. Extracting a shared one-line where-object would be §17
+  over-abstraction. No change.
+- **postMessage hot path** (2-sequential-DB-call shape + `dedupCommittedSend`
+  re-publish) — read and left exactly alone, per plan: it is correct, hot,
+  and its header documents why it is hand-tuned.
+- **The 2,083-line service split — MOVED to the approval list, with reasons.**
+  Unlike users.service (four unrelated concerns), every method here is ONE
+  domain's operations sharing the same guards (`requireChannelInTeam`,
+  `assertNotDm`) and the same models. A split by sub-entity (lifecycle+
+  membership / messages / pins+reactions) is mechanical but adds two DI seams
+  without removing any coupling, and its only behavior-proof (the 70-test
+  e2e batch) can't run until close-out on this box. Proposed cut lines are
+  recorded below so approval is a decision, not a design session.
+
 ## Listed for approval (grows as domains close — nothing here is executed)
 
 - `external/v1/external-v1.controller.ts` split by resource (192 routes / 67 imports).
+- `team-chat/channels.service.ts` (2,083 L / 1,466 code) split into lifecycle+membership+DMs / messages (post/edit/delete/threads, incl. the hand-tuned postMessage) / pins+reactions+read-receipts — mechanical, controller injects three; run the 70-test team-chat e2e batch as proof. Recommended, deferred only because the proof can't run mid-program on this box.
 - `lib/providers/meta.ts` (7,766 L) split.
 - `team.*` event / `team:*` frame renames — **contract-breaking** (§9 additive-only); recommend keeping wire names, renaming only internals.
 - The ~2,300 lower-case `team*` identifier occurrences across api+web (`teamSchedule`, `teamSlots`, `teamCounts`, `teamActivity`…) — mechanical rename sweep, wide blast radius; recommend doing it per-file as those files are next touched rather than in one churn commit.
