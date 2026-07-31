@@ -2,6 +2,10 @@ import { getTicketSettings } from "@/lib/api/queries";
 
 import { TicketSettingsClient } from "./ticket-settings-client";
 
+export const metadata = {
+  title: "Tickets · Settings",
+};
+
 /**
  * Ticketing configuration: when tickets open by themselves, how long a solved
  * one stays reopenable, and what each priority promises.

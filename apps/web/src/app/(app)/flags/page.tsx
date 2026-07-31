@@ -2,6 +2,10 @@ import { listMessageFlagDefinitions } from "@/lib/api/queries";
 
 import { FlagsQueueClient } from "./flags-queue-client";
 
+export const metadata = {
+  title: "Flags",
+};
+
 /**
  * The triage queue — every unresolved message flag across the team, newest
  * first, with inline resolve / dismiss / reassign.

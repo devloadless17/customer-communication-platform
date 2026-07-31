@@ -203,10 +203,16 @@ export async function getPlatformOps(): Promise<PlatformOpsSnapshot> {
 // full 60s window even after their own edits. Strip the cache so every RSC
 // render hits NestJS fresh. Cost: ~5-15ms per call docker-network. Acceptable
 // at pilot scale. Re-introduce a working cache layer once we trust the bust.
-/** Org, its workspaces (with counts) and its members — Organization settings. */
-export async function getOrganizationOverview(): Promise<OrganizationOverview> {
-  return api<OrganizationOverview>("/api/workspaces/organization");
-}
+/** Org, its workspaces (with counts) and its members — Organization settings.
+ *  `cache()`d for intra-request dedup like its siblings: the three
+ *  /organization tabs each call it, and a layout-level component sharing a
+ *  request with a page must not double the fan-out. (Cross-NAVIGATION
+ *  freshness is deliberate — every RSC read is no-store, see the note above.) */
+export const getOrganizationOverview = cache(
+  async (): Promise<OrganizationOverview> => {
+    return api<OrganizationOverview>("/api/workspaces/organization");
+  },
+);
 
 export interface OrganizationOverview {
   id: string;

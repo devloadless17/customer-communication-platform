@@ -9,6 +9,10 @@ import {
 import { ContactsClient } from "./contacts-client";
 import type { StageFilter } from "@/features/contacts/components/contact-browser";
 
+export const metadata = {
+  title: "Contacts",
+};
+
 /**
  * Server-render the first page of contacts + the team's field + tag
  * catalogs so every column can render on first paint.

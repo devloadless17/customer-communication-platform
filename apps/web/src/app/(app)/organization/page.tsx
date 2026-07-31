@@ -2,6 +2,10 @@ import { getOrganizationOverview } from "@/lib/api/queries";
 
 import { AccountInfoClient } from "./account-info-client";
 
+export const metadata = {
+  title: "Organization",
+};
+
 /**
  * Account info — who the organization is.
  *

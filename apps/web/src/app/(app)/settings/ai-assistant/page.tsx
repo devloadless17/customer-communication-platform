@@ -5,6 +5,10 @@ import { getSession } from "@/lib/auth/current-user";
 
 import { AiAssistantSettings, type AiConfig, type AiDocument } from "./ai-assistant-settings";
 
+export const metadata = {
+  title: "AI Assistant · Settings",
+};
+
 export const dynamic = "force-dynamic";
 
 export default async function AiAssistantSettingsPage() {

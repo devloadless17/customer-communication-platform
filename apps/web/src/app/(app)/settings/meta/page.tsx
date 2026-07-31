@@ -24,7 +24,15 @@ export default async function MetaSettingsPage() {
   // blank the panel or the credentials form above it.
   let metaAccounts: ChannelAccountView[] = [];
   if (canManage) {
-    const config = await getTeamMetaConfig();
+    // One fan-out: the credentials config and the three per-channel account
+    // lists have no data dependency, so awaiting the config first only added
+    // a serial round-trip before the accounts could start.
+    const [config, wa, msgr, ig] = await Promise.all([
+      getTeamMetaConfig(),
+      soft("whatsapp accounts", [], () => listChannelAccounts("whatsapp")),
+      soft("messenger accounts", [], () => listChannelAccounts("messenger")),
+      soft("instagram accounts", [], () => listChannelAccounts("instagram")),
+    ]);
     current = {
       connected: Boolean(config.appSecret && config.systemUserToken),
       appId: config.appId,
@@ -33,11 +41,6 @@ export default async function MetaSettingsPage() {
       systemUserToken: config.systemUserToken,
       credentialsUndecryptable: config.credentialsUndecryptable,
     };
-    const [wa, msgr, ig] = await Promise.all([
-      soft("whatsapp accounts", [], () => listChannelAccounts("whatsapp")),
-      soft("messenger accounts", [], () => listChannelAccounts("messenger")),
-      soft("instagram accounts", [], () => listChannelAccounts("instagram")),
-    ]);
     metaAccounts = [...wa, ...msgr, ...ig];
   } else {
     current = {

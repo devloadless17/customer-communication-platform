@@ -11,6 +11,10 @@ import {
 import { JoinChannelCard } from "@/features/team-chat/components/join-channel-card";
 import { TeamChatWorkspace } from "@/features/team-chat/components/team-chat-workspace";
 
+export const metadata = {
+  title: "Team Chat",
+};
+
 /**
  * Channel view. Server-renders the initial slice of per-channel data:
  *   - active channel meta

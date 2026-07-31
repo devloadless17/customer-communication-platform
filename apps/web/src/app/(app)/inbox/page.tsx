@@ -21,6 +21,10 @@ import {
   parseWidthCookie,
 } from "@/features/inbox/lib/panel-cookies";
 
+export const metadata = {
+  title: "Inbox",
+};
+
 /** Right contact-panel collapse cookie — read server-side so SSR renders the
  *  persisted state (no expand→collapse flash, same approach as the left
  *  AppRail). Default EXPANDED: only an explicit "true" (the user collapsed it)

@@ -4,6 +4,10 @@ import { EmptyStateCreateChannel } from "@/features/team-chat/components/empty-s
 import { getSession } from "@/lib/auth/current-user";
 import { getDefaultChannel } from "@/lib/api/queries";
 
+export const metadata = {
+  title: "Team Chat",
+};
+
 /**
  * /team — bounce to the team's default channel (the auto-created #general).
  * If somehow no channels exist (default got deleted at the DB level), we

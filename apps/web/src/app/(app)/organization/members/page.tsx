@@ -2,6 +2,10 @@ import { getOrganizationOverview } from "@/lib/api/queries";
 
 import { OrgMembersClient } from "./org-members-client";
 
+export const metadata = {
+  title: "Members · Organization",
+};
+
 /**
  * Admin settings — everyone in the organization, and which workspaces each
  * one can reach.

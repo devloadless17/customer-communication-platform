@@ -76,7 +76,7 @@ export default async function AppShellLayout({
     // message in one should alert — but `team:channel:activity` can't tell a
     // DM from a channel, so the client needs the id set to branch on.
     // Best-effort: a failure just means DM dings wait until /team is visited.
-    listDirectMessagesForUser().catch(() => []),
+    soft("dm-alert seed", [], () => listDirectMessagesForUser()),
     // Which accounts this workspace has on each channel. Seeded HERE rather
     // than in the inbox layout because the call layer below sits above the
     // inbox — an inbox-scoped provider is invisible to the incoming-call toast,

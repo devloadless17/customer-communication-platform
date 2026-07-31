@@ -3,6 +3,10 @@ import { soft } from "@/lib/api/soft";
 
 import { TicketsBoardClient } from "./tickets-board-client";
 
+export const metadata = {
+  title: "Tickets",
+};
+
 /**
  * The ticket board — every piece of work across every conversation, grouped by
  * where it stands.

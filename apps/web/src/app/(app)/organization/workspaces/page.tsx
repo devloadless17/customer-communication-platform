@@ -2,6 +2,10 @@ import { getOrganizationOverview } from "@/lib/api/queries";
 
 import { WorkspacesClient } from "./workspaces-client";
 
+export const metadata = {
+  title: "Workspaces · Organization",
+};
+
 /**
  * The organization's workspaces.
  *

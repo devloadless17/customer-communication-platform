@@ -14,6 +14,10 @@ import { getSession } from "@/lib/auth/current-user";
 import { TicketDetailClient } from "./ticket-detail-client";
 import { TicketElsewhere } from "./ticket-elsewhere";
 
+export const metadata = {
+  title: "Ticket",
+};
+
 /**
  * One ticket: what it is, who owns it, what it promised, and everything that
  * has happened to it.
@@ -29,12 +33,18 @@ export default async function TicketDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const [detail, session] = await Promise.all([getTicket(id).catch(() => null), getSession()]);
+  const [detail, session] = await Promise.all([
+    // soft() rather than a bare catch: a TRANSIENT api failure used to be
+    // indistinguishable from a real 404 in the logs — the page showed the
+    // dead-ticket state with no trace of why.
+    soft("ticket detail", null, () => getTicket(id)),
+    getSession(),
+  ]);
   if (!detail) {
     // Not in THIS workspace — but maybe in a sibling the viewer can open
     // (an escalation pair followed across a switch, a colleague's link, the
     // back button). Offer the one-click switch instead of a dead 404.
-    const elsewhere = await locateTicket(id).catch(() => null);
+    const elsewhere = await soft("ticket locate", null, () => locateTicket(id));
     if (elsewhere) {
       return (
         <div className="h-full overflow-y-auto">

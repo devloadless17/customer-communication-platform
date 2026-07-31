@@ -686,8 +686,10 @@ export function useCall(): {
       if (!callId || callId.startsWith("tmp_")) return;
       try {
         // keepalive so the request outlives the page. sendBeacon can't set the
-        // session cookie policy we need, so this is a keepalive fetch.
-        void fetch(`/api/calls/${callId}/end`, {
+        // session cookie policy we need, so this is a keepalive fetch — through
+        // fetchWithSessionGuard like every other call in this hook (the bare
+        // fetch() was the one site skipping the stale-session guard).
+        void fetchWithSessionGuard(`/api/calls/${callId}/end`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: "{}",
