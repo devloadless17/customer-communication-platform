@@ -4625,6 +4625,12 @@ export {
   isProvablyNotSent,
   isPairRateLimitBody,
   isPairRateLimitError,
+  // Missed by the 2026-07-31 split. CLAUDE.md §19 points here for it, and two
+  // specs import it from this module — they had been failing with
+  // "messagingAccountField is not a function" ever since, so the guard on the
+  // `messaging_account_id` vs deprecated `paid_messaging_account_id` spelling
+  // (a wrong body field is Meta error #100 and fails EVERY send) was dead.
+  messagingAccountField,
 };
 export type { MetaErrorCode, NormalizedSendError } from "./meta-send-error";
 
