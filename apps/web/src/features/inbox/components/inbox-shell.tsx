@@ -50,7 +50,7 @@ import { MessageThread } from "./message-thread";
 import { ContactPanel } from "./contact-panel";
 import { Sheet } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
-import { CallsHistory } from "@/app/(app)/calls/calls-history";
+import { CallsHistory } from "@/features/calls/components/calls-history";
 import { useCallApi } from "@/features/calls/call-provider";
 import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
 import { toast } from "@/lib/toast";
