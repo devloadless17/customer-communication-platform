@@ -88,11 +88,11 @@ NUMBER, the messaging limit per PORTFOLIO).
 | S3 | Assignment + availability | structural claims at HEAD; round-robin shim; cache-invalidation convention; naming residue | ✅ **2026-07-31** — dead exports removed (`c0c3c703`); cache convention verified 10/10; carried LOW refuted |
 | S4 | Team/Workspace naming residue | `/api/admin/teams` rename (both sides); `Team.<field>` comments; `team.*` events = contracts (list-only); AssignmentPolicy→Team promotion (recommendation only) | ✅ **2026-07-31** — route/DTO/component rename landed (`ed0c81b0`); events + identifier residue carried to approval list |
 | S5 | Team chat structure | 2,083 L god-service; RealtimeGateway direct injection (the ONE EventBus bypass); "#general" ×3; postMessage dedup | ✅ **2026-07-31** — gateway bypass closed (`81f7a884`); "#general ×3" refuted; split → approval list |
-| S6 | Realtime & client state | contact-panel fake reducer consumer → rewire + pin; convergence-policy duplication (list-only) | ☐ |
+| S6 | Realtime & client state | contact-panel fake reducer consumer → rewire + pin; convergence-policy duplication (list-only) | ✅ **2026-07-31** — "fake consumer" REFUTED (documented design); assert list completed + CI pin (`11f4d9f7`) |
 | S7 | Frontend fetching & loading perf | RSC waterfalls; getOrganizationOverview cache(); soft() consistency; force-dynamic; metadata; use-call fetch | ☐ |
 | S8 | Route loading & error boundaries | loading.tsx / error.tsx program; /calls dead segment; inbox layout doc-lie | ☐ |
 | S9 | Frontend sectioning | features/tickets|flags|organization creation; app/←features inversion; move-only relocations; queries.ts split | ☐ |
-| S10 | Backend layering | meta.controller business-logic extraction (proven by meta e2e 170); thin services; external-v1 split (list-only) | ☐ |
+| S10 | Backend layering | meta.controller business-logic extraction (proven by meta e2e 170); thin services; external-v1 split (list-only) | ✅ **2026-07-31** — extraction landed + e2e-proven (`b21b71d5`); one stale spec fixed on the way |
 | S11 | UI/UX rubric + skeleton system | SURFACES → every route (derived, not hand-named); shared skeleton primitive; axe fixes | ☐ |
 | S12 | Live UX walk + close-out | per-page browser pass, batched; full gates; approval list | ☐ |
 
@@ -297,6 +297,70 @@ team-chat e2e batch (70 tests) — no unit specs exist for this domain.**
   without removing any coupling, and its only behavior-proof (the 70-test
   e2e batch) can't run until close-out on this box. Proposed cut lines are
   recorded below so approval is a decision, not a design session.
+
+### S10 — backend layering — ✅ CLOSED (2026-07-31)
+
+**Method: R + refactor (`b21b71d5`) + E (hermetic meta e2e).**
+
+- **The Meta webhook controller extraction — DONE.** The one real
+  business-logic-in-a-controller violation: 1,684 lines, 8 private
+  ingestion/media methods, 8 direct Prisma calls, its own lifecycle hook.
+  Everything after "the payload is trusted" moved VERBATIM to
+  `MetaWebhookIngestService` (same folder): ingestWhatsappPayload +
+  ingestGroup, ingestSocialPayload, completePendingMedia, hadMedia, both
+  media downloaders, the retry helper, the DownloadOutcome type, the
+  in-flight-media set + shutdown drain. The controller keeps exactly the
+  authentication half — routes, HMAC (both per-tenant and platform secrets),
+  verify handshakes, the per-workspace rate bucket, and `receiveSocial`
+  (which is auth: it verifies the social HMAC before delegating). 539 lines.
+- **Proof:** `pnpm test:e2e:meta` — 165 passed; the 2 failures were both
+  NOT the extraction: (a) `receive-enhancements.spec.ts` asserted Messenger's
+  `ad_id` in `clickId`, the exact channel-shaped contract the pending
+  attribution work deliberately replaced with the unified `adId` field (the
+  type's own docblock records the reasoning) — spec corrected, passes; (b)
+  `@pressure` failed under full-suite load and passes clean in isolation
+  (57.5s, converges in 3 redelivery passes) — its documented
+  contention-sensitivity, not a regression.
+- **R-only ACCEPTED (recorded in S2):** the five small service-less
+  controllers stay as they are.
+- `external-v1.controller.ts` split and `lib/providers/meta.ts` split stay on
+  the approval list.
+
+### S6 — realtime & client state — ✅ CLOSED (2026-07-31)
+
+**Method: R (adversarial — and the finding REVERSED on reading) + N (CI pin,
+negative-tested) + E (web vitest 37/37).**
+
+- **"contact-panel is a fake reducer consumer" — REFUTED.** The exploration
+  read the panel's direct socket subscriptions as re-implementations of
+  `applyMessageFlag`/`applyNoteDeleted`/`applyContactUpdate`. Reading both
+  sides shows otherwise: the panel renders from the inbox-shell's
+  cacheTick-SILENT LRU snapshot, so it derives scalar mirrors (counts, note
+  gallery) directly from covered events — and the thread-reducers header
+  documents this design explicitly, including a warning NOT to "fix" it by
+  routing through `thread.data` (that re-renders the whole shell per inbound
+  message). The contact:updated block is not a reducer copy at all — it is
+  the form-edit CONFLICT machine (dirty-check, park + banner, echo
+  detection). The handlers that do overlap with reducers are thin payload
+  projections of server-computed fields (`payload.openFlagCount`), not
+  divergent logic.
+- **What WAS real, and is fixed (`11f4d9f7`):** the panel's
+  `assertReducerCoverage` call named 3 of the 5 events it binds — the
+  contact-edit pair was bound but undeclared, so the dev invariant could not
+  vouch for them. List completed; a new CI pin
+  (`apps/web/test/contact-panel-coverage.spec.ts`) enforces the lockstep the
+  dev assert can't (that the declared list names every `socket.on` in the
+  component), with an anti-vacuity floor on both scraped sets.
+  NEGATIVE-TESTED: removing one declared event fails exactly the lockstep
+  case with the intended message.
+- **CLAUDE.md §10 rewritten** to describe the real shape (two table-driven
+  consumers + the deliberate direct subscriber) — the old "wire into all
+  three" phrasing is what primed this very audit to mislabel the design;
+  fixing the doc is the durable half of the fix.
+- **Convergence-policy duplication across the 4 realtime hooks** (inbox
+  1,974 L, team-events 1,673, team-channel 816, thread 392) — confirmed
+  real, carried on the approval list (high-risk extraction; each hook's
+  policy is subtly load-bearing and heavily reasoned in place).
 
 ## Listed for approval (grows as domains close — nothing here is executed)
 
