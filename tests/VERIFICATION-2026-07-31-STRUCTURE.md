@@ -491,6 +491,30 @@ runs on this box are the documented phantom-failure recipe):
    states, layout shift, navigation clarity, copy) — findings fixed or
    ledgered.
 
+### S12 — live UX walk (reading half) — DONE 2026-07-31; gates in flight
+
+**Method: 28-route screenshot walk against the dev stack (1280px, authed
+admin), read page by page — the subjective half the rubric deliberately does
+not automate.**
+
+- **Verdict: the surfaces read as ONE product.** Chrome, sidebar patterns,
+  card grids and empty states are consistent; every empty state seen is
+  specific and actionable (tickets' explains the deliberate-raise model;
+  broadcasts' explains per-channel behavior and tracks; templates' shows an
+  honest not-connected banner with a direct settings link — now with the
+  persistent underline from `ae70f92d`). Team chat renders torture-test
+  content (200-char unbroken strings) with correct in-container wrapping —
+  no horizontal overflow, matching the rubric's body-scroll assertion.
+- **Two cosmetic observations, recorded WITHOUT churn:** the contacts
+  sub-sidebar stacks a "LIFECYCLE" section header directly over a
+  "LIFECYCLE STAGES" sub-label (redundant pair); the organization
+  sub-sidebar title truncates at "Organization settin…" at its fixed width.
+  Neither is a defect class; both are one-line copy decisions for the
+  maintainer.
+- **Observation for the AssignmentPolicy→Team decision** (approval list):
+  the settings navigation already labels the surface "Teams & routing" —
+  the product vocabulary has already made the choice the schema hasn't.
+
 ## Listed for approval (grows as domains close — nothing here is executed)
 
 - `external/v1/external-v1.controller.ts` split by resource (192 routes / 67 imports).
