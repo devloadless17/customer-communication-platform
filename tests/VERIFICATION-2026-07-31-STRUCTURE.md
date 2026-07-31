@@ -453,3 +453,6 @@ negative-tested) + E (web vitest 37/37).**
 - Internal splits of the 4 biggest client monoliths (new-broadcast-form, step-editors, reply-box, message-thread).
 - `AiAssistantConfig` (7 Json cols) / `WorkflowRun` (5, incl. per-run graphSnapshot) remodelling.
 - Availability columns → `WorkspaceMember` (named as the correct fix in `lib/availability/schedule.ts` itself).
+- Move the broadcasts / reports / settings clients into `features/` (the S9 pattern) once the pending campaign-analytics session commits — those exact files carry its uncommitted work today.
+- `queries.ts` split into `lib/api/queries/<domain>.ts` (fetchers + DTOs per domain) — same blocker, same timing.
+- Adopt the new `Skeleton` primitive at the 15 raw `animate-pulse` sites and 4 remaining local skeletons, per-file as touched.
