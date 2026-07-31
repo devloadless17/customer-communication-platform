@@ -638,8 +638,6 @@ function RailLink({
   );
   const hasBadge = badge > 0;
   const badgeText = badge > 99 ? "99+" : String(badge);
-  // Sits where the pill would if there were no count, so the two never overlap.
-  const dotClass = hasBadge ? "-left-1 -top-1" : "-right-1 -top-1";
 
   const link = (
     <Link
@@ -658,21 +656,28 @@ function RailLink({
     >
       <span className="relative shrink-0">
         <Icon className="size-4.5" />
-        {/* Collapsed: a tiny count pill anchored to the icon's top-right so it
-            reads as "unread on Inbox" even with no label. ring-sidebar lifts it
-            off the icon. */}
+        {/* Collapsed: a count pill clear of the icon's top-right corner.
+            Sized DOWN from h-5/min-w-5 — that was 20px plus a 2px ring on an
+            18px glyph, so the badge covered the icon it was labelling and the
+            rail read as unrecognisable. 16px offset further out leaves the
+            glyph legible while still reading as "unread on Tickets".
+
+            When there is also a reply waiting, the pill takes the accent
+            colour rather than growing a second mark beside it: at this size two
+            marks on one 18px icon is what made it unreadable in the first
+            place. Expanded (below) has room to show both. */}
         {hasBadge && collapsed && (
-          <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1 text-3xs font-semibold leading-none text-primary-foreground ring-2 ring-sidebar">
+          <span
+            className={cn(
+              "absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-semibold leading-none ring-2 ring-sidebar",
+              dot ? "bg-sky-500 text-white" : "bg-primary text-primary-foreground",
+            )}
+          >
             {badgeText}
           </span>
         )}
-        {dot && collapsed && (
-          <span
-            className={cn(
-              "absolute size-2 rounded-full bg-sky-500 ring-2 ring-sidebar",
-              dotClass,
-            )}
-          />
+        {dot && !hasBadge && collapsed && (
+          <span className="absolute -right-1 -top-1 size-2 rounded-full bg-sky-500 ring-2 ring-sidebar" />
         )}
       </span>
       {showLabels && (

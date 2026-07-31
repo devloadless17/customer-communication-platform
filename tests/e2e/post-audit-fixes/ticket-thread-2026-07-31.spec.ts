@@ -219,6 +219,18 @@ test.describe("ticket thread", () => {
       expect(guestSees.notes.some((n) => n.body === ownerNote)).toBe(false);
       expect(guestSees.events.some((e) => e.body === ownerNote)).toBe(false);
 
+      // The DELETE affordance must not be offered to a guest. `deleteTicket` is
+      // deliberately owner-only (§18), so a Delete button here can only ever
+      // error with the ticket still sitting there — which is exactly what an
+      // admin in the receiving workspace hit.
+      await page.goto(`/tickets/${ticketId}`);
+      await expect(page.getByRole("heading", { name: "Thread", exact: true })).toBeVisible({
+        timeout: 30_000,
+      });
+      await expect(page.getByRole("button", { name: "Delete" })).toHaveCount(0);
+      // ...and the API refuses it even if someone calls it directly.
+      expect((await api.delete(`/api/tickets/${ticketId}`)).status()).toBe(404);
+
       // Marking read is per-user and must not 404 for a guest either.
       expect((await api.post(`/api/tickets/${ticketId}/thread/read`)).ok()).toBeTruthy();
 

@@ -47,7 +47,7 @@ const STATUS_VIEWS: Array<{ status: TicketStatus; label: string; icon: typeof Ci
   { status: "closed", label: "Closed", icon: CircleDot },
 ];
 
-export function TicketsSubSidebar() {
+export function TicketsSubSidebar({ isAdmin }: { isAdmin: boolean }) {
   const pathname = usePathname();
   const params = useSearchParams();
   const [counts, setCounts] = useState<TicketCounts | null>(null);
@@ -214,14 +214,20 @@ export function TicketsSubSidebar() {
         ))}
       </SubSidebarSection>
 
-      <SubSidebarSection label="Configure">
-        <SubSidebarItem
-          href="/settings/tickets"
-          label="Ticket settings"
-          leading={<Settings2 className="size-4" />}
-          active={false}
-        />
-      </SubSidebarSection>
+      {/* Admin-gated on the ROLE, matching the settings sidebar and the API:
+          every `/api/workspace/tickets` route is `@RequireRole("admin")`, so an
+          agent who followed this link landed on the error boundary — the one
+          place in the product that offered it to them. */}
+      {isAdmin ? (
+        <SubSidebarSection label="Configure">
+          <SubSidebarItem
+            href="/settings/tickets"
+            label="Ticket settings"
+            leading={<Settings2 className="size-4" />}
+            active={false}
+          />
+        </SubSidebarSection>
+      ) : null}
     </SubSidebar>
   );
 }

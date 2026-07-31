@@ -69,10 +69,20 @@ export default async function TicketDetailPage({
     soft("escalation targets", [], () => listEscalationTargets()),
   ]);
   const { ticket, events, thread, notes, threadUnreadSinceMessageId } = detail;
-  // Delete is destructive and reserved for the people who supervise the queue —
-  // matches the API's admin/manager gate, so the button only shows when the
-  // click will actually work.
-  const canDelete = session.user.role === "admin" || session.user.role === "manager";
+  /**
+   * Delete is destructive and reserved for the people who supervise the queue.
+   *
+   * BOTH halves are required. The role gate matches the API's, and the OWNER
+   * check matches the domain's: `deleteTicket` is deliberately owner-only (§18
+   * — destroying a record several departments are working is not a guest's
+   * call), so on a ticket escalated INTO this workspace an admin was shown a
+   * button whose only possible outcome was an error with the ticket still
+   * there. A guest that is finished revokes its own access instead, which the
+   * sharing panel already offers.
+   */
+  const canDelete =
+    (session.user.role === "admin" || session.user.role === "manager") &&
+    ticket.sharing?.role !== "guest";
   return (
     // The section layout pins <main> to `overflow-hidden` for the BOARD's
     // sake (its columns own their scrolling). A ticket detail is a normal

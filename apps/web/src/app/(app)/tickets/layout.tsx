@@ -1,5 +1,6 @@
 import { SectionShell } from "@/components/layouts/section-shell";
 import { TicketsSubSidebar } from "@/components/layouts/tickets-sub-sidebar";
+import { getSession } from "@/lib/auth/current-user";
 
 /**
  * Tickets shell.
@@ -13,9 +14,16 @@ import { TicketsSubSidebar } from "@/components/layouts/tickets-sub-sidebar";
  * horizontally. A scrolling `<main>` would give the page a second scrollbar and
  * let the whole board slide under the header.
  */
-export default function TicketsLayout({ children }: { children: React.ReactNode }) {
+export default async function TicketsLayout({ children }: { children: React.ReactNode }) {
+  // The role decides whether the "Ticket settings" link is offered at all —
+  // every `/api/workspace/tickets` route is `@RequireRole("admin")`, so
+  // showing it to an agent is a link whose only outcome is an error page.
+  const { user } = await getSession();
   return (
-    <SectionShell subSidebar={<TicketsSubSidebar />} mainClassName="overflow-hidden">
+    <SectionShell
+      subSidebar={<TicketsSubSidebar isAdmin={user.role === "admin"} />}
+      mainClassName="overflow-hidden"
+    >
       {children}
     </SectionShell>
   );
