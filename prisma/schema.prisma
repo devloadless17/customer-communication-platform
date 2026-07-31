@@ -4752,6 +4752,11 @@ model TeamChannelReadReceipt {
   @@index([channelId])
 }
 
+// TENANCY EXCEPTION — no workspaceId by design: a login attempt happens
+// BEFORE authentication, so there is no tenant to attribute it to. Keyed by
+// lowercased email at the platform layer; allowlisted in the tenancy gate
+// (scripts/check-prisma-fields.mjs) like every other exception here.
+//
 // Persistent login-attempt counters. Replaces the in-process Map in
 // apps/web/src/lib/rate-limit.ts so brute-force history survives process
 // restarts (deploys, OOM, systemd Restart=on-failure). Keyed by lowercased

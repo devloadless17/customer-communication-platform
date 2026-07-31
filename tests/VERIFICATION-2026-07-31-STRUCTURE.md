@@ -83,7 +83,7 @@ NUMBER, the messaging limit per PORTFOLIO).
 
 | # | Domain | Lens | Status |
 |---|---|---|---|
-| S1 | Model spine & schema structure | tenancy exceptions vs reality; partial-index lockstep incl. the 2 NEW uncommitted migrations; cascade recount at 77 models; Json-heavy models | ☐ |
+| S1 | Model spine & schema structure | tenancy exceptions vs reality; partial-index lockstep incl. the 2 NEW uncommitted migrations; cascade recount at 77 models; Json-heavy models | ✅ **2026-07-31** — Finding #1 fixed (11 unprotected indexes); cascade + tenancy gates verified mechanically |
 | S2 | Org / workspaces / membership / session | service-less controllers; users.service grab-bag; duplicated tx idiom; single-definition rules verified at HEAD | ☐ |
 | S3 | Assignment + availability | structural claims at HEAD; round-robin shim; cache-invalidation convention; naming residue | ☐ |
 | S4 | Team/Workspace naming residue | `/api/admin/teams` rename (both sides); `Team.<field>` comments; `team.*` events = contracts (list-only); AssignmentPolicy→Team promotion (recommendation only) | ☐ |
@@ -95,6 +95,61 @@ NUMBER, the messaging limit per PORTFOLIO).
 | S10 | Backend layering | meta.controller business-logic extraction (proven by meta e2e 170); thin services; external-v1 split (list-only) | ☐ |
 | S11 | UI/UX rubric + skeleton system | SURFACES → every route (derived, not hand-named); shared skeleton primitive; axe fixes | ☐ |
 | S12 | Live UX walk + close-out | per-page browser pass, batched; full gates; approval list | ☐ |
+
+## Domain sessions
+
+### S1 — model spine & schema structure — ✅ CLOSED (2026-07-31)
+
+**Method: R (mechanical, scripted) + E (partial-indexes spec) + N (11 new tripwire entries).**
+
+- **Cascade recount — ✅ MACHINE-CHECKED at 77 models** (was 73 at the
+  predecessor's count): 60 `workspaceId + onDelete: Cascade` from Workspace,
+  2 carrying `workspaceId` but cascading via a parent that itself cascades
+  (`ApiIdempotencyKey` → WorkspaceApiKey, `AssignmentPolicyMember` →
+  AssignmentPolicy — both parents verified `onDelete: Cascade`), 14 without
+  `workspaceId`, plus `Workspace`. 60+2+14+1 = 77; nothing orphaned.
+- **Tenancy gate — ✅ EXACT.** `TENANTLESS_ALLOWLIST` in
+  `scripts/check-prisma-fields.mjs` is precisely the 14 no-workspaceId models,
+  and the gate also fails a model that GAINS workspaceId while allowlisted
+  (both directions guarded). One consistency gap fixed: `LoginAttempt` was the
+  only allowlisted model without the `TENANCY EXCEPTION` schema note the
+  convention (and the gate's own docblock) requires — note added (pre-auth by
+  nature, keyed by email, no tenant exists yet).
+- **The two NEW uncommitted migrations — ✅ verified.**
+  `20260730230000` adds a nullable, deliberately-FK-less scalar stamp
+  (documented in place); `20260730235500` adds `Broadcast.campaignName` plus a
+  NEW raw partial index `Broadcast_campaign_rollup_idx` — correctly placed in
+  its own migration per the rule written INTO the 0_init section (post-baseline
+  partial indexes must not go in the baseline section: the `*_event_key_uniq`
+  incident), and the pending session had already added it to the tripwire spec.
+  Discipline held without intervention. The pending `schema.prisma` diff drops
+  no columns, so no existing raw index is endangered.
+- **Finding #1 — FIXED: the tripwire had drifted from the section it guards by
+  ELEVEN indexes.** Mechanically extracting every Prisma-inexpressible index
+  (WHERE / expression / opclass) from all migrations and diffing against
+  `REQUIRED_PARTIAL_INDEXES`: 37 exist, 26 were pinned. The 11 unpinned —
+  `AiContextChunk_content_fts_idx`, `Contact_phoneNumber_trgm_idx`,
+  `Contact_workspaceId_marketingCapReachedAt_idx`, `Message_broadcastId_idx`,
+  `Message_conversationId_timestamp_inbound_idx` (the 24h-window check),
+  `Message_inbound_media_pending_idx`, `OutboundEvent_retention_idx`,
+  `OutboundWebhookDelivery_orphan_pending_idx`,
+  `TeamChannelMessage_channel_toplevel_keyset_idx`,
+  `WorkflowRun_active_startedAt_idx`, `WorkflowRun_terminal_startedAt_idx` —
+  are all non-UNIQUE performance indexes, so losing one to a baseline regen is
+  a **silent seq-scan regression** on a hot path (media sweeper, outbox reaper,
+  team-chat keyset paging, the 24h-window read), which is precisely the failure
+  class this program's lens exists for. All 11 added with `protects` rationale;
+  the FTS index needed a new optional `signature` field because its
+  inexpressibility is the expression, not a WHERE (the loop asserted WHERE on
+  every entry). **NEGATIVE-TESTED**: misspelling one name fails the spec naming
+  exactly that index; restored green (2/2).
+  Note the two false alarms the mechanical scan itself produced, recorded so
+  they are not re-chased: `Contact_name_trgm_idx` & friends in the GENERATED
+  section are Prisma-EXPRESSIBLE (`type: Gin` + `ops:` exists in the DSL — 5 in
+  schema.prisma) and need no pin; and a naive `'gin' in name` heuristic flags
+  `Lo·gin·Attempt` and `rin·gin·gAt`.
+- **Json-heavy models** (`AiAssistantConfig` 7 cols, `WorkflowRun` 5 incl.
+  per-run `graphSnapshot`) → carried to the approval list, per plan.
 
 ## Listed for approval (grows as domains close — nothing here is executed)
 

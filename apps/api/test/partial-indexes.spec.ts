@@ -38,7 +38,14 @@ afterAll(async () => {
 });
 
 /** Every raw partial index the product depends on, and what it protects. */
-const REQUIRED_PARTIAL_INDEXES: { name: string; unique: boolean; protects: string }[] = [
+const REQUIRED_PARTIAL_INDEXES: {
+  name: string;
+  unique: boolean;
+  protects: string;
+  /** Present when the index's Prisma-inexpressibility is an expression/opclass
+   *  rather than a WHERE predicate — asserted in place of the WHERE check. */
+  signature?: string;
+}[] = [
   {
     name: "TicketView_shared_name_key",
     unique: true,
@@ -195,6 +202,91 @@ const REQUIRED_PARTIAL_INDEXES: { name: string; unique: boolean; protects: strin
       "the campaign report's 'who clicked' drill-down — same full-campaign " +
       "re-scan per page as the replied leg if a baseline regen drops it",
   },
+  // ── The 11 below were in the hand-maintained 0_init section but NOT here ──
+  // Found 2026-07-31 by mechanically diffing that section against this list —
+  // the section's own header says "keep [this spec] in lockstep" and it had
+  // drifted by eleven. None are UNIQUE; all are performance indexes whose loss
+  // is a silent seq-scan, which is exactly the failure this spec exists to make
+  // loud. `signature` (instead of the default WHERE assertion) marks the ones
+  // whose Prisma-inexpressibility is an expression/opclass, not a predicate.
+  {
+    name: "AiContextChunk_content_fts_idx",
+    unique: false,
+    signature: "to_tsvector",
+    protects:
+      "AI context retrieval — full-text search over knowledge chunks; without " +
+      "the GIN every assistant lookup scans the workspace's whole corpus",
+  },
+  {
+    name: "Contact_phoneNumber_trgm_idx",
+    unique: false,
+    protects:
+      "contact search by partial phone number — ILIKE '%555%' cannot use a " +
+      "btree; partial on phoneNumber IS NOT NULL so social-only contacts cost nothing",
+  },
+  {
+    name: "Contact_workspaceId_marketingCapReachedAt_idx",
+    unique: false,
+    protects:
+      "the per-user marketing-cap sweep — finding capped contacts without " +
+      "scanning the whole directory (the column is NULL for almost everyone)",
+  },
+  {
+    name: "Message_broadcastId_idx",
+    unique: false,
+    protects:
+      "campaign message lookups ('every message this broadcast produced') — " +
+      "partial on broadcastId IS NOT NULL because organic messages dominate",
+  },
+  {
+    name: "Message_conversationId_timestamp_inbound_idx",
+    unique: false,
+    protects:
+      "the 24h-window check — 'latest INBOUND in this thread' answered off the " +
+      "index tip instead of walking outbound rows backwards",
+  },
+  {
+    name: "Message_inbound_media_pending_idx",
+    unique: false,
+    protects:
+      "the pending-media sweeper — inbound rows whose bytes never landed; " +
+      "without the partial index every sweep scans all of Message",
+  },
+  {
+    name: "OutboundEvent_retention_idx",
+    unique: false,
+    protects:
+      "outbox retention — reaping published-and-not-failed rows by publishedAt " +
+      "without scanning the live tail the drainer is working",
+  },
+  {
+    name: "OutboundWebhookDelivery_orphan_pending_idx",
+    unique: false,
+    protects:
+      "the orphaned-delivery sweep — never-attempted rows found by createdAt " +
+      "instead of scanning every delivery ever made",
+  },
+  {
+    name: "TeamChannelMessage_channel_toplevel_keyset_idx",
+    unique: false,
+    protects:
+      "team-chat keyset paging — (channelId, createdAt DESC, id DESC) on " +
+      "top-level messages only; without it every channel open re-sorts threads too",
+  },
+  {
+    name: "WorkflowRun_active_startedAt_idx",
+    unique: false,
+    protects:
+      "the workflow dashboard's active-runs lens and the stuck-run sweeper — " +
+      "queued/running/waiting rows are a sliver of a table that only grows",
+  },
+  {
+    name: "WorkflowRun_terminal_startedAt_idx",
+    unique: false,
+    protects:
+      "workflow-run history paging and retention — the terminal-status " +
+      "complement of the active lens",
+  },
 ];
 
 describe("hand-written partial indexes", () => {
@@ -215,7 +307,13 @@ describe("hand-written partial indexes", () => {
     // would reject every Instagram contact sharing a phone number.
     for (const idx of REQUIRED_PARTIAL_INDEXES) {
       const def = byName.get(idx.name)!;
-      expect(def, `${idx.name} must stay PARTIAL`).toMatch(/WHERE/i);
+      if (idx.signature) {
+        expect(def, `${idx.name} must keep its expression (${idx.signature})`).toContain(
+          idx.signature,
+        );
+      } else {
+        expect(def, `${idx.name} must stay PARTIAL`).toMatch(/WHERE/i);
+      }
       if (idx.unique) {
         expect(def, `${idx.name} must stay UNIQUE — it is ${idx.protects}`).toMatch(
           /CREATE UNIQUE INDEX/i,
