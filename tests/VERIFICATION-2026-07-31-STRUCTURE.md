@@ -93,7 +93,7 @@ NUMBER, the messaging limit per PORTFOLIO).
 | S8 | Route loading & error boundaries | loading.tsx / error.tsx program; /calls dead segment; inbox layout doc-lie | ✅ **2026-07-31** — 5 loading + 5 error boundaries, Skeleton primitive, /calls segment gone (`f0b87af6`) |
 | S9 | Frontend sectioning | features/tickets|flags|organization creation; app/←features inversion; move-only relocations; queries.ts split | ✅ **2026-07-31** — 13 move-only relocations (`1ce7e63a`); active-session files + queries.ts split deferred with reasons |
 | S10 | Backend layering | meta.controller business-logic extraction (proven by meta e2e 170); thin services; external-v1 split (list-only) | ✅ **2026-07-31** — extraction landed + e2e-proven (`b21b71d5`); one stale spec fixed on the way |
-| S11 | UI/UX rubric + skeleton system | SURFACES → every route (derived, not hand-named); shared skeleton primitive; axe fixes | ◐ **2026-07-31** — rubric extended + completeness guard (`cfafbb98`); RUN pending in S12 close-out |
+| S11 | UI/UX rubric + skeleton system | SURFACES → every route (derived, not hand-named); shared skeleton primitive; axe fixes | ✅ **2026-07-31** — **94/94 green** after fixing what the new surfaces caught (`ae70f92d`) |
 | S12 | Live UX walk + close-out | per-page browser pass, batched; full gates; approval list | ☐ |
 
 ## Domain sessions
@@ -440,6 +440,34 @@ negative-tested) + E (web vitest 37/37).**
   rename conflict), and the `queries.ts` domain split (same file carries
   their campaignName hunk; splitting underneath an active edit is churn with
   a live victim).
+
+### S11 — UI/UX rubric + skeleton system — ✅ CLOSED (2026-07-31)
+
+**Method: E (rubric run against the dev stack) + fix (`ae70f92d`) + the
+extension itself (`cfafbb98`).**
+
+- **The extended rubric ran 94/94 green** (was 58 checks at the 07-29
+  close): 13 full-rubric surfaces × 5 dimensions, 18 settings subpages, 12
+  feature subpages, and the filesystem-derived completeness guard as the
+  94th — which had already paid for itself before the first run by finding
+  `/settings/integrations/webhooks` unclaimed in a dry run.
+- **On arrival the new surfaces failed exactly as the method predicts** —
+  /templates carried two REAL violations no prior pass could see because no
+  prior pass named the surface: the active filter chip's
+  `bg-primary/10 + text-primary` pair measured under AA (the third
+  appearance of the opacity-modifier-on-token class the 07-29 ledger
+  documented), and the two in-text settings links were color-only. Chip is
+  now solid primary/primary-foreground (its count span deliberately NOT
+  given an opacity modifier — writing one and deleting it in the same
+  minute is in the commit history as a cautionary note); links carry the
+  house persistent underline. Surface re-runs green on all five dimensions
+  (CLS 0.0000).
+- **Two first-pass failures refuted as environmental**: /broadcasts/new and
+  /templates/library failed axe on the run where the dev server was
+  cold-compiling them and passed identically-configured re-runs — the
+  documented dev-compile-latency class, not product defects.
+- Base-URL note for future runs: the main config defaults to Caddy on
+  :8080; against the bare dev stack pass `E2E_BASE_URL=http://localhost:3000`.
 
 ## Close-out gate (S12) — the ritual, adapted from the 07-29 ledger
 
