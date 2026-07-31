@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -30,10 +30,14 @@ const DUAL_FETCHED = [
 ] as const;
 
 describe("RSC dual-fetch dedup", () => {
-  const queries = readFileSync(
-    join(__dirname, "../src/lib/api/queries.ts"),
-    "utf8",
-  );
+  // The 2026-07-31 split moved the fetchers into lib/api/queries/<domain>.ts
+  // behind a re-export facade — scan the whole directory so the pin follows
+  // the declarations wherever a future re-shuffle puts them.
+  const qdir = join(__dirname, "../src/lib/api/queries");
+  const queries = readdirSync(qdir)
+    .filter((f) => f.endsWith(".ts"))
+    .map((f) => readFileSync(join(qdir, f), "utf8"))
+    .join("\n");
   const currentUser = readFileSync(
     join(__dirname, "../src/lib/auth/current-user.ts"),
     "utf8",
@@ -46,7 +50,7 @@ describe("RSC dual-fetch dedup", () => {
       ).test(queries);
       expect(
         declared,
-        `${fn} must be declared as \`export const ${fn} = cache(...)\` in queries.ts — it is fetched by more than one component per request, and without cache() each render doubles the fan-out`,
+        `${fn} must be declared as \`export const ${fn} = cache(...)\` in lib/api/queries/ — it is fetched by more than one component per request, and without cache() each render doubles the fan-out`,
       ).toBe(true);
     });
   }
