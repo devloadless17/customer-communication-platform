@@ -233,6 +233,7 @@ export async function sendTextInternal(
   const send = await binding.provider.sendText(
     {
       to: channel.to,
+      ...(channel.viaBsuid ? { viaBsuid: true } : {}),
       body,
       useHumanAgentTag,
       ...(privateReply ? { privateReplyToCommentId: privateReply.commentId } : {}),

@@ -100,8 +100,20 @@ export interface NormalizedContactIdentity {
    * dropped. Undefined for every channel today.
    */
   bsuid?: string;
+  /**
+   * The PARENT BSUID ("US.ENT.…") — the cross-portfolio join key, present only
+   * for businesses enrolled in parent BSUIDs. Third rung of the ingest resolve
+   * ladder (phone → bsuid → parentBsuid).
+   */
+  parentBsuid?: string;
   /** WhatsApp public @username (2026), when present. Display + soft key only. */
   username?: string;
+  /**
+   * ISO 3166-1 alpha-2 from `contacts[].profile.country_code` (BSUID rollout —
+   * marked "subject to change" by Meta). Lets a phone-less contact carry a
+   * country; a phone-derived country always wins over it.
+   */
+  countryCode?: string;
 }
 
 /**
@@ -234,6 +246,19 @@ export interface NormalizedStatusUpdate extends NormalizedEventSource {
    * WhatsApp sets it, other channels omit it.
    */
   recipientId?: string;
+  /**
+   * The recipient's BSUID from `statuses[].recipient_user_id` — set on EVERY
+   * status once the BSUID rollout reaches the account, even for plain phone
+   * sends (the BSUID page documents it unconditionally). This is the
+   * highest-value BSUID capture point: every delivered status teaches an
+   * active thread its BSUID BEFORE the 30-day phone window can close, so the
+   * duplicate-thread fork Meta warns about never happens for the active book.
+   * Gated by the parser to BSUID-shaped values (never all-digits, never
+   * group traffic).
+   */
+  recipientBsuid?: string;
+  /** `statuses[].recipient_parent_user_id`, when enrolled in parent BSUIDs. */
+  recipientParentBsuid?: string;
   timestamp: Date;
   rawPayload: Record<string, unknown>;
 }
@@ -306,6 +331,9 @@ export interface NormalizedCallEvent extends NormalizedEventSource {
    * same way the inbound-message path does.
    */
   bsuid?: string;
+  /** Parent BSUID ("US.ENT.…"), when the business is enrolled — see
+   * `NormalizedContactIdentity.parentBsuid`. */
+  parentBsuid?: string;
   contactName: string | null;
   direction: "in" | "out";
   /**
@@ -981,6 +1009,13 @@ export interface NormalizedChannelHealth extends NormalizedEventSource {
   displayPhoneNumber?: string;
   /** Raw Meta messaging_limit tier, e.g. "TIER_1K" | "TIER_10K" | "TIER_100K" | "TIER_UNLIMITED". */
   messagingTier?: string;
+  /**
+   * The PORTFOLIO's phone-number allowance
+   * (`business_capability_update.max_phone_numbers_per_business_portfolio`,
+   * legacy spelling `max_phone_numbers_per_business`). Feeds
+   * `WhatsappPortfolio.maxPhoneNumbers`, which gates adding another number.
+   */
+  maxPhoneNumbers?: number;
   /** Quality band: "GREEN" | "YELLOW" | "RED". */
   qualityRating?: string;
   /** Throughput level: "STANDARD" | "HIGH". */
@@ -1076,6 +1111,15 @@ export interface NormalizedChannelHealth extends NormalizedEventSource {
    * exactly — no digit normalization, no single-number-WABA inference needed.
    */
   phoneNumberId?: string;
+  /**
+   * The number's WhatsApp @username, from the `business_username_updates`
+   * webhook — the number adopted, changed, or had a username transferred onto
+   * it. Per-NUMBER like `qualityRating` (a username is 1:1 with a business
+   * phone number). Lowercase — usernames are case-insensitive at Meta.
+   * `undefined` leaves the stored value untouched, like every other partial
+   * field on this event.
+   */
+  businessUsername?: string;
   rawPayload: Record<string, unknown>;
 }
 
@@ -1139,6 +1183,13 @@ export type NormalizedEvent =
 export interface SendTextArgs {
   /** E.164 digits, no '+'. */
   to: string;
+  /**
+   * WhatsApp only: `to` is a BSUID, not a phone — the provider addresses the
+   * send with the top-level `recipient` field (BSUID page, 2026-07) instead of
+   * `to`, with a one-shot legacy-`to` retry if Meta rejects the field. Set from
+   * `resolveContactChannel().viaBsuid`. Ignored by other channels.
+   */
+  viaBsuid?: boolean;
   body: string;
   /**
    * When set, the provider sends as a quoted reply. For Meta this becomes
@@ -1238,6 +1289,13 @@ export interface InteractiveOption {
 export interface SendInteractiveArgs {
   /** E.164 digits, no '+'. */
   to: string;
+  /**
+   * WhatsApp only: `to` is a BSUID, not a phone — the provider addresses the
+   * send with the top-level `recipient` field (BSUID page, 2026-07) instead of
+   * `to`, with a one-shot legacy-`to` retry if Meta rejects the field. Set from
+   * `resolveContactChannel().viaBsuid`. Ignored by other channels.
+   */
+  viaBsuid?: boolean;
   /** Question / body text the contact sees above the options. */
   bodyText: string;
   /**
@@ -1249,6 +1307,14 @@ export interface SendInteractiveArgs {
    * (`interactive.type: "location_request_message"`) — the customer taps it,
    * picks a location, and the reply arrives as an ordinary inbound `location`
    * message carrying `context` back to this message. No `options` either.
+   *
+   * `request_contact_info` renders WhatsApp's own "share contact info" button
+   * (`interactive.type: "request_contact_info"` — renamed from
+   * `contact_request` 2026-05-28; the button label is fixed by WhatsApp). The
+   * reply arrives as an ordinary inbound `contacts` message with
+   * `contacts[].origin: "contact_request"` — the one proactive remedy for a
+   * BSUID-only thread, since the card carries the customer's phone. No
+   * `options` either.
    *
    * `cta_url` renders one URL-opening button (`interactive.type: "cta_url"`)
    * so a long/ugly tracking link never appears raw in the body. Configured
@@ -1264,11 +1330,13 @@ export interface SendInteractiveArgs {
     | "list"
     | "voice_call"
     | "location_request"
+    | "request_contact_info"
     | "cta_url"
     | "carousel"
     | "generic"
     | "product";
-  /** Ignored for `voice_call` / `location_request` / `cta_url` / `carousel`. */
+  /** Ignored for `voice_call` / `location_request` / `request_contact_info` /
+   *  `cta_url` / `carousel`. */
   options: InteractiveOption[];
   /**
    * `voice_call` only. Every field is optional; the provider's defaults are
@@ -1681,6 +1749,13 @@ export interface SendUtilityTemplateArgs {
 export interface SendStickerArgs {
   /** Recipient's channel identity (PSID on Messenger). */
   to: string;
+  /**
+   * WhatsApp only: `to` is a BSUID, not a phone — the provider addresses the
+   * send with the top-level `recipient` field (BSUID page, 2026-07) instead of
+   * `to`, with a one-shot legacy-`to` retry if Meta rejects the field. Set from
+   * `resolveContactChannel().viaBsuid`. Ignored by other channels.
+   */
+  viaBsuid?: boolean;
   stickerId: string;
   /** Meta social only — see SendTextArgs.useHumanAgentTag. */
   useHumanAgentTag?: boolean;
@@ -1690,6 +1765,13 @@ export interface SendStickerArgs {
 export interface SendLocationArgs {
   /** E.164 digits, no '+'. */
   to: string;
+  /**
+   * WhatsApp only: `to` is a BSUID, not a phone — the provider addresses the
+   * send with the top-level `recipient` field (BSUID page, 2026-07) instead of
+   * `to`, with a one-shot legacy-`to` retry if Meta rejects the field. Set from
+   * `resolveContactChannel().viaBsuid`. Ignored by other channels.
+   */
+  viaBsuid?: boolean;
   latitude: number;
   longitude: number;
   /** Place name shown above the address. */
@@ -1715,6 +1797,13 @@ export interface SharedContactInput {
 /** Outbound contact share (WhatsApp `type:"contacts"`). */
 export interface SendContactsArgs {
   to: string;
+  /**
+   * WhatsApp only: `to` is a BSUID, not a phone — the provider addresses the
+   * send with the top-level `recipient` field (BSUID page, 2026-07) instead of
+   * `to`, with a one-shot legacy-`to` retry if Meta rejects the field. Set from
+   * `resolveContactChannel().viaBsuid`. Ignored by other channels.
+   */
+  viaBsuid?: boolean;
   contacts: SharedContactInput[];
   replyToExternalId?: string;
   useHumanAgentTag?: boolean;
@@ -1723,6 +1812,13 @@ export interface SendContactsArgs {
 /** Outbound emoji reaction to a customer message (WhatsApp `type:"reaction"`). */
 export interface SendReactionArgs {
   to: string;
+  /**
+   * WhatsApp only: `to` is a BSUID, not a phone — the provider addresses the
+   * send with the top-level `recipient` field (BSUID page, 2026-07) instead of
+   * `to`, with a one-shot legacy-`to` retry if Meta rejects the field. Set from
+   * `resolveContactChannel().viaBsuid`. Ignored by other channels.
+   */
+  viaBsuid?: boolean;
   /** The wamid of the message being reacted to. */
   messageExternalId: string;
   /** The emoji; an empty string REMOVES the reaction (Meta's convention). */
@@ -1757,6 +1853,13 @@ export interface UploadMediaResult {
 
 export interface SendMediaArgs {
   to: string;
+  /**
+   * WhatsApp only: `to` is a BSUID, not a phone — the provider addresses the
+   * send with the top-level `recipient` field (BSUID page, 2026-07) instead of
+   * `to`, with a one-shot legacy-`to` retry if Meta rejects the field. Set from
+   * `resolveContactChannel().viaBsuid`. Ignored by other channels.
+   */
+  viaBsuid?: boolean;
   kind: MediaKind;
   /** Provider-side media id from a prior uploadMedia call. */
   mediaId: string;
@@ -2173,6 +2276,13 @@ export interface TemplateVariableSet {
 
 export interface SendTemplateArgs {
   to: string;
+  /**
+   * WhatsApp only: `to` is a BSUID, not a phone — the provider addresses the
+   * send with the top-level `recipient` field (BSUID page, 2026-07) instead of
+   * `to`, with a one-shot legacy-`to` retry if Meta rejects the field. Set from
+   * `resolveContactChannel().viaBsuid`. Ignored by other channels.
+   */
+  viaBsuid?: boolean;
   name: string;
   language: string;
   variables: TemplateVariableSet;
@@ -2589,6 +2699,15 @@ export interface ProviderCapabilities {
    * interactive kind. WhatsApp only today. Optional — absent = false.
    */
   locationRequest?: boolean;
+  /**
+   * Contact-info REQUEST messages (`interactive.type:"request_contact_info"`
+   * — WhatsApp renders its own fixed-label "share contact info" button; the
+   * reply arrives as a normal inbound `contacts` card with
+   * `origin:"contact_request"`). Gates the composer/`/v1`
+   * `request_contact_info` interactive kind. WhatsApp only today. Optional —
+   * absent = false.
+   */
+  requestContactInfo?: boolean;
   /**
    * CTA URL button messages — one button that opens a URL, keeping the raw link
    * out of the body. Gates the composer/`/v1` `cta_url` interactive kind.
@@ -3315,6 +3434,26 @@ export interface MessagingProvider<SendConfig = unknown> {
     args: UpdateBusinessProfileArgs,
     config: SendConfig,
   ): Promise<void>;
+  /**
+   * The number's WhatsApp @username — a chat-native handle, 1:1 with the
+   * business phone number and globally unique across WhatsApp. Null when the
+   * number hasn't adopted one. Adopting one does NOT hide the phone number.
+   */
+  getUsername?(config: SendConfig): Promise<{ username: string | null }>;
+  /**
+   * Adopt or change it. `transferAction: "force_transfer"` moves a username
+   * already held by ANOTHER of the same portfolio's numbers (the conflict Meta
+   * reports as Graph error 147005) — callers must confirm before passing it,
+   * because the other number silently loses its handle.
+   */
+  setUsername?(
+    args: { username: string; transferAction?: "none" | "force_transfer" },
+    config: SendConfig,
+  ): Promise<void>;
+  /** Remove the number's username. */
+  deleteUsername?(config: SendConfig): Promise<void>;
+  /** Meta's reserved username suggestions for this number. */
+  getUsernameSuggestions?(config: SendConfig): Promise<string[]>;
   /**
    * Render the preset authentication text in the requested languages, so an
    * operator can SEE the wording before committing to it. Meta owns the copy, so

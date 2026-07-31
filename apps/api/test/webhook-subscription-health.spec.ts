@@ -40,9 +40,31 @@ vi.mock("@/lib/providers/meta-waba-subscription", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/providers/meta-waba-subscription")>();
   return { ...actual, ensureWabaSubscribed: vi.fn() };
 });
+/**
+ * The SOCIAL self-heal, mocked for the same reason as its WhatsApp twin above —
+ * and it was the one that got missed.
+ *
+ * `sweepWebhookSubscriptionHealthOnce` reads EVERY active Meta connection on the
+ * platform, so any Messenger/Instagram row in the developer's database is swept
+ * too. `getPageSubscription` rides the mocked `graphGetJson` and is therefore
+ * harmless, but when it reports "not subscribed" the sweeper calls
+ * `ensurePageSubscribedToMessaging` — which was NOT mocked, so it reached the
+ * real `graphPostForm` and made a live network call per social connection. Two
+ * cases here answer `{ data: [] }` to every `/subscribed_apps` URL, which is
+ * exactly "not subscribed", so both timed out at 30s the moment a dev database
+ * held a Page or Instagram account.
+ *
+ * Nothing about the assertions changes: these cases are about the WhatsApp
+ * re-parent probe, and a social connection was never part of what they test.
+ */
+vi.mock("@/lib/providers/meta-page-subscription", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/providers/meta-page-subscription")>();
+  return { ...actual, ensurePageSubscribedToMessaging: vi.fn() };
+});
 
 import { graphGetJson } from "@/lib/providers/meta-graph";
 import { ensureWabaSubscribed } from "@/lib/providers/meta-waba-subscription";
+import { ensurePageSubscribedToMessaging } from "@/lib/providers/meta-page-subscription";
 import { invalidateProviderConfig } from "@/lib/providers/config";
 import { sweepWebhookSubscriptionHealthOnce } from "@/lib/sweepers/webhook-subscription-health";
 
@@ -67,6 +89,7 @@ let connId = "";
 
 const mockedGraph = vi.mocked(graphGetJson);
 const mockedEnsure = vi.mocked(ensureWabaSubscribed);
+const mockedEnsurePage = vi.mocked(ensurePageSubscribedToMessaging);
 
 /** The sweeper reads EVERY active Meta connection on the platform, so a test
  *  must assert on ITS OWN row rather than on call counts — another spec's
@@ -147,6 +170,11 @@ beforeAll(async () => {
 beforeEach(async () => {
   mockedGraph.mockReset();
   mockedEnsure.mockReset();
+  // Default for the foreign social rows the global sweep picks up: answer
+  // "healed" so no case reaches the network. Individual cases override the
+  // WhatsApp mock only.
+  mockedEnsurePage.mockReset();
+  mockedEnsurePage.mockResolvedValue({ ok: true, subscribedFields: ["messages"] });
   invalidateProviderConfig(workspaceId);
   await clearReconnectFlag();
 });

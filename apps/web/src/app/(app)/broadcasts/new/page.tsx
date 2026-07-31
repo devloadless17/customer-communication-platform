@@ -77,6 +77,10 @@ export default async function NewBroadcastPage({
         targetMode: source.targetMode,
         channel: source.channel,
         bodyText: source.bodyText,
+        // The rollup's join key. A duplicate IS the campaign's next send (the
+        // re-send to non-openers, the follow-up), so dropping it here silently
+        // started a second campaign of one.
+        campaignName: source.campaignName,
       }
     : null;
   // Reproduce the source's message kind on duplicate rather than defaulting to
@@ -182,6 +186,7 @@ export default async function NewBroadcastPage({
       cloneHeaderVar={clone?.variables.header ?? null}
       cloneKind={cloneMessageKind}
       cloneBodyText={clone?.bodyText ?? null}
+      cloneCampaignName={clone?.campaignName ?? null}
       cloneChannel={clone?.channel ?? null}
       // A clone's own channel wins — the point of duplicating is to repeat it.
       initialChannel={

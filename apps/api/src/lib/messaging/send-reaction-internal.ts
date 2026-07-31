@@ -160,6 +160,7 @@ export async function sendReactionInternal(args: SendReactionInternalArgs): Prom
   await sendReaction(
     {
       to: dest.to,
+      ...(dest.viaBsuid ? { viaBsuid: true } : {}),
       messageExternalId: target.externalId,
       emoji: args.emoji,
       useHumanAgentTag,

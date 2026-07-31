@@ -1,5 +1,6 @@
 import {
   Body,
+  ConflictException,
   Controller,
   Delete,
   Get,
@@ -215,6 +216,25 @@ export class BroadcastsController {
     @Param("id") id: string,
   ) {
     await this.broadcasts.cancel(session.workspaceId, id);
+    return { ok: true };
+  }
+
+  /**
+   * The EXPLICIT operator resume for a paused campaign — the only path that
+   * may lift an `abuse_warning` pause (automatic resume excludes it: a human
+   * choosing to continue after seeing the reason IS the review Meta's warning
+   * asks for). 409 when the row isn't paused.
+   */
+  @Post(":id/resume")
+  @RequireCapability("broadcasts:manage")
+  async resume(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+  ) {
+    const resumed = await this.broadcasts.resume(session.workspaceId, id);
+    if (!resumed) {
+      throw new ConflictException({ error: "broadcast_not_paused" });
+    }
     return { ok: true };
   }
 

@@ -5,6 +5,10 @@ import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 import { assignConversation } from "@/lib/conversations/mutations";
 import { createOutboundMessageIdempotent, isTransient } from "@/lib/messages/idempotent-create";
+import {
+  BsuidPortfolioMismatchError,
+  applyBsuidPortfolioGuard,
+} from "@/lib/messaging/bsuid-routing";
 import { getProviderBinding } from "@/lib/providers";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import {
@@ -25,6 +29,11 @@ import { CHANNEL_CAPABILITIES, isPhoneChannel } from "@ccp/shared/providers/capa
 import { flagChannelNeedsReconnect } from "@/lib/providers/channel-health";
 import { enqueueBroadcastMaterialize } from "@/lib/broadcasts/materialize-queue";
 import { enqueueScheduledBroadcast } from "@/lib/broadcasts/schedule-queue";
+import {
+  createAccountRouter,
+  isSocialFanOut,
+  type AccountRouter,
+} from "@/lib/broadcasts/social-account-router";
 import {
   acquireSendToken,
   resolveSendRate,
@@ -881,7 +890,25 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   // park-on-missing-creds recovery below. `bindingByChannel` holds that single
   // entry; `processOneRecipient` resolves it per recipient.
   const bindingByChannel = new Map<Channel, ChannelBinding>();
-  {
+  // FAN-OUT campaigns pin no account, so there is no single run-level config to
+  // resolve — and trying would actively break them: `getSendConfig(null)` on a
+  // workspace with two Pages is deliberately AMBIGUOUS (`ACCOUNT_UNRESOLVED`),
+  // which the block below would read as "not connected" and park the whole
+  // campaign as paused. Every recipient carries its own account instead.
+  const fanOut = isSocialFanOut(broadcast.channel, broadcast.channelConnectionId);
+  if (fanOut) {
+    const binding = getProviderBinding(broadcast.channel);
+    if (broadcast.kind === "template" && !binding.provider.sendTemplate) {
+      await fail(broadcast.id, "provider does not support templates");
+      return;
+    }
+    // `config: null` is load-bearing, not a placeholder: a fan-out recipient
+    // MUST resolve its own account, and a recipient carrying no account stamp
+    // has never messaged any of these Pages — so there is no id to address and
+    // it is failed individually below rather than sent with a guessed account.
+    bindingByChannel.set(broadcast.channel, { provider: binding.provider, config: null });
+  }
+  if (!fanOut) {
     // Route to the broadcast's ACTUAL channel: template broadcasts are WhatsApp;
     // freeform broadcasts carry their own channel (Messenger / Instagram).
     const binding = getProviderBinding(broadcast.channel);
@@ -941,6 +968,11 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     }
     bindingByChannel.set(broadcast.channel, { provider, config });
   }
+
+  // Per-run resolver for the FAN-OUT case: a social campaign whose recipients
+  // were stamped with their own account at materialize time. Caches per account
+  // (including known-bad ones) so a 100k run resolves each account once.
+  const accountRouter = createAccountRouter(broadcast.workspaceId, broadcast.channel);
 
   const variables = parseVariables(broadcast.variables);
   // Hoist what doesn't change between recipients. TEMPLATE broadcasts load the
@@ -1167,6 +1199,10 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     // Pre-drawn campaign assignee (lib/assignment/broadcast-plan.ts), applied
     // after a successful send.
     assignedUserId: true,
+    // WHICH ACCOUNT to send this recipient from, stamped at materialize time.
+    // Null = use the campaign's own account (every WhatsApp campaign and every
+    // single-account social run). See resolve-recipient-accounts.ts.
+    channelConnectionId: true,
     contact: {
       select: {
         id: true,
@@ -1178,6 +1214,9 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         phoneNumber: true,
         // Freeform (social) broadcasts dial the PSID/IGSID, not a phone.
         externalContactId: true,
+        bsuid: true,
+        parentBsuid: true,
+        bsuidPortfolioId: true,
         email: true,
         location: true,
         // Drives the HUMAN_AGENT tag decision on freeform (social) sends — inside
@@ -1207,6 +1246,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         status: true,
         customerId: true,
         assignedUserId: true,
+        channelConnectionId: true,
         contact: {
           select: {
             id: true,
@@ -1215,6 +1255,9 @@ async function runBroadcast(broadcastId: string): Promise<void> {
             identityChannel: true,
             phoneNumber: true,
             externalContactId: true,
+            bsuid: true,
+            parentBsuid: true,
+            bsuidPortfolioId: true,
             email: true,
             location: true,
             lastInboundAt: true,
@@ -1463,7 +1506,28 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         // Rate gate BEFORE the Meta call, and before taking a team slot, so a
         // lane waiting on tokens isn't also holding a slot another team could
         // be using.
-        if (rateLimited) await acquireSendToken(rateKey, sendRate);
+        // Bucket on the RECIPIENT's account when the campaign fans out, because
+        // Meta's send ceilings are per Page: two Pages in one campaign must not
+        // throttle each other, and their combined rate must not exceed either
+        // one's limit. `rateKey` (the campaign's single account) is the fallback
+        // and stays exactly right for WhatsApp and single-account social runs.
+        //
+        // The bucket key must be the PROVIDER's account id (binding.rateKey),
+        // never our internal connection cuid: the run fallback and every other
+        // broadcast key on the provider id, so a cuid-keyed bucket was a SECOND
+        // bucket for the same Page — splitting one Page's traffic across two
+        // buckets and pacing it past the documented ceiling. The router caches
+        // per account, so this resolve is one config read per account per run.
+        //
+        // This is why the account is stamped on the recipient ROW at materialize
+        // time rather than resolved during the send: this gate fires before the
+        // recipient's conversation is ever read.
+        if (rateLimited) {
+          const recipientBinding = recipient.channelConnectionId
+            ? await accountRouter.resolve(recipient.channelConnectionId)
+            : null;
+          await acquireSendToken(recipientBinding?.rateKey ?? rateKey, sendRate);
+        }
         // Global gate BEFORE the per-team one: the process-wide ceiling is the
         // one protecting inbox latency, so it must bound every lane of every
         // running broadcast, not just one tenant's share.
@@ -1475,6 +1539,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
             broadcast,
             recipient,
             bindingByChannel,
+            accountRouter,
             bindings,
             variables,
             templateBody,
@@ -1735,6 +1800,11 @@ async function processOneRecipient(
     customerId: string | null;
     /** Assignee drawn at materialize time; null when the campaign assigns nobody. */
     assignedUserId: string | null;
+    /**
+     * The account this recipient must be sent from, stamped at materialize time.
+     * Null = the campaign's own account. See resolve-recipient-accounts.ts.
+     */
+    channelConnectionId: string | null;
     contact: {
       id: string;
       name: string;
@@ -1743,6 +1813,10 @@ async function processOneRecipient(
       identityChannel: Channel;
       phoneNumber: string | null;
       externalContactId: string | null;
+      /** BSUID trio — the phone-less WhatsApp destination + portfolio guard. */
+      bsuid: string | null;
+      parentBsuid: string | null;
+      bsuidPortfolioId: string | null;
       email: string | null;
       location: string | null;
       lastInboundAt: Date | null;
@@ -1753,6 +1827,8 @@ async function processOneRecipient(
     };
   },
   bindingByChannel: Map<Channel, ChannelBinding>,
+  /** Resolves per-account credentials when a social campaign fans out. */
+  accountRouter: AccountRouter,
   bindings: VariableBindings,
   variables: BroadcastVariables,
   templateBody: string,
@@ -1784,7 +1860,45 @@ async function processOneRecipient(
     );
     return;
   }
-  const { provider, config } = activeBinding;
+  // `provider` is identical for every account on a channel — only the
+  // CREDENTIALS differ — so only `config` is per-recipient. That is what keeps
+  // this change small: `sendTemplate`, `capabilities` and `useHumanAgentTag`
+  // below are all provider-level and need no rework.
+  const { provider } = activeBinding;
+  let config = activeBinding.config;
+  if (config === null && !recipient.channelConnectionId) {
+    // Fan-out run, and this recipient has no account: they have never messaged
+    // any of the connected Pages, so Meta has issued no id for them and there is
+    // nothing to address. (Imported and manually-added contacts are exactly
+    // this.) Fail the one recipient with a reason an operator can act on.
+    await failRecipientAndCount(
+      recipient.id,
+      "This contact has never messaged any of your connected accounts, so there is no address to send to.",
+      broadcast.id,
+      broadcast.workspaceId,
+      pendingBumps,
+    );
+    return;
+  }
+  if (recipient.channelConnectionId) {
+    // Fan-out: this recipient's id was issued by a specific account and is
+    // meaningless to any other, so it MUST go out from that one.
+    const own = await accountRouter.resolve(recipient.channelConnectionId);
+    if (!own) {
+      // One disconnected account fails only ITS recipients. Failing the run
+      // would be the blast-radius mistake fan-out exists to avoid — every other
+      // account in the campaign is still perfectly able to send.
+      await failRecipientAndCount(
+        recipient.id,
+        "The account this contact messaged is no longer connected.",
+        broadcast.id,
+        broadcast.workspaceId,
+        pendingBumps,
+      );
+      return;
+    }
+    config = own.config;
+  }
 
   // Capture the optional method once — providers without a template catalog
   // fail the recipient gracefully (vs throwing) so the rest of the broadcast
@@ -1930,8 +2044,16 @@ async function processOneRecipient(
               // — or, once the account-unresolved guard landed, refused to send
               // at all. Null stays null for a single-account workspace, which
               // is what the unambiguous fallback is for.
-              ...(broadcast.channelConnectionId
-                ? { channelConnectionId: broadcast.channelConnectionId }
+              // The RECIPIENT's account first: on a fan-out campaign the thread
+              // belongs to the Page that customer actually messaged, and their
+              // reply — plus the 24h window that governs the agent's free-form
+              // answer — lands there. Falls back to the campaign's own account,
+              // which is every WhatsApp run and every single-account social run.
+              ...(recipient.channelConnectionId ?? broadcast.channelConnectionId
+                ? {
+                    channelConnectionId:
+                      recipient.channelConnectionId ?? broadcast.channelConnectionId,
+                  }
                 : {}),
               status: "pending",
               lastMessagePreview: "",
@@ -1993,9 +2115,55 @@ async function processOneRecipient(
     // phone even though the send is freeform. Skip a recipient missing the
     // right identity with a clear failure rather than feeding `null` to Meta.
     const dialsPhone = isPhoneChannel(sendChannel);
-    const toPhone = dialsPhone
+    let toPhone = dialsPhone
       ? recipient.contact.phoneNumber
       : recipient.contact.externalContactId;
+    let viaBsuid = false;
+    // A phone-less WhatsApp contact identified only by BSUID (username
+    // adopter) is still reachable — for everything except AUTHENTICATION
+    // templates, which Meta refuses to a BSUID address (131062). Refusing
+    // locally saves a billed call per recipient; the report buckets it under
+    // the same `bsuid_needs_phone` code the inbox path uses. The portfolio
+    // guard retargets to the parent BSUID on a known cross-portfolio
+    // mismatch and refuses when none is stored (Meta hard-fails those).
+    if (dialsPhone && !toPhone && recipient.contact.bsuid) {
+      if (
+        broadcast.kind === "template" &&
+        (broadcast.templateCategory ?? "").toLowerCase() === "authentication"
+      ) {
+        await failRecipientAndCount(
+          recipient.id,
+          "Authentication templates need the contact's phone number — we only have their WhatsApp id.",
+          broadcast.id,
+          broadcast.workspaceId,
+          pendingBumps,
+          "bsuid_needs_phone",
+        );
+        return;
+      }
+      try {
+        const guarded = await applyBsuidPortfolioGuard(
+          { channel: sendChannel, to: recipient.contact.bsuid, viaBsuid: true },
+          recipient.contact,
+          config as { wabaAccountId?: string },
+        );
+        toPhone = guarded.to;
+        viaBsuid = true;
+      } catch (err) {
+        if (err instanceof BsuidPortfolioMismatchError) {
+          await failRecipientAndCount(
+            recipient.id,
+            err.message,
+            broadcast.id,
+            broadcast.workspaceId,
+            pendingBumps,
+            "bsuid_needs_phone",
+          );
+          return;
+        }
+        throw err;
+      }
+    }
     if (!toPhone) {
       await failRecipientAndCount(
         recipient.id,
@@ -2009,15 +2177,35 @@ async function processOneRecipient(
       return;
     }
 
-    // Fire-time freeform-window re-check. Customer-mode picks each person's best
-    // channel at CREATE time; a SCHEDULED broadcast fired hours/days later can
-    // have recipients whose 24h freeform window has since closed. WhatsApp has no
-    // human-agent extension, so a freeform send past 24h is a guaranteed Meta
-    // rejection — skip it here with a clean, actionable reason instead of a
-    // cryptic bulk Meta failure. (Social keeps its human-agent-tag behavior for
-    // the 24h–7d band via `useHumanAgentTag` above; a truly-expired social send
-    // still surfaces Meta's own error.)
-    if (isFreeform && dialsPhone) {
+    // Fire-time freeform-window re-check, for EVERY channel.
+    //
+    // Customer-mode picks each person's best channel at CREATE time; a SCHEDULED
+    // broadcast fired hours/days later can have recipients whose 24h window has
+    // since closed. On WhatsApp that send is a guaranteed Meta rejection, so it is
+    // skipped with an actionable reason instead of a cryptic bulk failure.
+    //
+    // SOCIAL USED TO BE EXEMPT HERE, and that was the dangerous half. An
+    // out-of-window Messenger/Instagram recipient fell through to
+    // `useHumanAgentTag` above and went out under `MESSAGE_TAG` + `HUMAN_AGENT`.
+    // That tag is not a delivery mechanism, it is a POLICY claim — Meta grants it
+    // so "a human agent [can] respond to a person's message" outside 24h, and is
+    // explicit that "Message Tags may not be used to send promotional content" and
+    // that "use of Message Tags outside the approved use cases may result in
+    // restrictions on the Page or Instagram account's ability to send messages".
+    //
+    // A broadcast is bulk outbound by construction: nobody is answering anyone's
+    // inquiry. So tagging one HUMAN_AGENT is misuse in the ordinary case, and the
+    // penalty lands on the CUSTOMER'S account — sending restrictions that are slow
+    // and painful to lift. We cannot classify message content, so we cannot judge
+    // "promotional" per campaign; what we can do is refuse to make the claim at all
+    // in the one place it is never true.
+    //
+    // The recipient is therefore skipped, exactly like WhatsApp, with the same
+    // reason an operator can act on. In-window recipients are unaffected and go
+    // out as `messaging_type: RESPONSE`, which is what they always should have
+    // been. Agent-typed replies keep the tag — there a human agent really is
+    // responding, which is precisely the approved use.
+    if (isFreeform) {
       const freeFormMs = CHANNEL_CAPABILITIES[sendChannel].freeFormWindowMs;
       if (
         freeFormMs !== null &&
@@ -2031,7 +2219,11 @@ async function processOneRecipient(
       ) {
         await failRecipientAndCount(
           recipient.id,
-          "Messaging window closed since the broadcast was created — the contact must message first to reopen it.",
+          dialsPhone
+            ? "Messaging window closed since the broadcast was created — the contact must message first to reopen it."
+            : "Messaging window closed — a broadcast can't be sent under the Human Agent tag, " +
+              "which Meta reserves for a human replying to that person's own message. " +
+              "The contact must message first to reopen the window.",
           broadcast.id,
           broadcast.workspaceId,
           pendingBumps,
@@ -2239,10 +2431,11 @@ async function processOneRecipient(
         Boolean(cardsForSend && mediaState.cardMediaIds);
       try {
         send = isFreeform
-          ? await provider.sendText({ to: toPhone, body: broadcast.bodyText ?? "", useHumanAgentTag }, config)
+          ? await provider.sendText({ to: toPhone, ...(viaBsuid ? { viaBsuid: true } : {}), body: broadcast.bodyText ?? "", useHumanAgentTag }, config)
           : await sendTemplate!(
               {
                 to: toPhone,
+                ...(viaBsuid ? { viaBsuid: true } : {}),
                 name: broadcast.templateName!,
                 language: broadcast.templateLanguage!,
                 variables: templateVariables,
@@ -2295,10 +2488,12 @@ async function processOneRecipient(
           );
           try {
             send = isFreeform
-              ? await provider.sendText({ to: toPhone, body: broadcast.bodyText ?? "", useHumanAgentTag }, config)
+              ? await provider.sendText({ to: toPhone, ...(viaBsuid ? { viaBsuid: true } : {}), body: broadcast.bodyText ?? "", useHumanAgentTag }, config)
               : await sendTemplate!(
                   {
                     to: toPhone,
+                    ...(viaBsuid ? { viaBsuid: true } : {}),
+                ...(viaBsuid ? { viaBsuid: true } : {}),
                     name: broadcast.templateName!,
                     language: broadcast.templateLanguage!,
                     variables: templateVariables,
@@ -2387,6 +2582,7 @@ async function processOneRecipient(
             send = await sendTemplate!(
               {
                 to: toPhone,
+                ...(viaBsuid ? { viaBsuid: true } : {}),
                 name: broadcast.templateName!,
                 language: broadcast.templateLanguage!,
                 variables: {
@@ -2644,7 +2840,11 @@ async function processOneRecipient(
         // from the thread. A recipient with an existing conversation keeps that
         // thread's pointer, which may name a different number than the campaign
         // sent from; the campaign's account is what actually carried this row.
-        channelConnectionId: broadcast.channelConnectionId ?? null,
+        // Historical stamp of the account this message ACTUALLY went out from —
+        // the recipient's own on a fan-out campaign. Getting this wrong
+        // misreports per-account analytics and CSV exports forever.
+        channelConnectionId:
+          recipient.channelConnectionId ?? broadcast.channelConnectionId ?? null,
         // Durable campaign link. `rawPayload.broadcastId` below is kept for
         // back-compat + the historical backfill, but the rawPayload-retention
         // sweeper COLLAPSES that blob to {"sentVia":"broadcast"} after its
@@ -2844,6 +3044,21 @@ async function maybeTripPermanentBreaker(
   },
   err: unknown,
 ): Promise<void> {
+  // Meta's ABUSE WARNING (`613 – 2018338`) stops the campaign on the FIRST hit,
+  // with no streak to accumulate.
+  //
+  // Every other run-fatal class here waits for a streak because one rejection
+  // can be an isolated bad recipient. This one cannot: Meta has already decided
+  // the account's behaviour "may be considered bothersome or abusive" and warned
+  // that "further misuse of API features may result in messaging restrictions
+  // being placed on your Page". Counting to a threshold means deliberately
+  // committing that further misuse two more times to confirm a message Meta only
+  // sends once. The cost of stopping early is a paused campaign an operator can
+  // resume; the cost of continuing is the customer's account.
+  if (normalizeMetaSendError(err)?.code === "abuse_warning") {
+    await tripPermanentBreakerNow(broadcast, "abuse_warning");
+    return;
+  }
   const credentialFatal = isPermanentCredentialError(err);
   const templateFatal = isFatalTemplateError(err);
   if (!credentialFatal && !templateFatal) {
@@ -2903,6 +3118,43 @@ async function maybeTripPermanentBreaker(
 
 function isProviderNotConfigured(err: unknown): boolean {
   return err instanceof ProviderNotConfiguredError;
+}
+
+/**
+ * Pause a broadcast IMMEDIATELY, with no streak — used only where waiting would
+ * itself be the harm.
+ *
+ * Same mechanics as the streak breaker (FATAL_PAUSE claim so every lane stops,
+ * running→paused CAS, status publish); the difference is that one occurrence is
+ * the whole signal. `abuse_warning` is the case it exists for: Meta sends that
+ * warning once, and the documented consequence of ignoring it is a messaging
+ * restriction on the customer's account.
+ *
+ * The reason is stored so auto-resume skips it — this needs a person to look at
+ * what was being sent, not a timer.
+ */
+async function tripPermanentBreakerNow(
+  broadcast: { id: string; workspaceId: string },
+  pausedReason: "abuse_warning",
+): Promise<void> {
+  if (FATAL_PAUSE.has(broadcast.id)) return;
+  FATAL_PAUSE.add(broadcast.id);
+  const reason =
+    "Meta warned that this account's messaging looks abusive and may restrict it. " +
+    "The broadcast was stopped immediately — review what is being sent before resuming.";
+  const paused = await db.broadcast.updateMany({
+    where: { id: broadcast.id, status: "running" },
+    data: { status: "paused", pausedAt: new Date(), pausedReason, lastError: reason },
+  });
+  if (paused.count === 0) return;
+  console.error(`[broadcast ${broadcast.id}] ABUSE WARNING from Meta — paused immediately: ${reason}`);
+  await publish({
+    type: "broadcast.status_changed",
+    workspaceId: broadcast.workspaceId,
+    broadcastId: broadcast.id,
+    status: "paused",
+    error: reason,
+  });
 }
 
 /**
@@ -3455,8 +3707,33 @@ export async function resumePausedBroadcasts({
       // Combined under AND because both conditions are OR-groups: two `OR` keys
       // in one object literal would silently overwrite each other.
       AND: [
+        // `abuse_warning` may NEVER auto-resume on ANY path — boot recovery
+        // and the settings-save resume included. Meta's 613/2018338 text is a
+        // pre-restriction warning whose documented consequence for "further
+        // misuse" is a messaging restriction on the Page; a HUMAN must look at
+        // what was being sent, and the explicit operator Resume action
+        // (resumeBroadcastManually) is the only way out of this pause. Unlike
+        // `template` (below), which boot deliberately resumes as its backstop,
+        // this exclusion is unconditional.
+        {
+          OR: [
+            { pausedReason: null },
+            { pausedReason: { not: "abuse_warning" } },
+          ],
+        },
         ...(skipTemplatePauses
-          ? [{ OR: [{ pausedReason: null }, { pausedReason: { not: "template" } }] }]
+          ? [
+              {
+                OR: [
+                  { pausedReason: null },
+                  // `template` may not auto-resume from the cooldown sweeper:
+                  // it needs an operator action in Meta's console, and each
+                  // retry burns recipients for nothing. (abuse_warning is
+                  // already excluded unconditionally above.)
+                  { pausedReason: { not: "template" } },
+                ],
+              },
+            ]
           : []),
         ...(pausedBefore
           ? [{ OR: [{ pausedAt: { lte: pausedBefore } }, { pausedAt: null }] }]
@@ -3679,10 +3956,12 @@ export async function reconcileCanceledMarkerRecipients(): Promise<void> {
       externalId: string;
       completedAt: Date;
       sourceStatus: "failed" | "queued";
+      channelConnectionId: string | null;
     }[]
   >`
     SELECT br."id"          AS "recipientId",
            br."contactId"   AS "contactId",
+           br."channelConnectionId" AS "channelConnectionId",
            br."broadcastId" AS "broadcastId",
            COALESCE(br."conversationId", osa."conversationId") AS "conversationId",
            osa."externalId" AS "externalId",
@@ -3790,7 +4069,14 @@ export async function reconcileCanceledMarkerRecipients(): Promise<void> {
       externalId: row.externalId,
       conversationId: row.conversationId,
     };
-    const recipient = { id: row.recipientId, contactId: row.contactId };
+    // Carries the recipient's OWN account so the recovered row is stamped with
+    // the account the send actually used — a fan-out campaign's orphan must not
+    // be attributed to the campaign's (possibly absent) account.
+    const recipient = {
+      id: row.recipientId,
+      contactId: row.contactId,
+      channelConnectionId: row.channelConnectionId,
+    };
     const conversationId = row.conversationId;
 
     {
@@ -3852,8 +4138,11 @@ export async function reconcileCanceledMarkerRecipients(): Promise<void> {
             direction: "out",
             channel: contact.identityChannel,
             status: "sent",
-            // The campaign's own account — see the send path above.
-            channelConnectionId: broadcast.channelConnectionId ?? null,
+            // Historical stamp of the account this message ACTUALLY went out
+            // from — the recipient's own on a fan-out campaign. Getting this
+            // wrong misreports per-account analytics and CSV exports forever.
+            channelConnectionId:
+              recipient.channelConnectionId ?? broadcast.channelConnectionId ?? null,
             // Template marker, template sends only — see the send path above.
             ...(broadcast.templateName ? { templateName: broadcast.templateName } : {}),
             rawPayload: {
@@ -3935,7 +4224,20 @@ export async function resumePausedBroadcastsForTeam(
   workspaceId: string,
 ): Promise<void> {
   const paused = await db.broadcast.findMany({
-    where: { workspaceId, status: "paused" },
+    // This path fires on a WhatsApp settings save (a credential fix), which
+    // says NOTHING about whether a human reviewed an abuse-flagged campaign —
+    // and the query isn't even channel-scoped, so without the exclusion a
+    // WhatsApp reconnect resumed a SOCIAL campaign Meta warned about. Same
+    // three-valued-logic shape as the reconciler: a bare `not` drops the NULL
+    // rows this path exists to resume.
+    where: {
+      workspaceId,
+      status: "paused",
+      OR: [
+        { pausedReason: null },
+        { pausedReason: { not: "abuse_warning" } },
+      ],
+    },
     select: { id: true },
   });
   for (const row of paused) {
@@ -3953,6 +4255,46 @@ export async function resumePausedBroadcastsForTeam(
     );
     void startBroadcast(row.id);
   }
+}
+
+/**
+ * The EXPLICIT operator resume — the one path allowed to lift ANY pause,
+ * including `abuse_warning` (which every automatic path now excludes: a human
+ * clicking Resume after seeing the pause reason IS the review Meta's warning
+ * asks for). Mirrors the reconciler's status transitions: a future-scheduled
+ * row re-arms as `scheduled`; anything else flips to `queued` and starts.
+ * Returns false when the row isn't paused (already resumed / canceled / raced).
+ */
+export async function resumeBroadcastManually(
+  workspaceId: string,
+  broadcastId: string,
+): Promise<boolean> {
+  const row = await db.broadcast.findFirst({
+    where: { id: broadcastId, workspaceId, status: "paused" },
+    select: { id: true, scheduledAt: true },
+  });
+  if (!row) return false;
+  if (row.scheduledAt && row.scheduledAt.getTime() > Date.now()) {
+    const rescheduled = await db.broadcast.updateMany({
+      where: { id: row.id, workspaceId, status: "paused" },
+      data: { status: "scheduled" },
+    });
+    if (rescheduled.count === 0) return false;
+    await enqueueScheduledBroadcast(
+      row.id,
+      row.scheduledAt.getTime() - Date.now(),
+    ).catch(() => {
+      // The schedule-drift sweeper re-arms stranded `scheduled` rows.
+    });
+    return true;
+  }
+  const flipped = await db.broadcast.updateMany({
+    where: { id: row.id, workspaceId, status: "paused" },
+    data: { status: "queued" },
+  });
+  if (flipped.count === 0) return false;
+  void startBroadcast(row.id);
+  return true;
 }
 
 /**
@@ -4213,7 +4555,11 @@ async function prepareBroadcastMedia(
   const parsed = parseVariables(broadcast.variables);
   const binding = bindingByChannel.get(broadcast.channel);
   const upload = binding?.provider.uploadMedia;
-  if (!binding || !upload) return state;
+  // `config === null` is a FAN-OUT run: there is no run-level account, so there
+  // is nothing to upload run-scoped media against. Today's fan-out campaigns are
+  // freeform and carry no header media, so this never fires — it is here so that
+  // stays true by construction rather than by luck if template fan-out lands.
+  if (!binding || binding.config === null || !upload) return state;
 
   // Carousel cards, same trade as the header — and it matters far more here:
   // a 10-card carousel to 100k recipients is a MILLION fetches of our storage

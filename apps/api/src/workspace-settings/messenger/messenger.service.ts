@@ -22,6 +22,7 @@ import {
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import { getMessengerSendConfig, type MessengerSendConfig } from "@/lib/providers/messenger-config";
 import { messengerProvider } from "@/lib/providers/messenger";
+import { messengerBroadcastReach } from "@/lib/providers/messenger-broadcast-reach";
 import {
   listStickerPacks,
   listStickersInPack,
@@ -776,6 +777,19 @@ export class MessengerService {
       );
       return null;
     }
+  }
+
+  /**
+   * Reach for a Messenger template campaign, per Page.
+   *
+   * A PSID belongs to ONE Page (Meta: "a unique page-scoped ID for each Facebook
+   * Page they start a conversation with"), so a campaign's sending account is a
+   * per-RECIPIENT fact, not a campaign-level choice. This is what lets the
+   * composer say so honestly — total reach, the split by Page, and which Pages
+   * are missing the chosen template — before anyone schedules a send.
+   */
+  async broadcastReach(workspaceId: string, templateName?: string) {
+    return messengerBroadcastReach(workspaceId, templateName);
   }
 
   /** Load the send config, turning "not connected" into a 400 the UI can read. */

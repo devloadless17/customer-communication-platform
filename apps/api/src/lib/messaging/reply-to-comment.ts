@@ -1,7 +1,7 @@
 import { db } from "@/lib/db";
 import { getProviderBinding } from "@/lib/providers";
 import { recordConversationEvent } from "@/lib/inbox/events";
-import type { MessageStructured } from "@ccp/shared/types";
+import { asCommentStructured } from "@/lib/messaging/private-reply";
 
 /**
  * Reply PUBLICLY to an Instagram comment, from the thread it landed in.
@@ -72,8 +72,14 @@ export async function replyToCommentPublicly(args: {
     throw new ReplyToCommentError("message_not_found", "message not found");
   }
 
-  const structured = message.structured as unknown as MessageStructured | null;
-  if (!structured || structured.kind !== "comment" || !structured.commentId) {
+  // ONE definition of "is this a repliable comment", shared with the private-reply
+  // path. Both read the same JSONB column for the same field, and both send the
+  // `commentId` straight to Meta as an address — so a cast here (which asserts a
+  // shape nothing checked) could carry an `undefined` into the request as
+  // `/undefined/replies`. The column is untrusted input: rows can predate the
+  // current writer, be hand-edited, or come from a webhook shape that has changed.
+  const comment = asCommentStructured(message.structured);
+  if (!comment) {
     // Answering a DM "publicly" is meaningless — there is no public surface.
     throw new ReplyToCommentError("not_a_comment", "this message is not a comment");
   }
@@ -89,7 +95,7 @@ export async function replyToCommentPublicly(args: {
   const config = await binding.getSendConfig(workspaceId, message.channelConnectionId);
   let result: { commentId: string };
   try {
-    result = await binding.provider.replyToComment(structured.commentId, body, config);
+    result = await binding.provider.replyToComment(comment.commentId, body, config);
   } catch (err) {
     throw new ReplyToCommentError(
       "provider_rejected",

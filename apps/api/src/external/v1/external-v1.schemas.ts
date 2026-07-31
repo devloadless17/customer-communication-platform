@@ -562,12 +562,15 @@ export const ExternalSendInteractiveSchema = z
   .object({
     body: z.string().trim().min(1).max(1024),
     // `location_request` renders WhatsApp's own "send location" button — no
-    // authored options (refined below); `cta_url` is the single URL-opening
+    // authored options (refined below); `request_contact_info` likewise renders
+    // WhatsApp's fixed-label "share contact info" button (the reply arrives as
+    // a normal inbound contact card); `cta_url` is the single URL-opening
     // button configured via `ctaUrl`. Mirrors SendInteractiveSchema.
     kind: z.enum([
       "buttons",
       "list",
       "location_request",
+      "request_contact_info",
       "cta_url",
       "carousel",
       "generic",
@@ -731,15 +734,22 @@ export const ExternalSendInteractiveSchema = z
     },
   )
   // The kinds that carry NO authored options: the vendor draws the affordance
-  // (location_request), or the content lives in a dedicated field (cta_url,
-  // carousel, generic, product). Adding a kind without listing it here rejects
-  // every send of it with "at least one option is required" — which is exactly
-  // what happened to `generic`/`product` until a schema test caught it, because
-  // the provider-level tests bypass this gate entirely.
+  // (location_request, request_contact_info), or the content lives in a
+  // dedicated field (cta_url, carousel, generic, product). Adding a kind
+  // without listing it here rejects every send of it with "at least one option
+  // is required" — which is exactly what happened to `generic`/`product` until
+  // a schema test caught it, because the provider-level tests bypass this gate
+  // entirely.
   .refine(
     (b) =>
-      ["location_request", "cta_url", "carousel", "generic", "product"].includes(b.kind) ||
-      b.options.length >= 1,
+      [
+        "location_request",
+        "request_contact_info",
+        "cta_url",
+        "carousel",
+        "generic",
+        "product",
+      ].includes(b.kind) || b.options.length >= 1,
     {
       message: "at least one option is required",
       path: ["options"],
@@ -747,8 +757,14 @@ export const ExternalSendInteractiveSchema = z
   )
   .refine(
     (b) =>
-      !["location_request", "cta_url", "carousel", "generic", "product"].includes(b.kind) ||
-      b.options.length === 0,
+      ![
+        "location_request",
+        "request_contact_info",
+        "cta_url",
+        "carousel",
+        "generic",
+        "product",
+      ].includes(b.kind) || b.options.length === 0,
     {
       message: "this kind carries no options — the vendor or a dedicated field supplies the content",
       path: ["options"],
@@ -1114,6 +1130,11 @@ export type ExternalTemplateListQueryInput = z.infer<
  * comment id is ours to keep.
  */
 export const ReplyToCommentSchema = z.object({
+  // 2,200 is Instagram's well-known caption/comment ceiling, but I did NOT find
+  // it stated in the comment-replies reference — so this is a conservative LOCAL
+  // guard, not a doc-derived constant. It exists to stop an unbounded body
+  // reaching Meta, and Meta remains the authority on the real limit. If the
+  // reference ever states one, replace this and say where it came from.
   body: z.string().trim().min(1).max(2200),
 });
 export type ReplyToCommentInput = z.infer<typeof ReplyToCommentSchema>;

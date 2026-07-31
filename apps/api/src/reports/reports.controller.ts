@@ -1,5 +1,15 @@
-import { BadRequestException, Controller, Get, Query, UseGuards } from "@nestjs/common";
+import {
+  BadRequestException,
+  Controller,
+  Get,
+  NotFoundException,
+  Param,
+  Query,
+  UseGuards,
+} from "@nestjs/common";
 
+import { acquisitionSources } from "@/lib/analytics/acquisition-sources";
+import { campaignRollup, listCampaigns } from "@/lib/analytics/campaign-rollup";
 import { getWorkspaceReport, ReportRangeError } from "@/lib/analytics/reports";
 import { getWabaAnalytics } from "@/lib/analytics/waba-analytics";
 
@@ -9,6 +19,8 @@ import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
 import { zQuery } from "../common/zod-validation.pipe";
 import {
+  AcquisitionQuerySchema,
+  type AcquisitionQuery,
   ReportOverviewQuerySchema,
   type ReportOverviewQuery,
   WabaAnalyticsQuerySchema,
@@ -48,6 +60,59 @@ export class ReportsController {
       }
       throw err;
     }
+  }
+
+  /**
+   * ACQUISITION SOURCES — where each customer came from.
+   *
+   * Aggregates the `attribution` every ad-sourced inbound already carries: the
+   * Click-to-Messenger `ad_id`, an m.me `ref` deep link, an Instagram Shop
+   * product tap, and WhatsApp's `ctwa_clid`. Counted by distinct CONTACT keyed on
+   * their FIRST attributed inbound, because Meta sends `referral` only on the
+   * message that starts a conversation — counting messages would answer a
+   * different and useless question.
+   *
+   * `organic` (no attribution at all) is reported SEPARATELY rather than as a
+   * row: it is the absence of a source, and folding it in would let it sort above
+   * every real campaign and read as the best-performing one.
+   */
+  @RequireCapability("teamActivity:view")
+  @Get("acquisition")
+  async acquisition(
+    @CurrentSession() session: ApiSession,
+    @Query(zQuery(AcquisitionQuerySchema)) query: AcquisitionQuery,
+  ) {
+    return acquisitionSources(session.workspaceId, {
+      ...(query.from ? { since: new Date(query.from) } : {}),
+      ...(query.to ? { until: new Date(query.to) } : {}),
+      ...(query.channel ? { channel: query.channel } : {}),
+    });
+  }
+
+  /**
+   * Every campaign in the workspace — the picker behind the rollup below.
+   */
+  @RequireCapability("teamActivity:view")
+  @Get("campaigns")
+  async campaigns(@CurrentSession() session: ApiSession) {
+    return { campaigns: await listCampaigns(session.workspaceId) };
+  }
+
+  /**
+   * CAMPAIGN ROLLUP — several broadcasts read as one set of numbers.
+   *
+   * Summed from recipient rows, never by adding up per-broadcast reports: those
+   * carry derived RATES, and averaging rates across sends of different sizes is
+   * wrong in a way nobody can see (a 100%-delivered send of 3 and a
+   * 50%-delivered send of 10,000 do not average to 75%). Rates are computed once
+   * from summed counts.
+   */
+  @RequireCapability("teamActivity:view")
+  @Get("campaigns/:name")
+  async campaign(@CurrentSession() session: ApiSession, @Param("name") name: string) {
+    const rollup = await campaignRollup(session.workspaceId, name);
+    if (!rollup) throw new NotFoundException({ error: "campaign_not_found" });
+    return rollup;
   }
 
   /**

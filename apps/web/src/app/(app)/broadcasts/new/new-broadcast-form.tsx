@@ -114,6 +114,7 @@ export function NewBroadcastForm({
   cloneKind = null,
   cloneBodyText = null,
   cloneChannel = null,
+  cloneCampaignName = null,
   initialChannel = null,
   teamMembers = [],
   assignmentPolicies = [],
@@ -149,6 +150,8 @@ export function NewBroadcastForm({
   cloneKind?: "template" | "freeform" | "customer" | null;
   cloneBodyText?: string | null;
   cloneChannel?: string | null;
+  /** Clone's campaign — a duplicate is usually that campaign's NEXT send. */
+  cloneCampaignName?: string | null;
   /** `?channel=` from the channel-scoped Outreach nav — which channel to open on. */
   initialChannel?: string | null;
 }) {
@@ -235,6 +238,11 @@ export function NewBroadcastForm({
    * one WhatsApp Business Account) and the audience.
    */
   const [accountId, setAccountId] = useState<string | null>(null);
+  // Distinguishes "the operator has not picked yet" from "the operator chose ALL
+  // ACCOUNTS", which are both `accountId === null`. Without it the default-account
+  // effect below reads a deliberate fan-out choice as an empty state and
+  // immediately resets it to one Page — the option would appear to do nothing.
+  const [accountChosen, setAccountChosen] = useState(false);
   /**
    * Opt-in to reaching contacts who belong to the workspace's OTHER accounts on
    * this channel. Off by default: those customers have never messaged this
@@ -288,6 +296,13 @@ export function NewBroadcastForm({
   // from a <input type="datetime-local"> (local wall-clock, no tz) which we
   // convert to an ISO string on submit.
   const [name, setName] = useState("");
+  // CAMPAIGN this send belongs to. A campaign is usually several broadcasts —
+  // one per channel, one per account, a re-send to non-openers — and the rollup
+  // groups on this string EXACTLY, so the existing names are offered as a
+  // datalist. Retyping "Spring Sale " with a stray space silently starts a
+  // second campaign, which is the one mistake this field can make.
+  const [campaignName, setCampaignName] = useState(cloneCampaignName ?? "");
+  const [knownCampaigns, setKnownCampaigns] = useState<string[]>([]);
   const [assignment, setAssignment] = useState<CampaignAssignmentValue>(
     EMPTY_CAMPAIGN_ASSIGNMENT,
   );
@@ -591,6 +606,9 @@ export function NewBroadcastForm({
       // The account and the template belong to the OLD channel — carrying either
       // across would bind the campaign to a sender that can't send it.
       setAccountId(null);
+      // A different channel has different accounts, so a previous pick is
+      // meaningless — fall back to that channel's default again.
+      setAccountChosen(false);
       setIncludeOtherAccounts(false);
       setSelectedTemplateId(null);
     },
@@ -627,10 +645,29 @@ export function NewBroadcastForm({
   // template list and the audience are scoped from the first render rather than
   // silently defaulting server-side.
   useEffect(() => {
+    if (accountChosen) return;
     if (accountId && channelAccounts.some((a) => a.id === accountId)) return;
     const fallback = channelAccounts.find((a) => a.isDefault) ?? channelAccounts[0];
     setAccountId(fallback?.id ?? null);
-  }, [selectedChannel, channelAccounts, accountId]);
+  }, [selectedChannel, channelAccounts, accountId, accountChosen]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await apiFetch("/api/reports/campaigns");
+        if (!res.ok) return;
+        const body = (await res.json()) as { campaigns?: Array<{ campaignName: string }> };
+        if (!cancelled) setKnownCampaigns((body.campaigns ?? []).map((c) => c.campaignName));
+      } catch {
+        // Suggestions are a convenience, not a requirement — a failure here must
+        // not block composing a broadcast.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const countChannel: "whatsapp" | "messenger" | "instagram" =
     messageKind === "template" ? "whatsapp" : freeformChannel;
@@ -1181,6 +1218,8 @@ export function NewBroadcastForm({
                 }),
             // Bind the campaign to the chosen sender.
             ...(accountId ? { channelConnectionId: accountId } : {}),
+            // Trimmed so a stray space can't fork the rollup into two campaigns.
+            ...(campaignName.trim() ? { campaignName: campaignName.trim() } : {}),
             ...(includeOtherAccounts && !isAccountScopedIdentity(selectedChannel)
         ? { includeOtherAccounts: true }
         : {}),
@@ -1314,6 +1353,7 @@ export function NewBroadcastForm({
               <select
                 value={accountId ?? ""}
                 onChange={(e) => {
+                  setAccountChosen(true);
                   setAccountId(e.target.value || null);
                   // The template catalogue is per-account; a template picked
                   // for the old one may not exist on the new.
@@ -1322,6 +1362,18 @@ export function NewBroadcastForm({
                 }}
                 className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
               >
+                {/* FAN-OUT, on the account-scoped channels only.
+                    A Messenger PSID belongs to one Page and an Instagram IGSID to
+                    one account, so no single account can reach everyone — but ONE
+                    campaign can, by routing each recipient through the account
+                    that issued their id. That is what this option means, and it
+                    is why it cannot be offered on WhatsApp: there a phone number
+                    is global, so which number sends is a real choice rather than
+                    a forced one, and fanning it out would silently change who the
+                    customer sees the message from. */}
+                {isAccountScopedIdentity(selectedChannel) && (
+                  <option value="">All accounts — reach everyone</option>
+                )}
                 {channelAccounts.map((a) => (
                   <option key={a.id} value={a.id}>
                     {a.name}
@@ -1331,6 +1383,12 @@ export function NewBroadcastForm({
                   </option>
                 ))}
               </select>
+              {accountId === null && isAccountScopedIdentity(selectedChannel) && (
+                <span className="text-2xs text-muted-foreground/70">
+                  Each person is messaged from the account they originally wrote
+                  to — Meta gives no way to reach them from any other.
+                </span>
+              )}
             </label>
           )}
 
@@ -1707,6 +1765,33 @@ export function NewBroadcastForm({
             />
             <span className="text-2xs text-muted-foreground/70">
               Shown in the broadcasts list. Falls back to the template name if blank.
+            </span>
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium text-muted-foreground">
+              Campaign <span className="font-normal">(optional)</span>
+            </span>
+            <input
+              type="text"
+              value={campaignName}
+              onChange={(e) => setCampaignName(e.target.value.slice(0, 120))}
+              list="known-campaigns"
+              placeholder="e.g. Spring Sale"
+              className="rounded-md border border-border bg-background px-3 py-1.5 text-sm outline-none focus:border-primary"
+            />
+            {/* Existing names, so an operator picks rather than retypes. The
+                rollup groups on this string exactly — "Spring Sale " with a
+                trailing space is a different campaign, and the only way to make
+                that mistake is to type it again from memory. */}
+            <datalist id="known-campaigns">
+              {knownCampaigns.map((c) => (
+                <option key={c} value={c} />
+              ))}
+            </datalist>
+            <span className="text-2xs text-muted-foreground/70">
+              Groups several broadcasts into one set of numbers — one per channel,
+              a re-send to non-openers, a follow-up next week.
             </span>
           </label>
 

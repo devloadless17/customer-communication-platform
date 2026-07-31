@@ -189,7 +189,8 @@ const TEMPLATE_LIST_MAX_PAGES = 40;
  *     `account_settings_update`
  *
  * `business_username_updates` is deliberately ABSENT from this list — it carries
- * state we do model (a number's username) and should be handled, not silenced.
+ * state we do model (a number's username) and is handled in parseWebhook: it
+ * emits a `channel_health` event carrying `businessUsername`.
  */
 const QUIET_DROP_WHATSAPP_FIELDS = new Set<string>([
   "account_settings_update",
@@ -475,6 +476,12 @@ interface MetaChangeValue {
    * right number in a multi-number workspace.
    */
   display_phone_number?: string;
+  // `business_username_updates` webhook fields — the number's @username was
+  // adopted / changed / transferred. Meta documents the FIELD but not a stable
+  // payload shape, so both plausible spellings are read and anything else is
+  // warn-logged raw by parseWebhook rather than guessed at.
+  username?: string;
+  business_username?: string;
   // `phone_number_name_update` webhook fields — a display-name review
   // concluded. An unapproved name voids the number's certificate (blocks
   // registration), so this is readiness state, not cosmetics.
@@ -554,6 +561,16 @@ interface MetaChangeValue {
    * `current_limit` were both removed in February 2026.
    */
   max_daily_conversations_per_business?: number | string;
+  /**
+   * The portfolio's phone-number allowance. The current
+   * `business_capability_update` reference spells it
+   * `max_phone_numbers_per_business_portfolio` (with a per-WABA sibling,
+   * `max_phone_numbers_per_waba`); `max_phone_numbers_per_business` is the
+   * legacy spelling kept for tolerance. Feeds
+   * `WhatsappPortfolio.maxPhoneNumbers`.
+   */
+  max_phone_numbers_per_business_portfolio?: number | string;
+  max_phone_numbers_per_waba?: number | string;
   max_phone_numbers_per_business?: number | string;
   // WhatsApp Coexistence webhook fields (one number on both the Business App +
   // Cloud API). Each arrives under its own `change.field`, keyed as its own
@@ -717,8 +734,15 @@ interface MetaStatus {
   recipient_id?: string;
   /** "call" marks this as a call-progress status rather than a message status. */
   type?: string;
-  /** BSUID of the callee on call statuses. */
+  /**
+   * The recipient's BSUID. On CALL statuses since May 2026; on MESSAGE
+   * statuses the BSUID page documents it unconditionally once the rollout
+   * reaches the account — even for plain phone sends — making delivery
+   * statuses the primary BSUID-learning channel for active threads.
+   */
   recipient_user_id?: string;
+  /** Parent BSUID ("US.ENT.…"), when the business is enrolled. */
+  recipient_parent_user_id?: string;
   /** Echoed from the `biz_opaque_callback_data` we sent when placing the call. */
   biz_opaque_callback_data?: string;
   /**
@@ -961,6 +985,13 @@ interface MetaContactsPayload {
   }>;
   org?: { company?: string; title?: string; department?: string };
   urls?: Array<{ url?: string; type?: string }>;
+  /**
+   * BSUID rollout: "contact_request" = reply to our REQUEST_CONTACT_INFO
+   * button (user shared their own number; `vcard` absent); "other" = an
+   * ordinary manually-shared vCard (`vcard` present).
+   */
+  origin?: string;
+  vcard?: string;
 }
 
 /**
@@ -1040,6 +1071,14 @@ interface MetaMessage {
     headline?: string;
     body?: string;
     ctwa_clid?: string;
+    // The creative the customer was looking at, plus the greeting Meta showed
+    // them before they typed. All documented on the CTWA referral and all
+    // previously discarded.
+    media_type?: string;
+    image_url?: string;
+    video_url?: string;
+    thumbnail_url?: string;
+    welcome_message?: { text?: string };
   };
   reaction?: { message_id?: string; emoji?: string };
   // Customer EDITED (`type:"edit"`) or UNSENT/revoked (`type:"revoke"`) a prior
@@ -1208,6 +1247,16 @@ function structuredForMessage(m: MetaMessage): MessageStructured | undefined {
         const company = [c.org?.title?.trim(), c.org?.company?.trim()]
           .filter((x): x is string => !!x && x.length > 0)
           .join(" · ");
+        // `origin` + `phones[].wa_id` (BSUID rollout): "contact_request" marks
+        // a reply to our REQUEST_CONTACT_INFO button — the user sharing THEIR
+        // OWN number — and `wa_id` is Meta's resolution of it to a WhatsApp
+        // account. Carried so ingest can apply the self-asserted phone to the
+        // sending contact; an ordinary forwarded vCard ("other"/absent) stays
+        // display-only.
+        const origin = c.origin?.trim();
+        const waIds = (c.phones ?? [])
+          .map((p) => p.wa_id?.replace(/\D/g, "") ?? "")
+          .filter((w) => w.length >= 8);
         return {
           name: contactCardName(c),
           phones: (c.phones ?? [])
@@ -1218,6 +1267,8 @@ function structuredForMessage(m: MetaMessage): MessageStructured | undefined {
             .filter((e) => e.length > 0),
           addresses,
           ...(company ? { company } : {}),
+          ...(origin ? { origin } : {}),
+          ...(waIds.length ? { waIds } : {}),
         };
       })
       .filter(
@@ -1235,6 +1286,8 @@ function structuredForMessage(m: MetaMessage): MessageStructured | undefined {
         ...(c.emails.length ? { emails: c.emails } : {}),
         ...(c.addresses.length ? { addresses: c.addresses } : {}),
         ...(c.company ? { company: c.company } : {}),
+        ...(c.origin ? { origin: c.origin } : {}),
+        ...(c.waIds?.length ? { waIds: c.waIds } : {}),
       }));
     if (contacts.length === 0) return undefined;
     return { kind: "contacts", contacts };
@@ -1301,6 +1354,21 @@ function attributionForMessage(m: MetaMessage): MessageAttribution | undefined {
     ...(r.body?.trim() ? { body: r.body.trim() } : {}),
     ...(r.source_url?.trim() ? { sourceUrl: r.source_url.trim() } : {}),
     ...(r.ctwa_clid?.trim() ? { clickId: r.ctwa_clid.trim() } : {}),
+    // `source_id` is documented as "the ID of the ad or post", so which field it
+    // belongs in depends on `source_type`. It was parsed into the wire type and
+    // then never mapped at all — so a Click-to-WhatsApp campaign could be seen
+    // one conversation at a time but never grouped by the ad that drove it.
+    ...(r.source_id?.trim() && source === "ad" ? { adId: r.source_id.trim() } : {}),
+    ...(r.source_id?.trim() && source === "post" ? { postId: r.source_id.trim() } : {}),
+    ...(r.media_type === "image" || r.media_type === "video"
+      ? { mediaType: r.media_type }
+      : {}),
+    ...(r.image_url?.trim() ? { imageUrl: r.image_url.trim() } : {}),
+    ...(r.video_url?.trim() ? { videoUrl: r.video_url.trim() } : {}),
+    ...(r.thumbnail_url?.trim() ? { thumbnailUrl: r.thumbnail_url.trim() } : {}),
+    ...(r.welcome_message?.text?.trim()
+      ? { greeting: r.welcome_message.text.trim() }
+      : {}),
   };
 }
 
@@ -1615,11 +1683,21 @@ function parseMetaCall(
   // dedicated BSUID fields and then to `contacts[]`. Reading only `from` here
   // dropped those calls entirely, making the caller invisible.
   const contact = contacts[0];
+  // EMPTY-string guard, same idiom as the message path: the BSUID docs say
+  // `from` "will be set to an empty string" when the phone isn't shareable,
+  // and `"" ?? x` never falls through (?? skips only null/undefined) — so an
+  // empty `from` used to freeze bsuid at "" and drop the call even when
+  // `from_user_id` carried the real identity.
   const bsuid =
-    (identityIsPhone ? undefined : rawIdentity) ??
-    (direction === "in" ? c.from_user_id : c.to_user_id) ??
-    contact?.user_id;
-  if (!phone && !bsuid) return null;
+    (identityIsPhone || !rawIdentity ? undefined : rawIdentity) ??
+    (direction === "in" ? c.from_user_id : c.to_user_id)?.trim() ??
+    contact?.user_id?.trim() ??
+    undefined;
+  const parentBsuid =
+    (direction === "in" ? c.from_parent_user_id : c.to_parent_user_id)?.trim() ||
+    contact?.parent_user_id?.trim() ||
+    undefined;
+  if (!phone && !bsuid && !parentBsuid) return null;
 
   // Meta supplies the customer's display name on inbound calls; without this we
   // name a brand-new contact after their raw phone number.
@@ -1679,6 +1757,7 @@ function parseMetaCall(
     externalCallId,
     ...(phone ? { contactPhone: phone } : {}),
     ...(bsuid ? { bsuid } : {}),
+    ...(parentBsuid ? { parentBsuid } : {}),
     contactName,
     direction,
     phase,
@@ -2299,22 +2378,26 @@ function parseChannelHealthUpdate(
     };
   }
   let messagingTier: string | undefined;
+  // `current_limit` is OVERLOADED by `event` (phone-number-quality-update
+  // reference): on THROUGHPUT_UPGRADE it describes the number's THROUGHPUT
+  // ("TIER_UNLIMITED — higher throughput", the doc's own example), NOT the
+  // messaging limit. Reading it as a tier there set the portfolio's 24h cap
+  // to UNLIMITED off a throughput event — ungating campaigns in the
+  // dangerous direction. The reference lists the same value vocabulary for
+  // <MAX_DAILY_MESSAGES_LIMIT>, so the guard covers BOTH fields on that
+  // event (the health poll owns throughput).
+  const isThroughputEvent =
+    field === "phone_number_quality_update" &&
+    value.event?.trim().toUpperCase() === "THROUGHPUT_UPGRADE";
   // The portfolio limit, on whichever webhook delivered it, wins. Limits have
   // been portfolio-scoped since 2025-10-07 — a per-phone number is at best the
   // same value and at worst a stale one.
-  if (value.max_daily_conversations_per_business != null) {
+  if (value.max_daily_conversations_per_business != null && !isThroughputEvent) {
     messagingTier = String(value.max_daily_conversations_per_business);
   } else if (field === "phone_number_quality_update") {
-    // `current_limit` is OVERLOADED by `event` (phone-number-quality-update
-    // reference): on THROUGHPUT_UPGRADE it describes the number's THROUGHPUT
-    // ("TIER_UNLIMITED — higher throughput", the doc's own example), NOT the
-    // messaging limit. Reading it as a tier there set the portfolio's 24h cap
-    // to UNLIMITED off a throughput event — ungating campaigns in the
-    // dangerous direction. Skip the tier read for that event (the health
-    // poll owns throughput); every other/absent event keeps the legacy
-    // limit reading until Meta removes the field (Feb 2026).
-    const isThroughputEvent =
-      value.event?.trim().toUpperCase() === "THROUGHPUT_UPGRADE";
+    // Skip the legacy `current_limit` read for the throughput event too;
+    // every other/absent event keeps the legacy limit reading until Meta
+    // removes the field (Feb 2026).
     if (value.current_limit && !isThroughputEvent) {
       messagingTier = value.current_limit;
     }
@@ -2322,6 +2405,18 @@ function parseChannelHealthUpdate(
     if (value.max_daily_conversation_per_phone != null) {
       messagingTier = String(value.max_daily_conversation_per_phone);
     }
+  }
+  // The portfolio's phone-number allowance rides business_capability_update.
+  // Current reference spelling first, legacy spelling as fallback; the per-WABA
+  // sibling (max_phone_numbers_per_waba) is deliberately not persisted — no
+  // column models it, and the portfolio cap is what the add-number flow gates.
+  let maxPhoneNumbers: number | undefined;
+  if (field === "business_capability_update") {
+    const rawCap =
+      value.max_phone_numbers_per_business_portfolio ??
+      value.max_phone_numbers_per_business;
+    const capNum = rawCap != null ? Number(rawCap) : Number.NaN;
+    if (Number.isFinite(capNum) && capNum > 0) maxPhoneNumbers = capNum;
   }
   // The quality band rides the same webhook. It used to be parsed PAST here —
   // a quality-only payload (no tier field) returned null and the band only
@@ -2332,7 +2427,11 @@ function parseChannelHealthUpdate(
     value.current_quality_rating.trim()
       ? value.current_quality_rating.trim().toUpperCase()
       : undefined;
-  if (messagingTier === undefined && qualityRating === undefined) {
+  if (
+    messagingTier === undefined &&
+    qualityRating === undefined &&
+    maxPhoneNumbers === undefined
+  ) {
     // `account_alerts` with no tier rider: the alert BODY is the payload.
     // Persist it as the last-alert slot instead of dropping it — this envelope
     // exists to explain enforcement, and it left no trace before.
@@ -2424,6 +2523,7 @@ function parseChannelHealthUpdate(
     kind: "channel_health",
     ...(messagingTier !== undefined ? { messagingTier } : {}),
     ...(qualityRating !== undefined ? { qualityRating } : {}),
+    ...(maxPhoneNumbers !== undefined ? { maxPhoneNumbers } : {}),
     rawPayload,
   };
 }
@@ -2441,6 +2541,63 @@ function parseChannelHealthUpdate(
  * as an error.
  */
 /**
+ * Address a WhatsApp `/messages` send: a phone rides `to`; a BSUID rides the
+ * top-level `recipient` field. Per the BSUID page + Send Marketing Messages
+ * reference (2026-07): "recipient — User BSUID or parent BSUID for individual
+ * messages. Used only when `to` is omitted"; when both are present Meta uses
+ * `to` and ignores `recipient`. This SUPERSEDES the 2026-07-30 reading that a
+ * BSUID rides `to` — `postWhatsappMessages` keeps that legacy form working as
+ * a one-shot retry while Meta's rollout completes, so either server behavior
+ * is handled.
+ */
+function whatsappDestination(args: { to: string; viaBsuid?: boolean }): Record<string, string> {
+  return args.viaBsuid ? { recipient: args.to } : { to: args.to };
+}
+
+/**
+ * POST a `/messages` body. When the body addresses a BSUID via `recipient` and
+ * Meta rejects the FIELD itself (#100 naming the param, or the documented
+ * misleading "The parameter to is required" that means `recipient` was
+ * ignored), retry ONCE with the pre-July form — the BSUID in `to`. Safe: a 400
+ * rejection created no message, so the retry cannot double-send. Every other
+ * response (including every failure of a phone-addressed send) passes through
+ * untouched, preserving each caller's own error handling.
+ */
+async function postWhatsappMessages(
+  url: string,
+  config: MetaSendConfig,
+  bodyObj: Record<string, unknown>,
+): Promise<Response> {
+  const post = (b: Record<string, unknown>) =>
+    metaFetch(url, {
+      method: "POST",
+      appSecret: config.appSecret,
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.accessToken}`,
+      },
+      body: JSON.stringify(b),
+    });
+  const res = await post(bodyObj);
+  if (res.ok || typeof bodyObj.recipient !== "string") return res;
+  const text = await res.clone().text().catch(() => "");
+  const rejectsRecipientField =
+    /"code"\s*:\s*100\b/.test(text) &&
+    (/recipient/i.test(text) || /parameter to is required/i.test(text));
+  if (!rejectsRecipientField) return res;
+  console.warn(
+    JSON.stringify({
+      event: "meta.bsuid_recipient_fallback",
+      severity: "info",
+      phoneNumberId: config.phoneNumberId,
+      note: "Meta rejected the `recipient` param — retried with the BSUID in `to` (pre-July form)",
+    }),
+  );
+  const { recipient, ...rest } = bodyObj;
+  return post({ ...rest, to: recipient });
+}
+
+/**
  * `interactive.type: "location_request_message"` — body text + WhatsApp's own
  * "send location" button (location-request-messages doc). The action name is
  * the fixed literal `send_location`; there is nothing else to configure. Body
@@ -2451,18 +2608,11 @@ async function sendLocationRequest(
   config: MetaSendConfig,
 ): Promise<SendTextResult> {
   const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
-  const res = await metaFetch(url, {
-    method: "POST",
-    appSecret: config.appSecret,
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${config.accessToken}`,
-    },
-    body: JSON.stringify({
+  const res = await postWhatsappMessages(url, config, {
       messaging_product: "whatsapp",
       ...messagingAccountField(config),
       recipient_type: "individual",
-      to: args.to,
+      ...whatsappDestination(args),
       type: "interactive",
       interactive: {
         type: "location_request_message",
@@ -2472,8 +2622,7 @@ async function sendLocationRequest(
       ...(args.replyToExternalId
         ? { context: { message_id: args.replyToExternalId } }
         : {}),
-    }),
-  });
+    });
   if (!res.ok) {
     const text = await safeMetaText(res);
     throw new MetaSendError(
@@ -2487,6 +2636,54 @@ async function sendLocationRequest(
   if (!externalId) {
     throw new Error(
       `meta sendLocationRequest missing message id: ${JSON.stringify(json)}`,
+    );
+  }
+  return { externalId, timestamp: new Date() };
+}
+
+/**
+ * `interactive.type: "request_contact_info"` — body text + WhatsApp's own
+ * "share contact info" button (renamed from `contact_request` 2026-05-28; the
+ * button label is fixed by WhatsApp, nothing else to configure). The action
+ * name is the same fixed literal `request_contact_info`. The reply arrives as
+ * a normal inbound `contacts` message with `contacts[].origin:
+ * "contact_request"` — ingest already reads that origin, so this is purely
+ * the outbound half. Body cap (1024) is enforced by the schemas upstream,
+ * same as location_request.
+ */
+async function sendRequestContactInfo(
+  args: SendInteractiveArgs,
+  config: MetaSendConfig,
+): Promise<SendTextResult> {
+  const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
+  const res = await postWhatsappMessages(url, config, {
+      messaging_product: "whatsapp",
+      ...messagingAccountField(config),
+      recipient_type: "individual",
+      ...whatsappDestination(args),
+      type: "interactive",
+      interactive: {
+        type: "request_contact_info",
+        body: { text: args.bodyText },
+        action: { name: "request_contact_info" },
+      },
+      ...(args.replyToExternalId
+        ? { context: { message_id: args.replyToExternalId } }
+        : {}),
+    });
+  if (!res.ok) {
+    const text = await safeMetaText(res);
+    throw new MetaSendError(
+      `meta sendRequestContactInfo failed: ${res.status} ${text}`,
+      res.status,
+      text,
+    );
+  }
+  const json = (await res.json()) as { messages?: Array<{ id?: string }> };
+  const externalId = json.messages?.[0]?.id;
+  if (!externalId) {
+    throw new Error(
+      `meta sendRequestContactInfo missing message id: ${JSON.stringify(json)}`,
     );
   }
   return { externalId, timestamp: new Date() };
@@ -2513,18 +2710,11 @@ async function sendInteractiveCarousel(
     throw new MetaSendError("sendInteractiveCarousel: 2-10 carouselCards required", 400, "");
   }
   const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
-  const res = await metaFetch(url, {
-    method: "POST",
-    appSecret: config.appSecret,
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${config.accessToken}`,
-    },
-    body: JSON.stringify({
+  const res = await postWhatsappMessages(url, config, {
       messaging_product: "whatsapp",
       ...messagingAccountField(config),
       recipient_type: "individual",
-      to: args.to,
+      ...whatsappDestination(args),
       type: "interactive",
       interactive: {
         type: "carousel",
@@ -2558,8 +2748,7 @@ async function sendInteractiveCarousel(
       ...(args.replyToExternalId
         ? { context: { message_id: args.replyToExternalId } }
         : {}),
-    }),
-  });
+    });
   if (!res.ok) {
     const text = await safeMetaText(res);
     throw new MetaSendError(
@@ -2594,18 +2783,11 @@ async function sendCtaUrlButton(
     throw new MetaSendError("sendCtaUrlButton: ctaUrl.displayText + url are required", 400, "");
   }
   const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
-  const res = await metaFetch(url, {
-    method: "POST",
-    appSecret: config.appSecret,
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${config.accessToken}`,
-    },
-    body: JSON.stringify({
+  const res = await postWhatsappMessages(url, config, {
       messaging_product: "whatsapp",
       ...messagingAccountField(config),
       recipient_type: "individual",
-      to: args.to,
+      ...whatsappDestination(args),
       type: "interactive",
       interactive: {
         type: "cta_url",
@@ -2627,8 +2809,7 @@ async function sendCtaUrlButton(
       ...(args.replyToExternalId
         ? { context: { message_id: args.replyToExternalId } }
         : {}),
-    }),
-  });
+    });
   if (!res.ok) {
     const text = await safeMetaText(res);
     throw new MetaSendError(
@@ -2666,18 +2847,11 @@ async function sendVoiceCallButton(
   if (args.voiceCall?.payload) {
     params.payload = args.voiceCall.payload.slice(0, 512);
   }
-  const res = await metaFetch(url, {
-    method: "POST",
-    appSecret: config.appSecret,
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${config.accessToken}`,
-    },
-    body: JSON.stringify({
+  const res = await postWhatsappMessages(url, config, {
       messaging_product: "whatsapp",
       ...messagingAccountField(config),
       recipient_type: "individual",
-      to: args.to,
+      ...whatsappDestination(args),
       type: "interactive",
       interactive: {
         type: "voice_call",
@@ -2690,8 +2864,7 @@ async function sendVoiceCallButton(
       ...(args.replyToExternalId
         ? { context: { message_id: args.replyToExternalId } }
         : {}),
-    }),
-  });
+    });
   if (!res.ok) {
     const text = await safeMetaText(res);
     throw new MetaSendError(
@@ -3030,6 +3203,46 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
                 ? { displayPhoneNumber: value.display_phone_number }
                 : {}),
             });
+          }
+          continue;
+        }
+
+        // The number's @username changed (`business_username_updates`) —
+        // adopted, renamed, or force-transferred onto/off this number. Handled
+        // as a channel_health partial (the username is per-NUMBER state, like
+        // quality), carrying the same display-number/WABA attribution hints as
+        // its siblings. Meta documents the field but not a stable payload
+        // shape, so the parse is deliberately defensive: read the username
+        // from either plausible spelling, and when neither is present log the
+        // raw value and drop quietly — never throw, never guess.
+        if (change.field === "business_username_updates") {
+          const rawUsername =
+            (typeof value.username === "string" ? value.username : undefined) ??
+            (typeof value.business_username === "string"
+              ? value.business_username
+              : undefined);
+          const username = rawUsername?.trim().toLowerCase();
+          if (username) {
+            emit({
+              kind: "channel_health",
+              businessUsername: username,
+              ...(wabaId ? { wabaId } : {}),
+              ...(value.display_phone_number
+                ? { displayPhoneNumber: value.display_phone_number }
+                : {}),
+              rawPayload: payload as Record<string, unknown>,
+            } satisfies NormalizedChannelHealth);
+          } else {
+            // Unrecognized shape (e.g. a pure decision/removal envelope with
+            // no username string). Store nothing rather than storing a guess;
+            // the settings read-through re-syncs the stored copy from Graph.
+            console.warn(
+              JSON.stringify({
+                event: "meta.business_username_update_unparsed",
+                severity: "info",
+                value,
+              }),
+            );
           }
           continue;
         }
@@ -3466,11 +3679,18 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           const phoneDigits = rawFrom.replace(/^\+/, "");
           const fromIsPhone = phoneDigits.length > 0 && !/\D/.test(phoneDigits);
           const phone = fromIsPhone ? phoneDigits : undefined;
-          // `contactByKey` is keyed by wa_id/user_id, so an EMPTY `from` misses it
-          // entirely — fall back to the sole `contacts[]` entry, which is where the
-          // identity still is. Meta empties/omits BOTH `from` and `contacts[].wa_id`
-          // for a customer who adopted a @username outside the 30-day phone window.
-          const contact = contactByKey.get(rawFrom) ?? (rawFrom ? undefined : value.contacts?.[0]);
+          // `contactByKey` is keyed by DIGIT-STRIPPED wa_id / verbatim user_id,
+          // so the lookup key must match that normalization: a plus-prefixed
+          // `from` (`+16505551234` — documented verbatim in the unsupported-
+          // messages reference) looked up raw missed the digit-stripped entry
+          // and silently dropped the profile-name/username enrichment. An
+          // EMPTY `from` misses the map entirely — fall back to the sole
+          // `contacts[]` entry, which is where the identity still is. Meta
+          // empties/omits BOTH `from` and `contacts[].wa_id` for a customer
+          // who adopted a @username outside the 30-day phone window.
+          const contact =
+            contactByKey.get(fromIsPhone ? phoneDigits : rawFrom) ??
+            (rawFrom ? undefined : value.contacts?.[0]);
           // Resolve the BSUID the same way the CALL path does (see `parseMetaCall`):
           // `from` when it is itself the BSUID, else the dedicated message-level
           // field, else `contacts[]`. Reading only the first of those dropped a
@@ -3486,12 +3706,25 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           const username = contact?.profile?.username?.trim() || contact?.username?.trim() || undefined;
           if (!externalId || (!phone && !bsuid)) continue;
           const contactName = contact?.profile?.name ?? null;
+          // Parent BSUID (cross-portfolio key, "US.ENT.…") — message-level
+          // field first, contacts[] mirror second, same layering as bsuid.
+          const parentBsuid =
+            m.from_parent_user_id?.trim() ||
+            contact?.parent_user_id?.trim() ||
+            undefined;
+          // `profile.country_code` (BSUID rollout, "subject to change") — the
+          // only country signal a phone-less contact has; ingest lets a
+          // phone-derived country win over it.
+          const profileCountryCode = contact?.profile?.country_code?.trim() || undefined;
           // Shared identity fragment spread into every inbound-message emit
-          // below (exactly one of phone/bsuid is the resolve key at ingest).
+          // below (exactly one of phone/bsuid/parentBsuid is the resolve key
+          // at ingest).
           const identity = {
             ...(phone ? { contactPhone: phone } : {}),
             ...(bsuid ? { bsuid } : {}),
+            ...(parentBsuid ? { parentBsuid } : {}),
             ...(username ? { username } : {}),
+            ...(profileCountryCode ? { countryCode: profileCountryCode } : {}),
           };
           // Click-to-WhatsApp ad attribution (only on the first ad-sourced
           // inbound) — spread into the content emits so the "from your ad" chip
@@ -3884,6 +4117,23 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             /^\d{8,15}$/.test(s.recipient_id.trim())
               ? { recipientId: s.recipient_id.trim() }
               : {}),
+            // The recipient's BSUID — present on every message status once the
+            // rollout reaches the account, even for phone sends. Shape-gated
+            // the inverse way of recipientId: a BSUID is `<ISO>.<digits>`
+            // (parent: `<ISO>.ENT.<digits>`), NEVER digits-only, so a bare
+            // number can't masquerade as one; group traffic excluded like
+            // recipientId above. Ingest backfills Contact.bsuid off this —
+            // the pre-emptive join that beats the 30-day window closing.
+            ...(s.recipient_type !== "group" &&
+            s.recipient_user_id &&
+            /^[A-Za-z]{2}\.(?:ENT\.)?\w+$/.test(s.recipient_user_id.trim())
+              ? { recipientBsuid: s.recipient_user_id.trim() }
+              : {}),
+            ...(s.recipient_type !== "group" &&
+            s.recipient_parent_user_id &&
+            /^[A-Za-z]{2}\.ENT\.\w+$/.test(s.recipient_parent_user_id.trim())
+              ? { recipientParentBsuid: s.recipient_parent_user_id.trim() }
+              : {}),
             timestamp: ts,
             rawPayload: payload as Record<string, unknown>,
           };
@@ -3903,18 +4153,11 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // OutboundSendAttempt guard owns the retry/refuse decision (it classifies
     // rate_limited / 5xx as recoverable). Same for sendInteractive/sendMedia/
     // sendTemplate below and placeCall.
-    const res = await metaFetch(url, {
-      method: "POST",
-      appSecret: config.appSecret,
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${config.accessToken}`,
-      },
-      body: JSON.stringify({
+    const res = await postWhatsappMessages(url, config, {
         messaging_product: "whatsapp",
         ...messagingAccountField(config),
         recipient_type: "individual",
-        to: args.to,
+        ...whatsappDestination(args),
         type: "text",
         // `preview_url` renders a link-preview card for the first URL in the
         // body. Auto-enabled when the body contains an http(s) link (caller can
@@ -3929,8 +4172,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         ...(args.replyToExternalId
           ? { context: { message_id: args.replyToExternalId } }
           : {}),
-      }),
-    });
+      });
 
     if (!res.ok) {
       // Surface Meta's error body so 24h-window failures (code 131047) and
@@ -3973,6 +4215,13 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // comes back as a normal inbound `location` message with `context`.
     if (args.kind === "location_request") {
       return sendLocationRequest(args, config);
+    }
+    // A contact-info request likewise: WhatsApp renders its own fixed-label
+    // "share contact info" button (request_contact_info, renamed from
+    // contact_request 2026-05-28), and the reply comes back as a normal
+    // inbound `contacts` card with `origin: "contact_request"`.
+    if (args.kind === "request_contact_info") {
+      return sendRequestContactInfo(args, config);
     }
     // One URL-opening button (cta-url-messages doc) — configured via
     // `args.ctaUrl`, no authored options.
@@ -4069,25 +4318,17 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           };
 
     const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
-    const res = await metaFetch(url, {
-      method: "POST",
-      appSecret: config.appSecret,
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${config.accessToken}`,
-      },
-      body: JSON.stringify({
+    const res = await postWhatsappMessages(url, config, {
         messaging_product: "whatsapp",
         ...messagingAccountField(config),
         recipient_type: "individual",
-        to: args.to,
+        ...whatsappDestination(args),
         type: "interactive",
         interactive,
         ...(args.replyToExternalId
           ? { context: { message_id: args.replyToExternalId } }
           : {}),
-      }),
-    });
+      });
 
     if (!res.ok) {
       const text = await safeMetaText(res);
@@ -4108,18 +4349,11 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
   async sendLocation(args: SendLocationArgs, config: MetaSendConfig): Promise<SendTextResult> {
     const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
-    const res = await metaFetch(url, {
-      method: "POST",
-      appSecret: config.appSecret,
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${config.accessToken}`,
-      },
-      body: JSON.stringify({
+    const res = await postWhatsappMessages(url, config, {
         messaging_product: "whatsapp",
         ...messagingAccountField(config),
         recipient_type: "individual",
-        to: args.to,
+        ...whatsappDestination(args),
         type: "location",
         location: {
           latitude: args.latitude,
@@ -4130,8 +4364,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         ...(args.replyToExternalId
           ? { context: { message_id: args.replyToExternalId } }
           : {}),
-      }),
-    });
+      });
     if (!res.ok) {
       const text = await safeMetaText(res);
       throw new MetaSendError(`meta sendLocation failed: ${res.status} ${text}`, res.status, text);
@@ -4185,24 +4418,17 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         ...(c.company ? { org: { company: c.company } } : {}),
       };
     });
-    const res = await metaFetch(url, {
-      method: "POST",
-      appSecret: config.appSecret,
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${config.accessToken}`,
-      },
-      body: JSON.stringify({
+    const res = await postWhatsappMessages(url, config, {
         messaging_product: "whatsapp",
         recipient_type: "individual",
-        to: args.to,
+        ...messagingAccountField(config),
+        ...whatsappDestination(args),
         type: "contacts",
         contacts,
         ...(args.replyToExternalId
           ? { context: { message_id: args.replyToExternalId } }
           : {}),
-      }),
-    });
+      });
     if (!res.ok) {
       const text = await safeMetaText(res);
       throw new MetaSendError(`meta sendContacts failed: ${res.status} ${text}`, res.status, text);
@@ -4225,23 +4451,15 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
   async sendReaction(args: SendReactionArgs, config: MetaSendConfig): Promise<SendTextResult> {
     const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
-    const res = await metaFetch(url, {
-      method: "POST",
-      appSecret: config.appSecret,
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${config.accessToken}`,
-      },
-      body: JSON.stringify({
+    const res = await postWhatsappMessages(url, config, {
         messaging_product: "whatsapp",
         ...messagingAccountField(config),
         recipient_type: "individual",
-        to: args.to,
+        ...whatsappDestination(args),
         type: "reaction",
         // Meta's convention: an empty emoji removes the business's reaction.
         reaction: { message_id: args.messageExternalId, emoji: args.emoji },
-      }),
-    });
+      });
     if (!res.ok) {
       const text = await safeMetaText(res);
       throw new MetaSendError(`meta sendReaction failed: ${res.status} ${text}`, res.status, text);
@@ -4484,25 +4702,17 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       sub.voice = true;
     }
 
-    const res = await metaFetch(url, {
-      method: "POST",
-      appSecret: config.appSecret,
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${config.accessToken}`,
-      },
-      body: JSON.stringify({
+    const res = await postWhatsappMessages(url, config, {
         messaging_product: "whatsapp",
         ...messagingAccountField(config),
         recipient_type: "individual",
-        to: args.to,
+        ...whatsappDestination(args),
         type: args.kind,
         [args.kind]: sub,
         ...(args.replyToExternalId
           ? { context: { message_id: args.replyToExternalId } }
           : {}),
-      }),
-    });
+      });
 
     if (!res.ok) {
       const text = await safeMetaText(res);
@@ -5622,26 +5832,18 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
     const components = buildTemplateSendComponents(args.variables);
 
-    const res = await metaFetch(url, {
-      method: "POST",
-      appSecret: config.appSecret,
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${config.accessToken}`,
-      },
-      body: JSON.stringify({
+    const res = await postWhatsappMessages(url, config, {
         messaging_product: "whatsapp",
         ...messagingAccountField(config),
         recipient_type: "individual",
-        to: args.to,
+        ...whatsappDestination(args),
         type: "template",
         template: {
           name: args.name,
           language: { code: args.language },
           ...(components.length > 0 ? { components } : {}),
         },
-      }),
-    });
+      });
 
     if (!res.ok) {
       const text = await safeMetaText(res);
@@ -5776,13 +5978,154 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     }
   },
 
+  // -------------------------------------------------------------------------
+  // Username — the number's chat-native @handle. 1:1 with the phone number,
+  // globally unique across WhatsApp; adopting one does NOT hide the number.
+  // -------------------------------------------------------------------------
+
+  async getUsername(config: MetaSendConfig): Promise<{ username: string | null }> {
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/username`;
+    const res = await metaFetch(new URL(url), {
+      method: "GET",
+      retry: true,
+      appSecret: config.appSecret,
+      headers: { authorization: `Bearer ${config.accessToken}` },
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      // A number that never adopted a username can answer this GET with the
+      // generic "does not support this operation" shape rather than an empty
+      // object. That is "no username", not an error — throwing here would
+      // break the whole settings panel for exactly the numbers most likely to
+      // open it (the ones about to adopt one).
+      if (res.status === 400 && isGraphShapeDisagreement(text)) {
+        return { username: null };
+      }
+      throw new MetaSendError(
+        `meta getUsername failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+    // Tolerate both a flat field and Meta's single-row `data` wrapper (the
+    // business-profile GET wraps exactly this way).
+    const json = (await res.json()) as {
+      username?: string;
+      data?: Array<{ username?: string }>;
+    };
+    const username = json.username ?? json.data?.[0]?.username ?? null;
+    return {
+      username:
+        typeof username === "string" && username.trim().length > 0
+          ? username.trim().toLowerCase()
+          : null,
+    };
+  },
+
+  async setUsername(
+    args: { username: string; transferAction?: "none" | "force_transfer" },
+    config: MetaSendConfig,
+  ): Promise<void> {
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/username`;
+    const res = await metaFetch(new URL(url), {
+      // No retry: adopting a username is a write, and with `force_transfer`
+      // it takes the handle away from a sibling number — never auto-repeat.
+      method: "POST",
+      appSecret: config.appSecret,
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.accessToken}`,
+      },
+      body: JSON.stringify({
+        username: args.username,
+        // `none` is Meta's documented default — omit it rather than asserting
+        // it, so the request stays minimal.
+        ...(args.transferAction && args.transferAction !== "none"
+          ? { transfer_action: args.transferAction }
+          : {}),
+      }),
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      // 147005 "Username transfer required" rides through in the body — the
+      // service detects it there and turns it into an actionable 409.
+      throw new MetaSendError(
+        `meta setUsername failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+  },
+
+  async deleteUsername(config: MetaSendConfig): Promise<void> {
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/username`;
+    const res = await metaFetch(new URL(url), {
+      method: "DELETE",
+      appSecret: config.appSecret,
+      headers: { authorization: `Bearer ${config.accessToken}` },
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(
+        `meta deleteUsername failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+  },
+
+  async getUsernameSuggestions(config: MetaSendConfig): Promise<string[]> {
+    const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/username_suggestions`;
+    const res = await metaFetch(new URL(url), {
+      method: "GET",
+      retry: true,
+      appSecret: config.appSecret,
+      headers: { authorization: `Bearer ${config.accessToken}` },
+    });
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(
+        `meta getUsernameSuggestions failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+    // The reference documents the endpoint but not the row shape, so accept
+    // both bare strings and `{ username }` rows under any of the plausible
+    // list keys — an unreadable row is skipped, never a throw.
+    const json = (await res.json()) as {
+      data?: unknown;
+      username_suggestions?: unknown;
+      suggestions?: unknown;
+    };
+    const rows = [json.data, json.username_suggestions, json.suggestions].find(
+      Array.isArray,
+    ) as unknown[] | undefined;
+    if (!rows) return [];
+    const out: string[] = [];
+    for (const row of rows) {
+      const value =
+        typeof row === "string"
+          ? row
+          : typeof (row as { username?: unknown })?.username === "string"
+            ? (row as { username: string }).username
+            : undefined;
+      const normalized = value?.trim().toLowerCase();
+      if (normalized && !out.includes(normalized)) out.push(normalized);
+    }
+    return out;
+  },
+
   /**
    * The number's Official Business Account status, and the WABA's own record.
    *
    * Two GETs because they live on different nodes, folded into one call so the
-   * settings panel makes one request. Both are read-only: OBA is REQUESTED in
-   * WhatsApp Manager (no wire shape for the request is published, only for the
-   * status), and WABA fields aren't ours to write.
+   * settings panel makes one request. Both are read-only here — WABA fields
+   * aren't ours to write, and the OBA APPLICATION flow is deliberately not
+   * built. The OBA guide now DOES publish a request wire shape
+   * (`POST /{phoneNumberId}/official_business_account`), so an in-app "apply
+   * for the blue tick" form is buildable when wanted (roadmap); until then the
+   * UI links out to WhatsApp Manager.
    */
   async getAccountStatus(config: MetaSendConfig): Promise<ProviderAccountStatus> {
     const numberUrl =
@@ -5994,14 +6337,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       );
     }
     const url = `${GRAPH_BASE}/${config.graphVersion}/${config.phoneNumberId}/messages`;
-    const res = await metaFetch(url, {
-      method: "POST",
-      appSecret: config.appSecret,
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${config.accessToken}`,
-      },
-      body: JSON.stringify({
+    const res = await postWhatsappMessages(url, config, {
         messaging_product: "whatsapp",
         ...messagingAccountField(config),
         recipient_type: "individual",
@@ -6018,8 +6354,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           // context reads as a scam to the customer. Callers always pass one.
           ...(args.bodyText ? { body: { text: args.bodyText } } : {}),
         },
-      }),
-    });
+      });
     if (!res.ok) {
       const text = await safeMetaText(res);
       throw new MetaSendError(
@@ -6943,12 +7278,18 @@ interface MetaTemplateRow {
 }
 
 /**
- * Did Meta accept this send but HOLD it?
+ * Did Meta accept this send but PARK it?
  *
  * Business-portfolio pacing batches template delivery so feedback can be
  * gathered between batches. Held messages get a real wamid, so the only signal
  * is `message_status` on the send response — and a caller that ignores it
  * reports a campaign as fully sent while most of it sits in Meta's queue.
+ *
+ * The Message API reference documents THREE accepted-response values:
+ * `accepted`, `held_for_quality_assessment`, and `paused` ("the message
+ * delivery has been paused"). Both non-accepted values mean the same thing to
+ * a caller — accepted but parked, delivery not underway — so both map to the
+ * `held` rung; only the operator copy would ever distinguish them.
  *
  * Applies to portfolios under 500k template sends in a rolling 365 days, and to
  * any portfolio under review for suspicious activity. Distinct from TEMPLATE
@@ -6957,7 +7298,8 @@ interface MetaTemplateRow {
 function isHeldForQualityAssessment(json: {
   messages?: Array<{ message_status?: string }>;
 }): boolean {
-  return json.messages?.[0]?.message_status === "held_for_quality_assessment";
+  const status = json.messages?.[0]?.message_status;
+  return status === "held_for_quality_assessment" || status === "paused";
 }
 
 /**
@@ -7247,9 +7589,11 @@ function mapTemplateStatus(s: string | undefined): TemplateStatus | null {
     case "REJECTED":
       return "rejected";
     // A FLAGGED template can't be sent — treat like paused so it's not offered.
-    // LIMIT_EXCEEDED means the WABA is at its template cap: the template is not
-    // usable, but it is not gone and it recovers on its own once the account is
-    // back under the limit — which is exactly "paused", not "disabled".
+    // LIMIT_EXCEEDED is "paused due to template pacing" (current status
+    // reference) — it does NOT recover on its own; the documented recovery is
+    // the manual /unpause the app already exposes, which is exactly the
+    // "paused" surface. (An older reading — "WABA at its template cap, clears
+    // itself" — was superseded; the mapping was right, the reason wasn't.)
     case "PAUSED":
     case "FLAGGED":
     case "LIMIT_EXCEEDED":
@@ -7266,6 +7610,11 @@ function mapTemplateStatus(s: string | undefined): TemplateStatus | null {
     // the escape hatch and the deadline.
     case "ARCHIVED":
       return "archived";
+    // LOCKED (status-update webhook: "the template has been locked and cannot
+    // be edited", with other_info carrying the lock reason) is DELIBERATELY
+    // unmapped: it changes editability, not sendability, and nothing here
+    // models edit-locks — null leaves the stored sendability status alone,
+    // which is the leave-stored-value posture this mapper is built on.
     default:
       return null;
   }
@@ -7278,7 +7627,10 @@ function mapTemplateCategory(c: string | undefined): TemplateCategory | null {
     case "UTILITY":
     case "TRANSACTIONAL":
       return "utility";
+    // OTP is the pre-2023 authentication category, still in the Graph enum —
+    // same legacy-tolerance as its twin TRANSACTIONAL above.
     case "AUTHENTICATION":
+    case "OTP":
       return "authentication";
     default:
       return null;

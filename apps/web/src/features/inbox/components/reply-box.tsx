@@ -1970,9 +1970,14 @@ function ReplyBoxImpl({
                 conversationId={conversationId}
                 initialBody={value}
                 // Capability-gated, never channel-name-gated: `location_request`
-                // is WhatsApp-only, while the link button also exists on
-                // Instagram (as a button template) with a tighter text ceiling.
+                // and `request_contact_info` are WhatsApp-only, while the link
+                // button also exists on Instagram (as a button template) with a
+                // tighter text ceiling.
                 allowLocationRequest={caps.locationRequest === true}
+                allowRequestContactInfo={caps.requestContactInfo === true}
+                // Drives the contact-info mode's hint — a phone-less
+                // (BSUID-only) thread is exactly what the request is for.
+                contactHasPhone={!!contact.phoneNumber}
                 allowCtaUrl={caps.ctaUrlButton === true}
                 allowCards={caps.genericTemplate === true}
                 {...(caps.templateTextMaxChars !== undefined

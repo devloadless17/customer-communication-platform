@@ -66,6 +66,14 @@ interface Props {
   /** Channel capability `locationRequest` — shows the "Request location" mode
    *  (WhatsApp's interactive location_request_message). */
   allowLocationRequest?: boolean;
+  /** Channel capability `requestContactInfo` — shows the "Contact info" mode
+   *  (WhatsApp's interactive request_contact_info: its own fixed-label "share
+   *  contact info" button; the reply arrives as a contact card). */
+  allowRequestContactInfo?: boolean;
+  /** Whether the thread's contact has a phone number on file. Drives the hint
+   *  in contact-info mode — a phone-less (BSUID-only) thread is exactly the
+   *  case the request exists for. */
+  contactHasPhone?: boolean;
   /** Channel capability `ctaUrlButton` — shows the "Link button" mode: one
    *  URL-opening button (WhatsApp `interactive.type:"cta_url"`, Instagram's
    *  button template). */
@@ -87,6 +95,8 @@ export function InteractivePopover({
   initialBody,
   onSent,
   allowLocationRequest = false,
+  allowRequestContactInfo = false,
+  contactHasPhone = true,
   allowCtaUrl = false,
   allowCards = false,
   templateTextMax,
@@ -94,10 +104,12 @@ export function InteractivePopover({
   const [body, setBody] = useState("");
   // "buttons" = agent-authored quick replies; "location_request" = WhatsApp's
   // own "send location" button (reply arrives as a normal location pin);
-  // "cta_url" = one URL-opening button so the raw link stays out of the body.
-  const [mode, setMode] = useState<"buttons" | "location_request" | "cta_url" | "generic">(
-    "buttons",
-  );
+  // "request_contact_info" = WhatsApp's own "share contact info" button
+  // (reply arrives as a contact card); "cta_url" = one URL-opening button so
+  // the raw link stays out of the body.
+  const [mode, setMode] = useState<
+    "buttons" | "location_request" | "request_contact_info" | "cta_url" | "generic"
+  >("buttons");
   // Meta's caps for the generic template: 1-10 cards, ≤3 buttons each.
   const [cards, setCards] = useState<CardDraft[]>([{ title: "", buttons: [] }]);
   const [ctaLabel, setCtaLabel] = useState("");
@@ -190,6 +202,7 @@ export function InteractivePopover({
       : null;
 
   const locationMode = mode === "location_request";
+  const contactInfoMode = mode === "request_contact_info";
   const ctaMode = mode === "cta_url";
   const cardsMode = mode === "generic";
   // Meta requires a card to carry something BEYOND its title, or it renders
@@ -213,6 +226,7 @@ export function InteractivePopover({
     (cardsMode
       ? cardsValid
       : locationMode ||
+      contactInfoMode ||
       (ctaMode
         ? ctaLabel.trim().length > 0 && ctaUrlValid
         : options.length >= 1 &&
@@ -246,14 +260,17 @@ export function InteractivePopover({
           body: cardsMode ? (cards[0]?.title.trim() ?? "Cards") : body.trim(),
           kind: locationMode
             ? "location_request"
-            : ctaMode
-              ? "cta_url"
-              : cardsMode
-                ? "generic"
-                : "buttons",
-          // location_request / cta_url carry no options — WhatsApp renders the button.
+            : contactInfoMode
+              ? "request_contact_info"
+              : ctaMode
+                ? "cta_url"
+                : cardsMode
+                  ? "generic"
+                  : "buttons",
+          // location_request / request_contact_info / cta_url carry no
+          // options — WhatsApp renders the button.
           options:
-            locationMode || ctaMode || cardsMode
+            locationMode || contactInfoMode || ctaMode || cardsMode
               ? []
               : options.map((o) => ({ id: o.id.trim(), title: o.title.trim() })),
           ...(cardsMode
@@ -323,11 +340,13 @@ export function InteractivePopover({
       aria-label={
         locationMode
           ? "Request location"
-          : ctaMode
-            ? "Send link button"
-            : cardsMode
-              ? "Send cards"
-              : "Send buttons"
+          : contactInfoMode
+            ? "Request contact info"
+            : ctaMode
+              ? "Send link button"
+              : cardsMode
+                ? "Send cards"
+                : "Send buttons"
       }
       tabIndex={-1}
       // left-0 (opens to the RIGHT): the trigger is a LEFT-side composer-toolbar
@@ -341,11 +360,13 @@ export function InteractivePopover({
         <div className="text-sm font-semibold">
           {locationMode
             ? "Request location"
-            : ctaMode
-              ? "Send a link button"
-              : cardsMode
-                ? "Send cards"
-                : "Send with buttons"}
+            : contactInfoMode
+              ? "Request contact info"
+              : ctaMode
+                ? "Send a link button"
+                : cardsMode
+                  ? "Send cards"
+                  : "Send with buttons"}
         </div>
         <button
           type="button"
@@ -357,7 +378,7 @@ export function InteractivePopover({
         </button>
       </div>
 
-      {(allowLocationRequest || allowCtaUrl) && (
+      {(allowLocationRequest || allowRequestContactInfo || allowCtaUrl) && (
         <div
           role="radiogroup"
           aria-label="Interactive message kind"
@@ -369,6 +390,9 @@ export function InteractivePopover({
               ...(allowLocationRequest
                 ? [["location_request", "Location"] as const]
                 : []),
+              ...(allowRequestContactInfo
+                ? [["request_contact_info", "Contact info"] as const]
+                : []),
               ...(allowCtaUrl ? [["cta_url", "Link button"] as const] : []),
               ...(allowCards ? [["generic", "Cards"] as const] : []),
             ] as ReadonlyArray<readonly [string, string]>
@@ -378,7 +402,15 @@ export function InteractivePopover({
               type="button"
               role="radio"
               aria-checked={mode === value}
-              onClick={() => setMode(value as typeof mode)}
+              onClick={() => {
+                setMode(value as typeof mode);
+                // WhatsApp fixes the button label, but the body prompt is
+                // ours and required — seed a sensible default so the agent
+                // isn't staring at an empty required field.
+                if (value === "request_contact_info" && body.trim() === "") {
+                  setBody("Could you share your contact info so we can reach you?");
+                }
+              }}
               className={`flex-1 rounded-md px-2 py-1 text-2xs font-medium transition-colors ${
                 mode === value
                   ? "bg-background text-foreground shadow-sm"
@@ -413,6 +445,25 @@ export function InteractivePopover({
           WhatsApp shows a <strong>Send location</strong> button under your
           message. The customer&apos;s location arrives as a map pin in this
           conversation.
+        </p>
+      )}
+
+      {contactInfoMode && (
+        // No authored options here either — WhatsApp draws its own
+        // fixed-label "share contact info" button; the customer's details
+        // land in the thread as a contact card.
+        <p className="mb-2 rounded-md bg-muted/40 px-2 py-1.5 text-2xs text-muted-foreground">
+          WhatsApp shows its own <strong>share contact info</strong> button
+          under your message (the label can&apos;t be customized). The
+          customer&apos;s name and phone arrive as a contact card in this
+          conversation.
+          {!contactHasPhone && (
+            <>
+              {" "}
+              <strong>This contact has no phone number on file</strong> — this
+              is the way to ask for one.
+            </>
+          )}
         </p>
       )}
 
@@ -584,7 +635,7 @@ export function InteractivePopover({
         </div>
       )}
 
-      <div className={locationMode || ctaMode || cardsMode ? "hidden" : "mb-2 flex flex-col gap-1.5"}>
+      <div className={locationMode || contactInfoMode || ctaMode || cardsMode ? "hidden" : "mb-2 flex flex-col gap-1.5"}>
         <div className="flex items-center justify-between">
           <span className="text-xs font-medium text-muted-foreground">
             Buttons (1–3)
@@ -634,7 +685,7 @@ export function InteractivePopover({
         </div>
       )}
 
-      {!error && !locationMode && validationHint && (
+      {!error && !locationMode && !contactInfoMode && validationHint && (
         <div className="mb-2 rounded border border-warning-border bg-warning-bg px-2 py-1 text-2xs text-warning-fg">
           {validationHint}
         </div>

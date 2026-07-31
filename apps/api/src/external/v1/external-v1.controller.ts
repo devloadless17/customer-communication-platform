@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Body,
   Controller,
   Delete,
@@ -24,10 +25,14 @@ import { tmpdir } from "node:os";
 import type { Response } from "express";
 
 import { CallsService } from "@/calls/calls.service";
+import { acquisitionSources, contactAcquisition } from "@/lib/analytics/acquisition-sources";
+import { campaignRollup, listCampaigns } from "@/lib/analytics/campaign-rollup";
 import { getWorkspaceReport, ReportRangeError } from "@/lib/analytics/reports";
 import { getWabaAnalytics } from "@/lib/analytics/waba-analytics";
 import { streamBlob } from "@/media/stream-blob";
 import {
+  AcquisitionQuerySchema,
+  type AcquisitionQuery,
   ReportOverviewQuerySchema,
   type ReportOverviewQuery,
   WabaAnalyticsQuerySchema,
@@ -146,10 +151,12 @@ import {
 import {
   CreateQrCodeSchema,
   RegisterWhatsappNumberSchema,
+  SetWhatsappUsernameSchema,
   UpdateBusinessProfileSchema,
   UpdateQrCodeSchema,
   type CreateQrCodeInput,
   type RegisterWhatsappNumberInput,
+  type SetWhatsappUsernameInput,
   type UpdateBusinessProfileInput,
   type UpdateQrCodeInput,
 } from "@/workspace-settings/whatsapp/whatsapp.schemas";
@@ -312,6 +319,7 @@ import {
  *   POST   /v1/contacts/:id/stage             — set lifecycle stage (fires lifecycle workflow + stage pill + webhook)
  *   DELETE /v1/contacts/:id                   — soft delete (removes from directory; conversation history preserved)
  *   GET    /v1/contacts/:id/channels          — list channels (siloed-per-channel → one row)
+ *   GET    /v1/contacts/:id/acquisition       — the ad / post / link that first brought them in
  *   POST   /v1/contacts/:id/block             — block at the provider (WhatsApp Block Users API)
  *   POST   /v1/contacts/:id/unblock           — lift the provider block
  *   POST   /v1/contacts/:id/tags              — add tag(s) to one contact
@@ -854,6 +862,23 @@ export class ExternalV1Controller {
     @Param("id") id: string,
   ) {
     return this.api.getContactChannels(auth.workspaceId, id);
+  }
+
+  /**
+   * WHERE THIS CUSTOMER CAME FROM — their earliest attributed inbound, so an
+   * external system can join a contact to the ad that won them without walking
+   * the whole message history looking for a `referral` block.
+   *
+   * `{ acquisition: null }` for an organic contact — never a 404, which would
+   * make "arrived directly" indistinguishable from "no such contact".
+   */
+  @Get("contacts/:id/acquisition")
+  @RequireScope("read:contacts")
+  async getContactAcquisition(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+  ) {
+    return { acquisition: await contactAcquisition(auth.workspaceId, id) };
   }
 
   @Post("contacts/:id/tags")
@@ -1757,6 +1782,15 @@ export class ExternalV1Controller {
     return { ok: true, message_id: out.messageId };
   }
 
+  @Get("channels/messenger/broadcast-reach")
+  @RequireScope("read:catalog")
+  async messengerBroadcastReach(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query("template_name") templateName?: string,
+  ) {
+    return this.messenger.broadcastReach(auth.workspaceId, templateName?.trim() || undefined);
+  }
+
   @Get("channels/messenger/utility-templates")
   @RequireScope("read:catalog")
   async messengerUtilityTemplates(
@@ -2532,6 +2566,46 @@ export class ExternalV1Controller {
     return { ok: true };
   }
 
+  /**
+   * The number's @username (a chat-native handle, 1:1 with the phone number,
+   * globally unique across WhatsApp) plus Meta's reserved suggestions.
+   * `?accountId=` picks one of the workspace's numbers.
+   */
+  @Get("whatsapp/username")
+  @RequireScope("read:catalog")
+  async whatsappUsername(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.whatsapp.getUsernameState(auth.workspaceId, accountId);
+  }
+
+  /**
+   * Adopt or change it. A 409 `username_transfer_required` means the name is
+   * on another of the portfolio's numbers — re-send with
+   * `transferAction: "force_transfer"` to move it here deliberately.
+   */
+  @Post("whatsapp/username")
+  @RequireScope("admin:settings")
+  async setWhatsappUsername(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Body(zBody(SetWhatsappUsernameSchema)) body: SetWhatsappUsernameInput,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.whatsapp.setUsername(auth.workspaceId, body, accountId);
+  }
+
+  /** Remove it. Customers who saved the @handle lose that route to the chat. */
+  @Delete("whatsapp/username")
+  @RequireScope("admin:settings")
+  async deleteWhatsappUsername(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query("accountId") accountId?: string,
+  ) {
+    await this.whatsapp.deleteUsername(auth.workspaceId, accountId);
+    return { ok: true };
+  }
+
   /** `?accountId=` reads ONE number's WABA; omitted reads the default number's. */
   @Get("whatsapp/insights/status")
   @RequireScope("read:catalog")
@@ -2651,6 +2725,52 @@ export class ExternalV1Controller {
       granularity: query.granularity,
       wabaAccountId: query.wabaAccountId,
     });
+  }
+
+  /**
+   * WHERE CUSTOMERS CAME FROM — acquisition sources, aggregated by distinct
+   * CONTACT keyed on their first attributed inbound (Meta only sends `referral`
+   * on the message that starts a conversation).
+   *
+   * `organic` is reported SEPARATELY rather than as a row: it is the absence of
+   * a source, and folding it in would let it sort above every real campaign.
+   */
+  @Get("reports/acquisition")
+  @RequireScope("read:reports")
+  async reportAcquisition(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Query(zQuery(AcquisitionQuerySchema)) query: AcquisitionQuery,
+  ) {
+    return acquisitionSources(auth.workspaceId, {
+      ...(query.from ? { since: new Date(query.from) } : {}),
+      ...(query.to ? { until: new Date(query.to) } : {}),
+      ...(query.channel ? { channel: query.channel } : {}),
+    });
+  }
+
+  /** Every campaign name in the workspace — the index behind the rollup below. */
+  @Get("reports/campaigns")
+  @RequireScope("read:reports")
+  async reportCampaigns(@CurrentApiKey() auth: ApiKeyContext) {
+    return { campaigns: await listCampaigns(auth.workspaceId) };
+  }
+
+  /**
+   * CAMPAIGN ROLLUP — several broadcasts read as one set of numbers, with the
+   * per-send, per-account, per-failure, per-cost and per-source cuts.
+   *
+   * Same domain function and same shape as the internal route. Summed from
+   * recipient rows, never by averaging per-broadcast rates.
+   */
+  @Get("reports/campaigns/:name")
+  @RequireScope("read:reports")
+  async reportCampaign(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("name") name: string,
+  ) {
+    const rollup = await campaignRollup(auth.workspaceId, name);
+    if (!rollup) throw new NotFoundException({ error: "campaign_not_found" });
+    return rollup;
   }
 
   @Get("calls")
@@ -2978,6 +3098,27 @@ export class ExternalV1Controller {
   ) {
     this.guardChainDepth(xCcpDepth);
     await this.broadcasts.cancel(auth.workspaceId, id);
+    return { ok: true };
+  }
+
+  /**
+   * Explicitly resume a PAUSED campaign. The only path that may lift an
+   * `abuse_warning` pause — automatic recovery deliberately excludes it, so a
+   * human choosing to continue after seeing the pause reason is the review
+   * Meta's warning asks for. 409 `broadcast_not_paused` otherwise.
+   */
+  @Post("broadcasts/:id/resume")
+  @RequireScope("write:broadcasts")
+  async resumeBroadcastV1(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    const resumed = await this.broadcasts.resume(auth.workspaceId, id);
+    if (!resumed) {
+      throw new ConflictException({ error: "broadcast_not_paused" });
+    }
     return { ok: true };
   }
 

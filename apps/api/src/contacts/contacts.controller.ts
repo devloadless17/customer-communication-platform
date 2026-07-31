@@ -19,6 +19,7 @@ import type { Response } from "express";
 
 import { resolvePermissions } from "@ccp/shared/auth/permissions";
 
+import { contactAcquisition } from "../lib/analytics/acquisition-sources";
 import { contactAvatarObjectKey } from "../lib/blob-storage/avatar";
 import { setContactBlocked } from "../lib/messaging/block-contact";
 import { mapBlockContactError } from "../common/block-contact-http";
@@ -56,6 +57,7 @@ import { ContactsService } from "./contacts.service";
  *   GET    /api/contacts/export         — full CSV export
  *   POST   /api/contacts/count          — live audience recipient count
  *   POST   /api/contacts/preview        — first N matches preview
+ *   GET    /api/contacts/:id/acquisition — the ad / post / link that first brought them in
  *   PATCH  /api/contacts/:id            — partial update (publishes contact.updated)
  *   DELETE /api/contacts/:id            — hard delete + blob cleanup
  *   PUT    /api/contacts/:id/tags       — replace tag set
@@ -163,6 +165,26 @@ export class ContactsController {
   ) {
     const contact = await this.contacts.syncSocialProfile(session.workspaceId, contactId);
     return { contact };
+  }
+
+  /**
+   * WHERE THIS CUSTOMER CAME FROM — the ad, post or link that first brought
+   * them in, from their earliest attributed inbound.
+   *
+   * Its own route rather than a field on the contact payload: the inbox loads
+   * that payload on every thread open, and this is a profile field an agent
+   * reads occasionally. Returns `{ acquisition: null }` for an organic contact —
+   * a 404 would make "arrived directly" indistinguishable from "no such
+   * contact", and the panel has to tell those apart.
+   */
+  @Get(":contactId/acquisition")
+  async acquisition(
+    @CurrentSession() session: ApiSession,
+    @Param("contactId") contactId: string,
+  ) {
+    return {
+      acquisition: await contactAcquisition(session.workspaceId, contactId),
+    };
   }
 
   @Post("count")

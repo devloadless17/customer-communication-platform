@@ -73,6 +73,12 @@ export interface ImportOptions {
   mapping?: Record<string, string>;
   /** Caller has `tags:manage` — only then are unknown tag names auto-created. */
   canManageTags: boolean;
+  /**
+   * ISO-2 country for the file's NATIONAL-format numbers ("LB", "AE", "GB").
+   * Only consulted for a number that carries no country code of its own, so a
+   * file mixing both is resolved row by row.
+   */
+  defaultCountry?: string;
 }
 
 export interface ImportCounters {
@@ -304,7 +310,7 @@ export async function runContactImport(opts: {
         automationsSkipped = options.fireAutomations;
       }
 
-      const built = buildRow(rowNumber, cells, mapping);
+      const built = buildRow(rowNumber, cells, mapping, options.defaultCountry);
       if ("error" in built) {
         pushError(errorRows, { rowNumber, reason: built.error, raw: cells });
         counters.failed += 1;
@@ -434,6 +440,12 @@ function buildRow(
   rowNumber: number,
   cells: Row,
   mapping: Map<string, HeaderMapping>,
+  /**
+   * The country the file's NATIONAL-format numbers belong to, chosen by the
+   * operator on the import screen. A CRM export commonly stores local numbers
+   * ("03123456"); without a country there is nothing to resolve them with.
+   */
+  defaultCountry?: string,
 ): { row: PendingRow } | { error: string } {
   let phoneRaw = "";
   let name = "";
@@ -472,10 +484,25 @@ function buildRow(
   }
 
   if (!phoneRaw.trim()) return { error: "missing_phone_number" };
-  const phone = normalizePhoneE164(phoneRaw);
+  const phone = normalizePhoneE164(phoneRaw, defaultCountry);
   if (!phone) {
     return {
       error: `invalid phone number "${phoneRaw}" — include the country code, e.g. 15551234567`,
+    };
+  }
+  // A leading zero is NEVER valid in E.164, so this number is provably not
+  // sendable — it is a national-format number we had no country to resolve.
+  //
+  // Rejected loudly at import rather than stored, which is the whole point:
+  // stored, the import reports success, the contact shows up in the directory
+  // and in audience counts, and the operator only discovers the problem weeks
+  // later as a per-recipient failure on a campaign they have already paid to
+  // build. The fix is one dropdown away, so the message names it.
+  if (phone.startsWith("0")) {
+    return {
+      error: defaultCountry
+        ? `"${phoneRaw}" is not a valid ${defaultCountry} number — check it, or add the country code (e.g. 15551234567)`
+        : `"${phoneRaw}" is in local format — choose the country these contacts are in, or add the country code (e.g. 15551234567)`,
     };
   }
 

@@ -26,7 +26,7 @@
 import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
 import {
   getThreadOwner,
-  PAGE_INBOX_APP_ID,
+  INSTAGRAM_INBOX_APP_ID,
   passThreadControl,
   releaseThreadControl,
   requestThreadControl,
@@ -212,7 +212,18 @@ export const instagramProvider: MessagingProvider<InstagramSendConfig> = {
         await releaseThreadControl(args.to, t);
         break;
       case "pass":
-        await passThreadControl(args.to, args.targetAppId ?? PAGE_INBOX_APP_ID, t, args.metadata);
+        // The INSTAGRAM inbox, not the Page inbox. Meta names two different
+        // first-party targets — "use 263902037430900 for the Page Inbox and
+        // 1217981644879628 for the Instagram Inbox" — and this provider was
+        // defaulting to the Messenger one it inherited. Handing an Instagram
+        // thread to the Page inbox sends it somewhere no Instagram agent is
+        // looking, and the API accepts it, so nothing would have errored.
+        await passThreadControl(
+          args.to,
+          args.targetAppId ?? INSTAGRAM_INBOX_APP_ID,
+          t,
+          args.metadata,
+        );
         break;
     }
     // Re-read rather than assume — a `request` is a message to the primary

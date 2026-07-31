@@ -781,6 +781,8 @@ export interface BroadcastListItem {
   id: string;
   status: string;
   name: string | null;
+  /** Groups this send with its siblings — the campaign rollup's join key. */
+  campaignName: string | null;
   // freeform / People (customer-mode) broadcasts carry no template — null here.
   kind: "template" | "freeform";
   channel: string;

@@ -153,7 +153,7 @@ export async function sendStickerInternal(
   }
 
   const send = await sendSticker(
-    { to: dest.to, stickerId: args.stickerId, useHumanAgentTag },
+    { to: dest.to, ...(dest.viaBsuid ? { viaBsuid: true } : {}), stickerId: args.stickerId, useHumanAgentTag },
     sendConfig,
   );
 

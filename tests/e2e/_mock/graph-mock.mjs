@@ -36,6 +36,17 @@ let failSendStatus = 500;
  * (requeue + pause) than a generic failure (mark recipient failed).
  */
 let failSendCode = 2;
+/**
+ * BSUID rollout toggle: when true, a WhatsApp send that addresses the
+ * top-level `recipient` field (the 2026-07 BSUID form) is answered with Meta's
+ * `#100 Unexpected parameter` 400 — the pre-rollout server behaviour — so an
+ * e2e run can exercise the provider's one-shot legacy-`to` retry.
+ * Defaults from the env (`GRAPH_MOCK_REJECT_RECIPIENT=1`); also flippable at
+ * runtime via `POST /__mock/reject-recipient {enabled}`. `/__mock/reset`
+ * restores the env default.
+ */
+const REJECT_RECIPIENT_DEFAULT = process.env.GRAPH_MOCK_REJECT_RECIPIENT === "1";
+let rejectRecipient = REJECT_RECIPIENT_DEFAULT;
 
 function readBody(req) {
   return new Promise((resolve) => {
@@ -80,7 +91,14 @@ const server = createServer(async (req, res) => {
     calls = [];
     failSendsRemaining = 0;
     failSendCode = 2;
+    rejectRecipient = REJECT_RECIPIENT_DEFAULT;
     return json(res, 200, { ok: true });
+  }
+  // Toggle the BSUID `recipient`-rejection behaviour mid-run (see the flag's
+  // docblock above). Additive control endpoint — never part of Graph.
+  if (path === "/__mock/reject-recipient" && method === "POST") {
+    rejectRecipient = Boolean(body?.enabled);
+    return json(res, 200, { ok: true, rejectRecipient });
   }
   // Arm the next `count` `POST .../messages` calls to fail with `status`. Lets a
   // spec drive the AMBIGUOUS send path (Meta 5xx — the message may or may not
@@ -177,6 +195,26 @@ const server = createServer(async (req, res) => {
       });
     }
     if (body && body.messaging_product === "whatsapp") {
+      // BSUID form (2026-07): the destination rides the top-level `recipient`
+      // field and `to` is omitted. Meta's documented response for a BSUID send
+      // echoes the id under `contacts[0].user_id` with NO `wa_id`.
+      if (typeof body.recipient === "string" && body.to === undefined) {
+        if (rejectRecipient) {
+          return json(res, 400, {
+            error: {
+              message: '(#100) Unexpected parameter "recipient"',
+              type: "OAuthException",
+              code: 100,
+              fbtrace_id: `MOCKTRACE${n}`,
+            },
+          });
+        }
+        return json(res, 200, {
+          messaging_product: "whatsapp",
+          contacts: [{ input: body.recipient, user_id: body.recipient }],
+          messages: [{ id: `wamid.MOCK.${n}` }],
+        });
+      }
       return json(res, 200, {
         messaging_product: "whatsapp",
         contacts: [{ input: body.to, wa_id: body.to }],

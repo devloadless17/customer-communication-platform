@@ -604,6 +604,20 @@ export type MessageStructured =
         addresses?: string[];
         /** "Title · Company" (whichever parts the vCard included). */
         company?: string;
+        /**
+         * How the card arrived (BSUID rollout): "contact_request" = the user
+         * tapped our REQUEST_CONTACT_INFO button and shared THEIR OWN number —
+         * ingest may apply it to the sending contact (self-asserted via an
+         * explicit consent flow, like the contact-share chip). "other" (or
+         * absent) = an ordinary forwarded vCard — display only, never a key.
+         */
+        origin?: string;
+        /**
+         * Meta's own WhatsApp-account resolution of the shared numbers
+         * (`phones[].wa_id`), digits-only, order-aligned with `phones` where
+         * present. Only meaningful with origin "contact_request".
+         */
+        waIds?: string[];
       }>;
     }
   | {
@@ -696,10 +710,54 @@ export interface MessageAttribution {
   body?: string;
   /** The ad/post URL the customer clicked. */
   sourceUrl?: string;
-  /** Click id (WhatsApp `ctwa_clid` / Messenger ad id) for ad-platform matching. */
+  /**
+   * The per-CLICK id, for ad-platform matching. WhatsApp's `ctwa_clid` today.
+   *
+   * NOT the ad id — one ad produces a different click id per person, so grouping
+   * a report by this counts clicks, not campaigns. Use `adId` for "which ad".
+   * Messenger has no per-click id at all, so this is absent there.
+   */
   clickId?: string;
+  /**
+   * WHICH AD brought this person — Messenger's `referral.ad_id`, WhatsApp's
+   * `referral.source_id` when `source_type` is `ad`.
+   *
+   * Its own field because the two channels put the ad id in different places and
+   * a report that groups "by ad" has to mean the same thing on both. Before this
+   * it was folded into `clickId` on Messenger and simply dropped on WhatsApp, so
+   * the same question had two different answers per channel and no answer at all
+   * for CTWA.
+   */
+  adId?: string;
+  /**
+   * The ad CREATIVE the customer was looking at when they wrote in.
+   *
+   * Present on both Meta surfaces under different names — WhatsApp's referral
+   * carries `media_type`/`image_url`/`video_url`/`thumbnail_url`, Messenger's
+   * `ads_context_data` carries `photo_url`/`video_url` — so they are unified
+   * here. Meta ships them precisely because the creative is what the customer
+   * has in mind, and an agent who can see it opens with context instead of
+   * "how can I help?".
+   */
+  mediaType?: "image" | "video";
+  imageUrl?: string;
+  videoUrl?: string;
+  thumbnailUrl?: string;
+  /**
+   * The ad's own greeting text (`welcome_message.text`) — the message Meta
+   * showed the customer BEFORE they typed. Without it the thread opens with the
+   * customer's reply to something invisible.
+   */
+  greeting?: string;
   /** Free-form deep-link ref payload (m.me `ref=...`), when that's the source. */
   ref?: string;
+  /**
+   * The POST a Click-to-Messenger ad was running against
+   * (`ads_context_data.post_id`). Distinct from `clickId`, which identifies the
+   * AD: several ads can promote one post, and a report that only knows the ad id
+   * cannot answer "which piece of content actually brings people in".
+   */
+  postId?: string;
   /**
    * Instagram Shop product the customer opened the DM from. Meta ships it as
    * `message.referral.product.id` on the `messages` webhook — a referral that

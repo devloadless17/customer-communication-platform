@@ -436,6 +436,7 @@ function TableView({
                   {broadcastTitle(b)}
                 </Link>
                 <div className="mt-0.5 truncate text-2xs text-muted-foreground">
+                  {b.campaignName ? `${b.campaignName} · ` : ""}
                   {b.name && b.templateName ? `${b.templateName} · ` : ""}
                   {b.templateLanguage ? `${b.templateLanguage} · ` : ""}
                   {b.audienceMode === "all"
@@ -511,6 +512,10 @@ function TableView({
                   {broadcastTitle(b)}
                 </Link>
                 <div className="truncate text-2xs text-muted-foreground">
+                  {/* Campaign first: it is the grouping an operator scans FOR
+                      ("which of these are the spring sale") — the rollup link
+                      itself lives on the detail page. */}
+                  {b.campaignName ? `${b.campaignName} · ` : ""}
                   {b.name && b.templateName ? `${b.templateName} · ` : ""}
                   {b.templateLanguage ? `${b.templateLanguage} · ` : ""}
                   {/* Sender identity — the first question about a historical

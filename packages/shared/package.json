@@ -21,6 +21,7 @@
     "./contacts/transfer-columns": "./src/contacts/transfer-columns.ts",
     "./presence": "./src/presence.ts",
     "./work-hours": "./src/work-hours.ts",
+    "./whatsapp/username": "./src/whatsapp/username.ts",
     "./mail/send": "./src/mail/send.ts",
     "./mail/templates": "./src/mail/templates.ts",
     "./providers/types": "./src/providers/types.ts",

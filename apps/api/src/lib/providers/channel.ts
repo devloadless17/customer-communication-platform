@@ -44,18 +44,21 @@ export interface ResolvedChannel {
   /**
    * True when `to` is a WhatsApp BSUID rather than a phone number.
    *
-   * The BSUID belongs in `to` — verified 2026-07-30: for
-   * `POST /{PHONE_NUMBER_ID}/messages` the doc states "to — Supports both
-   * WhatsApp user phone numbers and user BSUIDs". (The separate `recipient`
-   * body param belongs to `/marketing_messages`, the Marketing Messages Lite
-   * API, which this platform does not use — do not "fix" the send path toward
-   * it.) So this flag changes no wire bytes.
+   * WIRE (re-verified 2026-07-31, superseding the 2026-07-30 note that said a
+   * BSUID rides `to`): the BSUID page and the Send Marketing Messages
+   * reference both document a top-level `recipient` field for BSUIDs on
+   * `/messages` — "recipient — User BSUID or parent BSUID … used only when
+   * `to` is omitted; if both are provided, `to` wins". The provider's
+   * `whatsappDestination()` emits `recipient` when this flag is set, and
+   * `postWhatsappMessages()` retries ONCE with the legacy to-form if Meta
+   * rejects the field (rollout lag) — so either server behavior works. Do not
+   * flatten that fallback away.
    *
-   * It exists because a BSUID address is not universally sendable: "BSUIDs can
-   * be used to send any type of message except for one-tap, zero-tap, and copy
-   * code authentication templates, which require user phone numbers." Attempting
-   * one returns error 131062 AFTER the request is made, so send paths check this
-   * to refuse locally instead of burning a billed call on a guaranteed failure.
+   * The flag also gates sendability: "BSUIDs can be used to send any type of
+   * message except for one-tap, zero-tap, and copy code authentication
+   * templates, which require user phone numbers." Attempting one returns error
+   * 131062 AFTER the request is made, so send paths check this to refuse
+   * locally instead of burning a billed call on a guaranteed failure.
    */
   viaBsuid?: boolean;
 }

@@ -202,6 +202,24 @@ export class MessengerController {
   }
 
   /**
+   * Campaign reach across every connected Page. `?templateName=` additionally
+   * reports which Pages have that template approved — a utility template is
+   * Page-OWNED, so one approved on Page A does not exist on Page B and its name
+   * fails there per-recipient. `hasTemplate: null` means we could not read that
+   * Page's library, which is NOT the same as missing.
+   */
+  @Get("broadcast-reach")
+  async broadcastReach(
+    @CurrentSession() session: ApiSession,
+    @Query("templateName") templateName?: string,
+  ) {
+    return this.messenger.broadcastReach(
+      session.workspaceId,
+      templateName?.trim() || undefined,
+    );
+  }
+
+  /**
    * Removes EVERY account on this channel. `?confirmAll=1` is required when
    * the workspace holds more than one — see assertChannelDisconnectConfirmed.
    */

@@ -101,6 +101,39 @@ export interface ReportDiagnostic {
   action?: { label: string; filter?: string };
 }
 
+/** One row of the per-account aggregate, as Postgres returns it. */
+export interface AccountFunnelRow {
+  channelConnectionId: string | null;
+  targeted: bigint;
+  delivered: bigint;
+  read: bigint;
+  failed: bigint;
+}
+
+/**
+ * Shape the per-account aggregate for the report.
+ *
+ * Pure and exported so the two rules that matter are testable without a
+ * database: a single-account campaign yields NOTHING (a one-row breakdown
+ * restating the funnel is noise in a report whose job is to explain a number),
+ * and multi-account rows come back biggest-first so a struggling small Page is
+ * visible against the account that actually carried the campaign.
+ */
+export function summarizeByAccount(
+  rows: readonly AccountFunnelRow[],
+): BroadcastReport["byAccount"] {
+  if (rows.length <= 1) return [];
+  return rows
+    .map((r) => ({
+      channelConnectionId: r.channelConnectionId,
+      targeted: Number(r.targeted),
+      delivered: Number(r.delivered),
+      read: Number(r.read),
+      failed: Number(r.failed),
+    }))
+    .sort((a, b) => b.targeted - a.targeted);
+}
+
 export interface BroadcastReport {
   broadcastId: string;
   funnel: BroadcastFunnel;
@@ -111,6 +144,28 @@ export interface BroadcastReport {
   /** Billable conversations by Meta pricing category. No currency: Meta sends a
    *  category, never a price — the operator applies their own rate card. */
   cost: { billable: number; byCategory: Array<{ category: string; count: number }> };
+  /**
+   * Per-SENDING-ACCOUNT breakdown, for a campaign that fanned out across several
+   * accounts.
+   *
+   * Social ids are account-scoped — a Messenger PSID belongs to one Page, an
+   * Instagram IGSID to one account — so a campaign reaching every social customer
+   * routes each recipient through the account that issued their id. Which means
+   * "delivery was 62%" can hide one restricted Page dragging down three healthy
+   * ones, and an operator reading a single aggregate would go looking for a
+   * content problem that doesn't exist.
+   *
+   * EMPTY for a single-account campaign, where the split would be one row
+   * restating the funnel. Not null-vs-empty: nothing was unknown, there is simply
+   * only one account.
+   */
+  byAccount: Array<{
+    channelConnectionId: string | null;
+    targeted: number;
+    delivered: number;
+    read: number;
+    failed: number;
+  }>;
   diagnostics: ReportDiagnostic[];
   /** Wall-clock + throughput of the send itself. */
   throughput: { startedAt: string | null; completedAt: string | null; durationSec: number | null; perMinute: number | null };
@@ -187,6 +242,12 @@ export const ERROR_LABELS: Record<string, string> = {
   billing_issue: "WhatsApp billing problem",
   number_not_registered: "Number not registered with Cloud API",
   marketing_disabled: "Marketing templates disabled on this account",
+  // Meta's pre-restriction warning (`613 – 2018338`). Worded as the account risk
+  // it is, not as a delivery statistic — an operator scanning a failure report
+  // must not read this as "a few didn't land".
+  abuse_warning: "Meta warned this account looks abusive — sending was stopped",
+  media_unfetchable: "Meta couldn't download or use the attachment",
+  comment_reply_invalid: "The comment can no longer take a private reply",
   // Meta 131062 — we addressed a WhatsApp username (BSUID) and this message type
   // requires a phone number. Phrased as the action, not the error: the operator's
   // remedy is to get a number for these contacts, not to prune them.
@@ -258,7 +319,7 @@ export async function getBroadcastReport(
   });
   if (!broadcast) return null;
 
-  const [funnelRows, failureRows, benchmark, categoryRows] = await Promise.all([
+  const [funnelRows, failureRows, benchmark, categoryRows, accountRows] = await Promise.all([
     // ONE pass over the campaign's recipients for the whole funnel. FILTER
     // aggregates mean Postgres reads the range once instead of seven times.
     db.$queryRaw<FunnelRow[]>`
@@ -325,6 +386,24 @@ export async function getBroadcastReport(
       },
       _count: { _all: true },
     }),
+    // Per-ACCOUNT split, for a fan-out campaign. Grouped on the recipient's own
+    // account stamp — the column the runner writes at materialize time — so this
+    // is a plain aggregate over rows the funnel already scans, not a join.
+    //
+    // A single-account campaign yields one row and is dropped below: a "breakdown"
+    // that restates the total is noise in a report whose job is to explain a number.
+    db.$queryRaw<AccountFunnelRow[]>`
+      SELECT "channelConnectionId"                                       AS "channelConnectionId",
+             count(*)                                                    AS targeted,
+             count(*) FILTER (WHERE "deliveryState" = 'delivered')       AS delivered,
+             count(*) FILTER (WHERE "deliveryState" = 'read')            AS read,
+             count(*) FILTER (
+               WHERE "deliveryState" IN ('failed_at_send', 'undelivered')
+             )                                                           AS failed
+      FROM "BroadcastRecipient"
+      WHERE "broadcastId" = ${broadcastId}
+      GROUP BY "channelConnectionId"
+    `,
   ]);
   const costByCategory = categoryRows
     .filter((r) => r.pricingCategory)
@@ -423,6 +502,9 @@ export async function getBroadcastReport(
     rates,
     benchmark,
     failures,
+    // One row means a single-account campaign — the "breakdown" would just
+    // restate the funnel, so it is dropped rather than rendered as insight.
+    byAccount: summarizeByAccount(accountRows),
     cost: { billable: n(f?.billable), byCategory: costByCategory },
     diagnostics: deriveDiagnostics(funnel, rates, failures, benchmark),
     throughput: {

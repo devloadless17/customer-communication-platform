@@ -156,6 +156,7 @@ export async function sendMediaInternal(
   const send = await sendMedia(
     {
       to: channel.to,
+      ...(channel.viaBsuid ? { viaBsuid: true } : {}),
       kind: "audio",
       mediaId,
       ...(mediaUrl ? { mediaUrl } : {}),

@@ -1,4 +1,5 @@
 import { Prisma } from "@prisma/client";
+import { resolveRecipientAccounts } from "@/lib/broadcasts/resolve-recipient-accounts";
 import {
   BadRequestException,
   ConflictException,
@@ -16,6 +17,7 @@ import {
   getInFlightRunPromises,
   pruneBroadcastInMemoryStateForTerminalRows,
   reconcileOrphanedBroadcasts,
+  resumeBroadcastManually,
   signalShutdown,
   startBroadcast,
 } from "@/lib/broadcast-runner";
@@ -430,6 +432,16 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         throw new BadRequestException({
           error: "header_variable_required",
           detail: "This template's header has a placeholder — fill it in.",
+        });
+      }
+      // A GIF header is confined to Meta's Marketing Messages API — without
+      // this refusal it falls past the media map below and every recipient
+      // fails at Meta with an unlabelled 400 (same guard as the send path).
+      if (headerComp?.format === "GIF") {
+        throw new BadRequestException({
+          error: "template_feature_unsupported",
+          detail:
+            "This template's GIF header can only be sent through Meta's Marketing Messages API — pick a template with an image or video header.",
         });
       }
       // Media-header templates (IMAGE/VIDEO/DOCUMENT) need the campaign media
@@ -1015,6 +1027,9 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       workspaceId,
       createdById: userId,
       name,
+      // Rolls this send up with its siblings. Absent for an ad-hoc broadcast,
+      // which stays the common case.
+      ...(input.campaignName ? { campaignName: input.campaignName } : {}),
       scheduledAt: scheduledAtDate,
       kind: effectiveKind,
       targetMode: input.targetMode,
@@ -1117,6 +1132,14 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       return { perRecipient: [] as (string | null)[], totals: [] };
     });
 
+    // Resolved OUTSIDE the transaction: it is a pure read, and the tx below is
+    // already close to Prisma's interactive-tx timeout at 5k recipients.
+    const recipientAccounts = await resolveRecipientAccounts(
+      workspaceId,
+      filterChannel,
+      recipientRows.map((r) => r.contactId),
+    );
+
     const broadcast = await this.db.$transaction(async (tx) => {
       const created = await tx.broadcast.create({
         data: {
@@ -1135,6 +1158,11 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
             contactId: r.contactId,
             customerId: r.customerId,
             assignedUserId: assignmentPlan.perRecipient[i + j] ?? null,
+            // WHICH ACCOUNT this recipient is sent from. Social ids are
+            // account-scoped, so the sending account is a per-recipient fact —
+            // see resolve-recipient-accounts.ts. Empty map (and so null) on
+            // WhatsApp, which is deliberate.
+            channelConnectionId: recipientAccounts.get(r.contactId) ?? null,
           })),
           skipDuplicates: true,
         });
@@ -1556,6 +1584,9 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         id: b.id,
         status: b.status,
         name: b.name,
+        // The rollup's join key, so the list (and any /v1 consumer syncing it)
+        // can group sends by campaign without a second per-row fetch.
+        campaignName: b.campaignName,
         // kind/channel let the list build a title for freeform / People
         // broadcasts, which have no templateName (else the row title is blank).
         kind: b.kind,
@@ -1816,6 +1847,12 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       genuineFailedCount,
       status: row.status,
       name: row.name,
+      // The rollup's join key — the detail header's "Campaign: …" chip links
+      // through it. This DTO is an explicit whitelist, so a new Broadcast
+      // column is invisible to the UI until named here (which is exactly how
+      // this one shipped hidden: the chip rendered from a field the endpoint
+      // never sent, and only the e2e walking the LIVE page caught it).
+      campaignName: row.campaignName,
       scheduledAt: row.scheduledAt?.toISOString() ?? null,
       templateId: row.templateId,
       templateName: row.templateName,
@@ -1989,6 +2026,19 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
    * Compare-and-set on the previous status so two operators clicking
    * cancel at once (or cancel-while-already-canceled) don't double-emit.
    */
+  /**
+   * Explicit operator resume — the only path that may lift an `abuse_warning`
+   * pause (see resumeBroadcastManually). Returns false when not paused.
+   */
+  async resume(workspaceId: string, id: string): Promise<boolean> {
+    const row = await this.db.broadcast.findFirst({
+      where: { id, workspaceId },
+      select: { id: true },
+    });
+    if (!row) throw new NotFoundException({ error: "not_found" });
+    return resumeBroadcastManually(workspaceId, id);
+  }
+
   async cancel(workspaceId: string, id: string): Promise<void> {
     const row = await this.db.broadcast.findFirst({
       where: { id, workspaceId },

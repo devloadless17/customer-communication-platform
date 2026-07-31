@@ -54,6 +54,14 @@ export interface BroadcastReportDto {
   };
   benchmark: { deliveryRate: number | null; readRate: number | null; campaigns: number } | null;
   cost: { billable: number; byCategory: Array<{ category: string; count: number }> };
+  /** Per-sending-account split. EMPTY on a single-account campaign. */
+  byAccount?: Array<{
+    channelConnectionId: string | null;
+    targeted: number;
+    delivered: number;
+    read: number;
+    failed: number;
+  }>;
   failures: Array<{
     errorCode: string;
     label: string;
@@ -104,12 +112,26 @@ const BUCKET_COPY: Record<string, { label: string; tone: string }> = {
   },
 };
 
+/**
+ * Friendly name for a sending account, falling back to a shortened id.
+ *
+ * The fallback is deliberate rather than a "—": an account that has since been
+ * removed still sent part of this campaign, and its slice has to stay
+ * identifiable or the split silently becomes unreadable for exactly the
+ * historical campaigns someone is most likely to be investigating.
+ */
+function makeAccountLabel(accounts: Array<{ id: string; name: string }>) {
+  const byId = new Map(accounts.map((a) => [a.id, a.name]));
+  return (id: string): string => byId.get(id) ?? `Account ${id.slice(0, 8)}`;
+}
+
 export function BroadcastReport({
   report,
   refreshKey,
   onRefreshed,
   onFilter,
   hasTemplate = true,
+  accounts = [],
 }: {
   report: BroadcastReportDto;
   /** Bumped by the parent after a Meta fetch, so the curve refetches in step. */
@@ -121,7 +143,15 @@ export function BroadcastReport({
   /** False for freeform / People campaigns: Meta has no template to report
    *  on, so the panel (and its auto-fetch) would only ever produce a 400. */
   hasTemplate?: boolean;
+  /**
+   * The workspace's connected accounts, for naming the per-account split.
+   * Optional and defaulted to empty: the panel degrades to the raw id rather 
+   * than not rendering, because a campaign's per-account delivery split is 
+   * worth seeing even when we can't put a friendly name on a row.
+   */
+  accounts?: Array<{ id: string; name: string }>;
 }) {
+  const accountLabel = makeAccountLabel(accounts);
   const { funnel, rates, benchmark, failures, diagnostics } = report;
 
   // Cascade stages. Each carries the filter that isolates its population, so a
@@ -299,6 +329,79 @@ export function BroadcastReport({
           </div>
         </div>
       </div>
+
+      {/* PER-ACCOUNT SPLIT — only for a campaign that fanned out.
+          Social ids are account-scoped (a Messenger PSID belongs to one Page, an
+          Instagram IGSID to one account), so a campaign reaching every social
+          customer routes each recipient through the account that issued their id.
+          One aggregate rate can therefore hide one restricted Page dragging down
+          three healthy ones, and an operator reading only the total goes looking
+          for a content problem that isn't there.
+
+          The server sends an EMPTY array for a single-account campaign, so this
+          renders nothing rather than a one-row table restating the funnel. */}
+      {(report.byAccount?.length ?? 0) > 1 && (
+        <div className="mt-4">
+          <div className="mb-1.5 text-3xs uppercase tracking-wide text-muted-foreground">
+            By sending account
+          </div>
+          <div className="overflow-x-auto rounded-lg border border-border">
+            <table className="w-full text-xs">
+              <thead className="bg-muted/30 text-3xs uppercase tracking-wide text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-1.5 text-left font-medium">Account</th>
+                  <th className="px-3 py-1.5 text-right font-medium">Sent to</th>
+                  <th className="px-3 py-1.5 text-right font-medium">Reached</th>
+                  <th className="px-3 py-1.5 text-right font-medium">Failed</th>
+                  <th className="px-3 py-1.5 text-right font-medium">Delivery</th>
+                </tr>
+              </thead>
+              <tbody>
+                {report.byAccount!.map((row) => {
+                  const reached = row.delivered + row.read;
+                  // Denominator is what we ATTEMPTED for this account, matching
+                  // how the headline rate is framed — a per-account rate on a
+                  // different base than the campaign's would invite exactly the
+                  // "your numbers are wrong" comparison this panel exists to settle.
+                  const rate = row.targeted > 0 ? reached / row.targeted : null;
+                  return (
+                    <tr key={row.channelConnectionId ?? "unassigned"} className="border-t border-border">
+                      <td className="px-3 py-1.5">
+                        {row.channelConnectionId ? (
+                          accountLabel(row.channelConnectionId)
+                        ) : (
+                          // Rows materialized before per-account routing existed
+                          // carry no account. Shown rather than dropped, so the
+                          // split still sums to the funnel.
+                          <span className="text-muted-foreground">Campaign account</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-1.5 text-right tabular-nums">
+                        {row.targeted.toLocaleString()}
+                      </td>
+                      <td className="px-3 py-1.5 text-right tabular-nums">
+                        {reached.toLocaleString()}
+                      </td>
+                      <td
+                        className={cn(
+                          "px-3 py-1.5 text-right tabular-nums",
+                          row.failed > 0 && "text-destructive",
+                        )}
+                      >
+                        {row.failed.toLocaleString()}
+                      </td>
+                      <td className="px-3 py-1.5 text-right tabular-nums">
+                        {rate === null ? "—" : `${Math.round(rate * 100)}%`}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
 
       {/* ── Never received: the question clients actually ask ──────────────── */}
       {/* Held by portfolio pacing. Its own row, not folded into "sent": these

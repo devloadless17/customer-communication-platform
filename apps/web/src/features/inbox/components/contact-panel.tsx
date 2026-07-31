@@ -58,6 +58,7 @@ import { FlagsPanel } from "./panel/flags-panel";
 import { NotesPanel } from "./panel/notes-panel";
 import { EditableField } from "./contact-panel/editable-field";
 import { EditableHeading } from "./contact-panel/editable-heading";
+import { ContactAcquisitionRow } from "./contact-panel/acquisition-row";
 import { ReadOnlyRow } from "./contact-panel/read-only-row";
 import { Section } from "./contact-panel/section";
 import { AiConversationPanel } from "./ai/ai-conversation-panel";
@@ -1115,6 +1116,13 @@ function ContactPanelImpl({
               aria-selected={active}
               onClick={() => setView(id)}
               title={label}
+              // Explicit accessible name. Without it, the name is COMPUTED
+              // from visible text — and when the @container collapses the
+              // label to icon-only, a tab carrying a count badge is left
+              // named by the bare count ("1"), which is meaningless to a
+              // screen reader (and broke the Flags e2e selector at the
+              // panel's default width, where labels are always collapsed).
+              aria-label={count > 0 ? `${label} (${count})` : label}
               className={cn(
                 "flex min-w-0 flex-1 items-center justify-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium transition-colors",
                 active
@@ -1492,6 +1500,12 @@ function ContactPanelImpl({
               }
             />
           )}
+
+          {/* WHERE they came from. Renders nothing at all for an organic
+              contact — see the component. Placed right after "First contacted"
+              because the two are one thought: when they arrived, and what
+              brought them. */}
+          <ContactAcquisitionRow contactId={contact.id} />
 
           {/* Team-wide fields. Rendered in their definition order; admin-hidden
               definitions are dropped at this level so they never paint. */}

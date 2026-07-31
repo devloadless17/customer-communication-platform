@@ -42,8 +42,11 @@ export class MetaSendError extends Error {
  */
 export type MetaErrorCode =
   | "outside_24h_window"   // WA 131047 · social 10/2018278 · 2534022 — messaging window closed
-  | "invalid_recipient"    // WA 131026 · IG linkage 2534013/14/29/41 — recipient invalid/unreachable
+  | "invalid_recipient"    // WA 131026 · IG 2534014 — THIS PERSON is invalid/unreachable
   | "rate_limited"         // WA 4/80007/130429/131048/131056 · social 613/80006 — rate/throughput limit
+  | "abuse_warning"        // social 613/2018338 — Meta's PRE-RESTRICTION warning; run-fatal, never retried
+  | "media_unfetchable"    // social 2018008/2018294/2018109/2018047 — Meta couldn't fetch/use the media
+  | "comment_reply_invalid" // IG 2534025 — this comment can no longer take a private reply
   | "per_user_marketing_cap" // WA 131049 — Meta's per-USER marketing frequency cap (not our rate limit)
   | "marketing_opt_out"     // WA 131050 — this recipient stopped marketing messages FROM US
   | "duplicate_person"      // OURS, not Meta's — customer-mode: this contact merged
@@ -52,12 +55,12 @@ export type MetaErrorCode =
                             // (the SAME code on a synchronous response is Meta's "Generic user error")
   | "template_unavailable" // WA 132001/132007/132015/132016 — template paused/disabled/not-approved (run-fatal)
   | "auth_expired"         // 190 — access token expired
-  | "recipient_unavailable" // social 551/1545041 — person can't be messaged (blocked / deactivated)
+  | "recipient_unavailable" // social 551/1545041 · IG 2018108 — person can't be messaged right now (blocked / deactivated)
   | "message_unavailable"  // social 10900/9000001 — referenced message deleted/unavailable
   | "unsupported_message"  // 131009/131051 — message TYPE/content not supported (not a bad recipient)
   | "duplicate_button_title" // 131009 + "Duplicate button title" — interactive buttons reuse a title
   | "call_permission_required" // WA 138006 — customer hasn't granted calling permission
-  | "account_restricted"   // WA 368/131031 — WABA restricted/disabled/locked by policy enforcement
+  | "account_restricted"   // WA 368/131031 · IG 2534029/41/13 — the ACCOUNT is blocked/revoked/unlinked
   | "contact_blocked"      // WA 130403 — WE blocked this person (Block Users API); unblock to resume
   | "country_not_allowed"  // WA 130497 — business category can't message this recipient's country
   | "billing_issue"        // WA 131042 — payment method / credit line problem on the WABA
@@ -105,6 +108,9 @@ export const ALL_META_ERROR_CODES = [
   "billing_issue",
   "number_not_registered",
   "marketing_disabled",
+  "abuse_warning",
+  "media_unfetchable",
+  "comment_reply_invalid",
   "provider_rejected",
 ] as const satisfies ReadonlyArray<MetaErrorCode>;
 
@@ -195,6 +201,150 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
   // WhatsApp 131026; Instagram linkage errors (page not linked to the
   // IG account, or the recipient can't be resolved).
   //
+  // ── MEDIA Meta could not FETCH — Instagram's primary media path ──────────
+  //
+  // Instagram sends media by URL (`mediaSendByUrl`), handing Meta a presigned R2
+  // link to fetch. So every failure mode of that fetch is OURS to explain, and
+  // all four were falling to the catch-all as an opaque provider error:
+  //
+  //   2018008 "Failed to fetch the file from the url" — bad/expired URL, SSL
+  //           problem, or our server too slow. The presign TTL makes this the
+  //           most likely media failure on the channel, not an exotic one.
+  //   2018294 "Video upload timed out or video is corrupted" — Meta gives a
+  //           video fetch 75 SECONDS; a large file on a slow link loses.
+  //   2018109 "Attachment size exceeds allowable limit"
+  //   2018047 "Upload attachment failure" — commonly the declared type not
+  //           matching the actual file behind the URL.
+  //
+  // Grouped because the operator action is the same shape (the media, not the
+  // recipient and not the account) while the specifics differ enough to be worth
+  // naming. Notably NOT `unsupported_message`: the message type is fine, Meta
+  // simply could not get the bytes.
+  //
+  // WhatsApp's own twin is 131053 "Media upload error — Unable to upload the
+  // media used in the message" (the reference points at the file's type/
+  // integrity and at `error_data.details` on the failure webhook). Same
+  // operator action, so it joins the family instead of falling to the opaque
+  // catch-all its social siblings escaped.
+  if (
+    numericCode === 131053 ||
+    numericCode === 2018008 ||
+    subcode === 2018008 ||
+    numericCode === 2018294 ||
+    subcode === 2018294 ||
+    numericCode === 2018109 ||
+    subcode === 2018109 ||
+    numericCode === 2018047 ||
+    subcode === 2018047
+  ) {
+    const tooBig = numericCode === 2018109 || subcode === 2018109;
+    const video = numericCode === 2018294 || subcode === 2018294;
+    const mismatch = numericCode === 2018047 || subcode === 2018047;
+    const whatsappUpload = numericCode === 131053;
+    return {
+      code: "media_unfetchable",
+      message: tooBig
+        ? "Meta rejected this attachment as too large for the channel."
+        : video
+          ? "Meta couldn't download the video in time (it allows 75 seconds) or the file is corrupt — try a smaller or re-encoded file."
+          : mismatch
+            ? "Meta couldn't use this attachment — the file's actual type doesn't match the media type it was sent as."
+            : whatsappUpload
+              ? "WhatsApp couldn't process the media in this message — check the file's type and integrity, then try again."
+              : "Meta couldn't download the attachment from the link we gave it. Try sending it again.",
+      detail,
+      httpStatus,
+    };
+  }
+  // ── A comment that can no longer take a PRIVATE REPLY ────────────────────
+  //
+  // `100 – 2534025` "The comment is invalid for a private reply". Meta permits
+  // exactly one private reply per comment, within 7 days (and only during the
+  // broadcast for a live comment). `resolvePrivateReplyTarget` refuses locally in
+  // the cases it can see, but it cannot see everything — the comment may have
+  // been deleted, hidden, or already answered from Business Suite. Naming it
+  // stops the agent re-sending into a door that is permanently shut.
+  if (numericCode === 2534025 || subcode === 2534025) {
+    return {
+      code: "comment_reply_invalid",
+      message:
+        "This comment can no longer take a private reply — Meta allows one per comment within 7 days, " +
+        "and it may also have been deleted or already answered elsewhere.",
+      detail,
+      httpStatus,
+    };
+  }
+  // `100 – 2018320` "Invalid product id" — a PRODUCT TEMPLATE naming a catalog
+  // item Meta can't resolve (wrong id, deleted, or not on this account's
+  // catalog). The content is at fault, not the recipient.
+  if (numericCode === 2018320 || subcode === 2018320) {
+    return {
+      code: "unsupported_message",
+      message:
+        "One of the product IDs isn't valid for this account's catalog — check it in Commerce Manager.",
+      detail,
+      httpStatus,
+    };
+  }
+  // ── IG ACCOUNT-LEVEL blocks, split OUT of the recipient family below ─────
+  //
+  // Three of the four 2534xxx codes are not about the recipient at all, and
+  // reporting them as "this person can't be reached" is actively misleading:
+  //
+  //   2534029 "The business has been blocked from sending messages via the IG
+  //           Messaging API"                          → the ACCOUNT is blocked
+  //   2534041 "The account owner has disabled access to instagram direct
+  //           messages"                               → access revoked
+  //   2534013 "The page is not linked to an Instagram account"
+  //                                                   → wiring is wrong
+  //
+  // Only 2534014 ("No matching Instagram user") is genuinely a bad recipient.
+  //
+  // The distinction is operational, not cosmetic. Told "invalid recipient", an
+  // operator blames the contact and moves to the next one — hitting the same
+  // wall on every remaining recipient, which for 2534029 means hammering an API
+  // that has already blocked the business over a policy violation. Told the
+  // truth, they stop and go fix the account. `account_restricted` also rides the
+  // run-fatal credential family, so a broadcast pauses instead of burning its
+  // whole audience into `failed`.
+  if (
+    numericCode === 2534029 ||
+    subcode === 2534029 ||
+    numericCode === 2534041 ||
+    subcode === 2534041 ||
+    numericCode === 2534013 ||
+    subcode === 2534013 ||
+    // 2534077 "Cannot verify the connection between the IG account, the logged
+    // in user and the page" — the same linkage fault, reached a different way
+    // (the link is broken, or the owner needs 2FA).
+    numericCode === 2534077 ||
+    subcode === 2534077 ||
+    // 36103 "This IG account is not eligible for API yet" — the account simply
+    // cannot be messaged through the API, so it is account state, not a bad
+    // recipient, and no retry will change it.
+    numericCode === 36103 ||
+    subcode === 36103
+  ) {
+    const eligibility = numericCode === 36103 || subcode === 36103;
+    const linkage =
+      numericCode === 2534013 ||
+      subcode === 2534013 ||
+      numericCode === 2534077 ||
+      subcode === 2534077;
+    const revoked = numericCode === 2534041 || subcode === 2534041;
+    return {
+      code: "account_restricted",
+      message: eligibility
+        ? "Meta says this Instagram account isn't eligible for the messaging API yet."
+        : linkage
+        ? "The Facebook Page and Instagram professional account aren't properly linked (or the owner needs two-factor authentication) — relink them, then reconnect Instagram here."
+        : revoked
+          ? "The Instagram account owner has disabled this app's access to their direct messages. They need to re-authorise it."
+          : "Meta has blocked this Instagram account from sending messages via the API, usually after a policy violation. Sending more will not help — resolve it in Meta's console first.",
+      detail,
+      httpStatus,
+    };
+  }
   // The 2534xxx family is matched on code OR SUBCODE. Meta's Messenger error
   // reference lists 2534041 as the code–subcode PAIR "200 – 2534041 The account
   // owner has disabled access to instagram direct messages", so a code-only test
@@ -205,14 +355,8 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
   // table and Meta is not consistent about which slot it uses.
   if (
     numericCode === 131026 ||
-    numericCode === 2534013 ||
     numericCode === 2534014 ||
-    numericCode === 2534029 ||
-    numericCode === 2534041 ||
-    subcode === 2534013 ||
-    subcode === 2534014 ||
-    subcode === 2534029 ||
-    subcode === 2534041
+    subcode === 2534014
   ) {
     return {
       code: "invalid_recipient",
@@ -299,6 +443,34 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
       code: "call_permission_required",
       message:
         "This customer hasn't allowed calls from you yet — send them a call permission request first.",
+      detail,
+      httpStatus,
+    };
+  }
+  // ── Meta's ABUSE WARNING — run-fatal, and deliberately NOT a rate limit ──
+  //
+  // `613 – 2018338`: "Warning! You are engaging in behavior that may be
+  // considered bothersome or abusive by users. You must significantly decrease
+  // the rate at which you are sending messages using message tags to this
+  // person. Further misuse of API features may result in messaging restrictions
+  // being placed on your Page."
+  //
+  // It shares code 613 with the ordinary rate limit and MUST be caught first,
+  // because the two want opposite responses. `rate_limited` engages the retry
+  // machinery — send-worker retry, broadcast backoff, then send again. Here that
+  // retry IS the "further misuse" the warning names, and the stated penalty is a
+  // messaging restriction on the CUSTOMER'S account.
+  //
+  // So this is run-fatal: stop, surface it, and let a human decide. Meta is not
+  // asking us to go slower, it is telling us to stop tagging this person — which
+  // is also why the message points at message TAGS rather than at throughput.
+  if (subcode === 2018338 || numericCode === 2018338) {
+    return {
+      code: "abuse_warning",
+      message:
+        "Meta has warned that this account's messaging looks abusive — it is sending too many " +
+        "tagged messages to this person. Sending more may get the account restricted. Stop and " +
+        "review what is being sent before retrying.",
       detail,
       httpStatus,
     };
@@ -441,7 +613,18 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
     };
   }
   // ── Recipient can't be messaged (blocked / deactivated) — social ─────────
-  if (numericCode === 551 || subcode === 1545041) {
+  // 2018108 "This Person Cannot Receive Messages: This person isn't receiving
+  // messages from you right now" — the reference's wording is the verbatim
+  // parallel of 551, a TEMPORARY per-recipient state (block / muted /
+  // unavailable), not proof the contact is invalid. It used to sit in
+  // `invalid_recipient` (bucket: permanent — "remove this contact"), which
+  // advised list-cleaning someone who may merely be unreachable today.
+  if (
+    numericCode === 551 ||
+    subcode === 1545041 ||
+    numericCode === 2018108 ||
+    subcode === 2018108
+  ) {
     return {
       code: "recipient_unavailable",
       message: "This person can't be messaged right now (they may have blocked the account or deactivated).",
@@ -475,6 +658,10 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
   // was seeing a bare "Rejected by Meta" for a condition that clears by itself.
   // Meta lists both as bare numbers, so read them as either code or subcode.
   if (
+    // 2534037 "The action is invalid since it's not the thread owner" — the IG
+    // wording of the same fault 2018300 describes for Messenger.
+    numericCode === 2534037 ||
+    subcode === 2534037 ||
     numericCode === 2018300 ||
     numericCode === 2018321 ||
     subcode === 2018300 ||
@@ -505,11 +692,16 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
   // here really is the App Review one. Adding this branch is what forced the
   // subcode fix on `invalid_recipient` above: 2534041 had never matched, and
   // before that fix it would have been mislabelled here.
+  // The message is channel-neutral: the WhatsApp reference documents 200-299
+  // as generic "API Permission — permission is either not granted or has been
+  // removed" (e.g. whatsapp_business_messaging revoked), while on Messenger/IG
+  // a bare 200 is the App-Review case. Same operator direction either way —
+  // the app's permission is missing — so one code, one honest sentence.
   if (numericCode === 200) {
     return {
       code: "app_permission_required",
       message:
-        "Meta hasn't approved this app to message people who aren't its admins, developers or testers — finish App Review for pages_messaging and set the app live.",
+        "The app no longer has the Meta permission needed to message on this channel — re-check its granted permissions (and, for a new social app, App Review / live mode).",
       detail,
       httpStatus,
     };
@@ -599,9 +791,16 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
         httpStatus,
       };
     }
+    // Distinct sentences: 131009 is "Parameter value is not valid" (a VALUE in
+    // this message — the real reason rides error_data.details, surfaced via
+    // `detail`), while 131051 is genuinely "Unsupported message type". One
+    // shared toast blamed the account for what is usually a bad field value.
     return {
       code: "unsupported_message",
-      message: "This message type isn't supported on this account.",
+      message:
+        numericCode === 131009
+          ? "Meta rejected a value in this message — check the details for the field it named."
+          : "This message type isn't supported on this account.",
       detail,
       httpStatus,
     };
@@ -649,14 +848,15 @@ export function classifyMetaStatusError(code: number | null | undefined): MetaEr
     case 2534029:
     case 2534041:
       return "invalid_recipient";
-    // Per-USER marketing frequency cap. Only ever arrives post-acceptance, so
-    // the status webhook is the ONLY place it is ever observed — it is
-    // invisible to the send path entirely.
+    // Per-USER marketing frequency cap. The reference documents it as BOTH a
+    // synchronous 400 and a post-acceptance status failure — the sync ladder
+    // handles the 400 (checked before the rate-limit family there); this arm
+    // covers the webhook side.
     case 131049:
       return "per_user_marketing_cap";
     // The recipient used WhatsApp's own "Offers and announcements" setting to
-    // STOP marketing messages from this business. Meta accepts the send and then
-    // fails it, so — like 131049 — it is only ever seen on the status webhook.
+    // STOP marketing messages from this business. Like 131049, documented as a
+    // sync 400 AND a status failure; both ladders map it.
     case 131050:
       return "marketing_opt_out";
     // Dropped by a business-portfolio pacing review. Like the two above, this
@@ -696,6 +896,10 @@ export function classifyMetaStatusError(code: number | null | undefined): MetaEr
     case 131045:
     case 133010:
       return "number_not_registered";
+    // Media upload/processing failure — the reference explicitly directs to the
+    // failure webhook's `error_data.details`, so it is a real status-side code.
+    case 131053:
+      return "media_unfetchable";
     case 131063:
       return "marketing_disabled";
     case 132001:
@@ -834,6 +1038,11 @@ export function failureBucket(code: MetaErrorCode | string | null): FailureBucke
     // A WhatsApp Manager configuration refusing MARKETING templates — every
     // recipient fails identically until the flag or the template changes.
     case "marketing_disabled":
+    // The fault is the MEDIA (expired presign, oversize, corrupt file, wrong
+    // declared type) — its own toasts say "try again with a fixed file". The
+    // default bucket rendered it as "leave this recipient alone", which points
+    // the operator at a perfectly good contact instead of the attachment.
+    case "media_unfetchable":
       return "content";
     case "duplicate_person":
       // Deliberately suppressed, never retryable: the person DID receive this

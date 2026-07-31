@@ -65,6 +65,20 @@ export const CreateImportSchema = z
     fireAutomations: z.boolean().default(true),
     /** header → `"ignore"` | a built-in column id | `"field:<key>"`. */
     mapping: z.record(z.string().max(200), z.string().max(120)).optional(),
+    /**
+     * ISO-2 country for the file's NATIONAL-format numbers ("LB", "AE", "GB").
+     *
+     * A CRM export commonly stores local numbers (`03123456`) — without a
+     * country there is nothing to resolve them into a sendable wa_id, and they
+     * used to be stored as-is and fail silently at send time. A number that
+     * already carries its own country code is unaffected, so a mixed file is
+     * handled row by row.
+     */
+    defaultCountry: z
+      .string()
+      .regex(/^[A-Za-z]{2}$/, "Country must be a two-letter ISO code")
+      .transform((c) => c.toUpperCase())
+      .optional(),
   })
   .strict();
 export type CreateImportInput = z.infer<typeof CreateImportSchema>;

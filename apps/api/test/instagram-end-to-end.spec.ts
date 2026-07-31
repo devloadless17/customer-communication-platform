@@ -56,6 +56,7 @@ import {
 } from "@ccp/shared/providers/capabilities";
 import { encryptSecret } from "@/lib/crypto/envelope";
 import { sendTextInternal } from "@/lib/messaging/send-text-internal";
+import { sendInteractiveInternal } from "@/lib/messaging/send-interactive-internal";
 import { ingestWithRedelivery } from "./_ingest-redelivery";
 import type { NormalizedEvent } from "@ccp/shared/providers/types";
 
@@ -299,6 +300,117 @@ describe("a comment — gated, and it must not fake a messaging window", () => {
     await deliver(body);
 
     expect(await prisma.message.count({ where: { workspaceId } })).toBe(1);
+  });
+});
+
+describe("templates go out through the REAL send path, not just the provider", () => {
+  it("commits a generic-template send and puts Meta's element shape on the wire", async () => {
+    // Templates were verified at the provider (wire shape) and at the schema
+    // (caps) — but never THROUGH `sendInteractiveInternal` to a committed row.
+    // That is the layer where the capability gate, the window check and the
+    // message write live, and a template that passes both other layers can still
+    // be refused or mis-stored here.
+    await deliver(dmBody(`${S}.dmT`, "got any hats?"));
+    const thread = await theThread();
+
+    const res = await sendInteractiveInternal({
+      workspaceId,
+      conversationId: thread.id,
+      bodyText: "Our hats",
+      kind: "generic",
+      options: [],
+      genericCards: [
+        {
+          title: "Wool cap",
+          subtitle: "Warm and grey",
+          imageUrl: "https://example.com/cap.jpg",
+          buttons: [{ type: "web_url", title: "Buy", url: "https://example.com/cap" }],
+        },
+      ],
+      sentVia: "api",
+    });
+
+    // The DELIVERED wire — Meta's documented element shape, not our input shape.
+    const body = postJson.mock.calls[0]![2] as Record<string, unknown>;
+    expect(body.message).toEqual({
+      attachment: {
+        type: "template",
+        payload: {
+          template_type: "generic",
+          elements: [
+            {
+              title: "Wool cap",
+              subtitle: "Warm and grey",
+              image_url: "https://example.com/cap.jpg",
+              buttons: [
+                { type: "web_url", url: "https://example.com/cap", title: "Buy" },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    // …and the row that actually committed.
+    const row = await prisma.message.findFirstOrThrow({
+      where: { workspaceId, id: res.messageId },
+      select: { direction: true, channel: true, rawPayload: true, channelConnectionId: true },
+    });
+    expect(row.direction).toBe("out");
+    expect(row.channel).toBe("instagram");
+    expect(row.channelConnectionId).toBe(connId);
+    // The structured intent is preserved on the row, so the bubble and any audit
+    // reader can tell a card send from a plain reply.
+    expect((row.rawPayload as { interactive?: { kind?: string } }).interactive?.kind).toBe(
+      "generic",
+    );
+  });
+
+  it("commits a product template as bare catalog ids", async () => {
+    await deliver(dmBody(`${S}.dmP`, "show me products"));
+    const thread = await theThread();
+
+    await sendInteractiveInternal({
+      workspaceId,
+      conversationId: thread.id,
+      bodyText: "Have a look",
+      kind: "product",
+      options: [],
+      productIds: ["PROD-1", "PROD-2"],
+      sentVia: "api",
+    });
+
+    const body = postJson.mock.calls[0]![2] as Record<string, unknown>;
+    expect(body.message).toEqual({
+      attachment: {
+        type: "template",
+        payload: {
+          template_type: "product",
+          elements: [{ id: "PROD-1" }, { id: "PROD-2" }],
+        },
+      },
+    });
+  });
+
+  it("REFUSES a template when the messaging window is shut", async () => {
+    // A template is not a window escape on Instagram — there is no approved
+    // template catalogue here, so an out-of-window card is simply a send Meta
+    // will reject. The gate must be the same one plain text gets.
+    await setInboxSources(["comments"]);
+    await deliver(commentBody(`${S}.cT`, "any hats?"));
+    const thread = await theThread();
+
+    await expect(
+      sendInteractiveInternal({
+        workspaceId,
+        conversationId: thread.id,
+        bodyText: "Our hats",
+        kind: "generic",
+        options: [],
+        genericCards: [{ title: "Wool cap", subtitle: "Warm" }],
+        sentVia: "api",
+      }),
+    ).rejects.toMatchObject({ code: "outside_24h_window" });
+    expect(postJson).not.toHaveBeenCalled();
   });
 });
 

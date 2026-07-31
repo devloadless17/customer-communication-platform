@@ -69,7 +69,11 @@ import type { ApiSession } from "../auth/session.guard";
  *
  *   initiateCall    — outbound call from agent → customer. Runs the BIC
  *                     pre-flight gauntlet (region / revocation / 24h
- *                     window / 5-per-24h cap / permission request).
+ *                     window / provider-reported connected-call quota —
+ *                     the figure has moved 5 → 10 → 100 per 24h, which is
+ *                     exactly why the code reads it live from
+ *                     GET /call_permissions instead of hardcoding it /
+ *                     permission request).
  *   requestPermission — explicit permission request (when 24h window is
  *                     closed and no live permission exists).
  *   answerCall      — CAS-gated; first agent wins. Calls preAcceptCall

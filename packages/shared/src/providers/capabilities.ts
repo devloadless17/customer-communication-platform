@@ -36,8 +36,11 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     sendContacts: true,
     sendReaction: true,
     // …and asking FOR a location (interactive "location_request_message"),
-    // and the single URL-opening button (interactive "cta_url").
+    // the contact's own info (interactive "request_contact_info" — the one
+    // proactive remedy for a BSUID-only thread), and the single URL-opening
+    // button (interactive "cta_url").
     locationRequest: true,
+    requestContactInfo: true,
     ctaUrlButton: true,
     interactiveCarousel: true,
     // Provider-level user blocking (Block Users API on the business number).
@@ -153,6 +156,16 @@ export const CHANNEL_CAPABILITIES: Record<Channel, ProviderCapabilities> = {
     // `attachment_id` support on 2026-03-13 as an ALTERNATIVE for re-sending the
     // same large image to many people; a URL send remains fully supported and is
     // what a one-off agent reply wants, so this stays URL-based.
+    //
+    // DO NOT flip this to false without changing the SEND shape too. The
+    // upload-then-send path on Instagram is not the Messenger one: Meta's
+    // Attachment Upload doc says to send a stored attachment "with the type set
+    // to MEDIA_SHARE and payload.id set to the attachment ID", where Messenger
+    // sends `type: <media kind>` + `payload.attachment_id`. It also warns "your
+    // business must own the media", and attachment ids expire after 90 days.
+    // Today `send-media-internal` takes the URL branch for this channel and never
+    // calls `uploadMedia`, so none of that applies — flipping this capability
+    // alone would start sending Messenger's shape to Instagram.
     mediaSendByUrl: true,
     profileSync: true,
     contactShareChips: true,

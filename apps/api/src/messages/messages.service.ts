@@ -3539,6 +3539,10 @@ const TEMPLATE_ERROR_STATUS: Record<SendTemplateValidationError["code"], number>
   // authentication templates (131062). Actionable pre-flight refusal, so 400 —
   // the fix is to obtain a phone, not to retry.
   auth_template_requires_phone: 400,
+  // The contact's BSUID was issued by a different portfolio than the sending
+  // number's (cross-portfolio sends hard-fail at Meta) and no parent BSUID is
+  // stored. 409: the account/portfolio pairing is what's wrong, not the body.
+  bsuid_portfolio_mismatch: 409,
   provider_not_configured: 409,
   provider_no_template_support: 501,
 };

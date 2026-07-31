@@ -8,6 +8,7 @@ import {
   Flag,
   Forward,
   ListChecks,
+  MessageCircle,
   MoreHorizontal,
   SmilePlus,
 } from "lucide-react";
@@ -40,6 +41,94 @@ const QUICK_REACTIONS = ["👍", "❤️", "😆", "😮", "😢", "😠"];
 // it to "love". WhatsApp/Messenger keep the full bar.
 function reactionsForChannel(channel: Message["channel"]): string[] {
   return channel === "instagram" ? ["❤️"] : QUICK_REACTIONS;
+}
+
+/**
+ * The inline "reply publicly" composer for a comment.
+ *
+ * Deliberately NOT a modal: the agent needs the comment's own text visible while
+ * they answer it, and a dialog would cover the thread that gives it meaning.
+ *
+ * Nothing optimistic is painted. A public reply is not a message in this
+ * conversation — it has no recipient and Meta returns a COMMENT id — so there is
+ * no bubble to reconcile, and inventing one would make it look like the private
+ * reply had been spent. Success is a toast; the record lives on the audit
+ * timeline.
+ */
+function PublicReplyComposer({
+  messageId,
+  onDone,
+}: {
+  messageId: string;
+  onDone: () => void;
+}) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const ref = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    ref.current?.focus();
+  }, []);
+
+  async function submit() {
+    const body = text.trim();
+    if (!body || busy) return;
+    setBusy(true);
+    try {
+      const res = await apiFetch(`/api/messages/${messageId}/comment-reply`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body }),
+      });
+      const data = (await res.json().catch(() => null)) as
+        | { detail?: string; error?: string }
+        | null;
+      if (!res.ok) {
+        toast.error(data?.detail ?? data?.error ?? "Couldn't post the reply.");
+        return;
+      }
+      toast.success("Replied publicly on the comment.");
+      onDone();
+    } catch {
+      toast.error("Couldn't reach the server.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-1.5 flex w-full max-w-sm flex-col gap-1.5 rounded-lg border border-border bg-card p-2">
+      <span className="text-2xs font-medium text-muted-foreground">
+        Public reply — everyone who sees the post sees this
+      </span>
+      <textarea
+        ref={ref}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          // Enter sends, Shift+Enter newlines — the same contract as the main
+          // composer, so the muscle memory carries over.
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            void submit();
+          }
+          if (e.key === "Escape") onDone();
+        }}
+        rows={2}
+        placeholder="Reply on the post…"
+        aria-label="Public reply text"
+        className="resize-y rounded-md border border-input bg-background px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+      />
+      <div className="flex items-center gap-2">
+        <Button size="sm" className="h-7 text-xs" disabled={!text.trim() || busy} onClick={() => void submit()}>
+          {busy ? "Posting…" : "Reply publicly"}
+        </Button>
+        <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={onDone}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 export function BubbleActions({
@@ -84,6 +173,12 @@ export function BubbleActions({
     };
   }, [pickerOpen]);
 
+  // A public reply is only meaningful on an inbound COMMENT: it posts under that
+  // comment for everyone reading the post. A DM has no public surface, and our
+  // own outbound has nothing to answer.
+  const isComment = message.direction === "in" && message.structured?.kind === "comment";
+  const [replyingPublicly, setReplyingPublicly] = useState(false);
+
   const copyText = message.body.trim();
   const canCopy = copyText.length > 0;
   // Flagging needs a real persisted message (the flag FKs to Message.id) and at
@@ -126,6 +221,18 @@ export function BubbleActions({
       toast.error(err instanceof Error ? err.message : "Couldn't react");
     }
   };
+  // The composer replaces the action bar while open, rather than sitting beside
+  // it: it needs the width, and a half-typed public reply must not compete with
+  // a hover-revealed row of icons.
+  if (replyingPublicly) {
+    return (
+      <PublicReplyComposer
+        messageId={message.id}
+        onDone={() => setReplyingPublicly(false)}
+      />
+    );
+  }
+
   return (
     <div
       className={cn(
@@ -213,6 +320,18 @@ export function BubbleActions({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-44">
+            {/* Only on a COMMENT, and only inbound. A comment has two answers and
+                they are different promises: replying in the composer sends
+                Instagram's PRIVATE reply (a DM to that one person, one per
+                comment, 7 days), while this posts publicly under the comment for
+                everyone reading the post. Offering it on a DM would be
+                meaningless — there is no public surface to reply on. */}
+            {isComment && (
+              <DropdownMenuItem onSelect={() => setReplyingPublicly(true)}>
+                <MessageCircle className="size-3.5" />
+                Reply publicly
+              </DropdownMenuItem>
+            )}
             {canCopy && (
               <DropdownMenuItem onSelect={handleCopy}>
                 <Copy className="size-3.5" />

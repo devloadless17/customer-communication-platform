@@ -253,10 +253,9 @@ export const TEMPLATE_LIMITS = {
 } as const;
 
 /**
- * A limited-time offer template's OWN limits, which are TIGHTER than the
- * general ones — the body caps at 600 rather than 1024, and the offer code at
- * 15 rather than the usual copy-code 20. Applying the general numbers to one of
- * these lets an author write a body Meta will reject.
+ * Media-card carousel caps (carousel-templates reference): 2-10 cards with a
+ * uniform component signature, each card's body far tighter than the message
+ * body, and at most two buttons per card.
  */
 export const CAROUSEL_LIMITS = {
   /** Meta requires at least 2 cards — one card is just a media template. */
@@ -267,6 +266,12 @@ export const CAROUSEL_LIMITS = {
   maxButtonsPerCard: 2,
 } as const;
 
+/**
+ * A limited-time offer template's OWN limits, which are TIGHTER than the
+ * general ones — the body caps at 600 rather than 1024, and the offer code at
+ * 15 rather than the usual copy-code 20. Applying the general numbers to one of
+ * these lets an author write a body Meta will reject.
+ */
 export const LIMITED_TIME_OFFER_LIMITS = {
   bodyMaxLength: 600,
   /** The heading above the countdown. */
@@ -1063,6 +1068,12 @@ export function unsupportedTemplateFeature(components: unknown): string | null {
     for (const c of asComponents(comps)) {
       const type = (c.type ?? "").toUpperCase();
       if (commerce[type]) return commerce[type];
+      // A product-card carousel card is {type:"header", format:"product"} and
+      // may carry plain URL buttons, so the commerce marker can live in
+      // `format` alone (its send demands a product retailer id we never
+      // collect).
+      const format = (c.format ?? "").toUpperCase();
+      if (commerce[format]) return commerce[format];
       for (const b of c.buttons ?? []) {
         const bt = (b.type ?? "").toUpperCase();
         if (commerce[bt]) return commerce[bt];

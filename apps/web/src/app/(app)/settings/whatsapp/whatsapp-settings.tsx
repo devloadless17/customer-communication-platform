@@ -30,6 +30,7 @@ import { CallingSettings } from "./calling-settings";
 import { MessagingHealthPanel } from "./messaging-health-panel";
 import { BusinessProfilePanel } from "./business-profile-panel";
 import { QrCodesPanel } from "./qr-codes-panel";
+import { UsernamePanel } from "./username-panel";
 import { formatPhone } from "@ccp/shared/utils";
 
 export interface WhatsappCurrent {
@@ -365,6 +366,16 @@ export function WhatsappSettings({
       {current.connected && (
         <BusinessProfilePanel
           key={`profile-${activeSettingsAccountId ?? "default"}`}
+          canManage={canManage}
+          accountId={activeSettingsAccountId ?? undefined}
+        />
+      )}
+
+      {/* The number's @username — like the profile, it lives on the phone
+          number, so it is connected-only and follows the same account chips. */}
+      {current.connected && (
+        <UsernamePanel
+          key={`username-${activeSettingsAccountId ?? "default"}`}
           canManage={canManage}
           accountId={activeSettingsAccountId ?? undefined}
         />

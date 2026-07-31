@@ -227,10 +227,14 @@ export const SendInteractiveSchema = z
     // options, so `options` is optional and must stay EMPTY for it (refined
     // below); buttons/list keep requiring at least one. `cta_url` likewise:
     // one vendor-drawn URL button, configured via `ctaUrl` below.
+    // `request_contact_info` is the same shape as `location_request` —
+    // WhatsApp draws its own fixed-label "share contact info" button and the
+    // reply arrives as a normal inbound contact card.
     kind: z.enum([
       "buttons",
       "list",
       "location_request",
+      "request_contact_info",
       "cta_url",
       "carousel",
       "generic",
@@ -410,23 +414,36 @@ export const SendInteractiveSchema = z
     { message: "list row ids are limited to 200 characters (button ids allow 256)" },
   )
   // The kinds that carry NO authored options: the vendor draws the affordance
-  // (location_request), or the content lives in a dedicated field (cta_url,
-  // carousel, generic, product). Adding a kind without listing it here rejects
-  // every send of it with "at least one option is required" — which is exactly
-  // what happened to `generic`/`product` until a schema test caught it, because
-  // the provider-level tests bypass this gate entirely.
+  // (location_request, request_contact_info), or the content lives in a
+  // dedicated field (cta_url, carousel, generic, product). Adding a kind
+  // without listing it here rejects every send of it with "at least one option
+  // is required" — which is exactly what happened to `generic`/`product` until
+  // a schema test caught it, because the provider-level tests bypass this gate
+  // entirely.
   .refine(
     (b) =>
-      ["location_request", "cta_url", "carousel", "generic", "product"].includes(b.kind) ||
-      b.options.length >= 1,
+      [
+        "location_request",
+        "request_contact_info",
+        "cta_url",
+        "carousel",
+        "generic",
+        "product",
+      ].includes(b.kind) || b.options.length >= 1,
     {
       message: "at least one option is required",
     },
   )
   .refine(
     (b) =>
-      !["location_request", "cta_url", "carousel", "generic", "product"].includes(b.kind) ||
-      b.options.length === 0,
+      ![
+        "location_request",
+        "request_contact_info",
+        "cta_url",
+        "carousel",
+        "generic",
+        "product",
+      ].includes(b.kind) || b.options.length === 0,
     {
       message:
         "this kind carries no options — the vendor or a dedicated field supplies the content",

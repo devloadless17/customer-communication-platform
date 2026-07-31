@@ -65,11 +65,6 @@ function routesFrom(src) {
   return [...out].sort();
 }
 
-/** The stable prefix before the first `:param`. */
-function stem(path) {
-  return path.split(/\/?:/)[0].replace(/^\/+|\/+$/g, "");
-}
-
 /**
  * The LITERAL segments of a path, in order — `:params` dropped.
  *
@@ -83,37 +78,72 @@ function literalSegments(path) {
     .filter((seg) => seg && !seg.startsWith(":"));
 }
 
-/** Does one segment appear in a route-shaped context (never as prose)? */
-function segmentDocumented(seg, text) {
-  const q = seg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return [
-    new RegExp(`/v1/${q}\\b`),
-    new RegExp("`/" + q + "\\b"),
-    new RegExp(`/${q}/:`),
-    new RegExp(`/${q}\\b`),
-  ].some((re) => re.test(text));
-}
-
 /**
- * STRICT: the path must appear in a route-shaped context, never as prose.
+ * PATH-EXACT: the route's literal-segment sequence must match an
+ * `<Endpoint path="...">` declaration on the docs page.
  *
- * EVERY literal segment is checked, not just the stem before the first `:param`.
- *
- * That was a real hole, found 2026-07-30 by adding `POST contacts/:id/spam` and
- * watching the checker report "all documented". `stem()` truncates at the first
- * param, so the route was only ever verified as `contacts` — which of course
- * appears — and the same blindness covered every `.../:id/<verb>` route in the
- * file. A guard whose green light does not depend on the thing it guards is
- * worse than no guard: it is the reason nobody re-checks by hand.
+ * Two weaker versions preceded this, and each hid a real gap:
+ *   - stem matching (dropped 2026-07-30): only the prefix before the first
+ *     `:param` was checked, so every `.../:id/<verb>` route passed on its
+ *     collection's docs — found by adding `POST contacts/:id/spam` and
+ *     watching the checker stay green.
+ *   - independent per-segment matching (dropped 2026-07-31): each segment was
+ *     looked up separately, so `GET reports/acquisition` passed on the
+ *     strength of `reports/overview` + `contacts/:id/acquisition` while being
+ *     nowhere on the page — and it was hiding `assignment-policies`, a route
+ *     documented only inside another endpoint's prose.
+ * A guard whose green light does not depend on the thing it guards is worse
+ * than no guard: it is the reason nobody re-checks by hand.
  *
  * Item routes that add no segment of their own (`ticket-fields/:id`,
- * `tickets/views/:viewId`) still pass on their collection's documentation, which
+ * `tickets/views/:viewId`) still pass on their collection's declaration, which
  * is correct — there is nothing distinguishing left to document.
  */
 function documented(path, text) {
   const segments = literalSegments(path);
   if (segments.length === 0) return true;
-  return segments.every((seg) => segmentDocumented(seg, text));
+  // PATH-EXACT first: the docs page declares each route as
+  // `<Endpoint path="/api/external/v1/...">`, so the literal-segment SEQUENCE
+  // of a route must match one of those declarations.
+  //
+  // Checking segments INDEPENDENTLY was still a hole, found 2026-07-31 by
+  // adding `GET reports/acquisition` and watching the checker report "all
+  // documented": `reports` appears (reports/overview) and `acquisition`
+  // appears (contacts/:id/acquisition), so every segment passed while the
+  // route itself was nowhere on the page. Same lesson as the 2026-07-30 fix
+  // one function up — a green light that does not depend on the thing it
+  // guards is worse than no guard.
+  // PATH-EXACT, with no prose fallback. A per-segment fallback would re-open
+  // the exact hole this replaced: `reports/acquisition` passes it on the
+  // strength of two unrelated routes. Every one of the 149 routes carries its
+  // own <Endpoint> declaration today, so the strict form costs nothing — and
+  // the one route that did not (`assignment-policies`, mentioned only inside
+  // another endpoint's prose) turned out to be a real documentation gap the
+  // loose check had been hiding.
+  return documentedPaths(text).has(segments.join("/"));
+}
+
+/**
+ * Every route path declared on the docs page, as its literal-segment sequence.
+ *
+ * Read from the `path="..."` attribute of each `<Endpoint>` — an exact,
+ * machine-readable declaration, unlike the surrounding prose.
+ */
+const _documentedPaths = new Map();
+function documentedPaths(text) {
+  // Keyed by the surface's text, NOT a process-global: with a single cached
+  // set, adding a second surface to SURFACES would silently reuse the first
+  // surface's paths and report the second fully documented without ever
+  // reading it — a green light independent of the thing it guards, again.
+  let set = _documentedPaths.get(text);
+  if (set) return set;
+  set = new Set();
+  for (const m of text.matchAll(/path="([^"]+)"/g)) {
+    const p = m[1].replace(/^\/api\/external\/v1\/?/, "");
+    set.add(literalSegments(p).join("/"));
+  }
+  _documentedPaths.set(text, set);
+  return set;
 }
 
 

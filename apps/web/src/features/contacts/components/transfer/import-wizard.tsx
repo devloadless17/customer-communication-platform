@@ -13,6 +13,7 @@ import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { COUNTRIES } from "@/features/contacts/components/country-code-picker";
 
 import { TransferProgress } from "./transfer-progress";
 import { useTransferJob } from "./use-transfer-job";
@@ -55,6 +56,10 @@ export function ImportContactsWizard({
   const [mode, setMode] = useState("create_only");
   const [tagMode, setTagMode] = useState("merge");
   const [fireAutomations, setFireAutomations] = useState(true);
+  // The country the file's LOCAL-format numbers belong to. Empty = the file
+  // carries country codes already, which is the common case for a list that
+  // came out of another messaging tool.
+  const [defaultCountry, setDefaultCountry] = useState("");
   const [jobId, setJobId] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const notifiedRef = useRef(false);
@@ -116,7 +121,13 @@ export function ImportContactsWizard({
           uploadKey: preview.uploadKey,
           filename: preview.filename,
           format: preview.format,
-          options: { mode, tagMode, fireAutomations, mapping },
+          options: {
+            mode,
+            tagMode,
+            fireAutomations,
+            mapping,
+            ...(defaultCountry ? { defaultCountry } : {}),
+          },
         }),
       });
       const json = (await res.json()) as { jobId?: string; error?: string; detail?: string };
@@ -129,7 +140,7 @@ export function ImportContactsWizard({
     } finally {
       setBusy(false);
     }
-  }, [preview, mode, tagMode, fireAutomations, mapping]);
+  }, [preview, mode, tagMode, fireAutomations, mapping, defaultCountry]);
 
   const done = job ? ["completed", "failed", "canceled"].includes(job.status) : false;
 
@@ -284,6 +295,29 @@ export function ImportContactsWizard({
                 <option value="merge">Add to existing tags</option>
                 <option value="replace">Replace existing tags</option>
               </Select>
+            </Field>
+
+            <Field label="Phone number country">
+              <Select
+                aria-label="Country for local-format phone numbers"
+                value={defaultCountry}
+                onChange={(e) => setDefaultCountry(e.target.value)}
+              >
+                <option value="">Numbers already include the country code</option>
+                {COUNTRIES.map((c) => (
+                  <option key={c.iso} value={c.iso}>
+                    {c.name} (+{c.dial})
+                  </option>
+                ))}
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                {/* Named concretely, because the failure this prevents is
+                    invisible: a local number imports "successfully" and only
+                    fails weeks later, per recipient, on a campaign. */}
+                Pick a country if your file stores local numbers like{" "}
+                <span className="font-mono">03123456</span>. Numbers that already
+                carry a country code are unaffected, so a mixed file is fine.
+              </p>
             </Field>
 
             <div className="flex items-start justify-between gap-4 rounded-md border px-3 py-3">

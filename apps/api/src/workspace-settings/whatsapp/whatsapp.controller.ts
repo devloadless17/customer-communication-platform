@@ -17,11 +17,13 @@ import { zBody } from "../../common/zod-validation.pipe";
 import {
   CreateQrCodeSchema,
   RegisterWhatsappNumberSchema,
+  SetWhatsappUsernameSchema,
   UpdateQrCodeSchema,
   UpdateBusinessProfileSchema,
   UpdateWhatsappConfigSchema,
   type CreateQrCodeInput,
   type RegisterWhatsappNumberInput,
+  type SetWhatsappUsernameInput,
   type UpdateQrCodeInput,
   type UpdateBusinessProfileInput,
   type UpdateWhatsappConfigInput,
@@ -44,6 +46,8 @@ import {
  *   POST   /api/workspace/whatsapp/profile   — update it (?accountId= picks the number)
  *   GET/POST/DELETE /api/workspace/whatsapp/qr-codes[/:code]
  *                                — QR codes + short links for the number
+ *   GET/POST/DELETE /api/workspace/whatsapp/username
+ *                                — the number's @username (+ suggestions on GET)
  *   DELETE /api/workspace/whatsapp    — disconnect (wipes secrets, keeps history)
  *   GET    /api/workspace/whatsapp/insights/status
  *                                — is template analytics on for this WABA?
@@ -239,6 +243,51 @@ export class WhatsappController {
     @Query("accountId") accountId?: string,
   ) {
     await this.whatsapp.deleteQrCode(session.workspaceId, code, accountId);
+    return { ok: true };
+  }
+
+  /**
+   * The number's @username — a chat-native handle, 1:1 with the phone number
+   * and globally unique across WhatsApp. `?accountId=` picks one of the
+   * workspace's numbers, like profile/qr-codes above. GET also returns Meta's
+   * reserved suggestions so the panel can offer one-click picks.
+   */
+  // TWO Graph reads (current username + suggestions) — same cost/cap as
+  // `account-status`.
+  @Get("username")
+  @RateLimit({ perMinute: 12 })
+  async username(
+    @CurrentSession() session: ApiSession,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.whatsapp.getUsernameState(session.workspaceId, accountId);
+  }
+
+  /**
+   * Adopt or change it. When the name is on a SIBLING number of the same
+   * portfolio, Meta answers 147005 and this route 409s
+   * `username_transfer_required` — the UI confirms, then re-sends with
+   * `transferAction: "force_transfer"`.
+   */
+  @Post("username")
+  @HttpCode(200)
+  @RateLimit({ perMinute: 12 })
+  async setUsername(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(SetWhatsappUsernameSchema)) body: SetWhatsappUsernameInput,
+    @Query("accountId") accountId?: string,
+  ) {
+    return this.whatsapp.setUsername(session.workspaceId, body, accountId);
+  }
+
+  /** Remove it. Customers who saved the @handle lose that route to the chat. */
+  @Delete("username")
+  @RateLimit({ perMinute: 12 })
+  async deleteUsername(
+    @CurrentSession() session: ApiSession,
+    @Query("accountId") accountId?: string,
+  ) {
+    await this.whatsapp.deleteUsername(session.workspaceId, accountId);
     return { ok: true };
   }
 

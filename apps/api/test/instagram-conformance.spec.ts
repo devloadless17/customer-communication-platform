@@ -44,6 +44,8 @@ import {
   INSTAGRAM_HIGH_VOLUME_MESSAGE_CEILING,
   resolveSocialSendRate,
 } from "@/lib/broadcasts/send-rate-limiter";
+import { asCommentStructured } from "@/lib/messaging/private-reply";
+import { MetaSendError, normalizeMetaSendError } from "@/lib/providers/meta-send-error";
 import type { InstagramSendConfig } from "@/lib/providers/instagram-config";
 import {
   CHANNEL_CAPABILITIES,
@@ -147,7 +149,10 @@ describe("inbound: Instagram Shop product referral", () => {
     expect(msg.attribution).toEqual({
       source: "ad",
       headline: "Spring sale",
-      clickId: "AD-7",
+      // `adId`, not `clickId`: `clickId` is a per-CLICK id (WhatsApp
+      // `ctwa_clid`), so an ad id there would make "group by ad" compare two
+      // different id spaces.
+      adId: "AD-7",
       ref: "spring",
       flowId: "FLOW-9",
     });
@@ -323,6 +328,23 @@ describe("outbound: generic + product templates", () => {
         },
       },
     });
+  });
+
+  it("THROWS when a template kind arrives with no payload — never degrades to text", async () => {
+    // Below the template branch is the quick-reply path, so falling through would
+    // send the body as a plain message with empty `quick_replies` and report
+    // success — a silently different message than the caller asked for. The
+    // schemas refuse this, but the provider is reachable from workflows and
+    // future internal callers.
+    for (const kind of ["generic", "product", "cta_url"] as const) {
+      await expect(
+        instagramProvider.sendInteractive!(
+          { to: "IGSID_1", bodyText: "hi", kind, options: [], useHumanAgentTag: false },
+          CONFIG,
+        ),
+      ).rejects.toThrow(/needs its template payload/);
+    }
+    expect(postJson).not.toHaveBeenCalled();
   });
 
   it("does not collapse a template kind into quick replies", async () => {
@@ -616,6 +638,30 @@ describe("outbound: move_to_spam and thread control", () => {
     expect(res.failed).toEqual([]);
   });
 
+  it("hands a thread back to the INSTAGRAM inbox, not the Page inbox", async () => {
+    // Meta names two different first-party targets: "use 263902037430900 for the
+    // Page Inbox and 1217981644879628 for the Instagram Inbox". This provider
+    // inherited Messenger's default, which would have handed an Instagram thread
+    // to an inbox no Instagram agent is looking at — and Meta ACCEPTS it, so
+    // nothing would have errored.
+    postJson.mockResolvedValue({ success: true });
+    await instagramProvider.threadControl!({ action: "pass", to: "IGSID_1" }, CONFIG);
+    const url = String(postJson.mock.calls[0]![0]);
+    const body = sentBody();
+    expect(url).toContain(`/${CONFIG.pageId}/pass_thread_control`);
+    expect(body).toMatchObject({ target_app_id: "1217981644879628" });
+    expect(body).not.toMatchObject({ target_app_id: "263902037430900" });
+  });
+
+  it("still honours an explicit target app", async () => {
+    postJson.mockResolvedValue({ success: true });
+    await instagramProvider.threadControl!(
+      { action: "pass", to: "IGSID_1", targetAppId: "APP-9" },
+      CONFIG,
+    );
+    expect(sentBody()).toMatchObject({ target_app_id: "APP-9" });
+  });
+
   it("takes thread control on the PAGE node — Instagram uses Conversation Routing", async () => {
     // Meta discontinued Instagram's Handover Protocol on 2025-10-23 and migrated
     // everyone to Conversation Routing, which runs on the same Page endpoints.
@@ -785,6 +831,140 @@ describe("broadcast pacing uses INSTAGRAM's ceilings, not Messenger's", () => {
     // bucket can pace around it — which is exactly why it is a named constant
     // rather than a limiter input.
     expect(INSTAGRAM_HIGH_VOLUME_MESSAGE_CEILING).toBe(72_000);
+  });
+});
+
+describe("the comment address is NARROWED at runtime, not asserted", () => {
+  it("accepts a real comment row", () => {
+    expect(asCommentStructured({ kind: "comment", commentId: "C-1" })).toEqual({
+      kind: "comment",
+      commentId: "C-1",
+    });
+    expect(
+      asCommentStructured({ kind: "comment", commentId: "C-1", isLive: true })?.isLive,
+    ).toBe(true);
+  });
+
+  it("rejects every shape that would send an undefined ADDRESS to Meta", () => {
+    // `commentId` is the address: the private reply puts it in
+    // `recipient: { comment_id }` and the public reply puts it in the URL path.
+    // A cast would carry `undefined` into `/undefined/replies`. This column is
+    // untrusted input — rows can predate the current writer or be hand-edited.
+    for (const bad of [
+      null,
+      undefined,
+      "comment",
+      42,
+      [],
+      {},
+      { kind: "comment" },
+      { kind: "comment", commentId: "" },
+      { kind: "comment", commentId: 123 },
+      { kind: "story", commentId: "C-1" },
+      { kind: "location", latitude: 1, longitude: 2 },
+    ]) {
+      expect(asCommentStructured(bad), `should reject ${JSON.stringify(bad)}`).toBeNull();
+    }
+  });
+});
+
+describe("Instagram error codes: an ACCOUNT block is not a bad recipient", () => {
+  const err = (code: number, subcode?: number) =>
+    normalizeMetaSendError(
+      new MetaSendError(
+        "graph POST 400",
+        400,
+        JSON.stringify({
+          error: { code, ...(subcode ? { error_subcode: subcode } : {}) },
+        }),
+      ),
+    );
+
+  it("reports 2534029 as an account block, not an unreachable person", () => {
+    // "The business has been blocked from sending messages via the IG Messaging
+    // API." Told "invalid recipient", an operator blames the contact and moves
+    // to the next one — hammering an API that has already blocked the business
+    // over a policy violation. That is how a block becomes a worse block.
+    const e = err(100, 2534029);
+    expect(e?.code).toBe("account_restricted");
+    expect(e?.message).toMatch(/policy violation/i);
+  });
+
+  it("reports 2534041 as revoked access, with the fix being re-authorisation", () => {
+    const e = err(200, 2534041);
+    expect(e?.code).toBe("account_restricted");
+    expect(e?.message).toMatch(/re-authorise/i);
+  });
+
+  it("reports 2534013 as a broken Page↔Instagram link", () => {
+    const e = err(100, 2534013);
+    expect(e?.code).toBe("account_restricted");
+    expect(e?.message).toMatch(/linked/i);
+  });
+
+  it("keeps 2534014 a genuine recipient problem", () => {
+    // The ONE member of the family that really is about the person: "No matching
+    // Instagram user … Instagram User ID are not supported" (wrong id space).
+    expect(err(100, 2534014)?.code).toBe("invalid_recipient");
+  });
+
+  it("treats 2018108 as a TEMPORARILY unreachable recipient, not an invalid one", () => {
+    // "This person isn't receiving messages from you right now" is the verbatim
+    // parallel of 551 — a block/mute/deactivation that can lift. Classifying it
+    // `invalid_recipient` advised list-cleaning a contact who may only be
+    // unreachable today.
+    expect(err(10, 2018108)?.code).toBe("recipient_unavailable");
+  });
+});
+
+describe("Instagram error codes on the paths we actually use", () => {
+  const err = (code: number, subcode?: number) =>
+    normalizeMetaSendError(
+      new MetaSendError(
+        "graph POST 400",
+        400,
+        JSON.stringify({
+          error: { code, ...(subcode ? { error_subcode: subcode } : {}) },
+        }),
+      ),
+    );
+
+  it("names a media FETCH failure — Instagram's primary media path", () => {
+    // IG media goes out as a presigned URL Meta fetches, so 2018008 is the most
+    // likely media failure on this channel, not an exotic one. It was falling to
+    // the catch-all as an opaque provider error.
+    expect(err(100, 2018008)?.code).toBe("media_unfetchable");
+    expect(err(100, 2018008)?.message).toMatch(/download/i);
+  });
+
+  it("distinguishes the video 75-second fetch timeout from a size limit", () => {
+    expect(err(100, 2018294)?.message).toMatch(/75 seconds/);
+    expect(err(100, 2018109)?.message).toMatch(/too large/i);
+    // A type/file mismatch is a third distinct fix.
+    expect(err(100, 2018047)?.message).toMatch(/type/i);
+  });
+
+  it("explains a comment that can no longer take a private reply", () => {
+    // We refuse locally where we can see it, but the comment may have been
+    // deleted or answered from Business Suite — cases no local check can know.
+    const e = err(100, 2534025);
+    expect(e?.code).toBe("comment_reply_invalid");
+    expect(e?.message).toMatch(/one per comment/i);
+  });
+
+  it("points an invalid product id at Commerce Manager", () => {
+    expect(err(100, 2018320)?.message).toMatch(/Commerce Manager/);
+  });
+
+  it("treats IG's 2534037 as the same thread-ownership fault as 2018300", () => {
+    expect(err(100, 2534037)?.code).toBe("thread_control_lost");
+    expect(err(100, 2018300)?.code).toBe("thread_control_lost");
+  });
+
+  it("treats an ineligible or unlinked account as account state, not a bad recipient", () => {
+    expect(err(100, 36103)?.code).toBe("account_restricted");
+    expect(err(10, 2534077)?.code).toBe("account_restricted");
+    expect(err(10, 2534077)?.message).toMatch(/two-factor|linked/i);
   });
 });
 

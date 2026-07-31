@@ -156,6 +156,12 @@ export function portfolioTemplateLimit(verificationStatus: string | null): numbe
 /** A partial update — a webhook carries only the field(s) that changed. */
 export interface WhatsappHealthUpdate {
   messagingTier?: string | null;
+  /**
+   * The PORTFOLIO's phone-number allowance
+   * (`business_capability_update.max_phone_numbers_per_business_portfolio`).
+   * Portfolio-scoped like the tier; `undefined` untouched.
+   */
+  maxPhoneNumbers?: number | null;
   qualityRating?: string | null;
   throughputLevel?: string | null;
   /**
@@ -165,6 +171,20 @@ export interface WhatsappHealthUpdate {
    * absent field must never clear a real marker.
    */
   isOnBusinessApp?: boolean | null;
+  /**
+   * The number's WhatsApp @username, lowercase (`business_username_updates`
+   * webhook, or the settings read-through). Per-NUMBER like `qualityRating` —
+   * a username is 1:1 with a business phone number. `null` clears (the
+   * username was removed); `undefined` untouched.
+   *
+   * NOTE: the webhook pass-through (ingest's channel_health handler copying
+   * `businessUsername` off the event into this update) lands in a follow-up
+   * edit — ingest.ts is under concurrent edit right now, and its handler lists
+   * fields explicitly, so the parser's new field is dropped there harmlessly
+   * until then. The settings GET's read-through keeps the stored copy fresh in
+   * the meantime.
+   */
+  businessUsername?: string | null;
   /**
    * Calling enforcement. `null` clears a stored restriction/warning (the
    * provider lifted it); `undefined` leaves it untouched, because these events
@@ -389,6 +409,7 @@ export async function persistWhatsappHealth(
     qualityRating?: string | null;
     throughputLevel?: string | null;
     isOnBusinessApp?: boolean | null;
+    businessUsername?: string | null;
   } = {};
   const wabaScoped: {
     callingRestrictedUntil?: Date | null;
@@ -408,10 +429,40 @@ export async function persistWhatsappHealth(
 
   let portfolioTier: string | null | undefined;
   if (update.messagingTier !== undefined) {
-    portfolioTier = update.messagingTier ? normalizeMessagingTier(update.messagingTier) : null;
+    if (update.messagingTier) {
+      const normalized = normalizeMessagingTier(update.messagingTier);
+      // A PRESENT-but-unrecognized token must not clobber the stored cap.
+      // `TIER_NOT_SET` / `ONBOARDING` are documented `current_limit` /
+      // `max_daily_conversations_per_business` values meaning "this NUMBER
+      // hasn't sent yet" — which says nothing about its PORTFOLIO's limit,
+      // the scope this column gates. Writing null here silently ungated the
+      // 24h budget gate for the whole portfolio off one idle number's
+      // webhook. Unrecognized ⇒ leave the stored tier alone; an explicit
+      // null/empty from a caller still clears.
+      portfolioTier = normalized ?? undefined;
+    } else {
+      portfolioTier = null;
+    }
+  }
+  // Portfolio-scoped like the tier, and written by the same block below.
+  let portfolioCap: number | null | undefined;
+  if (update.maxPhoneNumbers !== undefined) {
+    portfolioCap =
+      update.maxPhoneNumbers != null &&
+      Number.isFinite(update.maxPhoneNumbers) &&
+      update.maxPhoneNumbers > 0
+        ? Math.floor(update.maxPhoneNumbers)
+        : update.maxPhoneNumbers == null
+          ? null
+          : undefined;
   }
   if (update.isOnBusinessApp !== undefined) {
     perNumber.isOnBusinessApp = update.isOnBusinessApp;
+  }
+  if (update.businessUsername !== undefined) {
+    // Already normalized (lowercase) by the parser/service; an empty string
+    // is not a username.
+    perNumber.businessUsername = update.businessUsername?.trim().toLowerCase() || null;
   }
   if (update.qualityRating !== undefined) {
     perNumber.qualityRating = update.qualityRating
@@ -462,7 +513,13 @@ export async function persistWhatsappHealth(
   }
   const hasPerNumber = Object.keys(perNumber).length > 0;
   const hasWabaScoped = Object.keys(wabaScoped).length > 0;
-  if (portfolioTier === undefined && !hasPerNumber && !hasWabaScoped) return;
+  if (
+    portfolioTier === undefined &&
+    portfolioCap === undefined &&
+    !hasPerNumber &&
+    !hasWabaScoped
+  )
+    return;
 
   // With no named connection, the legacy workspace-wide write is only safe when
   // there is exactly one row it could hit.
@@ -472,10 +529,15 @@ export async function persistWhatsappHealth(
       where: { workspaceId, channel: "whatsapp" },
     })) <= 1;
 
-  if (portfolioTier !== undefined) {
+  if (portfolioTier !== undefined || portfolioCap !== undefined) {
     const portfolioData = {
-      messagingTier: portfolioTier,
-      messagingDailyCap: tierDailyCap(portfolioTier),
+      ...(portfolioTier !== undefined
+        ? {
+            messagingTier: portfolioTier,
+            messagingDailyCap: tierDailyCap(portfolioTier),
+          }
+        : {}),
+      ...(portfolioCap !== undefined ? { maxPhoneNumbers: portfolioCap } : {}),
       messagingHealthUpdatedAt: new Date(),
     };
     const updated = await db.whatsappPortfolio.updateMany({

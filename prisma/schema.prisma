@@ -914,6 +914,14 @@ model ChannelConnection {
   // rebuild that JSON wholesale and would clobber webhook writes.
   verifiedName String?
   nameStatus   String?
+  // The number's WhatsApp @username (whatsapp channel only) — a chat-native
+  // handle, 1:1 with the business phone number, globally unique across
+  // WhatsApp, stored lowercase (case-insensitive at Meta). A CACHE, never the
+  // authority: the settings surface reads live from Graph and re-syncs this
+  // opportunistically, and the `business_username_updates` webhook keeps it
+  // fresh. Null = no username adopted. NOT in `config` for the same reason as
+  // `verifiedName` above — settings saves rebuild that JSON wholesale.
+  businessUsername String?
 
   // The LAST account-level alert Meta sent that we have no dedicated field
   // for: an `account_update` event outside the parsed set (the class where
@@ -1151,6 +1159,8 @@ model WhatsappPortfolio {
   /// Portfolio → WABA → phone number. Numbers reach their portfolio through the
   /// WABA, which is where Meta actually records the ownership.
   wabaAccounts WhatsappBusinessAccount[]
+  /// Contacts whose `bsuid` this portfolio issued (BSUIDs are portfolio-scoped).
+  bsuidContacts Contact[]
 
   @@unique([workspaceId, externalPortfolioId])
   @@index([workspaceId])
@@ -1512,6 +1522,20 @@ model Contact {
   // when the phone is absent, so we don't drop those inbounds once Meta flips.
   // NULL for every contact today (phone stays the identity). See lib/identity/identity-service.ts.
   bsuid                 String?
+  // The PARENT BSUID ("US.ENT.…") — Meta's cross-portfolio join key for
+  // businesses enrolled in parent BSUIDs. A BSUID is scoped to ONE portfolio,
+  // so a workspace holding several portfolios sees different `bsuid` values
+  // for the same person; the parent id is the one Meta lets every enrolled
+  // portfolio address. Resolved third in the ingest ladder (phone → bsuid →
+  // parentBsuid) and preferred as the send destination on a cross-portfolio
+  // account mismatch.
+  parentBsuid           String?
+  // Which WhatsappPortfolio issued `bsuid`. NULL = unknown/legacy (treated as
+  // compatible — the send-side portfolio guard only fires when BOTH sides are
+  // known and differ). Stamped whenever ingest writes `bsuid`, from the
+  // event's connection → WABA → portfolio chain.
+  bsuidPortfolioId      String?
+  bsuidPortfolio        WhatsappPortfolio? @relation(fields: [bsuidPortfolioId], references: [id], onDelete: SetNull)
   // The customer's public WhatsApp @username, when they've set one (2026). Kept
   // for display + as a softer future match key; NEVER auto-merged on (name/
   // username fuzzy matching is banned — strong keys only).
@@ -1723,6 +1747,7 @@ model Contact {
   // BSUID lookup (forward-compat): resolve a WhatsApp contact by its
   // business-scoped id when a webhook omits the phone. Sparse — NULL today.
   @@index([workspaceId, identityChannel, bsuid])
+  @@index([workspaceId, identityChannel, parentBsuid])
   // Customer → its channel-contacts (the profile's channel switcher loads by
   // customerId); also serves the merge/split re-point.
   @@index([customerId])
@@ -2760,6 +2785,22 @@ model AudienceGroup {
 // sent. We do keep `templateId` for ergonomic linkage in the UI.
 model Broadcast {
   id                    String              @id @default(cuid())
+  /// CAMPAIGN this send belongs to — a free-text label an operator types.
+  ///
+  /// A campaign is usually several broadcasts: one per channel, one per account,
+  /// a re-send to non-openers, a follow-up a week later. Without this, each is an
+  /// island and "how did the spring sale do" cannot be answered at all.
+  ///
+  /// Deliberately a STRING, not a `Campaign` table with a foreign key. A campaign
+  /// here is a reporting grouping, not an entity: it has no lifecycle, no
+  /// permissions, no settings, and nothing else points at it. A table would add a
+  /// create-then-select step to every broadcast for the sole benefit of renaming
+  /// one later — and CLAUDE.md is explicit that an abstraction has to reduce
+  /// complexity, not anticipate it. If a campaign ever grows a budget or an owner,
+  /// THAT is when it earns a table, and this column becomes its backfill.
+  ///
+  /// Null for an ad-hoc send, which stays the common case.
+  campaignName      String?
   workspaceId           String
   // The channel ACCOUNT this campaign sends from. Null = fall back to the
   // channel default (pre-multi-account rows).
@@ -2914,6 +2955,11 @@ model Broadcast {
   // ever run. Created by migration 20260722180000; declared here so it stops
   // reading as schema drift.
   @@index([channelConnectionId])
+  /// "every send in this campaign, newest first" — the only query the column
+  /// adds, and the one the rollup runs. Partial on NOT NULL because the common
+  /// case is an ad-hoc broadcast with no campaign, and indexing those nulls would
+  /// be pure write cost for rows the query never reaches.
+  @@index([workspaceId, campaignName, createdAt(sort: Desc)])
 }
 
 // TENANCY EXCEPTION — no workspaceId by design. Reach these rows ONLY
@@ -2925,6 +2971,35 @@ model BroadcastRecipient {
   id             String                   @id @default(cuid())
   broadcastId    String
   contactId      String
+  /// WHICH ACCOUNT this recipient must be sent from — resolved at MATERIALIZE
+  /// time, not at send time.
+  ///
+  /// On the social channels a customer's id is issued by ONE account and is
+  /// meaningless to any other (Meta: "a unique page-scoped ID for each Facebook
+  /// Page they start a conversation with"; an Instagram IGSID is scoped to the IG
+  /// account the same way). So a campaign that reaches every social customer has
+  /// to route each recipient through the account that issued their id — the
+  /// sending account is a per-RECIPIENT fact, not a campaign-level choice.
+  ///
+  /// It lives on the ROW rather than being resolved during the send because the
+  /// runner's rate gate (`acquireSendToken`) fires in the lane loop BEFORE the
+  /// recipient's conversation is read, and Meta's send ceilings are per Page — a
+  /// bucket keyed on an account nobody has resolved yet would either serialise
+  /// every Page onto one ceiling or overshoot each of them. Stamping it here also
+  /// makes per-account campaign analytics a plain GROUP BY.
+  ///
+  /// NULL means "use the campaign's own account", which is every WhatsApp
+  /// campaign (a phone number is not account-scoped, so which number sends is a
+  /// business choice the composer exposes) and every single-account social run.
+  ///
+  /// Deliberately a plain column with NO foreign key, unlike
+  /// `Message.channelConnectionId`. That one is read through relation filters and
+  /// needs the FK; this one is only ever read as a scalar, and a campaign can hold
+  /// 100k of these rows — an FK would add an index plus a delete-time scan for no
+  /// read benefit (CLAUDE.md §7: index only when a real query needs it). A deleted
+  /// account leaves a stale id here, which is CORRECT for a historical stamp: it
+  /// still records which account the send actually went out from.
+  channelConnectionId String?
   // The unified PERSON this recipient targets (customer-mode only). `contactId`
   // is the channel-contact actually sent to — resolved from the person's best
   // live channel at build time. Null in contact-mode. Soft pointer (no FK).

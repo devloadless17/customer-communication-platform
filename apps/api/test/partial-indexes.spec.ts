@@ -196,6 +196,17 @@ const REQUIRED_PARTIAL_INDEXES: {
       "of the filtered recipient list heap-scans the whole 100k-row campaign",
   },
   {
+    name: "Broadcast_campaign_rollup_idx",
+    unique: false,
+    protects:
+      "the campaign rollup — 'every send in this campaign, newest first'. Partial " +
+      "on `campaignName IS NOT NULL` because an ad-hoc broadcast with no campaign " +
+      "is the common case, so indexing those nulls would be write cost for rows " +
+      "the query never reaches. Prisma's DSL cannot express the WHERE, so the " +
+      "@@index in schema.prisma is only the non-partial approximation and this " +
+      "assertion is the only thing that notices if the real one is dropped",
+  },
+  {
     name: "BroadcastRecipient_clicked_idx",
     unique: false,
     protects:

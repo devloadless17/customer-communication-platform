@@ -53,6 +53,8 @@ interface StoredOptions {
   fireAutomations?: boolean;
   mapping?: Record<string, string>;
   canManageTags?: boolean;
+  /** ISO-2 country for the file's national-format numbers (import only). */
+  defaultCountry?: string;
   scopeIds?: string[];
   filters?: ListContactsOpts;
 }
@@ -214,6 +216,7 @@ async function handleTransfer(jobId: string): Promise<void> {
           fireAutomations: options.fireAutomations ?? true,
           mapping: options.mapping,
           canManageTags: options.canManageTags ?? false,
+          defaultCountry: options.defaultCountry,
         },
         // Resume from what a previous attempt already applied.
         resumeFrom: row.processedRows,

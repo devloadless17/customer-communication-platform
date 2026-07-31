@@ -250,6 +250,17 @@ export const CreateBroadcastSchema = z
     audience: AudienceSchema,
     // Optional operator label (falls back to template name in the UI).
     name: z.string().trim().max(120).optional(),
+    /**
+     * CAMPAIGN this send belongs to — free text, and the key that rolls several
+     * broadcasts into one set of numbers.
+     *
+     * A campaign is usually several sends: one per channel, one per account, a
+     * re-send to non-openers, a follow-up next week. Without it each is an island
+     * and "how did the spring sale do" has no answer. Matched EXACTLY (trimmed),
+     * so the composer should offer existing names rather than leaving an operator
+     * to retype one and silently start a second campaign.
+     */
+    campaignName: z.string().trim().min(1).max(120).optional(),
     // ISO datetime to send later. Omit / null = send now. A past/near-now value
     // is treated as "now" by the service (clamped delay), so no strict future
     // validation here — the UI prevents past picks, the server is tolerant.

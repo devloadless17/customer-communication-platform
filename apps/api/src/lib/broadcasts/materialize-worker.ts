@@ -18,6 +18,7 @@
 // start/stop.
 
 import { Prisma } from "@prisma/client";
+import { resolveRecipientAccounts } from "./resolve-recipient-accounts";
 import { Worker, type Job } from "bullmq";
 import type IORedis from "ioredis";
 
@@ -79,6 +80,9 @@ export async function materializeBroadcast(broadcastId: string): Promise<void> {
     select: {
       id: true,
       workspaceId: true,
+      // Needed to decide whether recipients carry a per-account stamp: only the
+      // social channels have account-scoped ids.
+      channel: true,
       status: true,
       scheduledAt: true,
       materializeRecipients: true,
@@ -179,12 +183,21 @@ export async function materializeBroadcast(broadcastId: string): Promise<void> {
       }
     }
     const slice = staged.slice(i, i + RECIPIENT_CHUNK);
+    // WHICH ACCOUNT each of these recipients must be sent from. Resolved per
+    // chunk in one indexed query — see resolve-recipient-accounts.ts for why it
+    // has to happen here rather than during the send.
+    const accountByContact = await resolveRecipientAccounts(
+      row.workspaceId,
+      row.channel,
+      slice.map((r) => r.contactId),
+    );
     await db.broadcastRecipient.createMany({
       data: slice.map((r, j) => ({
         broadcastId,
         contactId: r.contactId,
         customerId: r.customerId ?? null,
         assignedUserId: plan.perRecipient[i + j] ?? null,
+        channelConnectionId: accountByContact.get(r.contactId) ?? null,
       })),
       skipDuplicates: true,
     });

@@ -160,6 +160,11 @@ export class ContactTransferService {
         fireAutomations: args.options.fireAutomations,
         mapping: args.options.mapping ?? {},
         canManageTags: args.canManageTags,
+        // Persisted on the JOB, not just passed through, so a resumed import
+        // resolves national numbers the same way the first attempt did — a
+        // half-imported file must not end up with two different identities for
+        // the same person.
+        defaultCountry: args.options.defaultCountry,
       },
       expiresAt: expiry(),
     });

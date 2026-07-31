@@ -7,7 +7,9 @@ import {
   Controller,
   Get,
   Headers,
+  HttpException,
   NotFoundException,
+  Param,
   Post,
   Query,
   Res,
@@ -22,6 +24,12 @@ import { randomUUID } from "node:crypto";
 
 import { blobStorage } from "@/lib/blob-storage";
 
+import {
+  replyToCommentPublicly,
+  ReplyToCommentError,
+} from "@/lib/messaging/reply-to-comment";
+import { ReplyToCommentSchema } from "@/external/v1/external-v1.schemas";
+import type { ReplyToCommentInput } from "@/external/v1/external-v1.schemas";
 import { streamBlob } from "../media/stream-blob";
 import { ScopedByConversation } from "../auth/conversation-visibility.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
@@ -265,6 +273,40 @@ export class MessagesController {
    * volume text replies and the ~300ms inline Meta hop is acceptable for
    * the agent's clicked-Send-button latency.
    */
+  /**
+   * Answer a comment PUBLICLY — a sub-thread reply everyone reading the post
+   * sees. The complement to replying in the thread, which sends Instagram's
+   * one-per-comment PRIVATE reply.
+   *
+   * Synchronous, like the other rare agent-initiated actions: this is not a
+   * customer message and paints no optimistic bubble, so there is nothing for a
+   * queue to reconcile.
+   */
+  @Post(":id/comment-reply")
+  async replyToComment(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Body(zBody(ReplyToCommentSchema)) body: ReplyToCommentInput,
+  ) {
+    try {
+      const res = await replyToCommentPublicly({
+        workspaceId: session.workspaceId,
+        messageId: id,
+        body: body.body,
+        userId: session.userId,
+      });
+      return { ok: true, commentId: res.commentId };
+    } catch (err) {
+      if (err instanceof ReplyToCommentError) {
+        throw new HttpException(
+          { error: err.code, ...(err.detail ? { detail: err.detail } : {}) },
+          err.code === "message_not_found" ? 404 : 422,
+        );
+      }
+      throw err;
+    }
+  }
+
   @Post("interactive")
   async sendInteractive(
     @CurrentSession() session: ApiSession,

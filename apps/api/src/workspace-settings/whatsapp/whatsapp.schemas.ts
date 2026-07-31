@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+import {
+  WHATSAPP_USERNAME_MAX,
+  WHATSAPP_USERNAME_MIN,
+} from "@ccp/shared/whatsapp/username";
+
 /**
  * POST /api/workspace/whatsapp — connect / update the team's Meta credentials.
  *
@@ -140,3 +145,27 @@ export const UpdateQrCodeSchema = z.object({
   prefilledMessage: z.string().trim().min(1).max(140),
 });
 export type UpdateQrCodeInput = z.infer<typeof UpdateQrCodeSchema>;
+
+/**
+ * POST /api/workspace/whatsapp/username — adopt or change the number's
+ * @username. Zod enforces only the length envelope; the full rule set
+ * (charset, at-least-one-letter, period placement, `www`) lives in
+ * `checkWhatsappUsername` (@ccp/shared/whatsapp/username), shared with the
+ * UI's live validation so the two can never drift — and Meta stays the final
+ * authority either way.
+ *
+ * `transferAction: "force_transfer"` resolves Meta's 147005 conflict (the
+ * username is already on ANOTHER of the portfolio's numbers) by MOVING it
+ * here. Without it the API answers 409 `username_transfer_required`, so a
+ * caller must ask for the transfer deliberately — the other number silently
+ * loses its handle.
+ */
+export const SetWhatsappUsernameSchema = z.object({
+  username: z
+    .string()
+    .trim()
+    .min(WHATSAPP_USERNAME_MIN)
+    .max(WHATSAPP_USERNAME_MAX),
+  transferAction: z.enum(["none", "force_transfer"]).optional(),
+});
+export type SetWhatsappUsernameInput = z.infer<typeof SetWhatsappUsernameSchema>;

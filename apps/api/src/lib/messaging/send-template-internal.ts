@@ -9,6 +9,10 @@ import { blobStorage } from "@/lib/blob-storage";
 import { db } from "@/lib/db";
 import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
+import {
+  BsuidPortfolioMismatchError,
+  applyBsuidPortfolioGuard,
+} from "@/lib/messaging/bsuid-routing";
 import { getProviderBinding, requireProviderMethod } from "@/lib/providers";
 import {
   NoChannelDestinationError,
@@ -125,6 +129,9 @@ export class SendTemplateValidationError extends Error {
     | "contact_blocked"
     | "provider_not_configured"
     | "auth_template_requires_phone"
+    // The contact's BSUID was issued by a DIFFERENT portfolio than the sending
+    // number's, and no parent BSUID is stored — Meta hard-fails such sends.
+    | "bsuid_portfolio_mismatch"
     | "provider_no_template_support";
   detail?: string;
 
@@ -480,6 +487,19 @@ export async function sendTemplateInternal(
       ? { name: namedHeaderName, text: args.variables.header }
       : undefined;
 
+  // A GIF header (components reference: FORMAT "IMAGE, VIDEO, GIF, or
+  // DOCUMENT") is confined to the Marketing Messages API, which this platform
+  // does not send through — a GIF-header template synced from a shared WABA
+  // would otherwise fall past the media map below and go out with NO header
+  // component, failing at Meta with an unlabelled 400. Same posture as the
+  // commerce guard: name the refusal.
+  if (headerComp?.format === "GIF") {
+    throw new SendTemplateValidationError(
+      "template_feature_unsupported",
+      "gif header not supported",
+      "This template's GIF header can only be sent through Meta's Marketing Messages API, which this platform doesn't use — pick a template with an image or video header.",
+    );
+  }
   // Media-header templates (IMAGE/VIDEO/DOCUMENT) need the actual media for
   // this send, supplied as a public link. Without it Meta rejects the send,
   // so catch it here with an actionable message instead of a cryptic 400.
@@ -639,6 +659,24 @@ export async function sendTemplateInternal(
         "this conversation replies from. Pick a template from this account.",
     );
   }
+  // A BSUID is portfolio-scoped: a cross-portfolio send hard-fails at Meta.
+  // Retarget to the parent BSUID when stored; refuse with the reason when not.
+  try {
+    channel = await applyBsuidPortfolioGuard(
+      channel,
+      conversation.contact,
+      sendConfig as { wabaAccountId?: string },
+    );
+  } catch (err) {
+    if (err instanceof BsuidPortfolioMismatchError) {
+      throw new SendTemplateValidationError(
+        "bsuid_portfolio_mismatch",
+        "bsuid belongs to a different portfolio",
+        err.message,
+      );
+    }
+    throw err;
+  }
 
   // Templates are a provider capability — channels without a template catalog
   // (SMS, Telegram) raise a typed error here.
@@ -658,6 +696,7 @@ export async function sendTemplateInternal(
   const send = await sendTemplate(
     {
       to: channel.to,
+      ...(channel.viaBsuid ? { viaBsuid: true } : {}),
       name: template.name,
       language: template.language,
       variables: {

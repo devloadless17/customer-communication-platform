@@ -282,6 +282,20 @@ export default function ApiDocsPage() {
         <Endpoint method="GET" path="/api/external/v1/contacts/:id/channels">
           List a contact's channels (today: one WhatsApp row per contact).
         </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/contacts/:id/acquisition">
+          Where this customer came from — the Click-to-WhatsApp / Click-to-
+          Messenger ad, the post, the Instagram Shop product, or the{" "}
+          <code>m.me</code> deep link that first brought them in. Read from their
+          earliest attributed inbound message, so it stays stable however many
+          campaigns they are in afterwards. Returns{" "}
+          <code>{"{ acquisition: null }"}</code> when the contact arrived
+          directly — never a 404, so &ldquo;arrived organically&rdquo; and
+          &ldquo;no such contact&rdquo; stay distinguishable. The payload carries
+          whatever Meta sent: <code>source</code>, <code>adId</code>,{" "}
+          <code>postId</code>, <code>productId</code>, <code>ref</code>,{" "}
+          <code>headline</code>, <code>sourceUrl</code>, <code>imageUrl</code>,
+          and <code>at</code> (when they arrived).
+        </Endpoint>
         <Endpoint method="POST" path="/api/external/v1/contacts/:id/block">
           Block the contact at the provider — WhatsApp&apos;s Block Users API, or
           Instagram&apos;s Moderate Conversations API — so they can no longer
@@ -445,6 +459,28 @@ export default function ApiDocsPage() {
           <code>Idempotency-Key</code> like every other send. Scope{" "}
           <code>write:messages</code>.
         </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/channels/messenger/broadcast-reach">
+          Who a Messenger template campaign can actually reach, broken down{" "}
+          <strong>by Page</strong>. Optional <code>?template_name=</code> also
+          reports which Pages have that template approved.
+          <br />
+          <br />
+          This exists because of a hard Meta constraint: <em>&quot;A person is
+          assigned a unique page-scoped ID (PSID) for each Facebook Page they
+          start a conversation with.&quot;</em> A PSID belongs to{" "}
+          <strong>one Page</strong> — Page B cannot address someone who messaged
+          Page A, and Meta has no cross-Page identity for a person. So a
+          campaign&apos;s sending account is a <strong>per-recipient</strong>
+          fact, not a campaign-level choice, and reach has to be reported per
+          Page. A utility template is likewise <strong>Page-owned</strong>: one
+          approved on Page A does not exist on Page B and its name fails there
+          per recipient, which is why <code>hasTemplate</code> is reported for
+          each. <code>hasTemplate: null</code> means that Page&apos;s library
+          couldn&apos;t be read — <strong>not</strong> that the template is
+          missing — and those recipients count as reachable rather than blocked,
+          so a transient Graph blip can&apos;t silently truncate a campaign.
+          Scope <code>read:catalog</code>.
+        </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/channels/messenger/personas">
           The Page&apos;s <strong>personas</strong> — the named voices a reply can
           be sent under, so a thread reads as &quot;Adam from Jasper&apos;s
@@ -496,7 +532,8 @@ export default function ApiDocsPage() {
           outbound message: it has no recipient and does not consume the messaging
           window. <code>422 not_a_comment</code> if the message isn&apos;t a
           comment, <code>422 public_reply_not_supported</code> on other channels.
-          Scope <code>write:messages</code>.
+          Scope <code>write:messages</code>; full parity with the inbox&apos;s
+          &ldquo;Reply publicly&rdquo; action on a comment bubble.
         </Endpoint>
         <Endpoint method="POST" path="/api/external/v1/contacts/:id/spam">
           File this contact&apos;s conversation as <strong>spam</strong> at the
@@ -577,6 +614,7 @@ export default function ApiDocsPage() {
             mode: "create_and_update",
             tagMode: "merge",
             fireAutomations: true,
+            defaultCountry: "LB",
             mapping: { Mobile: "phone_number", "Company Name": "field:company" },
           }}
         >
@@ -587,6 +625,21 @@ export default function ApiDocsPage() {
           Above 5,000 rows <code>fireAutomations</code> is forced off (a 100k
           import would otherwise queue 100k workflow runs). Idempotency-Key
           required. 5/min.
+          <br />
+          <br />
+          <strong>Phone numbers.</strong> Stored digits-only, matching
+          Meta&apos;s <code>wa_id</code> wire format, so an imported contact and
+          the same person&apos;s inbound message are one identity. The{" "}
+          <code>00</code> international call prefix is stripped
+          (<code>009613123456</code> → <code>9613123456</code>).{" "}
+          <code>defaultCountry</code> (ISO-2) resolves rows stored in{" "}
+          <em>national</em> format — <code>03123456</code> with{" "}
+          <code>&quot;LB&quot;</code> becomes <code>9613123456</code>. A number
+          that already carries its own country code is never overridden, so a
+          mixed file is resolved row by row. A national-format number with no{" "}
+          <code>defaultCountry</code> is <strong>rejected per row</strong> rather
+          than stored: a leading zero is never valid in E.164, so it could only
+          ever fail later at send time.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/contacts/transfers/:id">
           Job status and counters — <code>status</code>, <code>processedRows</code>,{" "}
@@ -828,6 +881,51 @@ export default function ApiDocsPage() {
           figures at all (no phone number connected yet, credentials
           unreadable, Meta returned nothing). Scope: <code>read:reports</code>.
         </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/reports/acquisition">
+          Where customers came from, aggregated: one row per ad, post or deep
+          link, counted by distinct <strong>contact</strong> keyed on their first
+          attributed inbound (Meta sends <code>referral</code> only on the
+          message that starts a conversation, so counting messages would answer
+          a different question). Optional <code>?from=</code>/<code>?to=</code>{" "}
+          (ISO instants; omit for all time) and{" "}
+          <code>?channel=whatsapp|messenger|instagram</code>.
+          <br />
+          <br />
+          <code>organic</code> — contacts whose first inbound carried no
+          attribution at all — is returned <strong>separately</strong> rather
+          than as a row: it is the absence of a source, and folding it in would
+          let it sort above every real campaign. Scope:{" "}
+          <code>read:reports</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/reports/campaigns">
+          Every campaign name in the workspace, newest activity first, with its
+          send count. A campaign is the <code>campaignName</code> set on one or
+          more broadcasts — the name is the join key, so two spellings are two
+          campaigns. Scope: <code>read:reports</code>.
+        </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/reports/campaigns/:name">
+          One campaign&apos;s rollup — several broadcasts read as one set of
+          numbers. Carries the campaign funnel (<code>targeted</code>,{" "}
+          <code>reached</code>, <code>read</code>, <code>failed</code>,{" "}
+          <code>replied</code>, <code>clicked</code>, <code>optedOut</code>,{" "}
+          <code>contactsReached</code>) plus five cuts of the same recipient
+          rows: <code>broadcasts[]</code> (each send with its own funnel),{" "}
+          <code>accounts[]</code> (which number / Page / Instagram account each
+          recipient was reached from), <code>failures[]</code> (Meta&apos;s
+          reason, with the raw <code>metaCode</code> and an actionable{" "}
+          <code>bucket</code>), <code>cost[]</code> (Meta&apos;s pricing
+          category and type — counts only, never an amount) and{" "}
+          <code>sources[]</code> (where the reached people were originally
+          acquired).
+          <br />
+          <br />
+          Rates are computed once from summed counts, never by averaging
+          per-send rates — a 100%-delivered send of 3 and a 50%-delivered send
+          of 10,000 do not average to 75%. <code>contactsReached</code> counts
+          distinct people, because a re-send to non-openers legitimately targets
+          the same person twice. 404 <code>campaign_not_found</code> when no
+          broadcast carries that name. Scope: <code>read:reports</code>.
+        </Endpoint>
       </Section>
 
       <Section title="Calls">
@@ -1031,6 +1129,33 @@ export default function ApiDocsPage() {
           change it in WhatsApp Manager. The response is read back from Meta, not
           echoed.
         </Endpoint>
+        <Endpoint method="GET" path="/api/external/v1/whatsapp/username">
+          The number&apos;s WhatsApp <code>@username</code> — a chat-native
+          handle, 1:1 with the phone number and globally unique across WhatsApp
+          (adopting one does <em>not</em> hide the number) — plus Meta&apos;s
+          reserved <code>suggestions</code>. Reads <code>read:catalog</code>;
+          the writes below need <code>admin:settings</code>.{" "}
+          <code>?accountId=</code> picks one of the workspace&apos;s numbers.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/whatsapp/username"
+          body={{ username: "my.business" }}
+        >
+          Adopt or change it. 3–35 characters from <code>a-z 0-9 . _</code>{" "}
+          (normalized to lowercase), at least one letter, no leading/trailing or
+          consecutive periods, and it can&apos;t start with{" "}
+          <code>www</code> — <code>.</code> and <code>_</code> are distinct
+          (<code>my.id</code> ≠ <code>my_id</code>). A{" "}
+          <strong>409 <code>username_transfer_required</code></strong> means the
+          name is already on another of the portfolio&apos;s numbers; re-send
+          with <code>{`{ transferAction: "force_transfer" }`}</code> to move it
+          here — the other number loses it.
+        </Endpoint>
+        <Endpoint method="DELETE" path="/api/external/v1/whatsapp/username">
+          Remove it. Customers who saved the <code>@handle</code> lose that
+          route to the chat; the phone number keeps working.
+        </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/templates">
           The WhatsApp template catalog — the <code>id</code> the send and
           analytics routes take, Meta&apos;s <code>externalId</code>, the{" "}
@@ -1226,6 +1351,14 @@ export default function ApiDocsPage() {
           Read needs <code>read:catalog</code>, writes need{" "}
           <code>admin:settings</code> — routing rules are admin authority, same as in the app.
         </p>
+        <Endpoint method="GET" path="/api/external/v1/assignment-policies">
+          The policy catalog on its own —{" "}
+          <code>{`[{ id, name, isDefault, strategy }]`}</code>. This is where a{" "}
+          <code>assignedTeamId</code> comes from when handing a ticket to
+          another team (<code>PATCH /v1/tickets/:id</code>). Lighter than{" "}
+          <code>GET /assignment</code>, which also returns rules, settings and
+          the member roster. Scope: <code>read:catalog</code>.
+        </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/assignment">
           Everything at once: <code>{`{ policies, rules, settings, members }`}</code>.
           Each member carries their live <code>openCount</code> — the number a
@@ -1368,7 +1501,15 @@ export default function ApiDocsPage() {
           <code>kind: &quot;location_request&quot;</code> sends the body with a
           native <strong>Send location</strong> button (no <code>options</code>{" "}
           — WhatsApp renders it); the customer&apos;s pick arrives as a normal
-          inbound location message on the thread. <code>kind: &quot;cta_url&quot;</code>{" "}
+          inbound location message on the thread. Likewise on WhatsApp,{" "}
+          <code>kind: &quot;request_contact_info&quot;</code> sends the body with
+          WhatsApp&apos;s own <strong>share contact info</strong> button (no{" "}
+          <code>options</code>; the label is fixed by WhatsApp) — the
+          customer&apos;s reply arrives as a normal inbound contact card, the
+          one proactive way to get a phone number onto a thread WhatsApp
+          identifies only by a BSUID; other channels return{" "}
+          <code>422 request_contact_info_not_supported</code>.{" "}
+          <code>kind: &quot;cta_url&quot;</code>{" "}
           renders one URL-opening button instead of a raw link in the body — pass{" "}
           <code>{`ctaUrl: { displayText (≤20), url, headerText? (≤60), footerText? (≤60) }`}</code>{" "}
           and no <code>options</code>. It works on WhatsApp (interactive{" "}
@@ -1839,10 +1980,15 @@ export default function ApiDocsPage() {
             templateId: "tpl_123",
             audience: { audienceGroupId: "aud_456" },
             variables: { "1": "{{contact.firstName}}" },
+            campaignName: "Autumn sale",
           }}
         >
           <strong>Launch a campaign</strong>, or schedule one by passing{" "}
-          <code>scheduledAt</code>. Build the audience with the audience-group routes
+          <code>scheduledAt</code>. <code>campaignName</code> groups this send
+          with every other broadcast carrying the same name — the rollup at{" "}
+          <code>GET /v1/reports/campaigns/:name</code> reads them as one set of
+          numbers, so a re-send and a follow-up should reuse the name exactly
+          (it is matched trimmed-exact; a second spelling is a second campaign). Build the audience with the audience-group routes
           above, and call <code>preview-missing</code> first so you find out about empty
           variables now rather than from the failure report. <code>variables</code>{" "}
           accepts the same campaign-level extras as the single-message send —
@@ -1868,6 +2014,13 @@ export default function ApiDocsPage() {
           <strong>Stop a running or scheduled campaign.</strong> Recipients Meta has
           already accepted stay sent — a message cannot be unsent. Scope{" "}
           <code>write:broadcasts</code>.
+        </Endpoint>
+        <Endpoint method="POST" path="/api/external/v1/broadcasts/:id/resume">
+          <strong>Resume a paused campaign.</strong> The only way to lift an{" "}
+          <code>abuse_warning</code> pause — automatic recovery deliberately skips
+          those, so an explicit resume after reviewing what was being sent is the
+          human check Meta&apos;s warning asks for. <code>409 broadcast_not_paused</code>{" "}
+          otherwise. Scope <code>write:broadcasts</code>.
         </Endpoint>
         <Endpoint
           method="POST"

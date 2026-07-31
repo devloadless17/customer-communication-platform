@@ -20,6 +20,12 @@ import {
 } from "@/lib/messages/idempotent-create";
 import { ingestCallEvent } from "@/lib/providers/ingest-call";
 import { reconcileCanonicalWaId } from "@/lib/identity/canonical-wa-id";
+import {
+  applyContactRequestPhone,
+  backfillBsuidFromStatus,
+  reconcileBsuidFork,
+  resolveConnectionPortfolioId,
+} from "@/lib/identity/bsuid-reconcile";
 import { syncTemplateCatalog } from "@/lib/templates/catalog-sync";
 import { resumeOnReopen } from "@/lib/ai/conversation-state";
 import { routeMessageToTicket } from "@/lib/tickets/mutations";
@@ -324,6 +330,9 @@ export async function ingestEvents(
           channelConnectionId;
         await persistWhatsappHealth(workspaceId, {
           ...(evt.messagingTier !== undefined ? { messagingTier: evt.messagingTier } : {}),
+          ...(evt.maxPhoneNumbers !== undefined
+            ? { maxPhoneNumbers: evt.maxPhoneNumbers }
+            : {}),
           ...(evt.qualityRating !== undefined ? { qualityRating: evt.qualityRating } : {}),
           ...(evt.callingRestrictedUntil !== undefined
             ? {
@@ -1011,10 +1020,18 @@ async function ingestStatusUpdate(
       // extra lookup and no index on the wamid. Null for every ordinary send,
       // which is what makes the propagation free for non-broadcast traffic.
       broadcastId: true,
-      // contact.phoneNumber rides the same read so the canonical-wa_id
-      // mismatch check below costs nothing on the (overwhelming) match case.
+      // The SENDING account — the portfolio-stamp source for the BSUID
+      // backfill below (a status's recipient_user_id was issued by the
+      // portfolio of the number the send went out on).
+      channelConnectionId: true,
+      // contact.phoneNumber + bsuid ride the same read so the canonical-wa_id
+      // and BSUID mismatch checks below cost nothing on the (overwhelming)
+      // match cases.
       conversation: {
-        select: { contactId: true, contact: { select: { phoneNumber: true } } },
+        select: {
+          contactId: true,
+          contact: { select: { phoneNumber: true, bsuid: true, parentBsuid: true } },
+        },
       },
     },
   });
@@ -1059,6 +1076,30 @@ async function ingestStatusUpdate(
       evt.recipientId,
     ).catch((err) => {
       console.error("[ingest] canonical wa_id reconcile failed", err);
+    });
+  }
+
+  // BSUID capture from the delivery receipt: `recipient_user_id` arrives on
+  // EVERY status once the rollout reaches the account — even plain phone sends
+  // — making this the highest-value backfill point: every outbound teaches an
+  // active thread its BSUID BEFORE the 30-day wa_id overlap window can close
+  // (outside it a returning customer looks brand-new and forks a duplicate
+  // thread). The equality gate is free (bsuid rides the select above); the
+  // skipped case also covers a satellite already-filled row via the
+  // parentBsuid check. Fire-and-forget like the wa_id reconcile — an identity
+  // enrichment must never cost us a delivery receipt.
+  if (
+    channel === "whatsapp" &&
+    evt.recipientBsuid &&
+    (existing.conversation.contact.bsuid !== evt.recipientBsuid ||
+      (!existing.conversation.contact.parentBsuid && !!evt.recipientParentBsuid))
+  ) {
+    void backfillBsuidFromStatus(workspaceId, existing.conversation.contactId, {
+      bsuid: evt.recipientBsuid,
+      parentBsuid: evt.recipientParentBsuid ?? null,
+      sendingConnectionId: existing.channelConnectionId,
+    }).catch((err) => {
+      console.error("[ingest] bsuid status backfill failed", err);
     });
   }
 
@@ -1972,6 +2013,16 @@ async function ingestInboundMessage(
   // keep whatever stage they're already in.
   const defaultStageId = await ensureDefaultStage(workspaceId);
 
+  // Which portfolio issued the event's BSUID (connection → WABA → portfolio).
+  // Resolved OUTSIDE the Serializable tx below — it's cached, read-only config,
+  // and a `db`-pool read from inside the tx callback would silently escape the
+  // isolation level anyway. Null when any link in the chain is unknown: the
+  // portfolio stamp is then simply omitted, never guessed.
+  const eventBsuidPortfolioId =
+    isPhoneChannel(channel) && evt.bsuid && channelConnectionId
+      ? await resolveConnectionPortfolioId(workspaceId, channelConnectionId)
+      : null;
+
   // Contact + conversation resolution must be transactional. Without a tx,
   // two simultaneous first-time inbounds from the same brand-new phone both
   // see `findFirst({ status: { not: "closed" } }) === null` and both
@@ -2044,6 +2095,10 @@ async function ingestInboundMessage(
         deletedAt: true,
         phoneNumber: true,
         bsuid: true,
+        parentBsuid: true,
+        // Drives the profile-country fill for phone-less contacts below —
+        // a phone-derived country must always win over it.
+        countryCode: true,
         username: true,
         // Needed to decide whether the stored name is a real one or just the
         // identity fallback — see the name backfill below.
@@ -2055,6 +2110,8 @@ async function ingestInboundMessage(
         deletedAt: Date | null;
         phoneNumber: string | null;
         bsuid: string | null;
+        parentBsuid: string | null;
+        countryCode: string | null;
         username: string | null;
       } | null = null;
       if (isPhone) {
@@ -2076,6 +2133,18 @@ async function ingestInboundMessage(
         if (!existingContact && evt.bsuid) {
           existingContact = await tx.contact.findFirst({
             where: { workspaceId, identityChannel: channel, bsuid: evt.bsuid },
+            select: contactIdentitySelect,
+          });
+        }
+        // Third rung: the PARENT BSUID, the cross-portfolio key. A BSUID is
+        // portfolio-scoped, so the same person messaging a number under a
+        // DIFFERENT portfolio of this workspace arrives with a bsuid we've
+        // never stored — but (when the business is enrolled) the same parent
+        // id. Only consulted when phone AND bsuid both miss; the backfill
+        // below then fills the child bsuid the row is missing.
+        if (!existingContact && evt.parentBsuid) {
+          existingContact = await tx.contact.findFirst({
+            where: { workspaceId, identityChannel: channel, parentBsuid: evt.parentBsuid },
             select: contactIdentitySelect,
           });
         }
@@ -2118,6 +2187,8 @@ async function ingestInboundMessage(
           phoneNumber?: string;
           countryCode?: string | null;
           bsuid?: string;
+          bsuidPortfolioId?: string;
+          parentBsuid?: string;
           username?: string;
         } = {};
         if (isPhone) {
@@ -2125,7 +2196,29 @@ async function ingestInboundMessage(
             identityBackfill.phoneNumber = evt.contactPhone;
             identityBackfill.countryCode = getCountryFromPhone(evt.contactPhone);
           }
-          if (evt.bsuid && !existingContact.bsuid) identityBackfill.bsuid = evt.bsuid;
+          if (evt.bsuid && !existingContact.bsuid) {
+            identityBackfill.bsuid = evt.bsuid;
+            // Every bsuid write carries its issuing portfolio (when the
+            // connection → WABA → portfolio chain is known) — the stamp is what
+            // lets the status-path regeneration check tell "same portfolio,
+            // new id" apart from "sibling portfolio's id for the same person".
+            if (eventBsuidPortfolioId) identityBackfill.bsuidPortfolioId = eventBsuidPortfolioId;
+          }
+          if (evt.parentBsuid && !existingContact.parentBsuid) {
+            identityBackfill.parentBsuid = evt.parentBsuid;
+          }
+          // Profile-asserted country (`contacts[].profile.country_code`) for a
+          // contact with NO phone and none arriving — a phone-derived country
+          // always wins over it, so a phone-carrying event never reaches here
+          // and a stored value is never overwritten.
+          if (
+            evt.countryCode &&
+            !evt.contactPhone &&
+            !existingContact.phoneNumber &&
+            !existingContact.countryCode
+          ) {
+            identityBackfill.countryCode = evt.countryCode;
+          }
           if (evt.username && !existingContact.username) identityBackfill.username = evt.username;
         }
         // NAME backfill — the same fill-a-NULL discipline as the identity keys
@@ -2199,8 +2292,12 @@ async function ingestInboundMessage(
             // leave phone/country null.
             phoneNumber: isPhone ? evt.contactPhone ?? null : null,
             externalContactId: isPhone ? null : evt.externalContactId,
-            // BSUID forward-compat (phone channels only, null today).
+            // BSUID identity (phone channels only). The portfolio stamp rides
+            // every bsuid write — null when the connection → WABA → portfolio
+            // chain is unknown, never guessed.
             bsuid: isPhone ? evt.bsuid ?? null : null,
+            parentBsuid: isPhone ? evt.parentBsuid ?? null : null,
+            bsuidPortfolioId: isPhone && evt.bsuid ? eventBsuidPortfolioId : null,
             username: isPhone ? evt.username ?? null : null,
             name: evt.contactName ?? identityLabel,
             // Populate the new webhook-facing fields on create. Splitting the
@@ -2209,10 +2306,14 @@ async function ingestInboundMessage(
             // same shape so webhook receivers don't see partial rows.
             firstName,
             lastName,
-            // A BSUID-only inbound (cold contact, Meta omits wa_id) carries no
-            // phone to derive a country from — don't assert one into existence.
-            countryCode:
-              isPhone && evt.contactPhone ? getCountryFromPhone(evt.contactPhone) : null,
+            // Phone-derived country wins; a BSUID-only inbound (cold contact,
+            // Meta omits wa_id) falls back to the profile's self-reported
+            // `country_code` — display-grade only, never an identity key.
+            countryCode: isPhone
+              ? evt.contactPhone
+                ? getCountryFromPhone(evt.contactPhone)
+                : evt.countryCode ?? null
+              : null,
             stageId: defaultStageId,
             // Unified Customer (§6): resolve which person this contact belongs to
             // through the single identity authority. On a deterministic strong
@@ -2732,6 +2833,49 @@ async function ingestInboundMessage(
         );
       } catch (err) {
         console.error("[ingest][contact_share]", { contactId: txResult.contactId, err });
+      }
+    }
+
+    // Post-commit: cold-fork reconcile. A webhook carrying BOTH phone and
+    // BSUID is the ONLY join opportunity Meta grants (the 30-day overlap
+    // window); the phone lookup above won, but a bare-BSUID inbound outside
+    // that window may have already forked this person into a second contact
+    // holding the BSUID. One indexed read decides; the reconcile itself only
+    // runs on a real fork. Fire-and-forget exactly like reconcileCanonicalWaId
+    // — an identity repair must never cost us the message.
+    if (txResult && isPhoneChannel(channel) && evt.contactPhone && evt.bsuid) {
+      void reconcileBsuidFork(workspaceId, channel, txResult.contactId, {
+        bsuid: evt.bsuid,
+        parentBsuid: evt.parentBsuid ?? null,
+        channelConnectionId: channelConnectionId ?? null,
+      }).catch((err) => {
+        console.error("[ingest] bsuid fork reconcile failed", err);
+      });
+    }
+
+    // Post-commit: the customer answered our REQUEST_CONTACT_INFO button by
+    // sharing THEIR OWN number, Meta-resolved to a wa_id — the same trust
+    // level as the contact-share chip above, so it may fill a NULL phone and
+    // drive strong-key Customer adoption. Forwarded vCards (origin "other" /
+    // absent) are display-only and never reach this path.
+    if (txResult && evt.structured?.kind === "contacts") {
+      const requestCardWaId = evt.structured.contacts.find(
+        (c) => c.origin === "contact_request" && c.waIds?.[0],
+      )?.waIds?.[0];
+      if (requestCardWaId) {
+        try {
+          await applyContactRequestPhone(
+            workspaceId,
+            channel,
+            txResult.contactId,
+            requestCardWaId,
+          );
+        } catch (err) {
+          console.error("[ingest][contact_request_phone]", {
+            contactId: txResult.contactId,
+            err,
+          });
+        }
       }
     }
 
@@ -3289,6 +3433,13 @@ async function ingestContactSync(
  * thread continues instead of forking. If a contact already exists under the new
  * number, leaves both for a manual merge rather than violating the phone unique
  * key. Best-effort — a system webhook must never throw into the ingest pipeline.
+ *
+ * The BSUID trio is CLEARED on the re-point: Meta regenerates BSUIDs when the
+ * user changes number, so the stored id now names nobody — keeping it would
+ * mis-resolve the next cold inbound. The fill-a-NULL backfill heals the trio
+ * from the person's next webhook. Known limitation: a BSUID-only contact (no
+ * stored phone) can't be matched by this system message at all — its old BSUID
+ * dies with the number and the person's next inbound arrives as a stranger.
  */
 async function ingestContactNumberChange(
   workspaceId: string,
@@ -3320,7 +3471,14 @@ async function ingestContactNumberChange(
   const updated = await db.contact
     .update({
       where: { id: oldContact.id },
-      data: { phoneNumber: evt.newPhone },
+      // The BSUID trio goes with the old number — Meta regenerates BSUIDs on a
+      // number change, so the stored id is dead (see the docblock).
+      data: {
+        phoneNumber: evt.newPhone,
+        bsuid: null,
+        parentBsuid: null,
+        bsuidPortfolioId: null,
+      },
       include: { tags: { select: { id: true } } },
     })
     .catch((err) => {

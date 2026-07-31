@@ -50,3 +50,17 @@ export const WabaAnalyticsQuerySchema = z
   })
   .strict();
 export type WabaAnalyticsQueryInput = z.infer<typeof WabaAnalyticsQuerySchema>;
+
+/**
+ * GET /api/reports/acquisition — where customers came from.
+ *
+ * All three filters optional: no window means all time, which is the right
+ * default for "which ad has ever worked for us". `channel` narrows to one
+ * messaging channel when a business runs ads on several.
+ */
+export const AcquisitionQuerySchema = z.object({
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional(),
+  channel: z.enum(["whatsapp", "messenger", "instagram"]).optional(),
+});
+export type AcquisitionQuery = z.infer<typeof AcquisitionQuerySchema>;

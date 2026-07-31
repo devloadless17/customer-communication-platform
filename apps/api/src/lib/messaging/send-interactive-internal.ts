@@ -53,12 +53,14 @@ export interface SendInteractiveInternalArgs {
     | "list"
     | "voice_call"
     | "location_request"
+    | "request_contact_info"
     | "cta_url"
     | "carousel"
     | "generic"
     | "product";
-  /** Empty for `voice_call` / `location_request` / `cta_url` — those render a
-   *  single vendor-drawn CTA instead of authored options. */
+  /** Empty for `voice_call` / `location_request` / `request_contact_info` /
+   *  `cta_url` — those render a single vendor-drawn CTA instead of authored
+   *  options. */
   options: InteractiveOption[];
   /** `cta_url` only — button label + URL (+ optional text header/footer).
    *  Shape documented on SendInteractiveArgs. */
@@ -130,6 +132,11 @@ export async function sendInteractiveInternal(
           phoneNumber: true,
           identityChannel: true,
           externalContactId: true,
+          // BSUID-only threads (Meta omitted the phone) are exactly who a
+          // `request_contact_info` send is FOR — resolveContactChannel falls
+          // back to the BSUID when the phone is absent, and interactive
+          // messages are among the types a BSUID address can receive.
+          bsuid: true,
           lastInboundAt: true,
           blockedAt: true,
         },
@@ -247,6 +254,21 @@ export async function sendInteractiveInternal(
     );
   }
 
+  // Contact-info requests are likewise WhatsApp's interactive type
+  // ("request_contact_info" — the one proactive remedy for a BSUID-only
+  // thread, since the reply's contact card carries the customer's phone).
+  // Same capability-not-channel-name rule.
+  if (
+    args.kind === "request_contact_info" &&
+    !binding.provider.capabilities.requestContactInfo
+  ) {
+    throw new SendTextValidationError(
+      "provider_not_configured",
+      "request_contact_info_not_supported",
+      `${channel.channel} cannot request a contact's contact info`,
+    );
+  }
+
   // Same rule for the URL button ("cta_url") — capability, never a channel name:
   // WhatsApp sends `interactive.type:"cta_url"`, Instagram sends the equivalent
   // BUTTON TEMPLATE, and a channel with neither is refused here.
@@ -326,6 +348,7 @@ export async function sendInteractiveInternal(
   const send = await sendInteractive(
     {
       to: channel.to,
+      ...(channel.viaBsuid ? { viaBsuid: true } : {}),
       bodyText,
       kind: args.kind,
       options: args.options,

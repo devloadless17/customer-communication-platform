@@ -20,6 +20,7 @@ import {
 } from "@/lib/broadcast-runner";
 import { decryptSecret, encryptSecret } from "@/lib/crypto/envelope";
 import { getMetaProvider } from "@/lib/providers";
+import { getRedisConnection } from "@/lib/workflows/queue";
 import {
   getMetaSendConfig,
   invalidateProviderConfig,
@@ -65,6 +66,7 @@ import {
   validateTemplateComponents,
   validateTemplateTtl,
 } from "@ccp/shared/template-render";
+import { checkWhatsappUsername } from "@ccp/shared/whatsapp/username";
 import { syncTemplateCatalog } from "@/lib/templates/catalog-sync";
 import { assertChannelDisconnectConfirmed } from "@/lib/providers/assert-channel-disconnect";
 
@@ -76,6 +78,7 @@ import type {
   UpdateBusinessProfileInput,
   CreateQrCodeInput,
   UpdateQrCodeInput,
+  SetWhatsappUsernameInput,
 } from "./whatsapp.schemas";
 
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v26.0";
@@ -1159,6 +1162,30 @@ export class WhatsappService {
       config = await getMetaSendConfig(workspaceId, input.accountId);
     } catch {
       throw new BadRequestException({ error: "account_not_connected" });
+    }
+    // Meta budgets registration at 10 requests PER BUSINESS NUMBER in a 72h
+    // moving window; the 11th locks the number out of registration for up to
+    // 72h (registration guide). The per-user @RateLimit on the route cannot
+    // see that budget — an admin re-trying a wrong PIN at 3/min exhausts it in
+    // under four minutes. Count attempts per number in Redis (approximate
+    // fixed window — stricter than Meta's moving window is fine, looser is
+    // not) and refuse the 10th-plus with the real remedy. Fail-open on a
+    // Redis outage: registration is rare and Meta enforces the true limit.
+    try {
+      const redis = getRedisConnection();
+      const key = `wa-register-attempts:${config.phoneNumberId}`;
+      const attempts = await redis.incr(key);
+      if (attempts === 1) await redis.expire(key, 72 * 3600);
+      if (attempts > 9) {
+        throw new BadRequestException({
+          error: "register_attempts_exhausted",
+          detail:
+            "Meta allows 10 registration attempts per number in 72 hours, and the next one would lock this number out of registration for up to 72 hours. Double-check the two-step PIN in WhatsApp Manager before trying again later.",
+        });
+      }
+    } catch (err) {
+      if (err instanceof BadRequestException) throw err;
+      // Redis unavailable — proceed; Meta enforces the real budget.
     }
     let res: Response;
     try {
@@ -2565,6 +2592,161 @@ export class WhatsappService {
     }
   }
 
+  // ==========================================================================
+  // Username — the number's chat-native @handle
+  //
+  // 1:1 with the business phone number, globally unique across WhatsApp, and
+  // adopting one does NOT hide the number. Like the business profile, every
+  // read is LIVE from Graph (Meta is the authority); the stored
+  // `ChannelConnection.businessUsername` is a cache re-synced opportunistically
+  // on each read here and by the `business_username_updates` webhook.
+  // ==========================================================================
+
+  /** Current username + Meta's reserved suggestions, for the settings panel. */
+  async getUsernameState(
+    workspaceId: string,
+    accountId?: string,
+  ): Promise<{ username: string | null; suggestions: string[] }> {
+    const config = await this.requireSendConfig(workspaceId, accountId);
+    const provider = getMetaProvider();
+    if (!provider.getUsername) {
+      throw new HttpException({ error: "provider_does_not_support_usernames" }, 501);
+    }
+    let username: string | null;
+    try {
+      username = (await provider.getUsername(config)).username;
+    } catch (err) {
+      this.throwIfMetaSendError(err);
+      this.logger.error("username read failed", err);
+      throw new BadGatewayException({
+        error: "username_read_failed",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+    // Suggestions are decoration on this panel — a failure (permission quirk,
+    // endpoint not yet rolled out to this number) must not blank the current
+    // username the operator came to see.
+    let suggestions: string[] = [];
+    if (provider.getUsernameSuggestions) {
+      try {
+        suggestions = await provider.getUsernameSuggestions(config);
+      } catch (err) {
+        this.logger.warn(
+          `username suggestions read failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    await this.persistUsername(workspaceId, config.phoneNumberId, username);
+    return { username, suggestions };
+  }
+
+  /**
+   * Adopt or change the number's username.
+   *
+   * Meta's 147005 ("Username transfer required" — the name is already on
+   * ANOTHER of this portfolio's numbers) surfaces as a structured 409 so the
+   * UI can offer the force-transfer confirm instead of a dead-end error; a
+   * re-send with `transferAction: "force_transfer"` moves the handle here.
+   */
+  async setUsername(
+    workspaceId: string,
+    input: SetWhatsappUsernameInput,
+    accountId?: string,
+  ): Promise<{ username: string; warnings: string[] }> {
+    // Full rule check (the Zod schema only bounds length) — one shared
+    // definition with the UI's live validation. Meta remains the final
+    // authority; anything it rejects beyond these rules surfaces via
+    // meta_rejected_request below.
+    const check = checkWhatsappUsername(input.username);
+    if (!check.ok) {
+      throw new BadRequestException({
+        error: "invalid_username",
+        detail: check.errors.join(" "),
+      });
+    }
+    const config = await this.requireSendConfig(workspaceId, accountId);
+    const provider = getMetaProvider();
+    if (!provider.setUsername) {
+      throw new HttpException({ error: "provider_does_not_support_usernames" }, 501);
+    }
+    try {
+      await provider.setUsername(
+        {
+          username: check.normalized,
+          ...(input.transferAction ? { transferAction: input.transferAction } : {}),
+        },
+        config,
+      );
+    } catch (err) {
+      if (isUsernameTransferConflict(err)) {
+        throw new ConflictException({
+          error: "username_transfer_required",
+          detail:
+            "This username already belongs to another phone number in the same " +
+            'business portfolio. Re-send with transferAction "force_transfer" to ' +
+            "move it to this number — the other number loses it.",
+        });
+      }
+      this.throwIfMetaSendError(err);
+      this.logger.error("username update failed", err);
+      throw new BadGatewayException({
+        error: "username_update_failed",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+    // Mirror locally only AFTER Meta accepted — same posture as link tracking.
+    await this.persistUsername(workspaceId, config.phoneNumberId, check.normalized);
+    return { username: check.normalized, warnings: check.warnings };
+  }
+
+  /** Remove the number's username. */
+  async deleteUsername(workspaceId: string, accountId?: string): Promise<void> {
+    const config = await this.requireSendConfig(workspaceId, accountId);
+    const provider = getMetaProvider();
+    if (!provider.deleteUsername) {
+      throw new HttpException({ error: "provider_does_not_support_usernames" }, 501);
+    }
+    try {
+      await provider.deleteUsername(config);
+    } catch (err) {
+      this.throwIfMetaSendError(err);
+      this.logger.error("username delete failed", err);
+      throw new BadGatewayException({
+        error: "username_delete_failed",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+    await this.persistUsername(workspaceId, config.phoneNumberId, null);
+  }
+
+  /**
+   * Re-sync the cached copy after Meta confirmed a value. Best-effort — the
+   * cache is display data, and failing a successful Meta write over a local
+   * hiccup would report the wrong outcome to the operator.
+   */
+  private async persistUsername(
+    workspaceId: string,
+    phoneNumberId: string,
+    username: string | null,
+  ): Promise<void> {
+    try {
+      await this.db.channelConnection.updateMany({
+        where: {
+          workspaceId,
+          channel: META_PROVIDER,
+          externalAccountId: phoneNumberId,
+        },
+        data: { businessUsername: username },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `could not persist username for ${phoneNumberId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
   /** Update variableBindings only — the part of the template our app owns. */
   async updateTemplateBindings(
     workspaceId: string,
@@ -2787,6 +2969,17 @@ export class WhatsappService {
  * cross-account send guard only refuses when both sides are known and differ —
  * left it sendable from ANY account. Refusing here is the whole point.
  */
+/**
+ * Graph error 147005 "Username transfer required": the requested username is
+ * already on ANOTHER business phone number within the same portfolio, and Meta
+ * wants an explicit `transfer_action: "force_transfer"` to move it. Detected in
+ * the raw body the same way the shape-disagreement probe reads code 100 — the
+ * numeric code is the contract, the wording is not.
+ */
+function isUsernameTransferConflict(err: unknown): boolean {
+  return err instanceof MetaSendError && /"code"\s*:\s*147005\b/.test(err.body);
+}
+
 function requireWabaAccount(config: { wabaAccountId?: string }): string {
   if (!config.wabaAccountId) {
     throw new BadRequestException({

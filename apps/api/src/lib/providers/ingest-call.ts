@@ -13,6 +13,7 @@ import {
   downloadCallRecording,
   downloadCallTranscript,
 } from "@/lib/media/call-recording-download";
+import { resolveConnectionPortfolioId } from "@/lib/identity/bsuid-reconcile";
 import { resolveCustomerId } from "@/lib/identity/identity-service";
 import { recordConversationEvent } from "@/lib/inbox/events";
 import { toContactWire } from "@/lib/queries/_shared";
@@ -163,6 +164,14 @@ export async function ingestCallEvent(
     // first-time call webhooks for the same brand-new caller can't race-
     // create duplicate rows.
     const defaultStageId = await ensureDefaultStage(workspaceId);
+    // Which portfolio issued the event's BSUID (connection → WABA →
+    // portfolio). Resolved OUTSIDE the Serializable tx — cached, read-only
+    // config. Null when any link is unknown: the stamp is omitted, never
+    // guessed. Mirrors providers/ingest.ts.
+    const eventBsuidPortfolioId =
+      isPhone && evt.bsuid && channelConnectionId
+        ? await resolveConnectionPortfolioId(workspaceId, channelConnectionId)
+        : null;
     const resolved = await runWithSerializableRetry(async (tx) => {
       // Try BOTH phone and BSUID (phone first — it's the canonical key), so a
       // caller first seen cold as a BSUID and later warm as a phone resolves to
@@ -171,6 +180,7 @@ export async function ingestCallEvent(
         id: true,
         phoneNumber: true,
         bsuid: true,
+        parentBsuid: true,
         // Drives the `wasRevived` signal for the contact.created publish below.
         deletedAt: true,
       } as const;
@@ -178,6 +188,7 @@ export async function ingestCallEvent(
         id: string;
         phoneNumber: string | null;
         bsuid: string | null;
+        parentBsuid: string | null;
         deletedAt: Date | null;
       } | null = null;
       if (isPhone) {
@@ -195,6 +206,16 @@ export async function ingestCallEvent(
         if (!existingContact && evt.bsuid) {
           existingContact = await tx.contact.findFirst({
             where: { workspaceId, identityChannel: channel, bsuid: evt.bsuid },
+            select: contactIdentitySelect,
+          });
+        }
+        // Third rung: the PARENT BSUID (cross-portfolio key) — a caller known
+        // under a sibling portfolio's bsuid still resolves to one contact.
+        // Only when phone AND bsuid both miss; the backfill below fills the
+        // child bsuid the row is missing. Mirrors providers/ingest.ts.
+        if (!existingContact && evt.parentBsuid) {
+          existingContact = await tx.contact.findFirst({
+            where: { workspaceId, identityChannel: channel, parentBsuid: evt.parentBsuid },
             select: contactIdentitySelect,
           });
         }
@@ -218,13 +239,23 @@ export async function ingestCallEvent(
           phoneNumber?: string;
           countryCode?: string | null;
           bsuid?: string;
+          bsuidPortfolioId?: string;
+          parentBsuid?: string;
         } = {};
         if (isPhone) {
           if (evt.contactPhone && !existingContact.phoneNumber) {
             identityBackfill.phoneNumber = evt.contactPhone;
             identityBackfill.countryCode = getCountryFromPhone(evt.contactPhone);
           }
-          if (evt.bsuid && !existingContact.bsuid) identityBackfill.bsuid = evt.bsuid;
+          if (evt.bsuid && !existingContact.bsuid) {
+            identityBackfill.bsuid = evt.bsuid;
+            // The issuing portfolio rides every bsuid write (when the chain is
+            // known) — see the message-path backfill for why the stamp matters.
+            if (eventBsuidPortfolioId) identityBackfill.bsuidPortfolioId = eventBsuidPortfolioId;
+          }
+          if (evt.parentBsuid && !existingContact.parentBsuid) {
+            identityBackfill.parentBsuid = evt.parentBsuid;
+          }
         }
         contact = await tx.contact.update({
           where: { id: existingContact.id },
@@ -238,6 +269,10 @@ export async function ingestCallEvent(
             phoneNumber: isPhone ? evt.contactPhone ?? null : null,
             externalContactId: isPhone ? null : evt.externalContactId,
             bsuid: isPhone ? evt.bsuid ?? null : null,
+            parentBsuid: isPhone ? evt.parentBsuid ?? null : null,
+            // Which portfolio issued `bsuid` — stamped in the same write, or
+            // left null when the chain is unknown (never guessed).
+            bsuidPortfolioId: isPhone && evt.bsuid ? eventBsuidPortfolioId : null,
             name: evt.contactName ?? identityLabel,
             firstName,
             lastName,
@@ -1019,14 +1054,16 @@ async function handlePermissionEvent(
     ? evt.contactPhone ?? evt.bsuid
     : evt.externalContactId;
   if (!identityLabel) return;
-  // Phone channels may identify the caller by phone OR BSUID — match either, or
-  // a permission grant from a cold (BSUID-only) caller silently lands nowhere.
+  // Phone channels may identify the caller by phone, BSUID or parent BSUID —
+  // match any, or a permission grant from a cold (BSUID-only, possibly
+  // sibling-portfolio) caller silently lands nowhere.
   const identityWhere = isPhone
     ? {
         workspaceId,
         OR: [
           ...(evt.contactPhone ? [{ identityChannel: channel, phoneNumber: evt.contactPhone }] : []),
           ...(evt.bsuid ? [{ identityChannel: channel, bsuid: evt.bsuid }] : []),
+          ...(evt.parentBsuid ? [{ identityChannel: channel, parentBsuid: evt.parentBsuid }] : []),
         ],
       }
     : { workspaceId, identityChannel: channel, externalContactId: evt.externalContactId };

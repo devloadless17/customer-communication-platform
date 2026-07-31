@@ -71,12 +71,21 @@ describe("send-error classification (Messenger common error codes)", () => {
   // the order would relabel a blocked person as an App Review problem.
   //
   // "200 – 2534041 The account owner has disabled access to instagram direct
-  // messages" is the reason `invalid_recipient` had to learn to read the SUBCODE:
+  // messages" is the reason the 2534 family had to learn to read the SUBCODE:
   // Meta documents it only as a code–subcode pair, so the code-only test that
   // stood there matched nothing and the case fell to the catch-all.
+  //
+  // It now normalizes to `account_restricted`, not `invalid_recipient`. Meta's
+  // own gloss is "the owner of the Instagram Professional account has revoked
+  // your app's access" — that is the ACCOUNT, and every recipient on it fails
+  // identically. Calling it a bad recipient told an operator to blame the
+  // contact and try the next one, which walks the whole audience into the same
+  // wall; `account_restricted` rides the run-fatal family and pauses instead.
+  // The ORDERING this case exists to pin is unchanged: both specific subcodes
+  // still resolve ahead of the bare-200 `app_permission_required` branch.
   it("keeps the more specific 200 subcodes ahead of it", () => {
     expect(normalizeMetaSendError(metaError(200, 1545041))?.code).toBe("recipient_unavailable");
-    expect(normalizeMetaSendError(metaError(200, 2534041))?.code).toBe("invalid_recipient");
+    expect(normalizeMetaSendError(metaError(200, 2534041))?.code).toBe("account_restricted");
   });
 });
 
@@ -198,5 +207,112 @@ describe("messages webhook: attachment payloads we used to discard", () => {
     expect(events).toHaveLength(1);
     expect(events[0]!.media?.kind).toBe("sticker");
     expect(events[0]!.media?.sourceUrl).toBe("https://cdn.test/s.webp");
+  });
+});
+
+describe("ad referral: every documented field is captured", () => {
+  // `messaging_referrals` reference. Each of these answers a question a campaign
+  // report is actually asked, and each was previously parsed and thrown away.
+  it("keeps post_id, product_id and referer_uri", () => {
+    const [evt] = parseSocialMessaging(
+      pageEvent({
+        sender: { id: "PSID_1" },
+        recipient: { id: PAGE },
+        timestamp: 1_700_000_000_000,
+        message: { mid: "m_ad", text: "hi" },
+        referral: {
+          source: "ADS",
+          type: "OPEN_THREAD",
+          ad_id: "AD_123",
+          ref: "spring",
+          referer_uri: "https://shop.test/landing",
+          ads_context_data: {
+            ad_title: "Spring sale",
+            post_id: "POST_9",
+            product_id: "SKU_7",
+          },
+        },
+      }),
+      "page",
+    ) as [NormalizedInboundMessage];
+
+    expect(evt.attribution).toEqual({
+      source: "ad",
+      headline: "Spring sale",
+      adId: "AD_123",
+      ref: "spring",
+      // WHICH post drove this — several ads can promote one post, so an ad id
+      // alone can't answer "which content brings people in".
+      postId: "POST_9",
+      // WHICH product they were looking at when they wrote in.
+      productId: "SKU_7",
+      // WHERE they came from — the landing page that actually converts.
+      sourceUrl: "https://shop.test/landing",
+    });
+  });
+
+  it("does not invent a sourceUrl when Meta gives none", () => {
+    const [evt] = parseSocialMessaging(
+      pageEvent({
+        sender: { id: "PSID_1" },
+        recipient: { id: PAGE },
+        timestamp: 1_700_000_000_000,
+        message: { mid: "m_ad2", text: "hi" },
+        referral: { source: "ADS", ad_id: "AD_1" },
+      }),
+      "page",
+    ) as [NormalizedInboundMessage];
+    expect(evt.attribution).not.toHaveProperty("sourceUrl");
+    expect(evt.attribution).not.toHaveProperty("postId");
+  });
+});
+
+describe("ad creative is unified across Meta channels", () => {
+  // WhatsApp's referral spells it `image_url`; Messenger's ads_context_data
+  // spells it `photo_url`. Both are the creative the customer was looking at when
+  // they wrote in, so both land on ONE field — a report must not have to know
+  // which channel someone arrived on to answer the same question.
+  it("maps Messenger photo_url onto imageUrl and infers the media type", () => {
+    const [evt] = parseSocialMessaging(
+      pageEvent({
+        sender: { id: "PSID_1" },
+        recipient: { id: PAGE },
+        timestamp: 1_700_000_000_000,
+        message: { mid: "m_c", text: "hi" },
+        referral: {
+          source: "ADS",
+          ad_id: "AD_1",
+          ads_context_data: { photo_url: "https://cdn.test/creative.jpg" },
+        },
+      }),
+      "page",
+    ) as [NormalizedInboundMessage];
+
+    expect(evt.attribution).toMatchObject({
+      adId: "AD_1",
+      imageUrl: "https://cdn.test/creative.jpg",
+      mediaType: "image",
+    });
+  });
+
+  it("prefers video when Meta sends one", () => {
+    const [evt] = parseSocialMessaging(
+      pageEvent({
+        sender: { id: "PSID_1" },
+        recipient: { id: PAGE },
+        timestamp: 1_700_000_000_000,
+        message: { mid: "m_v", text: "hi" },
+        referral: {
+          source: "ADS",
+          ad_id: "AD_2",
+          ads_context_data: { video_url: "https://cdn.test/clip.mp4" },
+        },
+      }),
+      "page",
+    ) as [NormalizedInboundMessage];
+    expect(evt.attribution).toMatchObject({
+      videoUrl: "https://cdn.test/clip.mp4",
+      mediaType: "video",
+    });
   });
 });

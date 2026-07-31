@@ -157,6 +157,7 @@ export async function sendStructuredInternal(
     send = await sendLocation(
       {
         to: dest.to,
+        ...(dest.viaBsuid ? { viaBsuid: true } : {}),
         latitude: args.latitude,
         longitude: args.longitude,
         ...(args.name ? { name: args.name } : {}),
@@ -180,7 +181,7 @@ export async function sendStructuredInternal(
     const first = args.contacts[0]?.name?.trim() || "Contact";
     body =
       args.contacts.length > 1 ? `👤 ${first} +${args.contacts.length - 1}` : `👤 ${first}`;
-    send = await sendContacts({ to: dest.to, contacts: args.contacts, useHumanAgentTag }, sendConfig);
+    send = await sendContacts({ to: dest.to, ...(dest.viaBsuid ? { viaBsuid: true } : {}), contacts: args.contacts, useHumanAgentTag }, sendConfig);
   }
 
   const lastTs = conversation.lastMessageAt ?? null;

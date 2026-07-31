@@ -10,6 +10,7 @@ import {
   Download,
   ExternalLink,
   Loader2,
+  Megaphone,
   Octagon,
   RotateCcw,
   XCircle,
@@ -49,6 +50,8 @@ export interface BroadcastDetailDto {
   id: string;
   status: string;
   name: string | null;
+  /** Groups this send with its siblings — the rollup page's join key. */
+  campaignName: string | null;
   // freeform / People (customer-mode) broadcasts have no template — these are
   // null for them; the message is carried by `kind` + `bodyText` instead.
   kind: "template" | "freeform";
@@ -527,6 +530,18 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
               <div className="mt-0.5 truncate text-xs text-muted-foreground">
                 Template: {data.templateName}
               </div>
+            )}
+            {data.campaignName && (
+              // The reverse of the rollup page's per-send links: from one send
+              // to the campaign it belongs to. Without this, the rollup is
+              // only findable by someone who already knows it exists.
+              <Link
+                href={`/reports/campaigns/${encodeURIComponent(data.campaignName)}`}
+                className="mt-1 inline-flex max-w-full items-center gap-1 rounded-full border border-border bg-muted/40 px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <Megaphone className="size-3 shrink-0" />
+                <span className="truncate">Campaign: {data.campaignName}</span>
+              </Link>
             )}
           </div>
           <div className="flex shrink-0 items-center gap-2">

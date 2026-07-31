@@ -1,6 +1,8 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { ChevronRight, Megaphone } from "lucide-react";
 import {
   Bar,
   BarChart,
@@ -25,6 +27,7 @@ import {
   compactNumber,
 } from "@/features/charts/chart-primitives";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
+import { AcquisitionPanel } from "@/features/reports/acquisition-panel";
 import { WhatsappSpendPanel } from "@/features/reports/whatsapp-spend-panel";
 import { useChannelAccounts } from "@/features/channels/contexts/channel-accounts-context";
 import { cn } from "@ccp/shared/utils";
@@ -486,6 +489,32 @@ export function ReportsClient() {
           BUSINESS ACCOUNT (the WABA), which is a coarser thing than the per-number
           scope that filters our own message rows. */}
       {hasWhatsapp && <WhatsappSpendPanel days={days} />}
+
+      {/* WHERE customers came from. Not channel-filtered: the whole point is that
+          it reads the same across WhatsApp, Messenger and Instagram — a Meta ad
+          id means the same thing on all three now, so splitting it per channel
+          would hide the campaign that ran on two of them. */}
+      <AcquisitionPanel />
+
+      {/* The campaign rollup is a PAGE, not a panel: it is per-campaign and this
+          dashboard is per-workspace, so embedding it would need a picker whose
+          only job is to pick the thing the next page already asks for. Rendered
+          unconditionally — a workspace with no campaigns still needs to find out
+          that naming a broadcast is what creates one, and the page says so. */}
+      <Link
+        href="/reports/campaigns"
+        className="flex items-center gap-3 rounded-xl border bg-card p-5 transition-colors hover:bg-muted/40"
+      >
+        <Megaphone className="size-4 shrink-0 text-muted-foreground" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold">Campaigns</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Several broadcasts under one name, read together — by send, by
+            account, by failure and by what Meta charged for.
+          </p>
+        </div>
+        <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+      </Link>
     </div>
   );
 }

@@ -311,6 +311,12 @@ interface SocialReferral {
   source?: string;
   type?: string;
   ad_id?: string;
+  /**
+   * "The URI of the site where the message was sent" (`messaging_referrals`
+   * reference). For an m.me link this is the page the customer clicked FROM —
+   * the only signal that says which of your landing pages actually converts.
+   */
+  referer_uri?: string;
   ads_context_data?: Record<string, unknown>;
   /**
    * INSTAGRAM ONLY — the Shop product the customer opened the thread from. Meta's
@@ -337,7 +343,19 @@ interface SocialReferral {
  * creative's title/photo — surface the title as the headline when present.
  */
 function attributionFromSocialReferral(r: SocialReferral): MessageAttribution {
-  const ctx = (r.ads_context_data ?? {}) as { ad_title?: unknown };
+  const ctx = (r.ads_context_data ?? {}) as {
+    ad_title?: unknown;
+    // Documented on `ads_context_data` and previously all discarded. Each answers
+    // a question a campaign report is actually asked: WHICH post drove this, and
+    // WHICH product was the customer looking at when they wrote in.
+    post_id?: unknown;
+    product_id?: unknown;
+    // Meta's other spelling of the same creative: `photo_url` here vs WhatsApp's
+    // `image_url`. Unified onto one field so a report does not have to know
+    // which channel a customer arrived on.
+    photo_url?: unknown;
+    video_url?: unknown;
+  };
   const headline =
     typeof ctx.ad_title === "string" && ctx.ad_title.trim() ? ctx.ad_title.trim() : undefined;
   const productId = r.product?.id?.trim();
@@ -355,11 +373,29 @@ function attributionFromSocialReferral(r: SocialReferral): MessageAttribution {
   return {
     source,
     ...(headline ? { headline } : {}),
-    ...(r.ad_id?.trim() ? { clickId: r.ad_id.trim() } : {}),
+    // Messenger's `ad_id` is an AD id, so it belongs in `adId`. It used to be
+    // written to `clickId`, which meant "group by ad" silently compared a
+    // Messenger ad id against a WhatsApp per-click id and matched nothing.
+    ...(r.ad_id?.trim() ? { adId: r.ad_id.trim() } : {}),
     ...(r.ref?.trim() ? { ref: r.ref.trim() } : {}),
-    ...(productId ? { productId } : {}),
+    // The ad's product beats the Instagram-Shop one only as a fallback: they are
+    // different referral shapes and only one is ever present.
+    ...(productId ?? str(ctx.product_id)
+      ? { productId: (productId ?? str(ctx.product_id))! }
+      : {}),
+    ...(str(ctx.post_id) ? { postId: str(ctx.post_id)! } : {}),
+    ...(str(ctx.photo_url) ? { imageUrl: str(ctx.photo_url)!, mediaType: "image" as const } : {}),
+    ...(str(ctx.video_url) ? { videoUrl: str(ctx.video_url)!, mediaType: "video" as const } : {}),
+    // Where they came FROM. `referer_uri` for an m.me link; for an ad Meta gives
+    // no landing URL, so this stays absent rather than being invented.
+    ...(str(r.referer_uri) ? { sourceUrl: str(r.referer_uri)! } : {}),
     ...(r.flow_id?.trim() ? { flowId: r.flow_id.trim() } : {}),
   };
+}
+
+/** Trimmed string, or null — for the referral fields Meta types loosely. */
+function str(v: unknown): string | null {
+  return typeof v === "string" && v.trim() ? v.trim() : null;
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
@@ -690,7 +726,14 @@ interface SocialChange {
     /** Business-Login payloads spell it `id`; accept both. */
     id?: string;
     text?: string;
-    media?: { id?: string; media_product_type?: string; ad_id?: string };
+    media?: {
+      id?: string;
+      media_product_type?: string;
+      /** Present when the comment was made on an AD post. */
+      ad_id?: string;
+      ad_title?: string;
+      original_media_id?: string;
+    };
     /** Present on a reply to another comment. */
     parent_id?: string;
   };
@@ -760,9 +803,22 @@ function commentEvent(
     },
     // See the docblock — the one inbound that does not open the window.
     opensMessagingWindow: false,
-    // A comment from an ad's post carries the ad id; same "from your ad" chip.
+    // A comment on an AD's post carries the ad id; same "from your ad" chip.
+    // `adId`, not `clickId` — for the reason given on `attributionFromSocialReferral`:
+    // `clickId` is a per-CLICK id (WhatsApp's `ctwa_clid`), so putting an ad id
+    // there makes "group by ad" compare two different id spaces and match nothing.
+    // The comments webhook also carries `media.ad_title`, which is the same
+    // headline the ad chip shows.
     ...(value?.media?.ad_id
-      ? { attribution: { source: "ad" as const, clickId: value.media.ad_id } }
+      ? {
+          attribution: {
+            source: "ad" as const,
+            adId: value.media.ad_id,
+            ...(value.media.ad_title?.trim()
+              ? { headline: value.media.ad_title.trim() }
+              : {}),
+          },
+        }
       : {}),
     timestamp: new Date(entryTime ?? Date.now()),
     rawPayload: rawPayloadOf(change ?? {}),
@@ -1574,6 +1630,13 @@ function ctaUrlTemplatePayload(args: SendInteractiveArgs): object | null {
 }
 
 /**
+ * The interactive kinds that go out as a Meta TEMPLATE attachment rather than as
+ * quick replies. Named once so the send below can tell "this kind needs a
+ * template payload" from "this kind is a quick-reply message".
+ */
+const TEMPLATE_KINDS: ReadonlySet<string> = new Set(["cta_url", "generic", "product"]);
+
+/**
  * Meta's GENERIC TEMPLATE payload — 1-10 cards, a carousel beyond one.
  *
  * Doc-exact (Instagram Messaging → Generic Template): `template_type:"generic"`
@@ -1652,8 +1715,21 @@ export async function sendSocialInteractive(
         : args.kind === "product" && args.productIds?.length
           ? productTemplatePayload(args.productIds)
           : null;
-  const ctaTemplate = templateMessage;
-  if (ctaTemplate) {
+  // A TEMPLATE kind whose payload is missing must FAIL, not fall through.
+  //
+  // Below this point is the quick-reply path, so falling through would send the
+  // body text as a plain message with an empty `quick_replies` — a silently
+  // different message than the caller asked for, reported as a success. The
+  // request schemas already refuse the combination, but the provider is reachable
+  // from workflows and future internal callers, and "the layer above validates"
+  // is exactly the assumption that makes this kind of degradation survive.
+  if (TEMPLATE_KINDS.has(args.kind) && !templateMessage) {
+    throw new Error(
+      `${opts.label} sendInteractive: kind "${args.kind}" needs its template payload ` +
+        "(ctaUrl / genericCards / productIds) and none was supplied",
+    );
+  }
+  if (templateMessage) {
     const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messages`;
     const res = await graphPostJson(
       url,
@@ -1662,7 +1738,7 @@ export async function sendSocialInteractive(
         recipient: { id: args.to },
         ...messagingTypeFields(args.useHumanAgentTag),
         ...replyToFragment(args.replyToExternalId, args.useHumanAgentTag),
-        message: ctaTemplate,
+        message: templateMessage,
       },
       opts.appSecret,
     );
@@ -1718,11 +1794,18 @@ export async function uploadSocialMedia(
   const type = attachmentTypeFromKind(kindFromMime(args.mimeType));
   const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/message_attachments`;
   const form = new FormData();
-  // `platform` is Instagram-only and REQUIRED there: the Attachment Upload API is
-  // hosted on the same Page node for both channels, so Meta needs telling which
-  // surface the attachment is for. Messenger's own reference has no such field,
-  // and sending it there would be an unknown parameter — hence the label check
-  // rather than an unconditional add.
+  // `platform` is Instagram-only and REQUIRED there — confirmed verbatim against
+  // the Instagram Attachment Upload doc, whose every sample body carries
+  // `"platform":"instagram"`. The endpoint is hosted on the same Page node for
+  // both channels, so Meta needs telling which surface the attachment is for.
+  // Messenger's own reference has no such field, hence the label check rather
+  // than an unconditional add.
+  //
+  // NOTE: Instagram does not reach this function today — `mediaSendByUrl` routes
+  // it down the URL branch in `send-media-internal`. This is kept correct so the
+  // upload path is not the thing that breaks if that ever changes; see the
+  // capability's comment for the OTHER half that would need changing (Instagram
+  // sends a stored attachment as `MEDIA_SHARE`, not as its media kind).
   if (opts.label === "instagram") form.append("platform", "instagram");
   form.append(
     "message",

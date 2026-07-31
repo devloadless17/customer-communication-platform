@@ -1,0 +1,12 @@
+-- BroadcastRecipient.channelConnectionId — WHICH ACCOUNT this recipient is sent
+-- from, resolved at materialize time.
+--
+-- Social ids are account-scoped (a PSID belongs to one Page, an IGSID to one IG
+-- account), so a campaign reaching every social customer must route each
+-- recipient through the account that issued their id. It is stamped on the ROW
+-- because the runner's rate gate fires before the recipient's conversation is
+-- read, and Meta's ceilings are per Page.
+--
+-- Nullable and NO foreign key on purpose — see the schema docblock: this is a
+-- historical stamp read only as a scalar, and a campaign can hold 100k rows.
+ALTER TABLE "BroadcastRecipient" ADD COLUMN "channelConnectionId" TEXT;
