@@ -565,7 +565,7 @@ not automate.**
 - `lib/providers/meta.ts` split — **stage 1 DONE** (`21c3f397`): 822 lines of pure template parse/build → `meta-template-parse.ts` behind the file's established re-export facade; transport wrappers deliberately stayed. 8,144 → 7,364. Remaining stages (a dedicated session each): the parseWebhook family and the send-method family inside the 5k-line provider object.
 - `team.*` event / `team:*` frame renames — **contract-breaking** (§9 additive-only); recommend keeping wire names, renaming only internals.
 - The ~2,300 lower-case `team*` identifier occurrences across api+web (`teamSchedule`, `teamSlots`, `teamCounts`, `teamActivity`…) — mechanical rename sweep, wide blast radius; recommend doing it per-file as those files are next touched rather than in one churn commit.
-- AssignmentPolicy → first-class "Team" promotion (product decision — it already carries a durable member set, weights, capacity, rules and a rotation cursor; naming cleanup direction depends on this call).
+- ~~AssignmentPolicy → first-class "Team" promotion~~ — **DECIDED + DONE** (`c75738ec`, user approved 2026-07-31): `model Team` / `model TeamMember` with `@@map` on the original tables — zero DDL (the org→workspace lesson), columns and wire contracts unchanged. The 4-way "team" overload now resolves toward the model the UI always presented; the remaining lower-case `team*→workspace*` identifier sweep proceeds per-file-as-touched.
 - Reconnect-convergence policy dedup across the 4 large hooks.
 - Internal splits of the 4 biggest client monoliths (new-broadcast-form, step-editors, reply-box, message-thread).
 - `AiAssistantConfig` (7 Json cols) / `WorkflowRun` (5, incl. per-run graphSnapshot) remodelling.
