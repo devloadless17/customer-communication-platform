@@ -1435,7 +1435,8 @@ export class RealtimeGateway
     // Membership is re-checked on EVERY subscribe, including the re-subscribe
     // that follows a reconnect. It used to be skipped whenever the socket was
     // already in the room — but socket.io's connectionStateRecovery RESTORES a
-    // socket's rooms without running any handler, and `evictUserFromChannelRoom`
+    // socket's rooms without running any handler, and the members_changed
+    // fanout rule's `evictUserFromChannelRoom` (emitter.service.ts)
     // can only reach sockets that are live at the moment membership is revoked.
     // So: revoke someone's access to a private channel while their laptop is
     // asleep, and on wake their socket was silently back in `chan:<id>` and
@@ -1679,22 +1680,6 @@ export class RealtimeGateway
       }
     }
     return count;
-  }
-
-  /**
-   * Force every live socket of `userId` to leave a channel room. Called by
-   * `ChannelsService.removeMember` so a removed member's open tab stops
-   * receiving live channel frames before they next reload. Channel events
-   * are scoped to the channel room (see `fanout-rules.ts`), so leaving the
-   * room is sufficient — no need to disconnect the socket entirely.
-   */
-  evictUserFromChannelRoom(userId: string, channelId: string): void {
-    const room = channelRoom(channelId);
-    const socketIds = this.presence.socketsFor(userId);
-    for (const id of socketIds) {
-      const s = this.server.sockets.sockets.get(id);
-      if (s) s.leave(room);
-    }
   }
 
   /**

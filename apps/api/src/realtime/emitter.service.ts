@@ -92,6 +92,35 @@ export class RealtimeEmitter {
     }
   }
 
+  /**
+   * Force every live socket of `userId` to leave a channel room, so a member
+   * removed from a team-chat channel stops receiving live channel frames
+   * before they next reload. Channel events are scoped to the channel room
+   * (see fanout-rules.ts), so leaving the room is sufficient — no need to
+   * disconnect the socket. Called from the `team_channel.members_changed`
+   * fanout rule, which keeps room-membership revocation beside the frame that
+   * announces it instead of inside ChannelsService (the one place that used
+   * to hold the gateway directly, bypassing the bus→fanout seam).
+   *
+   * Iterates the ROOM rather than a presence lookup: only sockets already in
+   * the room can need to leave it, and `socket.data` carries the identity the
+   * match needs — same style as `evictStaleFromConversationRoom` above.
+   */
+  evictUserFromChannelRoom(workspaceId: string, userId: string, channelId: string): void {
+    const io = this.server;
+    if (!io) return;
+    const room = io.sockets.adapter.rooms.get(channelRoom(channelId));
+    if (!room) return;
+    for (const socketId of room) {
+      const s = io.sockets.sockets.get(socketId);
+      if (!s) continue;
+      const d = s.data as { workspaceId?: string; userId?: string };
+      if (d.workspaceId === workspaceId && d.userId === userId) {
+        s.leave(channelRoom(channelId));
+      }
+    }
+  }
+
   // ---------------------------------------------------------------------
   // Agent conversation-visibility fanout
   // ---------------------------------------------------------------------

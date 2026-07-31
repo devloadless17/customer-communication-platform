@@ -703,6 +703,12 @@ export const FANOUT_RULES: FanoutRuleMap = {
     if (e.action === "removed") {
       for (const uid of e.userIds) {
         emitter.emitToUser(e.workspaceId, uid, "team:channel:members:changed", payload);
+        // …and revoke their live room membership, so the kicked tab stops
+        // receiving channel frames before its next reload. This lives HERE,
+        // beside the frame announcing the removal, rather than in
+        // ChannelsService — which used to hold the RealtimeGateway directly
+        // for exactly this one call, the sole bypass of the bus→fanout seam.
+        emitter.evictUserFromChannelRoom(e.workspaceId, uid, e.channelId);
       }
     }
     // Catalog tick so the channel list (memberCount, visibility) refreshes

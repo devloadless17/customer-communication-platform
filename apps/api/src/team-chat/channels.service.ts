@@ -48,7 +48,6 @@ import type { Role } from "@ccp/shared/types";
 
 import { EventBus } from "../events/event-bus.module";
 import { DbService } from "../db/db.service";
-import { RealtimeGateway } from "../realtime/realtime.gateway";
 import type { ApiSession } from "../auth/session.guard";
 import type { TeamChannelMessageDto } from "@ccp/shared/team-chat/types";
 import type {
@@ -78,7 +77,6 @@ export class ChannelsService {
   constructor(
     private readonly db: DbService,
     private readonly bus: EventBus,
-    private readonly realtime: RealtimeGateway,
   ) {}
 
   // ---- Channels ---------------------------------------------------------
@@ -425,10 +423,6 @@ export class ChannelsService {
       userIds: [targetUserId],
       changedById: actorUserId,
     });
-    // Force the removed user's live sockets to leave the channel room so
-    // they stop receiving channel frames before they next reload. Without
-    // this, the kicked tab keeps seeing every new message until refresh.
-    this.realtime.evictUserFromChannelRoom(targetUserId, channelId);
   }
 
   private async requireChannelInTeam(workspaceId: string, channelId: string) {
