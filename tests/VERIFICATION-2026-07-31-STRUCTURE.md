@@ -89,11 +89,11 @@ NUMBER, the messaging limit per PORTFOLIO).
 | S4 | Team/Workspace naming residue | `/api/admin/teams` rename (both sides); `Team.<field>` comments; `team.*` events = contracts (list-only); AssignmentPolicy→Team promotion (recommendation only) | ✅ **2026-07-31** — route/DTO/component rename landed (`ed0c81b0`); events + identifier residue carried to approval list |
 | S5 | Team chat structure | 2,083 L god-service; RealtimeGateway direct injection (the ONE EventBus bypass); "#general" ×3; postMessage dedup | ✅ **2026-07-31** — gateway bypass closed (`81f7a884`); "#general ×3" refuted; split → approval list |
 | S6 | Realtime & client state | contact-panel fake reducer consumer → rewire + pin; convergence-policy duplication (list-only) | ✅ **2026-07-31** — "fake consumer" REFUTED (documented design); assert list completed + CI pin (`11f4d9f7`) |
-| S7 | Frontend fetching & loading perf | RSC waterfalls; getOrganizationOverview cache(); soft() consistency; force-dynamic; metadata; use-call fetch | ☐ |
-| S8 | Route loading & error boundaries | loading.tsx / error.tsx program; /calls dead segment; inbox layout doc-lie | ☐ |
-| S9 | Frontend sectioning | features/tickets|flags|organization creation; app/←features inversion; move-only relocations; queries.ts split | ☐ |
+| S7 | Frontend fetching & loading perf | RSC waterfalls; getOrganizationOverview cache(); soft() consistency; force-dynamic; metadata; use-call fetch | ✅ **2026-07-31** — 1 real waterfall fixed, 3 refuted; cache pin added (`4bbbc05b`) |
+| S8 | Route loading & error boundaries | loading.tsx / error.tsx program; /calls dead segment; inbox layout doc-lie | ✅ **2026-07-31** — 5 loading + 5 error boundaries, Skeleton primitive, /calls segment gone (`f0b87af6`) |
+| S9 | Frontend sectioning | features/tickets|flags|organization creation; app/←features inversion; move-only relocations; queries.ts split | ✅ **2026-07-31** — 13 move-only relocations (`1ce7e63a`); active-session files + queries.ts split deferred with reasons |
 | S10 | Backend layering | meta.controller business-logic extraction (proven by meta e2e 170); thin services; external-v1 split (list-only) | ✅ **2026-07-31** — extraction landed + e2e-proven (`b21b71d5`); one stale spec fixed on the way |
-| S11 | UI/UX rubric + skeleton system | SURFACES → every route (derived, not hand-named); shared skeleton primitive; axe fixes | ☐ |
+| S11 | UI/UX rubric + skeleton system | SURFACES → every route (derived, not hand-named); shared skeleton primitive; axe fixes | ◐ **2026-07-31** — rubric extended + completeness guard (`cfafbb98`); RUN pending in S12 close-out |
 | S12 | Live UX walk + close-out | per-page browser pass, batched; full gates; approval list | ☐ |
 
 ## Domain sessions
@@ -361,6 +361,85 @@ negative-tested) + E (web vitest 37/37).**
   1,974 L, team-events 1,673, team-channel 816, thread 392) — confirmed
   real, carried on the approval list (high-risk extraction; each hook's
   policy is subtly load-bearing and heavily reasoned in place).
+
+### S7 — frontend fetching & loading perf — ✅ CLOSED (2026-07-31)
+
+**Method: R + refactor (`4bbbc05b`) + N (cache pin, negative-tested) + E (web vitest 45/45).**
+
+- **Of the four suspected RSC waterfalls, ONE was real.** `settings/meta`
+  awaited the credentials config before three independent account lists —
+  now one 4-way fan-out. The other three are REFUTED and recorded so they
+  aren't re-chased: `broadcasts/new`'s serial stages are DATA-FORCED (the
+  audience fan-out consumes the clone's recipient ids) and its trailing
+  directory read is a `React.cache` hit the (app) layout already paid for;
+  `verify`/`invite` are session→row dependent; `templates/[id]/edit`'s
+  "serial awaits" are resolved-promise microtasks.
+- **`getOrganizationOverview` joins its `cache()`d siblings.** Honest scope:
+  `cache()` dedupes within a request; the per-tab-switch refetch the
+  exploration flagged is the app's UNIVERSAL no-store posture (documented in
+  queries.ts), not a defect — hoisting to the layout can't feed pages anyway
+  (layouts can't pass props down).
+- **NEW pin `apps/web/test/rsc-cache-dedup.spec.ts`** — source-scans that
+  every dual-fetched query (the inbox layout+page set, the org trio, the
+  directory, getSession) is declared through `cache(`; removing a wrapper
+  compiles clean and silently doubles the fan-out. NEGATIVE-TESTED (unwrap →
+  exactly that fn's case fails).
+- soft() replaces two bare `.catch` sites (the (app) layout's DM seed; the
+  ticket-detail pair, where a transient failure was indistinguishable from a
+  404 in the logs); the one bare `fetch()` in use-call joins
+  `fetchWithSessionGuard` like its ten siblings (clears the standing lint
+  warning); 12 pages gained `metadata` titles (incl. /inbox, /contacts).
+- **R-only ACCEPTED — the 41 `force-dynamic` exports stay.** Redundant today
+  (every RSC read is no-store and session pages read cookies), but removing
+  them can only be proven safe by a production build's static-analysis pass,
+  which this box cannot run mid-program; belt-and-suspenders costs 41 lines.
+- **Process note:** my negative-test restore of the S6 pin over-matched a
+  same-indentation line and injected a stray string into an unrelated frames
+  array in contact-panel.tsx — caught by web typecheck minutes later, fixed,
+  and the commit was never contaminated (the stray hunk was outside the
+  staged filter). Recorded as a reminder that sed-style edits on repeated
+  literals need an occurrence guard.
+
+### S8 — route loading & error boundaries — ✅ CLOSED (2026-07-31)
+
+**Method: R + build (`f0b87af6`) + E (typecheck + web vitest).**
+
+- **The inbox layout's doc-comment described streaming behind a loading.tsx
+  that never existed** — with ONE boundary in 65 routes, every navigation
+  froze the previous screen through the full RSC fan-out. Five loading
+  shells added where the fan-outs are heaviest (inbox — 11-way, contacts,
+  tickets, broadcasts, settings/channels — 6-way), each a quiet
+  geometry-mirroring shell in the house style set by team/[channelId].
+- **`components/ui/skeleton.tsx`** — the one placeholder primitive (pulse/
+  tone/radius decided once); the new boundaries consume it. Adoption at the
+  15 pre-existing raw `animate-pulse` sites + 4 remaining local skeletons is
+  deferred per-file-as-touched (several sit in the active session's files).
+- **error.tsx for tickets / flags / reports / organization / account** — all
+  delegating to the shared SegmentError (chunk self-heal included), so a
+  failed segment keeps its chrome instead of falling to the (app) boundary.
+- **/calls dead segment removed** — `calls-history.tsx` was a route folder
+  with no page whose component was imported FROM features
+  (inbox-shell.tsx:53), the one app/←features inversion. Moved to
+  `features/calls/components/`; segment deleted.
+- **Deliberately NO `<Suspense>` sprinkling**: route-level `loading.tsx` IS
+  the App Router's suspense boundary; per-component streaming inside pages
+  is a design decision per page, not an audit-scale sweep.
+
+### S9 — frontend sectioning — ✅ CLOSED (2026-07-31)
+
+**Method: R + move-only refactor (`1ce7e63a`) + E (typecheck, lint, 45/45).**
+
+- **13 files relocated, zero internal edits**: tickets (board + detail
+  clients → NEW `features/tickets/`), flags (→ NEW `features/flags/`),
+  organization (3 clients → NEW `features/organization/`), contacts (2),
+  templates (4 + `templates-cookies` following its consumers into
+  `features/templates/lib/`). Import updates only.
+- **Deliberately NOT moved, with reasons on the approval list**: broadcasts /
+  reports / settings clients (the other session's uncommitted work lives in
+  exactly those files — a move now would turn their pending diff into a
+  rename conflict), and the `queries.ts` domain split (same file carries
+  their campaignName hunk; splitting underneath an active edit is churn with
+  a live victim).
 
 ## Listed for approval (grows as domains close — nothing here is executed)
 
