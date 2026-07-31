@@ -6,6 +6,13 @@ import { InstagramModule } from "@/workspace-settings/instagram/instagram.module
 import { MessengerModule } from "@/workspace-settings/messenger/messenger.module";
 import { ApiIdempotencyService } from "./api-idempotency.service";
 import { ExternalV1Controller } from "./external-v1.controller";
+import { ExternalV1AssignmentController } from "./external-v1-assignment.controller";
+import { ExternalV1ChannelsController } from "./external-v1-channels.controller";
+import { ExternalV1ContactTransfersController } from "./external-v1-contact-transfers.controller";
+import { ExternalV1FlagsController } from "./external-v1-flags.controller";
+import { ExternalV1MessengerController } from "./external-v1-messenger.controller";
+import { ExternalV1ViewsController } from "./external-v1-views.controller";
+import { ExternalV1WhatsappController } from "./external-v1-whatsapp.controller";
 import { ExternalV1BroadcastWritesController } from "./external-v1-broadcast-writes.controller";
 import { ExternalV1CatalogController } from "./external-v1-catalog.controller";
 import { ExternalV1ConversationOpsController } from "./external-v1-conversation-ops.controller";
@@ -91,7 +98,14 @@ import { WorkflowsModule as WorkflowsSettingsModule } from "@/workspace-settings
   ],
   controllers: [
     ExternalV1Controller,
+    ExternalV1AssignmentController,
     ExternalV1BroadcastWritesController,
+    ExternalV1ChannelsController,
+    ExternalV1ContactTransfersController,
+    ExternalV1FlagsController,
+    ExternalV1MessengerController,
+    ExternalV1ViewsController,
+    ExternalV1WhatsappController,
     ExternalV1CatalogController,
     ExternalV1ConversationOpsController,
     ExternalV1CustomersController,

@@ -171,4 +171,25 @@ export class ExternalV1BroadcastWritesController {
     return this.broadcasts.listRecipientContactIds(auth.workspaceId, id);
   }
 
+
+  /**
+   * Pull Meta's own template analytics for this campaign (currency cost +
+   * unique link clicks — figures the per-recipient funnel cannot derive).
+   *
+   * Documented in both doc surfaces since the analytics work landed but never
+   * implemented on /v1, so an API-only integration got a 404 and its
+   * `report.metaAnalytics` block stayed permanently stale — the internal
+   * dashboard was the only way to refresh it. `read:broadcasts` because it
+   * fetches and caches a report figure; it changes no campaign state.
+   */
+  @Post("broadcasts/:id/analytics/refresh")
+  @RequireScope("read:broadcasts")
+  @RateLimit({ perMinute: 10 })
+  async refreshBroadcastAnalytics(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+  ) {
+    return this.broadcasts.refreshAnalytics(auth.workspaceId, id);
+  }
+
 }

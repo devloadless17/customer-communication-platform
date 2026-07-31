@@ -13,22 +13,13 @@ import {
   Post,
   Put,
   Query,
-  Res,
-  UploadedFile,
   UseGuards,
-  UseInterceptors,
-} from "@nestjs/common";
-import { FileInterceptor } from "@nestjs/platform-express";
-import { diskStorage } from "multer";
-import { tmpdir } from "node:os";
-import type { Response } from "express";
+  } from "@nestjs/common";
 
-import { CallsService } from "@/calls/calls.service";
 import { acquisitionSources, contactAcquisition } from "@/lib/analytics/acquisition-sources";
 import { campaignRollup, listCampaigns } from "@/lib/analytics/campaign-rollup";
 import { getWorkspaceReport, ReportRangeError } from "@/lib/analytics/reports";
 import { getWabaAnalytics } from "@/lib/analytics/waba-analytics";
-import { streamBlob } from "@/media/stream-blob";
 import {
   AcquisitionQuerySchema,
   type AcquisitionQuery,
@@ -38,7 +29,6 @@ import {
   type WabaAnalyticsQueryInput,
 } from "@/reports/reports.schemas";
 
-import { TRANSFER_MAX_UPLOAD_BYTES } from "@ccp/shared/contacts/transfer-columns";
 
 import { ApiKeyGuard } from "../../auth/api-key.guard";
 import { CurrentApiKey } from "../../auth/current-session.decorator";
@@ -55,77 +45,14 @@ import {
   replyToCommentPublicly,
   ReplyToCommentError,
 } from "@/lib/messaging/reply-to-comment";
-import { ContactTransferService } from "@/contacts/transfer.service";
-import {
-  CreateExportSchema,
-  ListTransfersQuerySchema,
-  type CreateExportInput,
-  type ListTransfersQueryInput,
-} from "@/contacts/transfer.schemas";
-import { AssignmentService } from "@/assignment/assignment.service";
-import { ChannelAccountsService } from "@/workspace-settings/channel-accounts/channel-accounts.service";
-import { InstagramService } from "@/workspace-settings/instagram/instagram.service";
-import { MessengerService } from "@/workspace-settings/messenger/messenger.service";
 import {
   SendMessengerTemplateSchema,
   type SendMessengerTemplateInput,
 } from "@/messages/messages.schemas";
-import {
-  CreatePersonaSchema,
-  StickerCatalogQuerySchema,
-  ThreadControlSchema,
-  UpdateMessengerEntryPointsSchema,
-  UpdateMessengerWelcomeSchema,
-  type CreatePersonaInput,
-  type StickerCatalogQuery,
-  type ThreadControlInput,
-  type UpdateMessengerEntryPointsInput,
-  type UpdateMessengerWelcomeInput,
-} from "@/workspace-settings/messenger/messenger.schemas";
-import {
-  UpdateEntryPointsSchema,
-  UpdateInboxSourcesSchema,
-  type UpdateEntryPointsInput,
-  type UpdateInboxSourcesInput,
-} from "@/workspace-settings/instagram/instagram.schemas";
-import { WhatsappService } from "@/workspace-settings/whatsapp/whatsapp.service";
-import { BroadcastsService } from "@/broadcasts/broadcasts.service";
-import {
-  CreateQrCodeSchema,
-  RegisterWhatsappNumberSchema,
-  SetWhatsappUsernameSchema,
-  UpdateBusinessProfileSchema,
-  UpdateQrCodeSchema,
-  type CreateQrCodeInput,
-  type RegisterWhatsappNumberInput,
-  type SetWhatsappUsernameInput,
-  type UpdateBusinessProfileInput,
-  type UpdateQrCodeInput,
-} from "@/workspace-settings/whatsapp/whatsapp.schemas";
-import { parseAccountChannel } from "@/workspace-settings/channel-accounts/channel-accounts.schemas";
-import {
-  CreatePolicySchema,
-  CreateRuleSchema,
-  PreviewAssignmentSchema,
-  ReorderRulesSchema,
-  UpdateAssignmentSettingsSchema,
-  UpdatePolicySchema,
-  UpdateRuleSchema,
-  type CreatePolicyInput,
-  type CreateRuleInput,
-  type PreviewAssignmentInput,
-  type ReorderRulesInput,
-  type UpdateAssignmentSettingsInput,
-  type UpdatePolicyInput,
-  type UpdateRuleInput,
-} from "@/assignment/assignment.schemas";
 
 import { parseChainDepth } from "@/lib/workflows/events";
 import { guardChainDepth, idemKey, idemKeyRequired } from "./v1-request-guards";
 import { ExternalV1Service } from "./external-v1.service";
-import { ExternalV1FlagsService } from "./external-v1-flags.service";
-import { InboxViewsService, type InboxViewActor } from "@/inbox-views/inbox-views.service";
-import { inboxViewWhereClauses } from "@/lib/inbox-views/where";
 import { getMessagingHealthSummary } from "@/lib/providers/meta-health";
 import {
   getInsightsStatus,
@@ -134,21 +61,11 @@ import {
 } from "@/lib/analytics/template-analytics";
 import { getBroadcastTimeseries } from "@/lib/broadcast-timeseries";
 import {
-  ExternalSetLinkTrackingSchema,
   ExternalTemplateAnalyticsQuerySchema,
-  type ExternalSetLinkTrackingInput,
   ExternalTemplateListQuerySchema,
-  ExternalUpdateTemplateLabelsSchema,
   type ExternalTemplateAnalyticsQueryInput,
   type ExternalTemplateListQueryInput,
-  type ExternalUpdateTemplateLabelsInput,
-} from "./external-v1.schemas";
-import {
-  CreateInboxViewSchema,
-  UpdateInboxViewSchema,
-  type CreateInboxViewInput,
-  type UpdateInboxViewInput,
-} from "@/inbox-views/inbox-views.schemas";
+  } from "./external-v1.schemas";
 import {
   ExternalAssignSchema,
   ExternalBulkTagSchema,
@@ -161,17 +78,7 @@ import {
   ExternalCreateContactSchema,
   ExternalCreateTagSchema,
   ExternalCallButtonSchema,
-  ExternalCreateFlagDefinitionSchema,
-  ExternalUpdateFlagDefinitionSchema,
-  type ExternalCreateFlagDefinitionInput,
-  type ExternalUpdateFlagDefinitionInput,
   ExternalListCallsQuerySchema,
-  ExternalListFlagsQuerySchema,
-  ExternalRaiseFlagSchema,
-  ExternalUpdateFlagSchema,
-  type ExternalListFlagsQueryInput,
-  type ExternalRaiseFlagInput,
-  type ExternalUpdateFlagInput,
   ExternalNoteSchema,
   ExternalSendInteractiveSchema,
   ReplyToCommentSchema,
@@ -186,7 +93,6 @@ import {
   ListContactsQuerySchema,
   ListBroadcastRecipientsQuerySchema,
   ListBroadcastsQuerySchema,
-  ListConversationsQuerySchema,
   ListMessagesQuerySchema,
   type ExternalAssignInput,
   type ExternalBulkTagInput,
@@ -213,7 +119,6 @@ import {
   type ListContactsQueryInput,
   type ListBroadcastRecipientsQueryInput,
   type ListBroadcastsQueryInput,
-  type ListConversationsQueryInput,
   type ListMessagesQueryInput,
 } from "./external-v1.schemas";
 // Availability/work-hours payloads are validated by the SAME schemas the
@@ -291,16 +196,6 @@ import {
 export class ExternalV1Controller {
   constructor(
     private readonly api: ExternalV1Service,
-    private readonly transfers: ContactTransferService,
-    private readonly assignment: AssignmentService,
-    private readonly flags: ExternalV1FlagsService,
-    private readonly inboxViews: InboxViewsService,
-    private readonly channelAccounts: ChannelAccountsService,
-    private readonly instagram: InstagramService,
-    private readonly messenger: MessengerService,
-    private readonly whatsapp: WhatsappService,
-    private readonly broadcasts: BroadcastsService,
-    private readonly calls: CallsService,
   ) {}
 
   // ---- Contacts: list + find -----------------------------------------
@@ -383,27 +278,6 @@ export class ExternalV1Controller {
   // page queues, backed by the same runners.
 
   /**
-   * Queue an export. Returns a job id immediately; poll
-   * `GET /v1/contacts/transfers/:id` and then fetch
-   * `GET /v1/contacts/transfers/:id/download` once `status` is `completed`.
-   *
-   * Rate-limited hard: each call can produce a full dump of the contact book,
-   * which is both expensive to generate and the single most sensitive payload
-   * this API can emit.
-   */
-  @Post("contacts/export")
-  @RequireScope("read:contacts")
-  @RateLimit({ perMinute: 5 })
-  async startContactExport(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(CreateExportSchema)) body: CreateExportInput,
-  ) {
-    // No acting user on an API-key call; the job records the key's team and is
-    // fetched back through the same team-scoped reads.
-    return this.transfers.startExport({ workspaceId: auth.workspaceId, userId: null, input: body });
-  }
-
-  /**
    * Queue an import from a file already staged via `POST
    * /v1/contacts/import/upload`. `Idempotency-Key` is REQUIRED: an import
    * creates and mutates contacts in bulk, so a retried request that queued a
@@ -433,70 +307,6 @@ export class ExternalV1Controller {
       idemKeyRequired(idempotencyKey),
     );
   }
-
-  /** Upload a CSV/XLSX and get back the staged key + detected mapping. */
-  @Post("contacts/import/upload")
-  @RequireScope("write:contacts")
-  @RateLimit({ perMinute: 10 })
-  @UseInterceptors(
-    FileInterceptor("file", {
-      storage: diskStorage({ destination: tmpdir() }),
-      limits: { fileSize: TRANSFER_MAX_UPLOAD_BYTES },
-    }),
-  )
-  async uploadContactImport(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @UploadedFile() file: Express.Multer.File | undefined,
-  ) {
-    return this.transfers.preview(auth.workspaceId, file);
-  }
-
-  @Get("contacts/transfers")
-  @RequireScope("read:contacts")
-  async listContactTransfers(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Query(zQuery(ListTransfersQuerySchema)) query: ListTransfersQueryInput,
-  ) {
-    return this.transfers.list(auth.workspaceId, query);
-  }
-
-  @Get("contacts/transfers/:id")
-  @RequireScope("read:contacts")
-  async getContactTransfer(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
-    return { job: await this.transfers.get(auth.workspaceId, id) };
-  }
-
-  /**
-   * 302 to a short-lived presigned URL. Partners that can't follow redirects
-   * can read the `Location` header directly.
-   */
-  @Get("contacts/transfers/:id/download")
-  @RequireScope("read:contacts")
-  async downloadContactTransfer(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-    @Res() res: Response,
-  ): Promise<void> {
-    res.redirect(302, await this.transfers.downloadUrl(auth.workspaceId, id, "result"));
-  }
-
-  @Get("contacts/transfers/:id/errors")
-  @RequireScope("read:contacts")
-  async errorsContactTransfer(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-    @Res() res: Response,
-  ): Promise<void> {
-    res.redirect(302, await this.transfers.downloadUrl(auth.workspaceId, id, "errors"));
-  }
-
-  @Post("contacts/transfers/:id/cancel")
-  @RequireScope("write:contacts")
-  async cancelContactTransfer(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
-    return this.transfers.cancel(auth.workspaceId, id);
-  }
-
-  // ---- Contacts: create / upsert / update / delete ------------------
 
   @Post("contacts")
   @RequireScope("write:contacts")
@@ -938,349 +748,6 @@ export class ExternalV1Controller {
     return this.api.listAssignmentPolicies(auth.workspaceId);
   }
 
-  @Get("assignment")
-  @RequireScope("read:catalog")
-  async getAssignment(@CurrentApiKey() auth: ApiKeyContext) {
-    return this.assignment.getOverview(auth.workspaceId);
-  }
-
-  @Post("assignment/policies")
-  @RequireScope("admin:settings")
-  async createAssignmentPolicy(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(CreatePolicySchema)) body: CreatePolicyInput,
-    @Headers("x-ccp-depth") xCcpDepth?: string,
-  ) {
-    guardChainDepth(xCcpDepth);
-    return this.assignment.createPolicy(auth.workspaceId, body);
-  }
-
-  @Put("assignment/policies/:id")
-  @RequireScope("admin:settings")
-  async updateAssignmentPolicy(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-    @Body(zBody(UpdatePolicySchema)) body: UpdatePolicyInput,
-    @Headers("x-ccp-depth") xCcpDepth?: string,
-  ) {
-    guardChainDepth(xCcpDepth);
-    return this.assignment.updatePolicy(auth.workspaceId, id, body);
-  }
-
-  @Post("assignment/policies/:id/default")
-  @RequireScope("admin:settings")
-  async setDefaultAssignmentPolicy(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-  ) {
-    return this.assignment.setDefaultPolicy(auth.workspaceId, id);
-  }
-
-  @Delete("assignment/policies/:id")
-  @RequireScope("admin:settings")
-  async archiveAssignmentPolicy(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-  ) {
-    return this.assignment.archivePolicy(auth.workspaceId, id);
-  }
-
-  @Post("assignment/rules")
-  @RequireScope("admin:settings")
-  async createAssignmentRule(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(CreateRuleSchema)) body: CreateRuleInput,
-  ) {
-    return this.assignment.createRule(auth.workspaceId, body);
-  }
-
-  // Before `rules/:id` — Nest matches in declaration order.
-  @Put("assignment/rules/order")
-  @RequireScope("admin:settings")
-  async reorderAssignmentRules(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(ReorderRulesSchema)) body: ReorderRulesInput,
-  ) {
-    return this.assignment.reorderRules(auth.workspaceId, body.ruleIds);
-  }
-
-  @Patch("assignment/rules/:id")
-  @RequireScope("admin:settings")
-  async updateAssignmentRule(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-    @Body(zBody(UpdateRuleSchema)) body: UpdateRuleInput,
-  ) {
-    return this.assignment.updateRule(auth.workspaceId, id, body);
-  }
-
-  @Delete("assignment/rules/:id")
-  @RequireScope("admin:settings")
-  async deleteAssignmentRule(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-  ) {
-    return this.assignment.deleteRule(auth.workspaceId, id);
-  }
-
-  @Patch("assignment/settings")
-  @RequireScope("admin:settings")
-  async updateAssignmentSettings(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(UpdateAssignmentSettingsSchema)) body: UpdateAssignmentSettingsInput,
-  ) {
-    return this.assignment.updateSettings(auth.workspaceId, body);
-  }
-
-  /** Dry run: "who would take a conversation like this?" Read-only — never
-   *  advances rotation or weighted counters, so it's safe to poll. */
-  @Post("assignment/preview")
-  @RequireScope("read:catalog")
-  async previewAssignment(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(PreviewAssignmentSchema)) body: PreviewAssignmentInput,
-  ) {
-    return this.assignment.preview(auth.workspaceId, body);
-  }
-
-  // ---- Conversations ------------------------------------------------
-
-  // ── Broadcasts (read-only) ────────────────────────────────────────────────
-  // Clients pull campaign results into their own BI. Same DTO the in-app report
-  // renders, so the API and the UI can never disagree about a number.
-
-  // ── Channel accounts ────────────────────────────────────────────────────
-  // Which accounts a workspace has connected per channel, and which one is the
-  // send default. Read-only: connecting/disconnecting moves real credentials
-  // and changes which number a customer hears from (see the scope comment).
-
-  @Get("channels/:channel/accounts")
-  @RequireScope("read:channels")
-  async listChannelAccounts(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("channel") channel: string,
-  ) {
-    const ch = parseAccountChannel(channel);
-    return { accounts: await this.channelAccounts.list(auth.workspaceId, ch) };
-  }
-
-  // The same accounts across EVERY channel, display fields only.
-  //
-  // Needed for parity with what the inbox now shows: a conversation carries
-  // `channel_connection_id` (which number/Page/handle the thread is on, and
-  // therefore which one a reply goes out from), and without this an integration
-  // has an opaque id and no way to resolve it. Also the only way a partner can
-  // tell which number a broadcast will use before submitting it.
-  //
-  // No tokens, no App secret, no WABA or portfolio id — so `read:catalog`,
-  // matching `whatsapp/health`, rather than the credential-adjacent
-  // `read:channels` the per-channel route above uses.
-  @Get("channel-accounts")
-  @RequireScope("read:catalog")
-  async channelAccountDirectory(@CurrentApiKey() auth: ApiKeyContext) {
-    return { accounts: await this.channelAccounts.directory(auth.workspaceId) };
-  }
-
-  // ── Instagram conversation entry points ─────────────────────────────────
-  // The ice breakers + persistent menu a customer sees before typing. These live
-  // on META, not in our database (they can also be edited in Business Suite), so
-  // both routes read and write through the same service the settings panel uses.
-  //
-  // `admin:settings`, not `write:channels`: this is admin-grade workspace
-  // CONFIGURATION whose internal twin is `@RequireRole("admin")`, and it changes
-  // what every future customer is shown — the same reasoning as assignment rules
-  // and SLA policies.
-
-  @Get("channels/instagram/entry-points")
-  @RequireScope("admin:settings")
-  async getInstagramEntryPoints(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Query("account_id") accountId?: string,
-  ) {
-    // `null` = we could not read them. Callers must treat that as unknown, NOT
-    // as empty: POSTing an empty set back would clear a live configuration.
-    return {
-      entry_points: await this.instagram.getEntryPoints(
-        auth.workspaceId,
-        accountId?.trim() || undefined,
-      ),
-    };
-  }
-
-  @Post("channels/instagram/entry-points")
-  @RequireScope("admin:settings")
-  async setInstagramEntryPoints(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(UpdateEntryPointsSchema)) body: UpdateEntryPointsInput,
-  ) {
-    return {
-      ok: true,
-      entry_points: await this.instagram.setEntryPoints(auth.workspaceId, body),
-    };
-  }
-
-  // ── Messenger profile: entry points, welcome screen, stickers ───────────
-  // Same reasoning and the same scope as the Instagram block above. Messenger
-  // has one surface Instagram does not: the WELCOME SCREEN (Get Started button,
-  // greeting, commands), which Instagram's profile node rejects outright — hence
-  // separate routes rather than a `channel` parameter on one.
-  //
-  // The sticker catalog is `read:catalog`, not `admin:settings`: it is a public,
-  // read-only list of Meta's own first-party stickers with no workspace data in
-  // it at all, and an integration composing a reply needs it without holding an
-  // admin-grade key.
-
-  @Get("channels/messenger/entry-points")
-  @RequireScope("admin:settings")
-  async getMessengerEntryPoints(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Query("account_id") accountId?: string,
-  ) {
-    // `null` = could not read. Treat as unknown, NOT empty — see the Instagram twin.
-    return {
-      entry_points: await this.messenger.getEntryPoints(
-        auth.workspaceId,
-        accountId?.trim() || undefined,
-      ),
-    };
-  }
-
-  @Post("channels/messenger/entry-points")
-  @RequireScope("admin:settings")
-  async setMessengerEntryPoints(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(UpdateMessengerEntryPointsSchema)) body: UpdateMessengerEntryPointsInput,
-  ) {
-    return {
-      ok: true,
-      entry_points: await this.messenger.setEntryPoints(auth.workspaceId, body),
-    };
-  }
-
-  @Get("channels/messenger/welcome")
-  @RequireScope("admin:settings")
-  async getMessengerWelcome(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Query("account_id") accountId?: string,
-  ) {
-    return {
-      welcome: await this.messenger.getWelcome(
-        auth.workspaceId,
-        accountId?.trim() || undefined,
-      ),
-    };
-  }
-
-  @Post("channels/messenger/welcome")
-  @RequireScope("admin:settings")
-  async setMessengerWelcome(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(UpdateMessengerWelcomeSchema)) body: UpdateMessengerWelcomeInput,
-  ) {
-    return { ok: true, welcome: await this.messenger.setWelcome(auth.workspaceId, body) };
-  }
-
-  @Get("channels/messenger/stickers")
-  @RequireScope("read:catalog")
-  async messengerStickers(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Query(zQuery(StickerCatalogQuerySchema)) query: StickerCatalogQuery,
-  ) {
-    return { catalog: await this.messenger.stickers(auth.workspaceId, query) };
-  }
-
-  /**
-   * Which NON-DM sources reach the inbox for one Instagram account (default:
-   * none — direct messages are the core and are never gated).
-   *
-   * `admin:settings` for the same reason as the entry points: it changes what
-   * every agent in the workspace sees, and the Meta-side subscription for these
-   * sources is app-wide, so this is the only per-workspace control over them.
-   */
-  @Post("channels/instagram/inbox-sources")
-  @RequireScope("admin:settings")
-  async setInstagramInboxSources(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(UpdateInboxSourcesSchema)) body: UpdateInboxSourcesInput,
-  ) {
-    return { ok: true, ...(await this.instagram.setInboxSources(auth.workspaceId, body)) };
-  }
-
-  // Handover Protocol. `write:conversations`, NOT `admin:settings`: unlike the
-  // profile routes above this changes nothing about workspace configuration — it
-  // acts on ONE conversation, and it is the programmatic equivalent of an agent
-  // taking a thread over from a bot. Scoping it as an admin setting would force
-  // an integration that only ever answers messages to hold an admin-grade key.
-  @Post("channels/messenger/thread-control")
-  @RequireScope("write:conversations")
-  async messengerThreadControl(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(ThreadControlSchema)) body: ThreadControlInput,
-  ) {
-    return { ok: true, ...(await this.messenger.threadControl(auth.workspaceId, body)) };
-  }
-
-  @Get("channels/messenger/thread-owner")
-  @RequireScope("read:channels")
-  async messengerThreadOwner(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Query("psid") psid: string,
-    @Query("account_id") accountId?: string,
-  ) {
-    return {
-      owner_app_id: await this.messenger.threadOwner(
-        auth.workspaceId,
-        psid,
-        accountId?.trim() || undefined,
-      ),
-    };
-  }
-
-  // Personas + utility templates. Both read Meta live with no local mirror.
-  //
-  // `read:catalog` for the two READS: neither returns workspace data — a persona
-  // is a display name and an avatar, a utility template is Meta-approved copy —
-  // and the composer needs both without an admin-grade key. Creating or deleting
-  // a persona changes what every future customer SEES, so those stay
-  // `admin:settings`.
-  @Get("channels/messenger/personas")
-  @RequireScope("read:catalog")
-  async messengerPersonas(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Query("account_id") accountId?: string,
-  ) {
-    return {
-      personas: await this.messenger.personas(auth.workspaceId, accountId?.trim() || undefined),
-    };
-  }
-
-  @Post("channels/messenger/personas")
-  @RequireScope("admin:settings")
-  async createMessengerPersona(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(CreatePersonaSchema)) body: CreatePersonaInput,
-  ) {
-    return { ok: true, persona: await this.messenger.createPersona(auth.workspaceId, body) };
-  }
-
-  @Delete("channels/messenger/personas/:personaId")
-  @RequireScope("admin:settings")
-  async deleteMessengerPersona(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("personaId") personaId: string,
-    @Query("account_id") accountId?: string,
-  ) {
-    await this.messenger.deletePersona(
-      auth.workspaceId,
-      personaId,
-      accountId?.trim() || undefined,
-    );
-    return { ok: true };
-  }
-
-  // Sending a Messenger template. `write:messages` — it IS a message send, not a
-  // settings change, and an integration that posts order updates should not need
-  // an admin-grade key. Rate-limited like the other sends.
   @Post("conversations/:id/messenger-template")
   @RequireScope("write:messages")
   @RateLimit({ perMinute: 60 })
@@ -1295,29 +762,6 @@ export class ExternalV1Controller {
     idemKeyRequired(idempotencyKey);
     const out = await this.api.sendMessengerTemplate(auth.workspaceId, auth.apiKeyId, id, body);
     return { ok: true, message_id: out.messageId };
-  }
-
-  @Get("channels/messenger/broadcast-reach")
-  @RequireScope("read:catalog")
-  async messengerBroadcastReach(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Query("template_name") templateName?: string,
-  ) {
-    return this.messenger.broadcastReach(auth.workspaceId, templateName?.trim() || undefined);
-  }
-
-  @Get("channels/messenger/utility-templates")
-  @RequireScope("read:catalog")
-  async messengerUtilityTemplates(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Query("account_id") accountId?: string,
-  ) {
-    return {
-      templates: await this.messenger.utilityTemplates(
-        auth.workspaceId,
-        accountId?.trim() || undefined,
-      ),
-    };
   }
 
   @Get("broadcasts")
@@ -1345,26 +789,6 @@ export class ExternalV1Controller {
   }
 
   /**
-   * Pull Meta's own template analytics for this campaign (currency cost +
-   * unique link clicks — figures the per-recipient funnel cannot derive).
-   *
-   * Documented in both doc surfaces since the analytics work landed but never
-   * implemented on /v1, so an API-only integration got a 404 and its
-   * `report.metaAnalytics` block stayed permanently stale — the internal
-   * dashboard was the only way to refresh it. `read:broadcasts` because it
-   * fetches and caches a report figure; it changes no campaign state.
-   */
-  @Post("broadcasts/:id/analytics/refresh")
-  @RequireScope("read:broadcasts")
-  @RateLimit({ perMinute: 10 })
-  async refreshBroadcastAnalytics(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-  ) {
-    return this.broadcasts.refreshAnalytics(auth.workspaceId, id);
-  }
-
-  /**
    * Recipient-level results. `updatedSince` enables incremental sync — delivery
    * and read receipts keep arriving for hours, so without it a client would
    * have to re-pull every recipient on each poll.
@@ -1385,36 +809,6 @@ export class ExternalV1Controller {
       id,
       query,
       hasScope(auth.scopes, "read:contacts"),
-    );
-  }
-
-  @Get("conversations")
-  @RequireScope("read:conversations")
-  async listConversations(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Query(zQuery(ListConversationsQuerySchema)) query: ListConversationsQueryInput,
-  ) {
-    // Resolve the saved view HERE, where the membership check lives — a key
-    // only sees shared views, and an id from another workspace 404s before it
-    // can become a WHERE clause. `resolveFilters` then drops references to
-    // tags / stages / teammates that have since been deleted.
-    const viewClauses = query.viewId
-      ? inboxViewWhereClauses(
-          await this.inboxViews.resolveFilters(
-            auth.workspaceId,
-            (await this.inboxViews.get(apiKeyViewActor(auth), query.viewId)).filters,
-          ),
-          // No viewer: an API key is not a person, so a view whose assignee is
-          // "me" matches nothing rather than everything.
-          undefined,
-        )
-      : [];
-
-    return this.api.listConversations(
-      auth.workspaceId,
-      query,
-      hasScope(auth.scopes, "read:contacts"),
-      viewClauses,
     );
   }
 
@@ -1733,138 +1127,6 @@ export class ExternalV1Controller {
   // outbound webhook to learn the moment something is flagged, then use these
   // endpoints to read the backlog and mark items handled from your own system.
 
-  @Get("message-flags")
-  @RequireScope("read:flags")
-  async listMessageFlags(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Query(zQuery(ExternalListFlagsQuerySchema)) query: ExternalListFlagsQueryInput,
-  ) {
-    return this.flags.list(auth.workspaceId, query);
-  }
-
-  /** Static segments before the `:flagId` routes below. */
-  @Get("message-flags/counts")
-  @RequireScope("read:flags")
-  async messageFlagCounts(@CurrentApiKey() auth: ApiKeyContext) {
-    return this.flags.counts(auth.workspaceId);
-  }
-
-  /** The flag CATALOG (which flags exist), archived included. Lives under
-   *  `read:catalog` with every other catalog read. */
-  @Get("message-flag-definitions")
-  @RequireScope("read:catalog")
-  async listMessageFlagDefinitions(@CurrentApiKey() auth: ApiKeyContext) {
-    return this.flags.listDefinitions(auth.workspaceId);
-  }
-
-  @Post("message-flag-definitions")
-  @RequireScope("write:catalog")
-  async createMessageFlagDefinition(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(ExternalCreateFlagDefinitionSchema)) body: ExternalCreateFlagDefinitionInput,
-  ) {
-    return this.flags.createDefinition(auth.workspaceId, body);
-  }
-
-  @Patch("message-flag-definitions/:id")
-  @RequireScope("write:catalog")
-  async updateMessageFlagDefinition(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-    @Body(zBody(ExternalUpdateFlagDefinitionSchema)) body: ExternalUpdateFlagDefinitionInput,
-  ) {
-    return this.flags.updateDefinition(auth.workspaceId, id, body);
-  }
-
-  /** Only permitted while the definition has never been raised — otherwise 409
-   *  with `message_flag_definition_in_use`; archive it instead
-   *  (`PATCH … { "archived": true }`) so the triage history stays readable. */
-  @Delete("message-flag-definitions/:id")
-  @RequireScope("write:catalog")
-  async deleteMessageFlagDefinition(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-  ) {
-    return this.flags.deleteDefinition(auth.workspaceId, id);
-  }
-
-  // ---- Saved inbox views ---------------------------------------------
-  //
-  // A named, reusable filter over the conversation list ("Support ·
-  // unassigned · WhatsApp"). Full parity with the inbox rail — the SAME
-  // service backs both, so a view can never select different conversations
-  // through the API than it shows in the product.
-  //
-  // API-KEY SPECIFICS, both consequences of a key not being a person:
-  //   - only SHARED views are visible or creatable (a personal view needs an
-  //     owner; creating one returns `inbox_view_requires_user`);
-  //   - a view whose assignee is "me" matches NOTHING here, deliberately —
-  //     silently widening it to everyone would be the dangerous direction.
-  //
-  // To LIST the conversations a view selects, pass its id to
-  // `GET /v1/conversations?viewId=…`.
-
-  @Get("inbox-views")
-  @RequireScope("read:catalog")
-  async listInboxViews(@CurrentApiKey() auth: ApiKeyContext) {
-    const views = await this.inboxViews.list(apiKeyViewActor(auth));
-    return { views };
-  }
-
-  @Get("inbox-views/:id")
-  @RequireScope("read:catalog")
-  async getInboxView(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
-    const view = await this.inboxViews.get(apiKeyViewActor(auth), id);
-    return { view };
-  }
-
-  @Post("inbox-views")
-  @RequireScope("write:catalog")
-  async createInboxView(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(CreateInboxViewSchema)) body: CreateInboxViewInput,
-  ) {
-    const view = await this.inboxViews.create(apiKeyViewActor(auth), {
-      ...body,
-      // A key has no personal scope, so default to shared rather than letting
-      // the service's personal default throw on every unqualified create.
-      visibility: body.visibility ?? "shared",
-    });
-    return { view };
-  }
-
-  @Patch("inbox-views/:id")
-  @RequireScope("write:catalog")
-  async updateInboxView(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-    @Body(zBody(UpdateInboxViewSchema)) body: UpdateInboxViewInput,
-  ) {
-    const view = await this.inboxViews.update(apiKeyViewActor(auth), id, body);
-    return { view };
-  }
-
-  @Delete("inbox-views/:id")
-  @RequireScope("write:catalog")
-  async deleteInboxView(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
-    await this.inboxViews.remove(apiKeyViewActor(auth), id);
-    return { ok: true };
-  }
-
-  // ---- WhatsApp messaging health --------------------------------------
-  //
-  // What Meta currently allows the workspace's WhatsApp number to send: the
-  // messaging tier and its 24h unique-recipient cap, how much of that budget is
-  // already spent, the quality rating, and the throughput ceiling.
-  //
-  // Worth exposing because it is the ONLY way an integration can size a
-  // campaign before submitting it. Without it a partner discovers the cap by
-  // having a 10k send refused — and the refusal is correct, so there is nothing
-  // to retry. `remainingDailyBudget` is the number to plan against.
-  //
-  // Read-only, and secret-free (no tokens, no App secret), so it sits under
-  // `read:catalog` rather than requiring a credential-bearing scope.
-
   @Get("whatsapp/health")
   @RequireScope("read:catalog")
   async whatsappHealth(
@@ -1876,45 +1138,6 @@ export class ExternalV1Controller {
   ) {
     return getMessagingHealthSummary(auth.workspaceId, accountId || null);
   }
-
-  /**
-   * Re-poll Meta for a number's tier / quality / throughput now, rather than
-   * waiting for the periodic sweep. Parity with the settings Refresh button.
-   * `admin:settings` — it spends Graph reads on the workspace's behalf.
-   */
-  @Post("whatsapp/health/refresh")
-  @HttpCode(200)
-  @RequireScope("admin:settings")
-  async whatsappHealthRefresh(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Query("accountId") accountId?: string,
-  ) {
-    return this.whatsapp.refreshHealth(auth.workspaceId, accountId || null);
-  }
-
-  /**
-   * Register a number for Cloud API use (two-step PIN, passed straight
-   * through to Meta and never stored). Parity with the UI's guided register.
-   */
-  @Post("whatsapp/register")
-  @HttpCode(200)
-  @RequireScope("admin:settings")
-  async whatsappRegister(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(RegisterWhatsappNumberSchema)) body: RegisterWhatsappNumberInput,
-  ) {
-    return this.whatsapp.registerNumber(auth.workspaceId, body);
-  }
-
-  // ---- Template analytics ----------------------------------------------
-  //
-  // Meta's own aggregate performance per template per day — the only source of
-  // real currency COST and of unique URL-button clicks. Read from the stored
-  // rollup; `POST /broadcasts/:id/analytics/refresh` is what pulls fresh data
-  // from Meta (deliberately manual — see the note on that route).
-  //
-  // These sit BESIDE the per-recipient funnel in `/broadcasts/:id/report`,
-  // never merged into it: the two measure different things and will not agree.
 
   /**
    * The template catalog. Read-only — creating a template is a Meta review
@@ -1929,66 +1152,6 @@ export class ExternalV1Controller {
     query: ExternalTemplateListQueryInput,
   ) {
     return this.api.listTemplates(auth.workspaceId, query);
-  }
-
-  /**
-   * Replace a template's organizational LABELS — the one part of a template
-   * this API may write. Labels are OURS ("promo", "ramadan-2026"): Meta has no
-   * such concept, nothing goes over the Graph wire, and a catalog re-sync
-   * leaves them untouched. Parity with the internal templates PATCH;
-   * `write:catalog` because labels are catalog taxonomy, like tags.
-   */
-  @Patch("templates/:id")
-  @RequireScope("write:catalog")
-  async updateTemplateLabels(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-    @Body(zBody(ExternalUpdateTemplateLabelsSchema))
-    body: ExternalUpdateTemplateLabelsInput,
-  ) {
-    await this.whatsapp.updateTemplateBindings(auth.workspaceId, id, {
-      labels: body.labels,
-    });
-    return { ok: true };
-  }
-
-  /**
-   * Lift a quality pause. Meta lifts a quality pause itself (3h, then 6h, then
-   * it DISABLES the template), so this is for one paused by Template Pacing,
-   * which never unpauses on its own. Campaigns parked for the template resume.
-   */
-  /**
-   * Lift a Template-Pacing pause. `admin:settings`, not `write:catalog`:
-   * unpausing RESUMES every broadcast campaign parked on this template — i.e.
-   * it restarts irreversible billed sends. `write:catalog` is advertised as
-   * "create/edit tags + custom fields"; a key minted for that must not be able
-   * to restart a 50k-recipient campaign. Matches the internal twin's
-   * `templates:manage` capability gate.
-   */
-  @Post("templates/:id/unpause")
-  @RequireScope("admin:settings")
-  async unpauseTemplate(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-  ) {
-    await this.whatsapp.unpauseTemplate(auth.workspaceId, id);
-    return { ok: true };
-  }
-
-  /**
-   * Toggle button-click tracking on one template (Meta's
-   * `cta_url_link_tracking_opted_out`). `admin:settings` like the internal
-   * twin's `templates:manage` gate — it changes what analytics Meta records
-   * for every future send of the template, workspace-wide.
-   */
-  @Post("templates/:id/link-tracking")
-  @RequireScope("admin:settings")
-  async setTemplateLinkTracking(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("id") id: string,
-    @Body(zBody(ExternalSetLinkTrackingSchema)) body: ExternalSetLinkTrackingInput,
-  ) {
-    return this.whatsapp.setTemplateLinkTracking(auth.workspaceId, id, body.enabled);
   }
 
   @Get("templates/:id/analytics")
@@ -2021,127 +1184,6 @@ export class ExternalV1Controller {
     };
   }
 
-  /**
-   * The business phone number's public profile — what a customer sees when they
-   * tap the business name. `?accountId=` picks one of the workspace's numbers;
-   * each has its own profile.
-   */
-  @Get("whatsapp/profile")
-  @RequireScope("read:catalog")
-  async businessProfile(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Query("accountId") accountId?: string,
-  ) {
-    return this.whatsapp.getBusinessProfile(auth.workspaceId, accountId);
-  }
-
-  /** OBA standing + the owning WABA's record. Read-only. */
-  @Get("whatsapp/account-status")
-  @RequireScope("read:catalog")
-  async accountStatus(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Query("accountId") accountId?: string,
-  ) {
-    return this.whatsapp.getAccountStatus(auth.workspaceId, accountId);
-  }
-
-  @Post("whatsapp/profile")
-  @RequireScope("admin:settings")
-  async updateBusinessProfile(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(UpdateBusinessProfileSchema)) body: UpdateBusinessProfileInput,
-    @Query("accountId") accountId?: string,
-  ) {
-    return this.whatsapp.updateBusinessProfile(auth.workspaceId, body, accountId);
-  }
-
-  /**
-   * QR codes & short links. Meta caps a number at 2,000 and publishes no scan
-   * analytics, so this is pure CRUD — there is nothing to report on.
-   */
-  @Get("whatsapp/qr-codes")
-  @RequireScope("read:catalog")
-  async listQrCodes(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Query("accountId") accountId?: string,
-  ) {
-    return this.whatsapp.listQrCodes(auth.workspaceId, accountId);
-  }
-
-  @Post("whatsapp/qr-codes")
-  @RequireScope("admin:settings")
-  async createQrCode(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(CreateQrCodeSchema)) body: CreateQrCodeInput,
-    @Query("accountId") accountId?: string,
-  ) {
-    return this.whatsapp.createQrCode(auth.workspaceId, body, accountId);
-  }
-
-  @Post("whatsapp/qr-codes/:code")
-  @RequireScope("admin:settings")
-  async updateQrCode(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("code") code: string,
-    @Body(zBody(UpdateQrCodeSchema)) body: UpdateQrCodeInput,
-    @Query("accountId") accountId?: string,
-  ) {
-    return this.whatsapp.updateQrCode(auth.workspaceId, code, body, accountId);
-  }
-
-  /** Deleting a code breaks any signage printed with it — Meta shows the
-   *  customer "this QR code has expired". */
-  @Delete("whatsapp/qr-codes/:code")
-  @RequireScope("admin:settings")
-  async deleteQrCode(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("code") code: string,
-    @Query("accountId") accountId?: string,
-  ) {
-    await this.whatsapp.deleteQrCode(auth.workspaceId, code, accountId);
-    return { ok: true };
-  }
-
-  /**
-   * The number's @username (a chat-native handle, 1:1 with the phone number,
-   * globally unique across WhatsApp) plus Meta's reserved suggestions.
-   * `?accountId=` picks one of the workspace's numbers.
-   */
-  @Get("whatsapp/username")
-  @RequireScope("read:catalog")
-  async whatsappUsername(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Query("accountId") accountId?: string,
-  ) {
-    return this.whatsapp.getUsernameState(auth.workspaceId, accountId);
-  }
-
-  /**
-   * Adopt or change it. A 409 `username_transfer_required` means the name is
-   * on another of the portfolio's numbers — re-send with
-   * `transferAction: "force_transfer"` to move it here deliberately.
-   */
-  @Post("whatsapp/username")
-  @RequireScope("admin:settings")
-  async setWhatsappUsername(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(SetWhatsappUsernameSchema)) body: SetWhatsappUsernameInput,
-    @Query("accountId") accountId?: string,
-  ) {
-    return this.whatsapp.setUsername(auth.workspaceId, body, accountId);
-  }
-
-  /** Remove it. Customers who saved the @handle lose that route to the chat. */
-  @Delete("whatsapp/username")
-  @RequireScope("admin:settings")
-  async deleteWhatsappUsername(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Query("accountId") accountId?: string,
-  ) {
-    await this.whatsapp.deleteUsername(auth.workspaceId, accountId);
-    return { ok: true };
-  }
-
   /** `?accountId=` reads ONE number's WABA; omitted reads the default number's. */
   @Get("whatsapp/insights/status")
   @RequireScope("read:catalog")
@@ -2162,52 +1204,6 @@ export class ExternalV1Controller {
     if (!series) throw new NotFoundException({ error: "broadcast_not_found" });
     return series;
   }
-
-  @Post("messages/:messageId/flags")
-  @RequireScope("write:flags")
-  async raiseMessageFlag(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("messageId") messageId: string,
-    @Body(zBody(ExternalRaiseFlagSchema)) body: ExternalRaiseFlagInput,
-    @Headers("x-ccp-depth") xCcpDepth?: string,
-  ) {
-    guardChainDepth(xCcpDepth);
-    // No Idempotency-Key requirement here, unlike sends: raising a flag is
-    // idempotent by construction (@@unique([messageId, definitionId]) + upsert)
-    // and costs nothing, so demanding a key would be friction with no payoff.
-    return this.flags.raise(auth.workspaceId, auth.apiKeyId, messageId, body);
-  }
-
-  @Patch("message-flags/:flagId")
-  @RequireScope("write:flags")
-  async updateMessageFlag(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("flagId") flagId: string,
-    @Body(zBody(ExternalUpdateFlagSchema)) body: ExternalUpdateFlagInput,
-    @Headers("x-ccp-depth") xCcpDepth?: string,
-  ) {
-    guardChainDepth(xCcpDepth);
-    return this.flags.update(auth.workspaceId, auth.apiKeyId, flagId, body);
-  }
-
-  @Delete("message-flags/:flagId")
-  @RequireScope("write:flags")
-  async deleteMessageFlag(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("flagId") flagId: string,
-    @Headers("x-ccp-depth") xCcpDepth?: string,
-  ) {
-    guardChainDepth(xCcpDepth);
-    return this.flags.remove(auth.workspaceId, auth.apiKeyId, flagId);
-  }
-
-  // ---- Calls --------------------------------------------------------
-  //
-  // Read history and permission state, ask a customer for calling permission,
-  // and send them a call button. There is deliberately no "place a call": a
-  // call needs an SDP offer from a live WebRTC peer and a browser to carry the
-  // audio, so an API client has nothing to place one with. What's here is the
-  // part an integration can genuinely drive.
 
   /**
    * Workspace performance report — same aggregates and SAME response shape as
@@ -2319,40 +1315,6 @@ export class ExternalV1Controller {
   }
 
   /**
-   * Stream a call's stored recording (audio/ogg). 404s until the recording
-   * has been ingested (`hasRecording: true` on the call row) — recordings
-   * land about a minute after the call ends.
-   */
-  @Get("calls/:callId/recording")
-  @RequireScope("read:calls")
-  async streamCallRecording(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("callId") callId: string,
-    @Headers("range") range: string | undefined,
-    @Res() res: Response,
-  ) {
-    const ref = await this.calls.getRecordingRefForTeam(auth.workspaceId, callId);
-    await streamBlob(res, ref.key, range, { downloadFilename: ref.filename });
-  }
-
-  /**
-   * The transcript JSON document (speaker-attributed segments with word
-   * timings; `transcript.language` is the auto-detected spoken language).
-   * 404s until `hasTranscript` is true on the call row.
-   */
-  @Get("calls/:callId/transcript")
-  @RequireScope("read:calls")
-  async streamCallTranscript(
-    @CurrentApiKey() auth: ApiKeyContext,
-    @Param("callId") callId: string,
-    @Headers("range") range: string | undefined,
-    @Res() res: Response,
-  ) {
-    const ref = await this.calls.getTranscriptRefForTeam(auth.workspaceId, callId);
-    await streamBlob(res, ref.key, range);
-  }
-
-  /**
    * The customer's CURRENT calling permission, read live from the provider —
    * including whether we may call them right now and when any quota resets.
    * This is the same read the inbox pre-flight uses, so an integration can
@@ -2413,16 +1375,3 @@ export class ExternalV1Controller {
   // ===========================================================================
 }
 
-/**
- * An API key as a saved-view actor.
- *
- * `userId: null` is the whole point — it makes the service treat this caller
- * as "not a person": shared views only, no personal ownership, and `me`
- * assignee filters resolve to nothing. `canManageShared: true` because a key
- * holding `write:catalog` is already trusted with workspace-wide
- * configuration; gating it further would only mean a partner can create tags
- * and stages but not the view that uses them.
- */
-function apiKeyViewActor(auth: ApiKeyContext): InboxViewActor {
-  return { workspaceId: auth.workspaceId, userId: null, canManageShared: true };
-}
