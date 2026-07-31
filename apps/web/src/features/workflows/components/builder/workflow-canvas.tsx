@@ -834,6 +834,10 @@ function describeNode(n: WorkflowNode): string | undefined {
       return typeof c.question === "string" ? clip(c.question) : undefined;
     case "http_request":
       return typeof c.url === "string" ? `POST ${clip(c.url, 40)}` : undefined;
+    case "send_conversions_event":
+      return typeof c.eventName === "string" && c.eventName
+        ? `${c.eventName} → Meta Ads`
+        : undefined;
     case "trigger_workflow":
       return typeof c.workflowId === "string" ? `→ ${c.workflowId}` : undefined;
     case "create_ticket":

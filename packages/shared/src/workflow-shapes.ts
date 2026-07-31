@@ -107,6 +107,32 @@ const AGENT_SHAPE: FieldShape = {
 };
 
 /**
+ * Business-messaging Conversions API event names Meta accepts on
+ * `action_source: "business_messaging"` (the CTWA / click-to-Messenger
+ * optimization loop). This is the ONE authority both the canvas editor's
+ * dropdown and the `send_conversions_event` step's publish-time validation
+ * read — an unknown name is rejected at parse time, never sent to Graph.
+ */
+export const CONVERSION_EVENT_NAMES = [
+  "Purchase",
+  "LeadSubmitted",
+  "InitiateCheckout",
+  "AddToCart",
+  "ViewContent",
+  "OrderCreated",
+  "OrderShipped",
+  "OrderDelivered",
+  "OrderCanceled",
+  "OrderReturned",
+  "CartAbandoned",
+  "QualifiedLead",
+  "RatingProvided",
+  "ReviewProvided",
+] as const;
+
+export type ConversionEventName = (typeof CONVERSION_EVENT_NAMES)[number];
+
+/**
  * Trigger payload shapes — what the `$var.trigger.*` namespace exposes
  * for each WorkflowTriggerEvent. Most triggers carry contact + (some
  * subset of) conversation + message + agent. Missing namespaces resolve
@@ -339,6 +365,15 @@ export const STEP_OUTPUT_SHAPES: Record<WorkflowStepType, FieldShape> = {
   trigger_workflow: {
     kind: "object",
     fields: { runId: leafString() },
+  },
+  send_conversions_event: {
+    kind: "object",
+    fields: {
+      datasetId: leafString("Meta dataset the event was sent to"),
+      eventName: leafString(),
+      eventId: leafString("Our idempotency id, echoed to Meta"),
+      skipped: leafString("Set when the contact had no ad click / channel id"),
+    },
   },
 };
 

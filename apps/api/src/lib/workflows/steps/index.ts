@@ -14,6 +14,7 @@ import {
   closeConversationStepHandler,
   openConversationStepHandler,
 } from "./open-close-conversation";
+import { sendConversionsEventStepHandler } from "./send-conversions-event";
 import { sendMessageStepHandler } from "./send-message";
 import { sendTemplateStepHandler } from "./send-template";
 import { setStatusStepHandler } from "./set-status";
@@ -64,6 +65,7 @@ const REGISTRY: Record<WorkflowStepType, StepHandler<unknown>> = {
   noop: noopStepHandler as StepHandler<unknown>,
   ask_question: askQuestionStepHandler as StepHandler<unknown>,
   http_request: httpRequestStepHandler as StepHandler<unknown>,
+  send_conversions_event: sendConversionsEventStepHandler as StepHandler<unknown>,
   trigger_workflow: triggerWorkflowStepHandler as StepHandler<unknown>,
 };
 

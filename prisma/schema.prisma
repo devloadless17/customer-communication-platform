@@ -479,6 +479,9 @@ enum WorkflowStepType {
   assign_ticket
   // External
   http_request
+  // Meta Conversions API signal for CTWA / click-to-Messenger ad optimization
+  // (leaf side effect — POSTs to the channel's dataset, publishes nothing).
+  send_conversions_event
   trigger_workflow
 }
 

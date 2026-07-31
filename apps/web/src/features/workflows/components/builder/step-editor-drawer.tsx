@@ -14,6 +14,7 @@ import {
   BranchEditor,
   CloseConversationEditor,
   HttpRequestEditor,
+  SendConversionsEventEditor,
   JumpToStepEditor,
   NoopEditor,
   OpenConversationEditor,
@@ -253,6 +254,8 @@ function EditorForNode({
       return <AskQuestionEditor config={c} onChange={onChangeConfig} onChangeWithEdges={onChangeConfigWithEdges} fields={catalogs.fields} trigger={trigger} />;
     case "http_request":
       return <HttpRequestEditor config={c} onChange={onChangeConfig} />;
+    case "send_conversions_event":
+      return <SendConversionsEventEditor config={c} onChange={onChangeConfig} />;
     case "trigger_workflow":
       return <TriggerWorkflowEditor config={c} onChange={onChangeConfig} workflows={catalogs.workflows} />;
     case "create_ticket":

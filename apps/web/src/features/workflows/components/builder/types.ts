@@ -173,6 +173,7 @@ export const STEP_OPTIONS: Array<{
   { value: "noop", label: "Do Nothing", description: "Stop this branch with no action.", group: "control" },
   { value: "ask_question", label: "Ask a Question", description: "Send a question, wait for the contact's reply, branch on answered / timeout.", group: "control" },
   { value: "http_request", label: "HTTP Request", description: "POST the envelope to an external URL.", group: "external" },
+  { value: "send_conversions_event", label: "Send Conversion to Meta Ads", description: "Sends a conversion signal to Meta Ads for the ad this contact came from. WhatsApp/Messenger sends power purchase optimization; Instagram is measurement-only for now.", group: "external" },
   { value: "trigger_workflow", label: "Trigger Workflow", description: "Run another workflow for this contact.", group: "external" },
 ];
 
@@ -225,6 +226,9 @@ export const CONTACT_ACTING_STEPS: ReadonlySet<StepType> = new Set([
   "set_ticket_status",
   "set_ticket_priority",
   "assign_ticket",
+  // Reads the trigger conversation's channel/account and the contact's ad
+  // click id — nothing to send without them.
+  "send_conversions_event",
 ]);
 
 /** Author-facing reason shown when a contact-acting step is offered on a
@@ -266,6 +270,8 @@ export function emptyConfigFor(type: StepType): Record<string, unknown> {
       return { question: "", timeoutHours: 24 };
     case "http_request":
       return { url: "" };
+    case "send_conversions_event":
+      return { eventName: "Purchase" };
     case "trigger_workflow":
       return { workflowId: "" };
     case "create_ticket":

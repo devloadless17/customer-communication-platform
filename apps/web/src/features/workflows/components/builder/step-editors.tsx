@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import type { ContactFieldDefinition } from "@ccp/shared/types";
+import { CONVERSION_EVENT_NAMES } from "@ccp/shared/workflow-shapes";
 import { FieldTokenPicker } from "@/features/templates/components/field-token-picker";
 import { PhoneNumberInput } from "@/features/contacts/components/phone-number-input";
 import { TokenHighlightTextarea } from "@/features/templates/components/token-highlight";
@@ -1839,6 +1840,89 @@ export function HttpRequestEditor({
           max={60_000}
         />
       </Field>
+    </div>
+  );
+}
+
+// send_conversions_event -----------------------------------------------------
+
+/** Mirrors CONVERSION_EVENT_NAMES validation server-side (parseConfig rejects
+ *  anything outside the shared list). */
+export function SendConversionsEventEditor({
+  config,
+  onChange,
+}: {
+  config: {
+    eventName?: string;
+    currency?: string;
+    value?: number;
+    testEventCode?: string;
+  };
+  onChange: (c: Record<string, unknown>) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-4">
+      <Field label="Conversion event">
+        <Select
+          value={config.eventName ?? "Purchase"}
+          onChange={(e) => onChange({ ...config, eventName: e.target.value })}
+          wrapperClassName="max-w-xs"
+        >
+          {CONVERSION_EVENT_NAMES.map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      <div className="flex gap-3">
+        <Field label="Value (optional)" hint="Set currency and value together, or neither.">
+          <Input
+            type="number"
+            value={config.value?.toString() ?? ""}
+            onChange={(e) => {
+              const n = Number.parseFloat(e.target.value);
+              onChange({
+                ...config,
+                value: Number.isFinite(n) && n >= 0 ? n : undefined,
+              });
+            }}
+            placeholder="123"
+            min={0}
+            step="any"
+          />
+        </Field>
+        <Field label="Currency (optional)">
+          <Input
+            value={config.currency ?? ""}
+            onChange={(e) =>
+              onChange({ ...config, currency: e.target.value.toUpperCase() || undefined })
+            }
+            placeholder="USD"
+            maxLength={3}
+            className="w-24"
+          />
+        </Field>
+      </div>
+      <Field
+        label="Test event code (optional)"
+        hint="Routes the event to Events Manager's Test Events tab to verify the plumbing. Meta still uses these events for delivery — it is not a sandbox."
+      >
+        <Input
+          value={config.testEventCode ?? ""}
+          onChange={(e) =>
+            onChange({ ...config, testEventCode: e.target.value || undefined })
+          }
+          placeholder="TEST12345"
+          className="max-w-xs"
+        />
+      </Field>
+      <div className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-2 text-2xs text-muted-foreground">
+        Sends a conversion signal to Meta Ads for the ad this contact came
+        from. WhatsApp/Messenger sends power purchase optimization;
+        Instagram is measurement-only for now. Contacts without an ad click
+        are skipped — the workflow continues.
+      </div>
     </div>
   );
 }
