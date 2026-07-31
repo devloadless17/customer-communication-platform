@@ -38,7 +38,7 @@ export function resolveUserSchedule(
 }
 
 /** Narrow a team's `workHours` JSON column, treating a blank grid as none. */
-export function teamScheduleOf(team: { workHours?: unknown } | null): WorkHours | null {
+export function workspaceScheduleOf(team: { workHours?: unknown } | null): WorkHours | null {
   const schedule = asWorkHours(team?.workHours);
   return schedule && !isScheduleEmpty(schedule) ? schedule : null;
 }
@@ -82,7 +82,7 @@ export function teamScheduleOf(team: { workHours?: unknown } | null): WorkHours 
 export async function loadAvailabilityScope(
   db: Pick<PrismaClient, "workspaceMember">,
   userId: string,
-): Promise<{ workspaceIds: string[]; teamSchedule: WorkHours | null }> {
+): Promise<{ workspaceIds: string[]; workspaceSchedule: WorkHours | null }> {
   const memberships = await db.workspaceMember.findMany({
     where: { userId },
     // Deterministic tie-break: join order, the same ordering the
@@ -91,14 +91,14 @@ export async function loadAvailabilityScope(
     select: { workspaceId: true, workspace: { select: { workHours: true } } },
   });
 
-  let teamSchedule: WorkHours | null = null;
+  let workspaceSchedule: WorkHours | null = null;
   for (const m of memberships) {
-    const schedule = teamScheduleOf(m.workspace);
+    const schedule = workspaceScheduleOf(m.workspace);
     if (schedule) {
-      teamSchedule = schedule;
+      workspaceSchedule = schedule;
       break;
     }
   }
 
-  return { workspaceIds: memberships.map((m) => m.workspaceId), teamSchedule };
+  return { workspaceIds: memberships.map((m) => m.workspaceId), workspaceSchedule };
 }

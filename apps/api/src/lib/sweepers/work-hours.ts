@@ -117,7 +117,7 @@ async function sweepOnce(): Promise<void> {
   for (const user of users) {
     // Per-user isolation: one failure must not skip everyone after it.
     try {
-      const { workspaceIds, teamSchedule } = await loadAvailabilityScope(db, user.id);
+      const { workspaceIds, workspaceSchedule } = await loadAvailabilityScope(db, user.id);
       if (workspaceIds.length === 0) continue;
       // RE-READ inside the loop. The findMany above is a point-in-time
       // snapshot, and a 300-member sweep takes seconds — long enough for an
@@ -139,7 +139,7 @@ async function sweepOnce(): Promise<void> {
         db,
         user: fresh,
         workspaceIds,
-        teamSchedule,
+        workspaceSchedule,
         intent: { kind: "sync" },
         nowMs,
         // Every other caller of applyAvailability busts the 15s ApiSession

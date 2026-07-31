@@ -464,8 +464,9 @@ export async function resolvePolicyFor(
  * count (+ in-flight reservations).
  *
  * `orderBy [createdAt, id]` is the stable order rotation depends on — it must
- * match `pickRoundRobinAssignee`'s historical order so an upgraded team's
- * rotation continues where it left off rather than jumping.
+ * match the legacy round-robin picker's historical order (pinned by
+ * tests/e2e/workflows-events/round-robin.spec.ts via `chooseRoundRobin`) so an
+ * upgraded team's rotation continues where it left off rather than jumping.
  */
 async function loadMembers(
   db: Db,

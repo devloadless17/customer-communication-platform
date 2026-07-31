@@ -61,8 +61,8 @@ describe("which workspace's default schedule governs", () => {
       ]),
       "u1",
     );
-    expect(scope.teamSchedule).not.toBeNull();
-    expect(scope.teamSchedule?.weekly.mon?.[0]?.open).toBe("09:01");
+    expect(scope.workspaceSchedule).not.toBeNull();
+    expect(scope.workspaceSchedule?.weekly.mon?.[0]?.open).toBe("09:01");
   });
 
   it("treats a BLANK grid as no schedule", async () => {
@@ -75,7 +75,7 @@ describe("which workspace's default schedule governs", () => {
       ]),
       "u1",
     );
-    expect(scope.teamSchedule?.weekly.mon?.[0]?.open).toBe("09:01");
+    expect(scope.workspaceSchedule?.weekly.mon?.[0]?.open).toBe("09:01");
   });
 
   it("picks exactly ONE when several workspaces have real schedules", async () => {
@@ -89,7 +89,7 @@ describe("which workspace's default schedule governs", () => {
       ]),
       "u1",
     );
-    expect(scope.teamSchedule?.weekly.mon?.[0]?.open).toBe("08:00");
+    expect(scope.workspaceSchedule?.weekly.mon?.[0]?.open).toBe("08:00");
   });
 
   it("is null when nobody configured hours — availability stays purely manual", async () => {
@@ -100,7 +100,7 @@ describe("which workspace's default schedule governs", () => {
       ]),
       "u1",
     );
-    expect(scope.teamSchedule).toBeNull();
+    expect(scope.workspaceSchedule).toBeNull();
   });
 });
 
@@ -124,7 +124,7 @@ describe("who gets told", () => {
   it("is empty for someone with no memberships, so callers can skip the write", async () => {
     const scope = await loadAvailabilityScope(fakeDb([]), "u1");
     expect(scope.workspaceIds).toEqual([]);
-    expect(scope.teamSchedule).toBeNull();
+    expect(scope.workspaceSchedule).toBeNull();
   });
 });
 

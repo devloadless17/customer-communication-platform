@@ -118,7 +118,7 @@ export class UserAvailabilityService {
       db: this.db,
       user,
       workspaceIds: scope.workspaceIds,
-      teamSchedule: scope.teamSchedule,
+      workspaceSchedule: scope.workspaceSchedule,
       intent: input.followSchedule
         ? { kind: "followSchedule" }
         : { kind: "pick", status: input.status, message: input.message, actorUserId },
@@ -156,11 +156,11 @@ export class UserAvailabilityService {
       select: { workHoursMode: true, workHours: true },
     });
     if (!user) throw new NotFoundException({ error: "not_found" });
-    const { teamSchedule } = await loadAvailabilityScope(this.db, userId);
+    const { workspaceSchedule } = await loadAvailabilityScope(this.db, userId);
     return {
       mode: user.workHoursMode,
       workHours: user.workHours ?? null,
-      teamWorkHours: teamSchedule,
+      teamWorkHours: workspaceSchedule,
     };
   }
 
@@ -231,7 +231,7 @@ export class UserAvailabilityService {
         db: this.db,
         user,
         workspaceIds: scope.workspaceIds,
-        teamSchedule: scope.teamSchedule,
+        workspaceSchedule: scope.workspaceSchedule,
         // Every caller of this method is a SCHEDULE EDIT (org default or a
         // member's own), so a live override must be re-anchored to the new
         // schedule rather than keep an expiry pointing at the old one's

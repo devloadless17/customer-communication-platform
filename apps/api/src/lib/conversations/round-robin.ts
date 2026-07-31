@@ -1,8 +1,3 @@
-import type { PrismaClient } from "@prisma/client";
-
-import type { AssignmentSource } from "@ccp/shared/assignment/types";
-
-import { resolveAssignee } from "@/lib/assignment/resolve";
 import { selectAssignee } from "@/lib/assignment/select";
 
 /**
@@ -15,11 +10,12 @@ import { selectAssignee } from "@/lib/assignment/select";
  * seeded default policy is configured to reproduce it EXACTLY, so nothing about
  * an un-configured team's behavior changed.
  *
- * The two exports are kept because they have real callers and, in
- * `chooseRoundRobin`'s case, a pure unit-test suite
- * (tests/e2e/workflows-events/round-robin.spec.ts) that is now doubling as the
- * proof of that equivalence. New code should call the engine directly:
- * `resolveAssignee` to decide, `assignByPolicy` to decide AND write.
+ * `chooseRoundRobin` is the ONE export kept: its pure unit-test suite
+ * (tests/e2e/workflows-events/round-robin.spec.ts) doubles as the proof that
+ * the engine's `least_busy` strategy reproduces the legacy algorithm exactly.
+ * The other legacy exports (`pickRoundRobinAssignee`, `RoundRobinDb`) lost
+ * their last caller and were removed 2026-07-31. New code calls the engine
+ * directly: `resolveAssignee` to decide, `assignByPolicy` to decide AND write.
  */
 
 /**
@@ -68,24 +64,3 @@ export function chooseRoundRobin(args: {
   }).userId;
 }
 
-/**
- * Policy-driven assignee pick. Kept as a named helper so existing call sites
- * read naturally, but it is now fully configurable: whichever policy the
- * team's rules select for `source` decides the strategy, eligibility, weights
- * and capacity.
- */
-export async function pickRoundRobinAssignee(args: {
-  db: Parameters<typeof resolveAssignee>[0]["db"];
-  workspaceId: string;
-  /** Rule-matching source; defaults to the AI handoff path this shim served. */
-  source?: AssignmentSource;
-  policyId?: string | null;
-}): Promise<string | null> {
-  const { db, workspaceId, source = "ai_handoff", policyId } = args;
-  const decision = await resolveAssignee({ db, workspaceId, ctx: { source }, policyId });
-  return decision.userId;
-}
-
-/** Narrow Prisma surface the legacy signature advertised. Retained so callers
- *  typed against it keep compiling. */
-export type RoundRobinDb = Pick<PrismaClient, "user" | "workspace" | "conversation">;

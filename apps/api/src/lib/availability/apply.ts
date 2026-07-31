@@ -112,7 +112,7 @@ export interface ApplyAvailabilityArgs {
   workspaceIds: string[];
   /** The GOVERNING default schedule, already narrowed — see
    *  `loadAvailabilityScope` for which workspace's it is and why only one. */
-  teamSchedule: WorkHours | null;
+  workspaceSchedule: WorkHours | null;
   intent: AvailabilityIntent;
   nowMs: number;
   /** Drop the 15s ApiSession snapshot for this user. Nest paths pass this. */
@@ -132,7 +132,7 @@ export interface ApplyAvailabilityResult {
 /** Compute-only — no write, no event. Used by read paths that want a preview. */
 export function computeEffective(
   user: AvailabilityRow,
-  teamSchedule: WorkHours | null,
+  workspaceSchedule: WorkHours | null,
   nowMs: number,
 ): EffectiveAvailability {
   return resolveEffectiveAvailability({
@@ -140,7 +140,7 @@ export function computeEffective(
     manualMessage: user.availabilityManualMessage,
     overrideUntil: user.availabilityOverrideUntil,
     manualSource: user.availabilitySource as AvailabilitySource | null,
-    schedule: resolveUserSchedule(user, teamSchedule),
+    schedule: resolveUserSchedule(user, workspaceSchedule),
     nowMs,
   });
 }
@@ -148,8 +148,8 @@ export function computeEffective(
 export async function applyAvailability(
   args: ApplyAvailabilityArgs,
 ): Promise<ApplyAvailabilityResult> {
-  const { db, user, workspaceIds, teamSchedule, intent, nowMs } = args;
-  const schedule = resolveUserSchedule(user, teamSchedule);
+  const { db, user, workspaceIds, workspaceSchedule, intent, nowMs } = args;
+  const schedule = resolveUserSchedule(user, workspaceSchedule);
 
   // --- 1. Fold the intent into the manual pick -----------------------------
   let manualStatus = (user.availabilityManualStatus ??
