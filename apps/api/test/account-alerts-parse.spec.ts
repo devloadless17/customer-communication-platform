@@ -170,12 +170,31 @@ describe("phone_number_quality_update current_limit overload (quality-update ref
     expect(health.messagingTier).toBe("TIER_2K");
   });
 
-  it("max_daily_conversations_per_business wins regardless of event", () => {
+  it("ignores BOTH tier fields on THROUGHPUT_UPGRADE — the reference gives them one value vocabulary", () => {
+    // The reference lists the same value set for <MAX_DAILY_MESSAGES_LIMIT> as
+    // for current_limit, so on a throughput event neither field can be trusted
+    // as the 24h messaging tier. The failure direction of reading one anyway is
+    // setting the portfolio's cap to UNLIMITED off a throughput event.
     const events = metaProvider.parseWebhook(
       qualityEnvelope({
         display_phone_number: "15550783881",
         event: "THROUGHPUT_UPGRADE",
         current_limit: "TIER_UNLIMITED",
+        max_daily_conversations_per_business: "TIER_2K",
+      }),
+    );
+    const health = events.find((e) => e.kind === "channel_health");
+    expect(
+      health?.kind === "channel_health" ? health.messagingTier : undefined,
+    ).toBeUndefined();
+  });
+
+  it("max_daily_conversations_per_business beats current_limit on every other event", () => {
+    const events = metaProvider.parseWebhook(
+      qualityEnvelope({
+        display_phone_number: "15550783881",
+        event: "ONBOARDING",
+        current_limit: "TIER_1K",
         max_daily_conversations_per_business: "TIER_2K",
       }),
     );
