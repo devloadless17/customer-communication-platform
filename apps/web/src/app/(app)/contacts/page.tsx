@@ -6,7 +6,7 @@ import {
   listTags,
 } from "@/lib/api/queries";
 
-import { ContactsClient } from "./contacts-client";
+import { ContactsClient } from "@/features/contacts/components/contacts-client";
 import type { StageFilter } from "@/features/contacts/components/contact-browser";
 
 export const metadata = {

@@ -3,7 +3,7 @@ import { cookies } from "next/headers";
 import { getSession } from "@/lib/auth/current-user";
 import { listContactFieldDefinitions, listWhatsappTemplates } from "@/lib/api/queries";
 
-import { TemplatesView } from "./templates-view";
+import { TemplatesView } from "@/features/templates/components/templates-view";
 // Pure SSR-safe primitives (no "use client") — same split pattern as
 // inbox-filter.ts / broadcasts-cookies.ts. Importing parsers / cookie
 // constants from a client component crashes at runtime with
@@ -12,7 +12,7 @@ import {
   TEMPLATES_SEARCH_COOKIE,
   TEMPLATES_STATUS_COOKIE,
   parseTemplatesStatus,
-} from "./templates-cookies";
+} from "@/features/templates/lib/templates-cookies";
 
 /**
  * Templates index. Server component so the initial paint already has the

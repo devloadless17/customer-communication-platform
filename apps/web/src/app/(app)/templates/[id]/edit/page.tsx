@@ -4,7 +4,7 @@ import { getSession } from "@/lib/auth/current-user";
 import { listWhatsappTemplates, listContactFieldDefinitions } from "@/lib/api/queries";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 
-import { TemplateForm } from "../../new/template-form";
+import { TemplateForm } from "@/features/templates/components/template-form";
 
 export const metadata = { title: "Edit template" };
 export const dynamic = "force-dynamic";

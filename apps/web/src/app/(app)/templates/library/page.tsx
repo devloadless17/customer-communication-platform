@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth/current-user";
 import { listWhatsappTemplates } from "@/lib/api/queries";
 
-import { TemplateLibraryBrowser } from "./library-browser";
+import { TemplateLibraryBrowser } from "@/features/templates/components/library-browser";
 
 export const metadata = { title: "Template library" };
 export const dynamic = "force-dynamic";

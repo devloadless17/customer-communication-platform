@@ -63,13 +63,13 @@ export {
   TEMPLATES_STATUS_COOKIE,
   parseTemplatesStatus,
   type TemplatesStatusFilter,
-} from "./templates-cookies";
+} from "@/features/templates/lib/templates-cookies";
 
 import {
   TEMPLATES_SEARCH_COOKIE,
   TEMPLATES_STATUS_COOKIE,
   type TemplatesStatusFilter,
-} from "./templates-cookies";
+} from "@/features/templates/lib/templates-cookies";
 
 type StatusFilter = TemplatesStatusFilter;
 

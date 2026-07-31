@@ -1,7 +1,7 @@
 import { listAssignmentPolicies, listTeamMembers } from "@/lib/api/queries";
 import { soft } from "@/lib/api/soft";
 
-import { TicketsBoardClient } from "./tickets-board-client";
+import { TicketsBoardClient } from "@/features/tickets/components/tickets-board-client";
 
 export const metadata = {
   title: "Tickets",

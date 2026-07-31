@@ -1,6 +1,6 @@
 import { getOrganizationOverview } from "@/lib/api/queries";
 
-import { OrgMembersClient } from "./org-members-client";
+import { OrgMembersClient } from "@/features/organization/components/org-members-client";
 
 export const metadata = {
   title: "Members · Organization",

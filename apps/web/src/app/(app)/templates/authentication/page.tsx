@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth/current-user";
 import { listWhatsappTemplates } from "@/lib/api/queries";
 
-import { AuthTemplateForm } from "./auth-template-form";
+import { AuthTemplateForm } from "@/features/templates/components/auth-template-form";
 
 export const metadata = { title: "Authentication template" };
 export const dynamic = "force-dynamic";

@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth/current-user";
 import { listWhatsappTemplates, listContactFieldDefinitions } from "@/lib/api/queries";
 
-import { TemplateForm } from "./template-form";
+import { TemplateForm } from "@/features/templates/components/template-form";
 
 export const metadata = { title: "New template" };
 export const dynamic = "force-dynamic";

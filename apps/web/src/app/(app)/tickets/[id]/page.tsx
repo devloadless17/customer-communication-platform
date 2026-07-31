@@ -11,7 +11,7 @@ import {
 import { soft } from "@/lib/api/soft";
 import { getSession } from "@/lib/auth/current-user";
 
-import { TicketDetailClient } from "./ticket-detail-client";
+import { TicketDetailClient } from "@/features/tickets/components/ticket-detail-client";
 import { TicketElsewhere } from "./ticket-elsewhere";
 
 export const metadata = {

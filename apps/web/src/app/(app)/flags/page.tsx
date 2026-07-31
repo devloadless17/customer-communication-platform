@@ -1,6 +1,6 @@
 import { listMessageFlagDefinitions } from "@/lib/api/queries";
 
-import { FlagsQueueClient } from "./flags-queue-client";
+import { FlagsQueueClient } from "@/features/flags/components/flags-queue-client";
 
 export const metadata = {
   title: "Flags",

@@ -1,6 +1,6 @@
 import { getOrganizationOverview } from "@/lib/api/queries";
 
-import { AccountInfoClient } from "./account-info-client";
+import { AccountInfoClient } from "@/features/organization/components/account-info-client";
 
 export const metadata = {
   title: "Organization",
