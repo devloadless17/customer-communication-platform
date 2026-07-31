@@ -507,8 +507,17 @@ export function isTransientDbError(err: unknown): boolean {
 export function isDriverTransientError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
 
-  // SQLSTATE from node-postgres, when present.
-  const code = (err as { code?: unknown }).code;
+  // SQLSTATE from node-postgres, when present. THE THIRD SHAPE DEFEAT
+  // (measured 2026-07-31 by the broadcast status-flood harness): adapter-pg's
+  // `DriverAdapterError` carries the server's SQLSTATE on its NESTED
+  // `cause.code` — `{ cause: { code: "57014", severity: "ERROR", … } }` —
+  // with nothing at the top level, so a statement timeout under burst load
+  // matched no branch here, was classified permanent, swallowed, and answered
+  // 200: a delivery status (or an inbound customer message) lost on its only
+  // delivery. Read the SQLSTATE from BOTH levels.
+  const topCode = (err as { code?: unknown }).code;
+  const causeCode = (err as { cause?: { code?: unknown } }).cause?.code;
+  const code = typeof topCode === "string" ? topCode : causeCode;
   if (typeof code === "string") {
     if (
       code === "53300" /* too_many_connections */ ||
@@ -577,6 +586,10 @@ export function isDriverTransientError(err: unknown): boolean {
     m.includes("write conflict") ||
     m.includes("deadlock") ||
     m.includes("could not serialize") ||
+    // Statement timeout surfacing as message text (SQLSTATE 57014 lives on
+    // the nested cause — matched above — but match the text too, since the
+    // adapter has moved details between cause and message across releases).
+    m.includes("canceling statement due to statement timeout") ||
     // pg-pool acquisition timeout — the regression this function was written for.
     m.includes("timeout exceeded when trying to connect") ||
     m.includes("connection terminated due to connection timeout") ||
