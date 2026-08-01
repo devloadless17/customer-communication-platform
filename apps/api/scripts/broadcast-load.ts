@@ -592,6 +592,14 @@ async function phaseMaterialize(fx: Fixture, measured: boolean): Promise<string>
 
 async function phaseSend(broadcastId: string, stub: FetchStub, measured: boolean): Promise<void> {
   stub.reset();
+  // Simulated Graph RTT. A 0ms stub is a measurement LIE that also breaks the
+  // run: real Meta sends take ~100-300ms, which keeps each lane busy waiting
+  // on the network and spaces the bookkeeping writes; with an instant stub,
+  // 225 HIGH-tier lanes stampede the 50-connection pool as fast as Postgres
+  // can absorb — a load shape production cannot produce (measured 2026-07-31:
+  // two 100k runs collapsed in pool-acquisition timeouts that vanish with RTT
+  // restored). Overridable for deliberate stampede testing.
+  stub.delayMs = Number(process.env.LOAD_STUB_RTT_MS ?? 200);
   runner.resetShutdownFlag();
 
   const run = async () => {
