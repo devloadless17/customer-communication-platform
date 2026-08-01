@@ -14,6 +14,7 @@ import {
   type TicketActor,
 } from "./mutations";
 import { asContactSnapshot } from "./queries";
+import { notifyUsers, ticketAudience } from "@/lib/notifications/notifications";
 
 /**
  * Cross-workspace ticket SHARING — how two departments work one customer's
@@ -231,6 +232,26 @@ export async function shareTicket(db: Db, args: ShareTicketArgs): Promise<ShareO
 
   if (!result) return { ok: false, reason: "already_shared" };
   kickOutbox();
+
+  // The BELL. After the transaction and detached: a courtesy must not hold a
+  // lock, and it must never fail the escalation it announces.
+  void (async () => {
+    const audience = await ticketAudience(db as never, ticket.id);
+    if (!audience) return;
+    await notifyUsers(db as never, {
+      workspaceId: args.workspaceId,
+      kind: "ticket_escalated",
+      // Includes whoever RAISED it — they asked the question, and "Billing has
+      // it now" is the answer they are waiting on.
+      userIds: audience.userIds,
+      actorUserId: args.actor.userId ?? null,
+      ticketId: ticket.id,
+      ticketNumber: audience.number,
+      ticketSubject: audience.subject,
+      summary: `brought ${target.name} onto this ticket`,
+    });
+  })().catch(() => undefined);
+
   return { ok: true, ticket: result, guestWorkspaceName: target.name };
 }
 

@@ -727,6 +727,7 @@ model Workspace {
   ticketMessages          TicketMessage[]
   ticketMessagesAuthored  TicketMessage[]          @relation("TicketMessageAuthorWorkspace")
   ticketThreadUnreads     TicketThreadUnread[]
+  notifications           Notification[]
   audienceGroups          AudienceGroup[]
   workflows               Workflow[]
   workflowRuns            WorkflowRun[]
@@ -1358,6 +1359,8 @@ model User {
   createdTicketViews      TicketView[]             @relation("CreatedTicketViews")
   ticketMessages          TicketMessage[]          @relation("TicketMessageAuthor")
   ticketThreadUnreads     TicketThreadUnread[]
+  notifications           Notification[]           @relation("UserNotifications")
+  notificationsActed      Notification[]           @relation("NotificationActor")
   // Audit-log authorship. Nullable on the event row + SetNull so deleting a
   // user keeps the audit trail; the timeline just renders "Removed user".
   authoredEvents          ConversationEvent[]
@@ -3725,6 +3728,7 @@ model Ticket {
   // "billing" should not maintain a second parallel tag list.
   tags          Tag[]             @relation("TicketTags")
   events        TicketEvent[]
+  notifications Notification[]
   messages      Message[]
   // Back-reference for Conversation.activeTicketId.
   activeOn      Conversation[]    @relation("ConversationActiveTicket")
@@ -4026,6 +4030,72 @@ model TicketThreadUnread {
   @@index([ticketId])
   @@index([workspaceId])
   @@index([sinceMessageId])
+}
+
+/// One thing that happened which ONE person should know about.
+///
+/// The app's signals were rail badges and toasts: both are ambient, both are
+/// per-surface, and neither survives you being away from the tab. A member
+/// assigned a ticket learned about it by going to look. This is the place any
+/// such signal lands and waits.
+///
+/// APPEND-ONLY, one row per event — deliberately NOT coalesced at write time.
+/// Coalescing needs a read-then-write on an "unread row for this (user, ticket,
+/// actor)", which is a race that wants a partial unique index, and this repo
+/// has learned twice over what raw partial indexes cost (they are invisible to
+/// `migrate diff` and to `check:prisma-fields`). The bell groups by ticket when
+/// it RENDERS instead: same result on screen, no race, no index, and the
+/// history stays intact after you have read it.
+///
+/// `workspaceId` is the workspace the notification was RAISED in, so it obeys
+/// the ordinary tenancy rule and needs no exception — a person in two
+/// workspaces sees each one's notifications when they are in it.
+model Notification {
+  id          String @id @default(cuid())
+  workspaceId String
+  /// WHOSE bell this is. Every read is scoped to (userId, workspaceId).
+  userId      String
+
+  /// What happened. A string, not an enum, for the same reason `Ticket.source`
+  /// is: adding a kind must be a code-only change, and an unrecognised kind
+  /// degrades to a generic line rather than failing the whole bell.
+  kind String
+
+  /// The ticket it is about. Cascade: a notification for a deleted ticket is
+  /// a dead link, and there is nothing to show.
+  ticketId String?
+
+  /// WHO did it. Null for automation. The NAME is snapshotted beside it
+  /// because a notification is a statement about a MOMENT ("Sara assigned you
+  /// #42") — the same reason `TicketEvent.after` snapshots rather than joins,
+  /// and it keeps reading correctly when the actor leaves the org.
+  actorUserId String?
+  actorName   String?
+
+  /// Enough to render the line without a second query: the ticket number and
+  /// subject as they were, plus a short human summary of the change.
+  ticketNumber  Int?
+  ticketSubject String?
+  summary       String? @db.Text
+
+  /// Null until read. A nullable timestamp rather than a boolean so "when did
+  /// I see this" is answerable, and so the unread query is a plain `null` test.
+  readAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation("UserNotifications", fields: [userId], references: [id], onDelete: Cascade)
+  ticket    Ticket?   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  actor     User?     @relation("NotificationActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  /// The bell's only read: my unread/recent, newest first.
+  @@index([userId, workspaceId, createdAt(sort: Desc)])
+  /// The badge count, and the retention sweep.
+  @@index([userId, workspaceId, readAt])
+  @@index([ticketId])
+  @@index([workspaceId])
+  @@index([actorUserId])
 }
 
 // One SLA commitment per priority. Modelled per-priority rather than as a

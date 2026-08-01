@@ -3,6 +3,7 @@ import type { PrismaClient } from "@prisma/client";
 import type { TicketAttachment } from "@ccp/shared/tickets/types";
 import { blobStorage } from "@/lib/blob-storage";
 import { kickOutbox } from "@/lib/events/outbox";
+import { notifyUsers, ticketAudience } from "@/lib/notifications/notifications";
 import { kindFromMime, normalizeMimeType } from "@/lib/media-storage";
 
 import { ticketByIdWhere } from "./access";
@@ -161,6 +162,28 @@ export async function addTicketAttachment(
     return row;
   });
   kickOutbox();
+
+  // The BELL — "adding a file to this ticket must notify who raised it".
+  // Skipped when the file rides a thread MESSAGE: that reply already notified
+  // the same people, and two entries for one action is how a bell becomes
+  // something people mute.
+  if (!args.messageId) {
+    void (async () => {
+      const audience = await ticketAudience(db as never, ticket.id);
+      if (!audience) return;
+      await notifyUsers(db as never, {
+        workspaceId: args.workspaceId,
+        kind: "ticket_file_added",
+        userIds: audience.userIds,
+        actorUserId: args.actor.userId ?? null,
+        ticketId: ticket.id,
+        ticketNumber: audience.number,
+        ticketSubject: audience.subject,
+        summary: `attached ${attachment.filename}`,
+      });
+    })().catch(() => undefined);
+  }
+
   return { ok: true, attachment: mapAttachment(attachment, ticket.id) };
 }
 

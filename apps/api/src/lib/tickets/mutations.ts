@@ -4,6 +4,7 @@ import type { TicketPriority, TicketSource, TicketStatus } from "@ccp/shared/tic
 import { isTicketActive, TICKET_ACTIVE_STATUSES } from "@ccp/shared/tickets/types";
 import { asWorkHours } from "@ccp/shared/work-hours";
 import { kickOutbox, publishInTx } from "@/lib/events/outbox";
+import { notifyUsers, ticketAudience } from "@/lib/notifications/notifications";
 import { db as sharedDb } from "@/lib/db";
 
 import { ticketByIdWhere } from "./access";
@@ -404,8 +405,36 @@ export async function routeMessageToTicket(
  * Callers that are ALREADY writing the row set the field inline instead, so a
  * status change stays one statement.
  */
+/**
+ * One human line for the bell: "changed the status to Solved".
+ *
+ * Deliberately terse and deliberately INCOMPLETE — a bell entry says enough to
+ * decide whether to open the ticket, not what the audit log says. Returns null
+ * when nothing worth telling anyone about changed (an assignment is announced
+ * by its own, more specific notification).
+ */
+function describeTicketChange(args: UpdateTicketArgs): string | null {
+  if (args.status) return `changed the status to ${args.status.replace(/_/g, " ")}`;
+  if (args.priority) return `set the priority to ${args.priority}`;
+  if (args.assignedTeamId !== undefined) {
+    return args.assignedTeamId ? "handed this to another team" : "took this out of every queue";
+  }
+  if (args.assignedUserId === null) return "unassigned this ticket";
+  if (args.description !== undefined) return "filled in the cause";
+  if (args.subject !== undefined) return "renamed this ticket";
+  if (args.tagIds !== undefined) return "changed the tags";
+  if (args.customFields !== undefined) return "edited a field";
+  if (args.resolutionCode !== undefined || args.resolutionNote !== undefined) {
+    return "recorded the resolution";
+  }
+  return null;
+}
+
 export async function touchTicketActivity(
-  tx: TxClient,
+  // Only `ticket.updateMany` is used, so the parameter asks for exactly that —
+  // a transaction client, the module's `Db`, and the shared client all satisfy
+  // it, and no caller needs a cast to hand one over.
+  tx: Pick<PrismaClient, "ticket">,
   ticketId: string,
   at: Date = new Date(),
 ): Promise<void> {
@@ -866,6 +895,56 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
 
   if (result.conflict) return { ok: false, reason: "version_conflict" };
   kickOutbox();
+
+  // The BELL. After the transaction, never inside it: a courtesy must not hold
+  // a lock, and `notifyUsers` swallows its own failure so it can never fail the
+  // write it decorates.
+  //
+  // Two audiences, both deliberate:
+  //  - a NEW ASSIGNEE is told they now own this. That is the one notification
+  //    people asked for by name, and it goes only to them.
+  //  - everyone else on the ticket — above all whoever RAISED it — is told
+  //    something changed, because the person who asked the question is the one
+  //    waiting on the answer and is usually neither assignee nor editor.
+  void (async () => {
+    const audience = await ticketAudience(sharedDb, existing.id);
+    if (!audience) return;
+    const actorName = args.actor.userId
+      ? ((await sharedDb.user.findUnique({
+          where: { id: args.actor.userId },
+          select: { name: true },
+        })) ?? null)?.name ?? null
+      : null;
+    const base = {
+      workspaceId: args.workspaceId,
+      actorUserId: args.actor.userId ?? null,
+      actorName,
+      ticketId: existing.id,
+      ticketNumber: audience.number,
+      ticketSubject: audience.subject,
+    };
+
+    if (args.assignedUserId) {
+      await notifyUsers(sharedDb, {
+        ...base,
+        kind: "ticket_assigned",
+        userIds: [args.assignedUserId],
+        summary: "assigned this ticket to you",
+      });
+    }
+    const summary = describeTicketChange(args);
+    if (summary) {
+      await notifyUsers(sharedDb, {
+        ...base,
+        kind: "ticket_changed",
+        // The new assignee already got the more specific line above.
+        userIds: audience.userIds.filter((id) => id !== args.assignedUserId),
+        summary,
+      });
+    }
+  })().catch((err) => {
+    console.warn("[tickets] notification fan-out failed:", err instanceof Error ? err.message : err);
+  });
 
   // `Workspace.ticketCloseConversationOnLastSolved`: solving the LAST active
   // ticket closes the thread. Detached, best-effort, and AFTER the ticket tx
@@ -1429,7 +1508,7 @@ export async function addTicketNote(
   });
   // A note is work on the ticket even though it changes no field — leaving it
   // out would sink a ticket someone is actively annotating.
-  await touchTicketActivity(db as unknown as TxClient, args.ticketId);
+  await touchTicketActivity(db, args.ticketId);
   return { ok: true };
 }
 

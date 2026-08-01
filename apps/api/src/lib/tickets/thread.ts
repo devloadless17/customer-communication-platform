@@ -2,6 +2,7 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 
 import type { TicketAttachment, TicketThreadMessage } from "@ccp/shared/tickets/types";
 import { publish } from "@/lib/events/bus";
+import { notifyUsers } from "@/lib/notifications/notifications";
 
 import { ticketByIdWhere } from "./access";
 import type { TicketActor } from "./mutations";
@@ -90,13 +91,16 @@ export async function listTicketThread(
 /**
  * WHO should be told about a reply.
  *
- * Four arms, all deliberate:
- *  1. the ticket's assignee — the owner side's accountable person;
- *  2. every share's assignee — each guest department's accountable person;
- *  3. every share's CREATOR — the person who escalated. They asked the
- *     question, they are often neither assignee nor poster, and telling them
- *     the answer arrived is the entire point of this feature;
- *  4. everyone who has already spoken in the thread.
+ * Five arms, all deliberate:
+ *  1. whoever RAISED the ticket. They asked the question and are waiting on the
+ *     answer, and they are frequently neither the assignee nor anyone who has
+ *     spoken. Missing this arm was a real gap: a reply badged the assignee and
+ *     left the person who actually needed it silent.
+ *  2. the ticket's assignee — the owner side's accountable person;
+ *  3. every share's assignee — each guest department's accountable person;
+ *  4. every share's CREATOR — the person who escalated. Same reasoning as (1),
+ *     one department over;
+ *  5. everyone who has already spoken in the thread.
  *
  * Deliberately NOT every member of a participating workspace: that badges a
  * whole department for a two-person conversation, which is the noise this is
@@ -107,7 +111,10 @@ export async function resolveThreadParticipants(
   ticketId: string,
 ): Promise<string[]> {
   const [ticket, shares, authors] = await Promise.all([
-    db.ticket.findUnique({ where: { id: ticketId }, select: { assignedUserId: true } }),
+    db.ticket.findUnique({
+      where: { id: ticketId },
+      select: { assignedUserId: true, createdById: true },
+    }),
     db.ticketShare.findMany({
       where: { ticketId },
       select: { assignedUserId: true, createdById: true },
@@ -119,6 +126,7 @@ export async function resolveThreadParticipants(
     }),
   ]);
   const ids = new Set<string>();
+  if (ticket?.createdById) ids.add(ticket.createdById);
   if (ticket?.assignedUserId) ids.add(ticket.assignedUserId);
   for (const s of shares) {
     if (s.assignedUserId) ids.add(s.assignedUserId);
@@ -285,6 +293,22 @@ export async function addTicketMessage(
     sharedWithWorkspaceIds: ticket.shares.map((s) => s.guestWorkspaceId),
     notifiedUserIds: result.notified,
   });
+
+  // The BELL, alongside the in-thread unread marker. The marker badges the
+  // ticket surfaces; this is the place you find out without being on them.
+  // Same audience — never the author — and it can never fail the reply.
+  if (result.notified.length > 0) {
+    await notifyUsers(db as never, {
+      workspaceId: args.workspaceId,
+      kind: "ticket_replied",
+      userIds: result.notified,
+      actorUserId: authorUserId,
+      actorName: message.authorName,
+      ticketId: ticket.id,
+      ticketNumber: ticket.number,
+      summary: "replied on this ticket",
+    });
+  }
 
   return { ok: true, message, notifiedUserIds: result.notified };
 }

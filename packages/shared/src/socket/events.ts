@@ -236,6 +236,23 @@ export interface ServerToClientEvents {
   }) => void;
 
   /**
+   * Something landed in THIS user's bell.
+   *
+   * Emitted to the per-user room (`user:<ws>:<uid>`), so a client never sees a
+   * colleague's. Carries enough to raise the toast without a fetch; the list
+   * itself is refetched, because the bell is server-authoritative (§10) and a
+   * client-side append would drift from it after any offline gap.
+   */
+  "notification:new": (payload: {
+    workspaceId: string;
+    kind: string;
+    ticketId?: string;
+    ticketNumber?: number;
+    actorName?: string;
+    summary?: string;
+  }) => void;
+
+  /**
    * A reader cleared their unread marker on a ticket thread.
    *
    * LOCALLY DISPATCHED, never emitted by the server — the reading tab fires it

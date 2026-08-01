@@ -256,6 +256,25 @@ export const FANOUT_RULES: FanoutRuleMap = {
     }
   },
 
+  /**
+   * A notification landed. One frame per recipient, to their OWN room — a
+   * notification is the most personal thing this app emits, and a workspace
+   * broadcast would hand every colleague the fact that you were assigned
+   * something.
+   */
+  "notification.created": (e, emitter) => {
+    for (const userId of new Set(e.userIds)) {
+      emitter.emitToUser(e.workspaceId, userId, "notification:new", {
+        workspaceId: e.workspaceId,
+        kind: e.kind,
+        ...(e.ticketId ? { ticketId: e.ticketId } : {}),
+        ...(e.ticketNumber !== undefined ? { ticketNumber: e.ticketNumber } : {}),
+        ...(e.actorName ? { actorName: e.actorName } : {}),
+        ...(e.summary ? { summary: e.summary } : {}),
+      });
+    }
+  },
+
   "message.flag_changed": (e, emitter) => {
     emitter.emitAboutConversation(e.workspaceId,
       e.conversationId, "message:flag", {

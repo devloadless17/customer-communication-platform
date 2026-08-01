@@ -21,6 +21,7 @@ import { ChannelAccountsModule } from "./workspace-settings/channel-accounts/cha
 import { MediaModule } from "./media/media.module";
 import { MessagesModule } from "./messages/messages.module";
 import { MessageFlagsModule } from "./message-flags/message-flags.module";
+import { NotificationsModule } from "./notifications/notifications.module";
 import { TicketsModule } from "./tickets/tickets.module";
 import { NotesModule } from "./notes/notes.module";
 import { OutboundWebhooksModule } from "./outbound-webhooks/outbound-webhooks.module";
@@ -65,6 +66,7 @@ import { WorkflowsModule } from "./workflows/workflows.module";
     InboxViewsModule,
     NotesModule,
     MessageFlagsModule,
+    NotificationsModule,
     TicketsModule,
     ContactsModule,
     CustomersModule,

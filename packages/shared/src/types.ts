@@ -1331,4 +1331,4 @@ export interface CursorPage<T> {
    */
   totalCount?: number;
 }
-
+export type { AppNotification } from "./notifications/types";

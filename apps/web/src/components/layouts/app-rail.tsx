@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getClientSocket } from "@/lib/socket-client";
+import { NotificationBell } from "@/features/notifications/components/notification-bell";
 import { apiFetch } from "@/lib/api/client-fetch";
 import {
   WorkspaceSwitcher,
@@ -506,6 +507,14 @@ export function AppRail({
           "mt-2 flex flex-col gap-0.5 border-t border-sidebar-border pt-2 px-2",
         )}
       >
+        {/* The bell. In the rail rather than a page header because it belongs
+            to the PERSON, not to whatever surface they happen to be on — and
+            the rail is the only chrome present on every one of them. Its panel
+            opens to the right, so a collapsed rail doesn't clip it. */}
+        <div className={cn("flex pb-1", collapsed ? "justify-center" : "px-0.5")}>
+          <NotificationBell />
+        </div>
+
         {/* Collapse / expand toggle */}
         <Tooltip>
           <TooltipTrigger asChild>

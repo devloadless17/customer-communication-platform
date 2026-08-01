@@ -803,6 +803,27 @@ export interface TicketThreadMessageCreatedEvent {
   notifiedUserIds: string[];
 }
 
+/**
+ * A notification landed in one or more people's bells.
+ *
+ * A LEAF: the only subscriber is realtime fanout, nothing mutates in response,
+ * so there is no chain to guard and no `silent` flag to carry.
+ *
+ * `userIds` is the audience and the filter both. The frame goes to each
+ * recipient's own room, so a client only ever sees its own — but it is carried
+ * here because the fanout rule is the one place that knows who it is emitting
+ * to, and re-reading the recipients there would race a delete.
+ */
+export interface NotificationCreatedEvent {
+  workspaceId: string;
+  userIds: string[];
+  kind: string;
+  ticketId?: string;
+  ticketNumber?: number;
+  actorName?: string;
+  summary?: string;
+}
+
 export interface NoteDeletedEvent {
   workspaceId: string;
   conversationId: string;
@@ -1485,6 +1506,7 @@ export interface DomainEventMap {
   "message.flag_changed": MessageFlagChangedEvent;
   "ticket.changed": TicketChangedEvent;
   "ticket.thread_message_created": TicketThreadMessageCreatedEvent;
+  "notification.created": NotificationCreatedEvent;
   "conversation.assigned": ConversationAssignedEvent;
   "conversation.status_changed": ConversationStatusChangedEvent;
   "conversation.ai_changed": ConversationAiChangedEvent;
