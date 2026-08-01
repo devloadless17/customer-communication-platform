@@ -27,6 +27,8 @@ const CLOSED: Filter = { kind: "preset", id: "closed" };
 const STAGE_A: Filter = { kind: "stage", stageId: "stg_a" };
 const STAGE_B: Filter = { kind: "stage", stageId: "stg_b" };
 const CALLS: Filter = { kind: "calls" };
+const VIEW_A: Filter = { kind: "view", viewId: "iv_a" };
+const VIEW_B: Filter = { kind: "view", viewId: "iv_b" };
 
 describe("conversationFilterKey", () => {
   it("changes when the ACCOUNT narrow changes — the regression this exists for", () => {
@@ -55,6 +57,15 @@ describe("conversationFilterKey", () => {
     expect(new Set(keys).size).toBe(keys.length);
   });
 
+  it("changes between two SAVED VIEWS — the arm the union grew and this key did not", () => {
+    // `Filter` gained a `view` arm; the key's ternary never did, so every saved
+    // view fell through to the literal "calls" segment. Two views, one key: the
+    // exact shape of the account bug, with the same bulk-delete ending.
+    expect(conversationFilterKey(VIEW_A, null)).not.toBe(conversationFilterKey(VIEW_B, null));
+    // ...and a view must never be mistaken for the calls list either.
+    expect(conversationFilterKey(VIEW_A, null)).not.toBe(conversationFilterKey(CALLS, null));
+  });
+
   it("is stable for the same inputs", () => {
     expect(conversationFilterKey(STAGE_A, "conn_x")).toBe(
       conversationFilterKey(STAGE_A, "conn_x"),
@@ -71,7 +82,7 @@ describe("conversationFilterKey", () => {
   });
 
   it("every (filter × account) pair is distinct", () => {
-    const filters = [ACTIVE, CLOSED, STAGE_A, STAGE_B, CALLS];
+    const filters = [ACTIVE, CLOSED, STAGE_A, STAGE_B, CALLS, VIEW_A, VIEW_B];
     const accounts = [null, "conn_sales", "conn_support"];
     const keys = filters.flatMap((f) => accounts.map((a) => conversationFilterKey(f, a)));
     expect(new Set(keys).size).toBe(filters.length * accounts.length);

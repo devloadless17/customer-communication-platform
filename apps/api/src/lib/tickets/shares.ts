@@ -48,6 +48,7 @@ type Db = Pick<
   | "workspace"
   | "contact"
   | "contactFieldDefinition"
+  | "user"
   | "$transaction"
 >;
 
@@ -238,13 +239,21 @@ export async function shareTicket(db: Db, args: ShareTicketArgs): Promise<ShareO
   void (async () => {
     const audience = await ticketAudience(db as never, ticket.id);
     if (!audience) return;
+    const actorName = args.actor.userId
+      ? (
+          await db.user.findUnique({
+            where: { id: args.actor.userId },
+            select: { name: true },
+          })
+        )?.name ?? null
+      : null;
     await notifyUsers(db as never, {
-      workspaceId: args.workspaceId,
       kind: "ticket_escalated",
       // Includes whoever RAISED it — they asked the question, and "Billing has
       // it now" is the answer they are waiting on.
-      userIds: audience.userIds,
+      recipients: audience.recipients,
       actorUserId: args.actor.userId ?? null,
+      actorName,
       ticketId: ticket.id,
       ticketNumber: audience.number,
       ticketSubject: audience.subject,

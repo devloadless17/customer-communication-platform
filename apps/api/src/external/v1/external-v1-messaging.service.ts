@@ -623,17 +623,56 @@ export class ExternalV1MessagingService {
     apiKeyId: string,
     conversationId: string,
     input: SendMessengerTemplateInput,
+    /** From the `Idempotency-Key` header. Required by the route. */
+    idempotencyKey?: string,
   ): Promise<{ messageId: string }> {
-    const r = await sendMessengerTemplateInternal({
-      workspaceId,
-      conversationId,
-      senderApiKeyId: apiKeyId,
-      sentVia: "v1/messenger-template",
-      ...(input.mode === "structured"
-        ? { mode: "structured" as const, template: input.template }
-        : { mode: "utility" as const, template: input.template }),
-    });
-    return { messageId: r.messageId };
+    // Claim-then-execute, the same shape the text and template paths use. The
+    // route already REQUIRED the header, but the key never reached the service:
+    // a partner retrying on a timeout sent the message again, and this is a
+    // billed send with no other duplicate gate before Meta.
+    if (idempotencyKey) {
+      const claim = await this.claimIdempotency<{ messageId: string }>(
+        workspaceId,
+        apiKeyId,
+        idempotencyKey,
+        requestFingerprint("send_messenger_template", {
+          conversationId,
+          mode: input.mode,
+          template: input.template,
+        }),
+        // A crashed-mid-send pending row past TTL must not auto-clear into a
+        // re-send (OUTBOUND-1).
+        { refuseStaleOnAmbiguity: true },
+      );
+      if (claim.kind === "replay") return claim.result;
+    }
+
+    let r;
+    try {
+      r = await sendMessengerTemplateInternal({
+        workspaceId,
+        conversationId,
+        senderApiKeyId: apiKeyId,
+        sentVia: "v1/messenger-template",
+        ...(input.mode === "structured"
+          ? { mode: "structured" as const, template: input.template }
+          : { mode: "utility" as const, template: input.template }),
+      });
+    } catch (err) {
+      // Released only for a failure that provably happened BEFORE Meta could
+      // have accepted it. `sendMessengerTemplateInternal` throws its validation
+      // errors ahead of the provider call; anything else may have landed, so
+      // the claim stays and a retry gets 409 rather than a second billed send.
+      if (idempotencyKey && err instanceof HttpException) {
+        await this.releaseIdempotency(workspaceId, apiKeyId, idempotencyKey);
+      }
+      throw err;
+    }
+    const out = { messageId: r.messageId };
+    if (idempotencyKey) {
+      await this.completeIdempotency(workspaceId, apiKeyId, idempotencyKey, out);
+    }
+    return out;
   }
 
   async sendMessage(

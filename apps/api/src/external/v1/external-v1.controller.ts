@@ -761,11 +761,21 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Body(zBody(SendMessengerTemplateSchema)) body: SendMessengerTemplateInput,
     @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    // A billed send is exactly the hop a cross-system loop is made of
+    // (our outbound webhook → partner → /v1 send → message.sent → webhook…),
+    // so it guards depth like the text and template sends do.
+    guardChainDepth(xCcpDepth);
     // A send is non-idempotent and bills the business, so `/v1` sends REQUIRE the
     // header (CLAUDE.md §8) — the same gate every other /v1 send applies.
-    idemKeyRequired(idempotencyKey);
-    const out = await this.api.sendMessengerTemplate(auth.workspaceId, auth.apiKeyId, id, body);
+    const out = await this.api.sendMessengerTemplate(
+      auth.workspaceId,
+      auth.apiKeyId,
+      id,
+      body,
+      idemKeyRequired(idempotencyKey),
+    );
     return { ok: true, message_id: out.messageId };
   }
 
@@ -1412,7 +1422,10 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
     @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    // Billable message ⇒ same chain-depth ceiling as every other /v1 send.
+    guardChainDepth(xCcpDepth);
     return this.api.requestCallPermission(
       auth.workspaceId,
       auth.apiKeyId,

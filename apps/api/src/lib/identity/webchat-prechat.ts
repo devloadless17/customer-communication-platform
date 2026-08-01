@@ -80,7 +80,15 @@ export async function applyWebchatPreChatIdentity(
   // can't collide — it's exactly the pair we want resolveCustomerId to fuse).
   const phone = fields.phone ? normalizePhoneE164(fields.phone) : null;
   const hasCustom = fields.custom != null && Object.keys(fields.custom).length > 0;
-  if (!name && !email && !phone && !hasCustom) return;
+  // A visitor who typed a phone we could not resolve to E.164 (a national form
+  // with no country to resolve it WITH — the widget has no default country to
+  // plumb) still told us something. `normalizePhoneE164` refuses to store such
+  // a value as an identity, and rightly so, but treating the whole submission
+  // as empty would ALSO throw away the name and email beside it, and leave the
+  // visitor un-promoted out of ephemeral status. So: proceed on the raw value's
+  // presence, and let the unusable digits simply not become the phone identity.
+  const submittedPhone = Boolean(fields.phone?.trim());
+  if (!name && !email && !phone && !submittedPhone && !hasCustom) return;
 
   const contact = await db.contact.findFirst({
     where: { id: contactId, workspaceId, deletedAt: null },

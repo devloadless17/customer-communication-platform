@@ -2105,6 +2105,13 @@ export class MessagesService {
       send = await sendMedia(
         {
           to: toPhone,
+          // A BSUID rides the top-level `recipient` field, not `to` — dropping
+          // the flag addressed the send with the superseded form AND made the
+          // provider's compensating retry unreachable (it only fires when the
+          // body carried `recipient`). Every sibling send site threads it; this
+          // one was missed, so an agent could not send media to a WhatsApp
+          // username contact at all. Same line as the forward path below.
+          ...(channel.viaBsuid ? { viaBsuid: true } : {}),
           kind,
           mediaId,
           ...(mediaUrl ? { mediaUrl } : {}),

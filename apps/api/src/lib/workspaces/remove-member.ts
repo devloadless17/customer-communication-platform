@@ -203,7 +203,54 @@ async function rehomeTickets(
       after: { assignedUserId: null },
     })),
   });
-  return ids.length;
+  return ids.length + (await releaseShareAssignments(db, workspaceId, userId));
+}
+
+/**
+ * ...and the same for tickets escalated INTO this workspace.
+ *
+ * A guest department's accountable person is `TicketShare.assignedUserId`, NOT
+ * the ticket's column — that separation is the whole point of the share row.
+ * Clearing only the ticket therefore left every escalated-in ticket owned by
+ * someone who no longer exists here: the other department still reads "waiting
+ * on <departed person>", and the rail's untriaged count (a share with no
+ * assignee) never picks it back up, so the work is invisible to the queue it
+ * fell into.
+ */
+async function releaseShareAssignments(
+  db: RemoveMemberDb,
+  workspaceId: string,
+  userId: string,
+): Promise<number> {
+  const shares = await db.ticketShare.findMany({
+    where: {
+      guestWorkspaceId: workspaceId,
+      assignedUserId: userId,
+      ticket: { status: { notIn: ["solved", "closed"] } },
+    },
+    select: { id: true, ticketId: true, ownerWorkspaceId: true },
+  });
+  if (shares.length === 0) return 0;
+  await db.ticketShare.updateMany({
+    where: { id: { in: shares.map((s) => s.id) } },
+    // `lastAssignedUserId` is left alone — it exists to keep continuity across
+    // exactly this kind of gap, the same way the ticket's does.
+    data: { assignedUserId: null },
+  });
+  await db.ticketEvent.createMany({
+    // The event belongs to the ticket's OWNER workspace (one ticket, one
+    // history), and `actorWorkspaceId` is what makes it read as "Support
+    // unassigned their side" rather than an anonymous change.
+    data: shares.map((s) => ({
+      workspaceId: s.ownerWorkspaceId,
+      ticketId: s.ticketId,
+      actorWorkspaceId: workspaceId,
+      kind: "unassigned" as const,
+      before: { assignedUserId: userId, side: "guest" },
+      after: { assignedUserId: null, side: "guest" },
+    })),
+  });
+  return shares.length;
 }
 
 /** Drop every grant + pointer this workspace holds for the user. */

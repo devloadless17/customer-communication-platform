@@ -574,6 +574,25 @@ export async function sendTemplateInternal(
         }
       : undefined;
 
+  // Every CARD's image needs the same treatment for the same reason — the
+  // composer's card uploader stores our own stable (private) object URL, so an
+  // unsigned link is a 403 to Meta and the whole carousel send is rejected. The
+  // broadcast runner already presigns per card; this is the 1:1 half of that
+  // same rule. Persisted `rawPayload` below deliberately keeps the ORIGINAL
+  // never-expiring URLs, exactly as the header does.
+  const cardsForSend = args.variables.cards
+    ? await Promise.all(
+        args.variables.cards.map(async (card) => {
+          const link = card.headerMedia.link;
+          if (card.headerMedia.id || !link || !blobStorage.isOwnUrl(link)) return card;
+          return {
+            ...card,
+            headerMedia: { ...card.headerMedia, link: await blobStorage.presignGetUrl(link) },
+          };
+        }),
+      )
+    : undefined;
+
   let channel;
   try {
     channel = resolveContactChannel(conversation.contact);
@@ -714,7 +733,7 @@ export async function sendTemplateInternal(
         ...(args.variables.limitedTimeOfferExpiresAtMs !== undefined
           ? { limitedTimeOfferExpiresAtMs: args.variables.limitedTimeOfferExpiresAtMs }
           : {}),
-        ...(args.variables.cards ? { cards: args.variables.cards } : {}),
+        ...(cardsForSend ? { cards: cardsForSend } : {}),
       },
     },
     sendConfig,

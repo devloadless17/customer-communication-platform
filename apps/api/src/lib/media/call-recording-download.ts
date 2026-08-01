@@ -897,13 +897,38 @@ async function transcribeOneChannel(
       return empty;
     }
 
-    const kept = res.segments.filter(
-      (s) =>
-        s.no_speech_prob <= MAX_NO_SPEECH_PROB &&
-        s.avg_logprob >= MIN_AVG_LOGPROB &&
-        s.compression_ratio <= MAX_COMPRESSION_RATIO &&
-        isSubstantive(s.text),
-    );
+    // Only `whisper-1` returns segments and the per-segment quality signals
+    // (`no_speech_prob` / `avg_logprob` / `compression_ratio`). The shipped
+    // DEFAULT model does not, so filtering `res.segments` there filters an
+    // always-empty array: every channel was discarded as "non-speech" after
+    // burning the whole retry ladder, and call transcription produced nothing
+    // at all. Fall back to the one unit the model does return — the full text —
+    // and apply the gates that do not need whisper-only signals. The rest of
+    // the pipeline already treats coarse timings as expected (see the turn
+    // assembly below), so this degrades attribution, not correctness.
+    const kept = res.segments.length > 0
+      ? res.segments.filter(
+          (s) =>
+            s.no_speech_prob <= MAX_NO_SPEECH_PROB &&
+            s.avg_logprob >= MIN_AVG_LOGPROB &&
+            s.compression_ratio <= MAX_COMPRESSION_RATIO &&
+            isSubstantive(s.text),
+        )
+      : isSubstantive(res.text)
+        ? [
+            {
+              start: 0,
+              end: side.audio.speechSeconds,
+              text: res.text,
+              // Neutral values: these gates were already applied above where
+              // they exist, and inventing a score here would misreport
+              // confidence rather than admit it is unknown.
+              no_speech_prob: 0,
+              avg_logprob: 0,
+              compression_ratio: 0,
+            },
+          ]
+        : [];
     const assembled = kept.map((s) => s.text.trim()).join(" ");
     const looped = looksLikeRepetitionLoop(assembled);
     const wrongLanguage = !isPlausibleLanguage(res.language, policy);

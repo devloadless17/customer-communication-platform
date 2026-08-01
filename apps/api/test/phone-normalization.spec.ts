@@ -97,11 +97,27 @@ describe("bounds", () => {
     expect(normalizePhoneE164("")).toBeNull();
   });
 
-  it("leaves an unresolvable national number alone rather than guessing", () => {
+  it("REFUSES an unresolvable national number instead of storing it", () => {
     // With no country stated there is nothing to resolve it WITH, and inventing
-    // one would silently attribute a customer to the wrong country. The import
-    // runner rejects this row explicitly instead — a leading zero is never
-    // valid in E.164, so it is provably not sendable.
-    expect(normalizePhoneE164("03123456")).toBe("03123456");
+    // one would silently attribute a customer to the wrong country — so the
+    // answer is null, not a guess.
+    //
+    // REVERSED 2026-08-01. This used to return the digits unchanged, on the
+    // reasoning that the CSV import runner rejects the row explicitly. It was
+    // the only caller that did: `/v1` contacts create + upsert, the inbox
+    // contact-card "Message" button (vCards routinely carry national format)
+    // and the workflow `phone` target all stored it. A leading zero is never
+    // valid in E.164, so those rows are provably unsendable — and when the
+    // person later writes in, ingest's exact-match lookup misses the
+    // trunk-0-less wa_id and forks a second contact that auto-merge can never
+    // fuse. One definition in the normalizer beats the same rule remembered at
+    // five call sites.
+    expect(normalizePhoneE164("03123456")).toBeNull();
+    // ...but a resolvable one still normalizes rather than being refused: the
+    // trunk zero is stripped where the plan requires it.
+    expect(normalizePhoneE164("07700900123", "GB")).toBe("447700900123");
+    // ...and a number whose leading zero is SIGNIFICANT keeps it, because the
+    // country code is present and libphonenumber says so.
+    expect(normalizePhoneE164("+39 06 6982")).toBe("39066982");
   });
 });

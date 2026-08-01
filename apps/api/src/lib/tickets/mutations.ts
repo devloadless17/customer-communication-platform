@@ -93,7 +93,8 @@ export type TicketOutcome =
   | { ok: false; reason: "ticket_terminal" }
   /** The cause is WRITTEN ONCE — it can be filled in while empty, never
    *  rewritten. History moves forward through comments and notes instead. */
-  | { ok: false; reason: "cause_immutable" };
+  | { ok: false; reason: "cause_immutable" }
+  | { ok: false; reason: "tags_owner_only" };
 
 // ---------------------------------------------------------------------------
 // Create.
@@ -573,6 +574,15 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
   // (one ticket, one truth) except for the two dimensions that are per-side:
   // the assignee and the team queue.
   const isGuest = existing.workspaceId !== args.workspaceId;
+  // TAGS are the OWNER's vocabulary. `tags: { set }` replaces the whole list,
+  // and a guest's ids resolve against a different catalogue — so a guest
+  // submitting the tag editor scoped every id away, wrote an empty set, and
+  // silently destroyed the owner's tags (while any id that DID resolve attached
+  // another workspace's tag to the row). Refused rather than ignored: a write
+  // the caller believes happened is the failure mode this whole model avoids.
+  if (args.tagIds !== undefined && isGuest) {
+    return { ok: false, reason: "tags_owner_only" };
+  }
   const result = await db.$transaction(async (tx) => {
     const nextStatus = args.status;
     const statusMoves = nextStatus !== undefined && nextStatus !== existing.status;
@@ -769,10 +779,12 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
         where: { id: existing.id },
         select: { tags: { select: { id: true, name: true, color: true } } },
       });
-      // Scope to this workspace's tags — `set` by id doesn't filter, so a
-      // foreign id would attach another workspace's tag. Empty stays empty
-      // (clears all tags), which is the intended meaning of `tagIds: []`.
-      const safeTagIds = await workspaceScopedTagIds(tx, args.workspaceId, args.tagIds);
+      // Scope to the OWNER's tags — `set` by id doesn't filter, so a foreign id
+      // would attach another workspace's tag. (Guests never reach here; the
+      // owner-only refusal above is the gate. Reading the owner's id rather
+      // than the actor's keeps this correct on its own terms.) Empty stays
+      // empty (clears all tags), the intended meaning of `tagIds: []`.
+      const safeTagIds = await workspaceScopedTagIds(tx, existing.workspaceId, args.tagIds);
       await tx.ticket.update({
         where: { id: existing.id },
         data: { tags: { set: safeTagIds.map((id) => ({ id })) } },
@@ -783,7 +795,7 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
       tagDiff = {
         added: addedIds.length
           ? await tx.tag.findMany({
-              where: { id: { in: addedIds }, workspaceId: args.workspaceId },
+              where: { id: { in: addedIds }, workspaceId: existing.workspaceId },
               select: { id: true, name: true, color: true },
             })
           : [],
@@ -916,7 +928,6 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
         })) ?? null)?.name ?? null
       : null;
     const base = {
-      workspaceId: args.workspaceId,
       actorUserId: args.actor.userId ?? null,
       actorName,
       ticketId: existing.id,
@@ -925,12 +936,18 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
     };
 
     if (args.assignedUserId) {
-      await notifyUsers(sharedDb, {
-        ...base,
-        kind: "ticket_assigned",
-        userIds: [args.assignedUserId],
-        summary: "assigned this ticket to you",
-      });
+      // The assignee is on the OWNER's roster (a guest's person is their
+      // share's `assignedUserId`), so take their placement from the audience —
+      // it is the one thing that knows which bell each person reads.
+      const assignee = audience.recipients.find((r) => r.userId === args.assignedUserId);
+      if (assignee) {
+        await notifyUsers(sharedDb, {
+          ...base,
+          kind: "ticket_assigned",
+          recipients: [assignee],
+          summary: "assigned this ticket to you",
+        });
+      }
     }
     const summary = describeTicketChange(args);
     if (summary) {
@@ -938,7 +955,7 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
         ...base,
         kind: "ticket_changed",
         // The new assignee already got the more specific line above.
-        userIds: audience.userIds.filter((id) => id !== args.assignedUserId),
+        recipients: audience.recipients.filter((r) => r.userId !== args.assignedUserId),
         summary,
       });
     }
@@ -1289,6 +1306,39 @@ export async function readTicket(tx: TxClient, id: string): Promise<Ticket> {
   return mapTicket(row, row.workspaceId);
 }
 
+/**
+ * The same ticket, mapped for EACH workspace that may see it.
+ *
+ * `readTicket` is owner-perspective by construction, and `mapTicket` exists
+ * precisely because the owner's view is not the guest's: `contactId` /
+ * `contactName` / `conversationId` / `assignedUserId` all differ, and three of
+ * those are boundaries rather than preferences (a guest gets the frozen
+ * snapshot's name, never a live pointer into the owner's directory). Broadcast
+ * one owner DTO to every guest room and that boundary is simply gone.
+ *
+ * One extra read per publish, on shared tickets only. Ticket changes happen at
+ * human cadence, so this is not a hot path — and re-mapping in the fanout layer
+ * is not an option: it must stay a pure function of the event (§10).
+ */
+async function readTicketPerWorkspace(
+  tx: TxClient,
+  id: string,
+  workspaceIds: string[],
+): Promise<Record<string, Ticket>> {
+  if (workspaceIds.length === 0) return {};
+  // `findUnique`, not `…OrThrow`: `deleteTicket` publishes its `deleted` frame
+  // from inside the transaction that removed the row, so there is legitimately
+  // nothing left to map. The fanout rule blanks the owner-only fields when this
+  // returns no entry — an empty map must never mean "forward the owner's DTO".
+  const row = await tx.ticket.findUnique({ where: { id }, select: TICKET_SELECT });
+  if (!row) return {};
+  const byWorkspace: Record<string, Ticket> = {};
+  for (const workspaceId of new Set(workspaceIds)) {
+    byWorkspace[workspaceId] = mapTicket(row, workspaceId);
+  }
+  return byWorkspace;
+}
+
 interface LoadedPolicy extends SlaPolicyInput {
   id: string;
 }
@@ -1564,6 +1614,14 @@ export async function publishTicketEvent(
   },
 ): Promise<void> {
   const { args, ticket, openTicketCount, action, previousStatus } = params;
+  const otherWorkspaceIds = [
+    ...(ticket.sharing?.guests.map((g) => g.workspaceId) ?? []),
+    ...(params.alsoNotifyWorkspaceIds ?? []),
+  ].filter((id) => id !== ticket.sharing?.ownerWorkspaceId);
+  // Each recipient workspace gets the ticket as IT sees it — see
+  // `readTicketPerWorkspace`. Built here, in the transaction, so the fanout
+  // stays a pure function of the event.
+  const ticketByWorkspace = await readTicketPerWorkspace(tx, ticket.id, otherWorkspaceIds);
   await publishInTx(tx, {
     type: "ticket.changed",
     workspaceId: args.workspaceId,
@@ -1583,6 +1641,7 @@ export async function publishTicketEvent(
       ...(ticket.sharing?.guests.map((g) => g.workspaceId) ?? []),
       ...(params.alsoNotifyWorkspaceIds ?? []),
     ],
+    ticketByWorkspace,
     ...(args.silent !== undefined ? { silent: args.silent } : {}),
     ...(args.skipOutboundWebhook !== undefined
       ? { skipOutboundWebhook: args.skipOutboundWebhook }

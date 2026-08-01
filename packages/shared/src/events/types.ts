@@ -761,6 +761,18 @@ export interface TicketChangedEvent {
    * these workspaces merely hold a key.
    */
   sharedWithWorkspaceIds?: string[];
+  /**
+   * The ticket as each OTHER workspace sees it, keyed by workspace id.
+   *
+   * `ticket` above is the OWNER's mapping, and the two genuinely differ:
+   * `contactId`, `contactName`, `conversationId` and `assignedUserId` are all
+   * viewer-dependent, and a guest is supposed to get the frozen contact
+   * SNAPSHOT rather than a live pointer into the owner's directory (§2).
+   * Broadcasting the owner's DTO into a guest room hands over exactly what the
+   * share boundary exists to withhold, so the publisher maps it per recipient
+   * inside the transaction and the fanout rule stays a pure lookup.
+   */
+  ticketByWorkspace?: Record<string, Ticket>;
   /** Who made the change. null for automation / SLA sweeper actions. */
   changedByUserId: string | null;
   /** Set on /v1 mutations for audit attribution. */

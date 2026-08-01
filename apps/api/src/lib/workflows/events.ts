@@ -584,46 +584,50 @@ export interface WorkflowTicketSnapshot {
   contactId: string | null;
 }
 
-export interface TicketCreatedPayload {
+/**
+ * The thread the ticket is about, when there is one.
+ *
+ * Every ticket payload carries it for the same reason the conversation
+ * triggers do: `send_message`, `set_status`, `assign_to` and the rest read
+ * their target through `envelopeConversation`, and a trigger that omits it
+ * leaves them nothing to act on (they `advanceWithError(400)`). Null is the
+ * honest answer on a shared ticket a guest has not bound a thread to — the
+ * same case `contact` is already null for.
+ */
+export interface TicketPayloadBase {
   ticket: WorkflowTicketSnapshot;
   /** Absent when the ticket has no contact this workspace can read. */
   contact: WorkflowContactSnapshot | null;
+  conversation: WorkflowConversationSnapshot | null;
+}
+
+export interface TicketCreatedPayload extends TicketPayloadBase {
   createdByUserId: string | null;
 }
 
-export interface TicketStatusChangedPayload {
-  ticket: WorkflowTicketSnapshot;
-  contact: WorkflowContactSnapshot | null;
+export interface TicketStatusChangedPayload extends TicketPayloadBase {
   previousStatus: string;
   newStatus: string;
   changedByUserId: string | null;
 }
 
-export interface TicketPriorityChangedPayload {
-  ticket: WorkflowTicketSnapshot;
-  contact: WorkflowContactSnapshot | null;
+export interface TicketPriorityChangedPayload extends TicketPayloadBase {
   newPriority: string;
   changedByUserId: string | null;
 }
 
-export interface TicketAssignedPayload {
-  ticket: WorkflowTicketSnapshot;
-  contact: WorkflowContactSnapshot | null;
+export interface TicketAssignedPayload extends TicketPayloadBase {
   /** Null when the ticket was UNassigned. */
   assignedUserId: string | null;
   changedByUserId: string | null;
 }
 
-export interface TicketSlaBreachedPayload {
-  ticket: WorkflowTicketSnapshot;
-  contact: WorkflowContactSnapshot | null;
+export interface TicketSlaBreachedPayload extends TicketPayloadBase {
   /** WHICH promise was missed — an automation almost always cares. */
   breachedLeg: "first_response" | "resolution";
 }
 
-export interface TicketEscalatedPayload {
-  ticket: WorkflowTicketSnapshot;
-  contact: WorkflowContactSnapshot | null;
+export interface TicketEscalatedPayload extends TicketPayloadBase {
   /** The workspace granted access, and the reason given. */
   guestWorkspaceId: string;
   guestWorkspaceName: string;

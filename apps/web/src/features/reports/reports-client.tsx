@@ -42,7 +42,6 @@ import {
 import {
   computeReportRange,
   DEFAULT_RANGE,
-  rangeSelectionDays,
   ReportControls,
   useScopeAccounts,
   type ReportRangeSelection,
@@ -438,7 +437,7 @@ export function ReportsClient() {
           Not account-scoped by the picker above — these figures are per WhatsApp
           BUSINESS ACCOUNT (the WABA), which is a coarser thing than the per-number
           scope that filters our own message rows. */}
-      {hasWhatsapp && <WhatsappSpendPanel days={rangeSelectionDays(rangeSel)} />}
+      {hasWhatsapp && <WhatsappSpendPanel from={range.from} to={range.to} />}
 
       {/* WHERE customers came from. Not channel-filtered: the whole point is that
           it reads the same across WhatsApp, Messenger and Instagram — a Meta ad

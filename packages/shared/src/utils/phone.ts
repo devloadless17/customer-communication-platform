@@ -94,6 +94,17 @@ export function normalizePhoneE164(
   } catch {
     // unparseable shape → keep the digits-only fallback below
   }
+  // A LEADING ZERO never survives as an E.164 identity: no country code starts
+  // with 0, so this is a national-format number that libphonenumber could not
+  // resolve (no `defaultCountry` was supplied, or the shape is wrong). Storing
+  // it produces a contact nobody can be messaged at, and — worse — when that
+  // person does write in, ingest's exact-match phone lookup misses the
+  // trunk-0-less wa_id and forks a SECOND contact that auto-merge can never
+  // fuse. The CSV importer already refused this shape; every other create path
+  // (manual, /v1 create + upsert, start-conversation-by-phone, the workflow
+  // `phone` target) fell through to the digits fallback below and kept it.
+  // Refusing here makes the rule the normalizer's, not one caller's.
+  if (digits.startsWith("0")) return null;
   return digits;
 }
 

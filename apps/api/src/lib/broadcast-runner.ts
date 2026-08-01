@@ -3478,7 +3478,16 @@ async function fail(broadcastId: string, message: string): Promise<void> {
   // lane already advanced (sent / failed-at-send) are untouched.
   const failedNow = await db.broadcastRecipient.updateMany({
     where: { broadcastId, status: "queued" },
-    data: { status: "failed", errorMessage: message.slice(0, 500) },
+    // `deliveryState` too, not just `status`: the reporting layer reads
+    // deliveryState ONLY (schema.prisma §BroadcastRecipient), so leaving these
+    // rows at the `pending` default made a campaign that failed outright report
+    // zero failures forever — a funnel that says nothing went wrong about a run
+    // where nothing went right.
+    data: {
+      status: "failed",
+      deliveryState: "failed_at_send",
+      errorMessage: message.slice(0, 500),
+    },
   });
   if (failedNow.count > 0) {
     // Keep the denormalized counter honest with the rows just flipped.

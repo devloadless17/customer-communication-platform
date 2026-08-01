@@ -300,6 +300,9 @@ export class CustomersService {
     workspaceId: string,
     customerId: string,
     name: string,
+    /** The agent asking — the profile it returns is viewer-filtered, and an
+     *  edit is no reason to hand back more than a read would. */
+    viewer?: ConversationViewer,
   ): Promise<CustomerProfile> {
     const trimmed = name.trim();
     const res = await this.db.customer.updateMany({
@@ -307,7 +310,7 @@ export class CustomersService {
       data: { name: trimmed.length > 0 ? trimmed : null },
     });
     if (res.count === 0) throw new NotFoundException({ error: "customer_not_found" });
-    return this.loadProfile(workspaceId, customerId);
+    return this.loadProfile(workspaceId, customerId, viewer);
   }
 
   getProfile(
@@ -417,6 +420,8 @@ export class CustomersService {
     customerId: string,
     contactId: string,
     actorUserId: string | null = null,
+    /** The agent asking — see `rename`. */
+    viewer?: ConversationViewer,
   ): Promise<CustomerProfile> {
     const moved = await this.db.$transaction(async (tx) => {
       const [customer, contact] = await Promise.all([
@@ -478,7 +483,7 @@ export class CustomersService {
     // Only after the re-point commits, and only when it actually moved (never a
     // speculative/unchanged frame for a no-op re-link).
     if (moved) await this.publishContactUpdated(workspaceId, contactId, actorUserId);
-    return this.loadProfile(workspaceId, customerId);
+    return this.loadProfile(workspaceId, customerId, viewer);
   }
 
   /**

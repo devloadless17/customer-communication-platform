@@ -198,6 +198,7 @@ function mapSharing(t: TicketRow, viewerWorkspaceId: string): TicketSharingInfo 
   const mine = t.shares.find((s) => s.guestWorkspaceId === viewerWorkspaceId);
   return {
     role,
+    viewerWorkspaceId,
     ownerWorkspaceId: t.workspaceId,
     ownerWorkspaceName: t.workspace.name,
     guests: t.shares.map((s) => ({

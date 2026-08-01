@@ -120,19 +120,26 @@ function label(map: Record<string, string>, v: string | null): string {
   return map[v.toUpperCase()] ?? v.replaceAll("_", " ").toLowerCase();
 }
 
-export function WhatsappSpendPanel({ days }: { days: number }) {
+/**
+ * `from`/`to` rather than a day COUNT. The panel used to derive its window as
+ * `[now - days, now]`, which silently ignored a custom historical range: asking
+ * for March 1-7 reported the last seven days instead, under a heading that said
+ * March. Taking the resolved range means the panel shows the range that is
+ * selected, and there is only one place that decides what that is.
+ */
+export function WhatsappSpendPanel({ from, to }: { from: Date; to: Date }) {
   const [data, setData] = useState<WabaAnalyticsResult | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
+  const fromIso = from.toISOString();
+  const toIso = to.toISOString();
 
   useEffect(() => {
     let cancelled = false;
     setState("loading");
     setData(null);
-    const to = new Date();
-    const from = new Date(to.getTime() - days * 86_400_000);
     const qs = new URLSearchParams({
-      from: from.toISOString(),
-      to: to.toISOString(),
+      from: fromIso,
+      to: toIso,
       granularity: "day",
     });
     void (async () => {
@@ -154,7 +161,7 @@ export function WhatsappSpendPanel({ days }: { days: number }) {
     return () => {
       cancelled = true;
     };
-  }, [days]);
+  }, [fromIso, toIso]);
 
   // No WhatsApp account at all — render nothing rather than an empty money
   // panel. A workspace on Messenger only has no WhatsApp spend to report, and an

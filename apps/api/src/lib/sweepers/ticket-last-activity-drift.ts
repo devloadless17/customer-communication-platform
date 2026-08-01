@@ -101,7 +101,14 @@ export async function sweepTicketLastActivityOnce(): Promise<number> {
             GREATEST(
               x."createdAt",
               COALESCE((SELECT MAX(e."createdAt") FROM "TicketEvent" e WHERE e."ticketId" = x."id"), x."createdAt"),
-              COALESCE((SELECT MAX(m."createdAt") FROM "TicketMessage" m WHERE m."ticketId" = x."id"), x."createdAt")
+              COALESCE((SELECT MAX(m."createdAt") FROM "TicketMessage" m WHERE m."ticketId" = x."id"), x."createdAt"),
+              -- The first agent REPLY bumps lastActivityAt (markFirstResponse)
+              -- and writes neither an event nor a thread message, so a formula
+              -- without this term reverts it: the ticket someone just answered
+              -- sank back below ones nobody has touched, nightly, and the
+              -- sweeper logged it as a correction. The stamp records exactly
+              -- the moment that moved the clock, so truth stays derivable.
+              COALESCE(x."firstResponseAt", x."createdAt")
             ) AS actual
           FROM "Ticket" x
           WHERE x."workspaceId" = ${workspaceId}

@@ -38,6 +38,15 @@ export const VALID_TRIGGERS: ReadonlyArray<WorkflowTriggerEvent> = [
   "contact_field_updated",
   "contact_tag_updated",
   "contact_lifecycle_updated",
+  // The ticket family. The enum, the dispatcher, the condition fields and the
+  // builder's trigger picker all shipped with these; this gate did not, so
+  // every ticket-triggered workflow 400'd on save.
+  "ticket_created",
+  "ticket_status_changed",
+  "ticket_priority_changed",
+  "ticket_assigned",
+  "ticket_sla_breached",
+  "ticket_escalated",
   "manual_trigger",
   "incoming_webhook",
 ];

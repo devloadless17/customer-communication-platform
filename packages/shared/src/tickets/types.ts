@@ -251,6 +251,14 @@ export interface TicketSharingInfo {
   /** What the VIEWING workspace is: the workspace that raised it, or one it
    *  was escalated to. */
   role: "owner" | "guest";
+  /**
+   * The workspace the viewer is reading from. `role` says WHAT they are; this
+   * says WHICH — the difference matters as soon as a ticket has more than one
+   * guest, because "is this row me?" is otherwise unanswerable on the client
+   * (comparing a guest row against `ownerWorkspaceId` is never true, which is
+   * how a guest lost the ability to hand its own access back).
+   */
+  viewerWorkspaceId: string;
   /** The workspace that owns the ticket (and the customer conversation). */
   ownerWorkspaceId: string;
   ownerWorkspaceName: string;

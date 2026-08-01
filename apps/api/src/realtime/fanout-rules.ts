@@ -218,6 +218,23 @@ export const FANOUT_RULES: FanoutRuleMap = {
         // own active workspace, and the board it patches is theirs.
         workspaceId: guestWorkspaceId,
         conversationId: null,
+        // ...and the TICKET as that workspace sees it. `frame.ticket` is the
+        // owner's mapping, which carries the owner's live `contactId` /
+        // `contactName` and their thread id — the board patches the card with
+        // the whole DTO, so forwarding it verbatim replaced a guest's frozen
+        // snapshot with the owner's directory.
+        //
+        // When there is no per-workspace mapping the owner's fields are BLANKED
+        // rather than forwarded. That is not hypothetical: `deleteTicket`
+        // publishes from inside the transaction that removed the row, so there
+        // is nothing left to re-map and the `deleted` frame would otherwise
+        // carry exactly the three fields the share boundary withholds.
+        ticket: e.ticketByWorkspace?.[guestWorkspaceId] ?? {
+          ...e.ticket,
+          contactId: null,
+          contactName: "Unknown",
+          conversationId: null,
+        },
       });
     }
   },

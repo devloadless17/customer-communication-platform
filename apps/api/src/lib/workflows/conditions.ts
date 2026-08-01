@@ -466,8 +466,11 @@ function readField(field: ConditionField, payload: EventPayload): string | null 
       return p.assignedUserId ?? p.ticket?.assignedUserId ?? null;
     case "ticket_team_id":
       return p.ticket?.assignedTeamId ?? null;
-    // Multi-valued: `equals` means "has this tag". Joined with a delimiter for
-    // the substring ops so `contains` can't match across two ids.
+    // Multi-valued: `equals` means "has this tag" — evaluated as membership in
+    // `evaluateLeaf` (MULTI_VALUED_FIELDS), because a whole-string compare
+    // against the joined list stops matching the moment a second tag exists.
+    // Joined with a delimiter for the substring ops so `contains` can't match
+    // across two ids.
     case "ticket_tag_id":
       return p.ticket?.tagIds?.length ? p.ticket.tagIds.join(",") : null;
     case "ticket_breached_leg":
@@ -543,8 +546,23 @@ function applyOp(
   }
 }
 
+/**
+ * Fields whose value is a LIST rendered as one delimited string.
+ *
+ * `equals` on such a field has to mean "is one of", not "is the whole list" —
+ * "ticket has tag Refund" is the only thing an admin can be asking, and a
+ * whole-string compare answered it correctly right up until someone added a
+ * second tag, then silently stopped matching forever.
+ */
+const MULTI_VALUED_FIELDS: ReadonlySet<string> = new Set(["ticket_tag_id"]);
+
 function evaluateLeaf(c: Condition, payload: EventPayload): boolean {
   const actual = readField(c.field, payload);
+  if (MULTI_VALUED_FIELDS.has(c.field) && (c.op === "equals" || c.op === "not_equals")) {
+    const has =
+      actual !== null && c.value !== undefined && actual.split(",").includes(c.value);
+    return c.op === "equals" ? has : !has;
+  }
   return applyOp(c.op, actual, c.value);
 }
 

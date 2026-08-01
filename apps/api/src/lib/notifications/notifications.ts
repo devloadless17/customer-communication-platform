@@ -24,7 +24,10 @@ import { publish } from "@/lib/events/bus";
  *     same result on screen, no race, and the history survives being read.
  */
 
-type Db = Pick<PrismaClient, "notification" | "ticket" | "ticketShare" | "user">;
+type Db = Pick<
+  PrismaClient,
+  "notification" | "ticket" | "ticketShare" | "user" | "workspaceMember"
+>;
 
 /** Newest-first page size for the bell. A centre, not an archive. */
 export const NOTIFICATION_PAGE = 30;
@@ -89,12 +92,27 @@ export function mapNotification(n: Row): AppNotification {
   };
 }
 
-export interface NotifyArgs {
-  /** The workspace the thing happened IN — this is whose bell it lands in. */
+/**
+ * One person, and the workspace THEY will read this in.
+ *
+ * Not "the workspace it happened in": the bell reads
+ * `{ userId, workspaceId: session.workspaceId }` and the socket room is
+ * `user:<ws>:<uid>`, so a row stamped with the ACTOR's workspace is invisible
+ * to a recipient sitting in their own — permanently, when they are not a member
+ * of the actor's workspace at all. That is precisely the escalation audience
+ * (§18: the raiser and each side's assignee), i.e. the case the bell exists
+ * for. Pairing the person with their own workspace at the point the audience is
+ * resolved is what makes that unforgettable — the share row already knows it.
+ */
+export interface NotificationRecipient {
+  userId: string;
   workspaceId: string;
+}
+
+export interface NotifyArgs {
   kind: NotificationKind;
   /** Everyone who should hear about it. The actor is filtered out here, once. */
-  userIds: string[];
+  recipients: NotificationRecipient[];
   actorUserId?: string | null;
   actorName?: string | null;
   ticketId?: string;
@@ -116,15 +134,21 @@ export interface NotifyArgs {
  * would be the wrong trade every time.
  */
 export async function notifyUsers(db: Db, args: NotifyArgs): Promise<string[]> {
-  const recipients = [...new Set(args.userIds.filter(Boolean))].filter(
-    (id) => id !== args.actorUserId,
-  );
-  if (recipients.length === 0) return [];
+  // One row per person. First mapping wins if a person reaches the audience
+  // twice (someone who is a member of both departments still has one bell, and
+  // the owner side is resolved first).
+  const byUser = new Map<string, string>();
+  for (const r of args.recipients) {
+    if (!r.userId || !r.workspaceId) continue;
+    if (r.userId === args.actorUserId) continue;
+    if (!byUser.has(r.userId)) byUser.set(r.userId, r.workspaceId);
+  }
+  if (byUser.size === 0) return [];
 
   try {
     await db.notification.createMany({
-      data: recipients.map((userId) => ({
-        workspaceId: args.workspaceId,
+      data: [...byUser].map(([userId, workspaceId]) => ({
+        workspaceId,
         userId,
         kind: args.kind,
         actorUserId: args.actorUserId ?? null,
@@ -140,21 +164,33 @@ export async function notifyUsers(db: Db, args: NotifyArgs): Promise<string[]> {
     return [];
   }
 
+  // One frame per workspace, because the per-user room is workspace-keyed
+  // (`user:<ws>:<uid>`) — a single frame on the actor's workspace would reach
+  // nobody standing in theirs.
+  //
   // On the BUS, not through the outbox: the only subscriber is realtime fanout,
   // and a frame lost to a crash is recoverable — the bell is server-authoritative
   // on mount and re-seeded on reconnect. Same call the ticket thread makes.
-  await publish({
-    type: "notification.created",
-    workspaceId: args.workspaceId,
-    userIds: recipients,
-    kind: args.kind,
-    ...(args.ticketId ? { ticketId: args.ticketId } : {}),
-    ...(args.ticketNumber !== undefined ? { ticketNumber: args.ticketNumber } : {}),
-    ...(args.actorName ? { actorName: args.actorName } : {}),
-    ...(args.summary ? { summary: args.summary } : {}),
-  });
+  const byWorkspace = new Map<string, string[]>();
+  for (const [userId, workspaceId] of byUser) {
+    const bucket = byWorkspace.get(workspaceId);
+    if (bucket) bucket.push(userId);
+    else byWorkspace.set(workspaceId, [userId]);
+  }
+  for (const [workspaceId, userIds] of byWorkspace) {
+    await publish({
+      type: "notification.created",
+      workspaceId,
+      userIds,
+      kind: args.kind,
+      ...(args.ticketId ? { ticketId: args.ticketId } : {}),
+      ...(args.ticketNumber !== undefined ? { ticketNumber: args.ticketNumber } : {}),
+      ...(args.actorName ? { actorName: args.actorName } : {}),
+      ...(args.summary ? { summary: args.summary } : {}),
+    });
+  }
 
-  return recipients;
+  return [...byUser.keys()];
 }
 
 /**
@@ -173,27 +209,98 @@ export async function notifyUsers(db: Db, args: NotifyArgs): Promise<string[]> {
 export async function ticketAudience(
   db: Db,
   ticketId: string,
-): Promise<{ userIds: string[]; number: number; subject: string | null } | null> {
+): Promise<{
+  recipients: NotificationRecipient[];
+  number: number;
+  subject: string | null;
+} | null> {
   const ticket = await db.ticket.findUnique({
     where: { id: ticketId },
     select: {
       number: true,
       subject: true,
+      workspaceId: true,
       createdById: true,
       assignedUserId: true,
-      shares: { select: { assignedUserId: true, createdById: true } },
+      shares: {
+        select: { guestWorkspaceId: true, assignedUserId: true, createdById: true },
+      },
     },
   });
   if (!ticket) return null;
 
-  const ids = new Set<string>();
-  if (ticket.createdById) ids.add(ticket.createdById);
-  if (ticket.assignedUserId) ids.add(ticket.assignedUserId);
+  // Each side's people are paired with THEIR OWN workspace: the owner's with
+  // the ticket's, each guest's with that share's.
+  //
+  // The one person that does NOT place by column is a share's `createdById` —
+  // the escalator. Escalation is access-gated, not owner-only, so a guest can
+  // escalate onward, and neither `ownerWorkspaceId` nor `guestWorkspaceId`
+  // names the workspace they were standing in. Membership answers it, which is
+  // also the question that actually matters ("where will they read this?"), so
+  // it is the authority for everyone here.
+  const preferred: Array<{ userId: string; workspaceId: string }> = [];
+  if (ticket.createdById)
+    preferred.push({ userId: ticket.createdById, workspaceId: ticket.workspaceId });
+  if (ticket.assignedUserId)
+    preferred.push({ userId: ticket.assignedUserId, workspaceId: ticket.workspaceId });
   for (const s of ticket.shares) {
-    if (s.assignedUserId) ids.add(s.assignedUserId);
-    if (s.createdById) ids.add(s.createdById);
+    if (s.assignedUserId)
+      preferred.push({ userId: s.assignedUserId, workspaceId: s.guestWorkspaceId });
+    // The ESCALATOR is normally standing in the workspace the ticket came FROM,
+    // not the one it was handed to, so the owner's is the better first guess —
+    // membership below corrects it when they are genuinely a guest-side person.
+    // (A guest may escalate onward, which is why this is a preference and not a
+    // rule; `TicketShare` records no acting workspace of its own.)
+    if (s.createdById)
+      preferred.push(
+        { userId: s.createdById, workspaceId: ticket.workspaceId },
+        { userId: s.createdById, workspaceId: s.guestWorkspaceId },
+      );
   }
-  return { userIds: [...ids], number: ticket.number, subject: ticket.subject };
+  if (preferred.length === 0)
+    return { recipients: [], number: ticket.number, subject: ticket.subject };
+
+  const participating = [ticket.workspaceId, ...ticket.shares.map((s) => s.guestWorkspaceId)];
+  const memberships = await db.workspaceMember.findMany({
+    where: {
+      userId: { in: [...new Set(preferred.map((p) => p.userId))] },
+      workspaceId: { in: [...new Set(participating)] },
+    },
+    select: { userId: true, workspaceId: true },
+  });
+  const memberOf = new Map<string, Set<string>>();
+  for (const m of memberships) {
+    const set = memberOf.get(m.userId);
+    if (set) set.add(m.workspaceId);
+    else memberOf.set(m.userId, new Set([m.workspaceId]));
+  }
+
+  const recipients: NotificationRecipient[] = [];
+  const placed = new Set<string>();
+  for (const p of preferred) {
+    if (placed.has(p.userId)) continue;
+    const mine = memberOf.get(p.userId);
+    // No membership row in ANY participating workspace still means a real
+    // audience member: an org owner/admin and a superAdmin reach a workspace
+    // through the DB-verified beyond-membership escape in
+    // `resolveActiveWorkspaceId`, so they can raise a ticket somewhere they
+    // hold no `WorkspaceMember` row. Dropping them would take the RAISER — the
+    // one §18 puts in the audience for every change — out of their own bell.
+    // The column-derived workspace is the honest answer there; the bell query
+    // is (userId, workspaceId)-scoped either way, so nothing widens.
+    if (!mine || mine.size === 0) {
+      recipients.push({ userId: p.userId, workspaceId: p.workspaceId });
+      placed.add(p.userId);
+      continue;
+    }
+    const workspaceId = mine.has(p.workspaceId)
+      ? p.workspaceId
+      : // Still on the ticket, just from the other side — the escalator case.
+        participating.find((w) => mine.has(w))!;
+    recipients.push({ userId: p.userId, workspaceId });
+    placed.add(p.userId);
+  }
+  return { recipients, number: ticket.number, subject: ticket.subject };
 }
 
 /** This person's bell, newest first. Scoped to (user, workspace). */

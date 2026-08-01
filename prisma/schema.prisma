@@ -3831,6 +3831,13 @@ model TicketEvent {
   @@index([ticketId, createdAt])
   @@index([workspaceId, createdAt(sort: Desc)])
   @@index([actorUserId])
+  // Declared here as well as in 20260730123000_ticket_event_actor_workspace_fk.
+  // It backs the SetNull on the actorWorkspace FK; existing only in the
+  // migration made it invisible to the schema, so the next `migrate dev` would
+  // have generated a DROP for it as a stray. (Unlike the raw PARTIAL indexes,
+  // this one IS expressible in the DSL — so it belongs here, not in the
+  // hand-maintained 0_init section.)
+  @@index([actorWorkspaceId])
 }
 
 // A file on a ticket — the screenshot of the error, the invoice PDF, the

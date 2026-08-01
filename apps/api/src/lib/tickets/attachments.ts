@@ -32,7 +32,7 @@ import { ATTACHMENT_SELECT_FIELDS, mapAttachment } from "./queries";
 
 type Db = Pick<
   PrismaClient,
-  "ticket" | "ticketEvent" | "ticketAttachment" | "conversation" | "$transaction"
+  "ticket" | "ticketEvent" | "ticketAttachment" | "conversation" | "user" | "$transaction"
 >;
 
 /** Total files per ticket. A ticket is a work item, not a file share; the cap
@@ -171,11 +171,19 @@ export async function addTicketAttachment(
     void (async () => {
       const audience = await ticketAudience(db as never, ticket.id);
       if (!audience) return;
+      const actorName = args.actor.userId
+        ? (
+            await db.user.findUnique({
+              where: { id: args.actor.userId },
+              select: { name: true },
+            })
+          )?.name ?? null
+        : null;
       await notifyUsers(db as never, {
-        workspaceId: args.workspaceId,
         kind: "ticket_file_added",
-        userIds: audience.userIds,
+        recipients: audience.recipients,
         actorUserId: args.actor.userId ?? null,
+        actorName,
         ticketId: ticket.id,
         ticketNumber: audience.number,
         ticketSubject: audience.subject,

@@ -813,6 +813,12 @@ export class TicketsService {
           detail:
             "The cause is written once, when the ticket is raised. Add a note or a shared comment instead of rewriting it.",
         });
+      case "tags_owner_only":
+        throw new BadRequestException({
+          error: "tags_owner_only",
+          detail:
+            "Tags belong to the workspace that raised this ticket. Add a shared comment, or use your own team queue, instead.",
+        });
       default:
         throw new NotFoundException({ error: outcome.reason });
     }

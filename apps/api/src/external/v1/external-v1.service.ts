@@ -272,8 +272,15 @@ export class ExternalV1Service {
     apiKeyId: string,
     conversationId: string,
     input: import("@/messages/messages.schemas").SendMessengerTemplateInput,
+    idempotencyKey?: string,
   ) {
-    return this.messaging.sendMessengerTemplate(workspaceId, apiKeyId, conversationId, input);
+    return this.messaging.sendMessengerTemplate(
+      workspaceId,
+      apiKeyId,
+      conversationId,
+      input,
+      idempotencyKey,
+    );
   }
 
   setStatus(

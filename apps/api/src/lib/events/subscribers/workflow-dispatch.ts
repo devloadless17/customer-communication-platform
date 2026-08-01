@@ -48,7 +48,11 @@ import type { DomainEventOf, DomainEventType } from "@ccp/shared/events/types";
 
 import { subscribe as busSubscribe, SubscriberPriority } from "@/lib/events/bus";
 import { dispatch } from "@/lib/workflows/dispatcher";
-import { workflowContactSnapshot, type WorkflowTicketSnapshot } from "@/lib/workflows/events";
+import {
+  workflowContactSnapshot,
+  workflowConversationSnapshot,
+  type WorkflowTicketSnapshot,
+} from "@/lib/workflows/events";
 import { db } from "@/lib/db";
 
 /**
@@ -309,11 +313,48 @@ export function registerWorkflowDispatchSubscribers(): () => void {
       : null;
     const contact = contactRow ? workflowContactSnapshot(contactRow) : null;
 
+    // The thread, loaded on the same terms as the contact above (ticket changes
+    // are human-cadence, so one indexed read per change is not a hot path).
+    // Without it every conversation-acting step — `send_message`, `set_status`,
+    // `assign_to` — has no target and answers 400. Null on a guest's unbound
+    // ticket, which is the honest answer rather than a fabricated thread.
+    const conversationRow = e.ticket.conversationId
+      ? await db.conversation.findFirst({
+          where: { id: e.ticket.conversationId, workspaceId: e.workspaceId },
+          select: {
+            id: true,
+            channel: true,
+            channelConnectionId: true,
+            status: true,
+            assignedUserId: true,
+            aiEnabled: true,
+            unreadCount: true,
+            lastMessageAt: true,
+            firstAssignedAt: true,
+            firstAssignedUserId: true,
+            lastAssignedAt: true,
+            firstResponseAt: true,
+            firstResponseByUserId: true,
+            closedAt: true,
+            closedByUserId: true,
+            closedByApiKeyId: true,
+            closedCategory: true,
+            closedSummary: true,
+            assignmentsCount: true,
+            incomingMessagesCount: true,
+            outgoingMessagesCount: true,
+            responsesCount: true,
+          },
+        })
+      : null;
+    const conversation = conversationRow ? workflowConversationSnapshot(conversationRow) : null;
+
     switch (e.action) {
       case "created":
         await dispatch(e.workspaceId, "ticket_created", {
           ticket,
           contact,
+          conversation,
           createdByUserId: e.changedByUserId,
         });
         return;
@@ -324,6 +365,7 @@ export function registerWorkflowDispatchSubscribers(): () => void {
         await dispatch(e.workspaceId, "ticket_status_changed", {
           ticket,
           contact,
+          conversation,
           previousStatus: e.previousStatus ?? ticket.status,
           newStatus: ticket.status,
           changedByUserId: e.changedByUserId,
@@ -333,6 +375,7 @@ export function registerWorkflowDispatchSubscribers(): () => void {
         await dispatch(e.workspaceId, "ticket_priority_changed", {
           ticket,
           contact,
+          conversation,
           newPriority: ticket.priority,
           changedByUserId: e.changedByUserId,
         });
@@ -345,6 +388,7 @@ export function registerWorkflowDispatchSubscribers(): () => void {
         await dispatch(e.workspaceId, "ticket_assigned", {
           ticket,
           contact,
+          conversation,
           assignedUserId: ticket.assignedUserId,
           changedByUserId: e.changedByUserId,
         });
@@ -353,6 +397,7 @@ export function registerWorkflowDispatchSubscribers(): () => void {
         await dispatch(e.workspaceId, "ticket_sla_breached", {
           ticket,
           contact,
+          conversation,
           // The event always carries the leg on this action; resolution is the
           // safer default than inventing a first-response breach.
           breachedLeg: e.breachedLeg ?? "resolution",
@@ -366,6 +411,7 @@ export function registerWorkflowDispatchSubscribers(): () => void {
         await dispatch(e.workspaceId, "ticket_escalated", {
           ticket,
           contact,
+          conversation,
           guestWorkspaceId: newest.workspaceId,
           guestWorkspaceName: newest.workspaceName,
           // The reason lives on the timeline entry; the payload carries the

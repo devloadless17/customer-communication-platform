@@ -178,6 +178,8 @@ export function TicketDetailClient({
   const [escCause, setEscCause] = useState("");
   // Files picked for the next comment, and for direct ticket attachment.
   const { confirm, confirmDialog } = useConfirm();
+  /** A department this ticket was escalated TO, rather than the one that raised it. */
+  const isGuest = ticket.sharing?.role === "guest";
 
   async function removeTicket() {
     const ok = await confirm({
@@ -872,7 +874,7 @@ export function TicketDetailClient({
                   added <LocalTime iso={g.sharedAt} format="listTime" />
                 </span>
                 {/* The owner may remove anyone; a guest may only remove itself. */}
-                {ticket.sharing?.role === "owner" || g.workspaceId === ticket.sharing?.ownerWorkspaceId ? (
+                {ticket.sharing?.role === "owner" || g.workspaceId === ticket.sharing?.viewerWorkspaceId ? (
                   <button
                     type="button"
                     disabled={busy}
@@ -1091,7 +1093,20 @@ export function TicketDetailClient({
       <section className="rounded-xl border bg-card p-4">
         <h2 className="mb-2 text-sm font-semibold">Tags</h2>
         <div className="flex flex-wrap gap-1.5">
-          {tags.map((tag) => {
+          {/* A guest department reads the owner's tags but does not edit them —
+              they are the owner's vocabulary, and `tags: { set }` replaces the
+              whole list. The server refuses it either way; showing a control
+              that always fails is the worse half. */}
+          {isGuest
+            ? ticket.tags.map((tag) => (
+                <span
+                  key={tag.id}
+                  className={cn("rounded px-2 py-0.5 text-2xs", tagColorClasses(tag.color))}
+                >
+                  {tag.name}
+                </span>
+              ))
+            : tags.map((tag) => {
             const on = ticket.tags.some((t) => t.id === tag.id);
             return (
               <button
@@ -1114,11 +1129,17 @@ export function TicketDetailClient({
               </button>
             );
           })}
-          {tags.length === 0 && (
-            <p className="text-2xs text-muted-foreground">
-              No tags yet — create them in Settings.
-            </p>
-          )}
+          {isGuest
+            ? ticket.tags.length === 0 && (
+                <p className="text-2xs text-muted-foreground">
+                  No tags — these belong to {ticket.sharing?.ownerWorkspaceName ?? "the owning workspace"}.
+                </p>
+              )
+            : tags.length === 0 && (
+                <p className="text-2xs text-muted-foreground">
+                  No tags yet — create them in Settings.
+                </p>
+              )}
         </div>
       </section>
 

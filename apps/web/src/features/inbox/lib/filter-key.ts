@@ -25,12 +25,34 @@ import type { Filter } from "@/features/inbox/components/inbox-controls";
  * site, for exactly the reason the account one was missed.
  */
 export function conversationFilterKey(filter: Filter, accountId?: string | null): string {
-  const base =
-    filter.kind === "preset"
-      ? `p:${filter.id}`
-      : filter.kind === "stage"
-        ? `s:${filter.stageId}`
-        : "calls";
+  // Every arm of `Filter` gets its own segment. A missing arm is not a cosmetic
+  // gap: two different saved views collapsing to one key is byte-identical to
+  // the account bug above, with the same ending — a selection carried across a
+  // switch, into a bulk delete of rows the agent cannot see.
+  //
+  // A SWITCH, not a ternary chain with a default: the `view` arm was added to
+  // `Filter` and silently fell through to the "calls" literal for exactly as
+  // long as nobody noticed. The `never` assignment makes the next arm someone
+  // adds a COMPILE error here instead of a data-loss path.
+  let base: string;
+  switch (filter.kind) {
+    case "preset":
+      base = `p:${filter.id}`;
+      break;
+    case "stage":
+      base = `s:${filter.stageId}`;
+      break;
+    case "view":
+      base = `v:${filter.viewId}`;
+      break;
+    case "calls":
+      base = "calls";
+      break;
+    default: {
+      const exhaustive: never = filter;
+      throw new Error(`unhandled inbox filter: ${JSON.stringify(exhaustive)}`);
+    }
+  }
   // Always append the account segment, even when absent — a key that changes
   // SHAPE between "no account" and "an account" is harder to reason about than
   // one that always has the slot.

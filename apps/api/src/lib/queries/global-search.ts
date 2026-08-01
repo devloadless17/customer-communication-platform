@@ -160,7 +160,20 @@ export async function searchContacts(
     const ids = [...new Set(rows.map((r) => r.customerId).filter((v): v is string => !!v))];
     if (ids.length === 0) return byCustomer;
     const newest = await db.contact.findMany({
-      where: { workspaceId, deletedAt: null, customerId: { in: ids }, OR: matchOr },
+      // The SAME predicate the page query uses, for the same reason it is ANDed
+      // there. "The person's newest match" has to mean "newest match THIS VIEWER
+      // CAN SEE": computed against the unfiltered set, the winner can be a
+      // contact the page query never returns (an ephemeral widget contact that
+      // `directoryContactWhere` excludes, or a thread a restricted agent is not
+      // assigned), and then no visible sibling is representative — so the person
+      // vanishes from search entirely rather than showing under the contact the
+      // viewer does have.
+      where: {
+        workspaceId,
+        deletedAt: null,
+        customerId: { in: ids },
+        AND: [directoryContactWhere, visibilityClause, { OR: matchOr }],
+      },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       distinct: ["customerId"],
       select: { customerId: true, id: true },

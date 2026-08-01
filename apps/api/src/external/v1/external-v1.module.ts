@@ -97,11 +97,17 @@ import { WorkflowsModule as WorkflowsSettingsModule } from "@/workspace-settings
     MessengerModule,
   ],
   controllers: [
+    // ORDER IS LOAD-BEARING. Nest matches routes in controller-registration
+    // order, and `ExternalV1Controller` carries `GET contacts/:id` — which
+    // swallows `GET contacts/transfers` (and every `contacts/transfers/*`)
+    // as a contact whose id is the literal string "transfers". The transfers
+    // controller must therefore be registered BEFORE it: a literal segment has
+    // to be reachable ahead of the parameter that shadows it.
+    ExternalV1ContactTransfersController,
     ExternalV1Controller,
     ExternalV1AssignmentController,
     ExternalV1BroadcastWritesController,
     ExternalV1ChannelsController,
-    ExternalV1ContactTransfersController,
     ExternalV1FlagsController,
     ExternalV1MessengerController,
     ExternalV1ViewsController,

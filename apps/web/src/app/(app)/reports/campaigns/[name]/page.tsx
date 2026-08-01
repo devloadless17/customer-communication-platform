@@ -20,6 +20,9 @@ export default async function CampaignPage({
   const { permissions } = await getSession();
   if (!permissions["teamActivity:view"]) redirect("/inbox");
 
+  // NOT decoded again: Next already decodes dynamic segments before handing
+  // them over, so a second pass mangles any campaign whose name contains a
+  // percent sign ("50% off" → `%20off` → a URIError that takes the page down).
   const { name } = await params;
-  return <CampaignClient name={decodeURIComponent(name)} />;
+  return <CampaignClient name={name} />;
 }

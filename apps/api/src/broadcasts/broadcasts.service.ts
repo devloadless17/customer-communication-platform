@@ -2310,7 +2310,19 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       // template Meta has already accepted and billed.
       const reset = await tx.broadcastRecipient.updateMany({
         where: { id: { in: failedIds }, status: "failed" },
-        data: { status: "queued", errorMessage: null, sentAt: null, externalId: null },
+        // `errorCode` alongside `errorMessage`: the report's failure breakdown
+        // buckets by CODE, so a recipient that later succeeded kept appearing
+        // under its old failure reason. `deliveryState` returns to the
+        // pending default for the same reason the counters do — this row is
+        // about to be attempted again, and reporting reads deliveryState only.
+        data: {
+          status: "queued",
+          deliveryState: "pending",
+          errorMessage: null,
+          errorCode: null,
+          sentAt: null,
+          externalId: null,
+        },
       });
 
       // Delete the surviving OutboundSendAttempt rows (jobId `bc-recipient-<id>`)

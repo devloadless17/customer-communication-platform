@@ -165,9 +165,15 @@ function documentedPaths(text) {
  * someone re-counted by hand. All 163 routes carried it on 2026-07-29; this is
  * what keeps that true.
  *
- * The decorator sits AFTER the verb in this controller, so the search window
- * runs from the previous verb to the start of the method body. (A first pass
- * that looked only backwards reported 78 false positives.)
+ * The decorator sits AFTER the verb, so the window runs from the verb line
+ * itself down to the method signature. (A first pass that looked only backwards
+ * reported 78 false positives.)
+ *
+ * It must NOT start at the previous route — a window opening one line after the
+ * PREVIOUS verb contains that route's `@RequireScope`, so every route inherited
+ * its predecessor's decorator and the gate passed unconditionally. Verified
+ * against all 200 routes: every one carries the decorator below its own verb,
+ * and none above, so the narrow window is both correct and sufficient.
  */
 function routesMissingScope(src) {
   const lines = src.split("\n");
@@ -176,12 +182,11 @@ function routesMissingScope(src) {
   const verbLines = [];
   lines.forEach((l, i) => { if (verb.test(l)) verbLines.push(i); });
   const missing = [];
-  verbLines.forEach((i, idx) => {
+  verbLines.forEach((i) => {
     const m = verb.exec(lines[i]);
-    const start = idx > 0 ? verbLines[idx - 1] + 1 : 0;
     let end = i;
     while (end < lines.length && !body.test(lines[end]) && end - i <= 25) end++;
-    const block = lines.slice(start, end + 1).join("\n");
+    const block = lines.slice(i, end + 1).join("\n");
     if (!block.includes("@RequireScope(")) {
       missing.push(`${m[1].toUpperCase()} /v1/${m[2]} (line ${i + 1})`);
     }

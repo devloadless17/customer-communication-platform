@@ -104,7 +104,7 @@ export function mapMessage(row: MessageRow): TeamChannelMessageDto {
           // URL only after a team + channel-membership check, so internal
           // attachments are protected by auth, not just key unguessability
           // (M4). Resolves the same way WhatsApp media's `/api/media/:id` does.
-          url: `/api/workspace/channels/${row.channelId}/messages/${row.id}/media`,
+          url: `/api/team-chat/channels/${row.channelId}/messages/${row.id}/media`,
           mimeType: row.mediaMimeType,
           sizeBytes: row.mediaSizeBytes ?? 0,
           ...(row.mediaCaption ? { caption: row.mediaCaption } : {}),

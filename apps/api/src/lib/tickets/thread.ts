@@ -2,7 +2,7 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 
 import type { TicketAttachment, TicketThreadMessage } from "@ccp/shared/tickets/types";
 import { publish } from "@/lib/events/bus";
-import { notifyUsers } from "@/lib/notifications/notifications";
+import { notifyUsers, ticketAudience } from "@/lib/notifications/notifications";
 
 import { ticketByIdWhere } from "./access";
 import type { TicketActor } from "./mutations";
@@ -298,10 +298,29 @@ export async function addTicketMessage(
   // ticket surfaces; this is the place you find out without being on them.
   // Same audience — never the author — and it can never fail the reply.
   if (result.notified.length > 0) {
+    // The audience resolver is what knows which bell each person reads — a row
+    // stamped with the ACTING workspace is unreadable to the other department.
+    // Thread authors who are not otherwise on the ticket (arm 5) place by their
+    // own `authorWorkspaceId`.
+    const audience = await ticketAudience(db as never, ticket.id);
+    const placed = new Map<string, string>();
+    for (const r of audience?.recipients ?? []) placed.set(r.userId, r.workspaceId);
+    const authorWorkspaces = await db.ticketMessage.findMany({
+      where: { ticketId: ticket.id, authorUserId: { in: result.notified } },
+      select: { authorUserId: true, authorWorkspaceId: true },
+      distinct: ["authorUserId"],
+    });
+    for (const a of authorWorkspaces) {
+      if (a.authorUserId && a.authorWorkspaceId && !placed.has(a.authorUserId))
+        placed.set(a.authorUserId, a.authorWorkspaceId);
+    }
+    const recipients = result.notified.flatMap((userId) => {
+      const workspaceId = placed.get(userId);
+      return workspaceId ? [{ userId, workspaceId }] : [];
+    });
     await notifyUsers(db as never, {
-      workspaceId: args.workspaceId,
       kind: "ticket_replied",
-      userIds: result.notified,
+      recipients,
       actorUserId: authorUserId,
       actorName: message.authorName,
       ticketId: ticket.id,

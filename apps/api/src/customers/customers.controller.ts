@@ -70,7 +70,7 @@ export class CustomersController {
     @Param("id") id: string,
     @Body(zBody(RenameCustomerSchema)) body: RenameCustomerInput,
   ) {
-    const customer = await this.customers.rename(session.workspaceId, id, body.name);
+    const customer = await this.customers.rename(session.workspaceId, id, body.name, session);
     return { ok: true, customer };
   }
 
@@ -85,6 +85,7 @@ export class CustomersController {
       id,
       body.contactId,
       session.userId,
+      session,
     );
     return { ok: true, customer };
   }
