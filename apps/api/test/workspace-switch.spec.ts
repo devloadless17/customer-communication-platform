@@ -41,6 +41,17 @@ const service = new WorkspacesService(
 );
 
 const SUFFIX = `ws${Date.now().toString().slice(-8)}`;
+/**
+ * Per-RUN session id.
+ *
+ * Was the literal `"sess_test"`. `Session.id` is the primary key and this suite
+ * shares the maintainer's dev database, so a run that died before `afterAll`
+ * (an OOM, a timeout, a Ctrl-C) left the row behind and every run after it
+ * failed in `beforeAll` with a P2002 on the id — the whole file reported as 9
+ * skipped, which reads like a broken feature rather than a stale fixture. One
+ * was found squatting from 2026-07-31.
+ */
+const SESSION_ID = `sess_test_${SUFFIX}`;
 
 let orgA = "";
 let orgB = "";
@@ -52,7 +63,7 @@ let memberId = "";
 /** A session as `resolveSession` would build it for `memberId` in wsA1. */
 function sessionFor(overrides: Partial<ApiSession> = {}): ApiSession {
   return {
-    sessionId: "sess_test",
+    sessionId: SESSION_ID,
     userId: memberId,
     organizationId: orgA,
     orgRole: "member",
@@ -100,7 +111,7 @@ beforeAll(async () => {
   // A Session row so `setActive`'s update has something to write to.
   await prisma.session.create({
     data: {
-      id: "sess_test",
+      id: SESSION_ID,
       userId: memberId,
       token: `tok-${SUFFIX}`,
       expiresAt: new Date(Date.now() + 86_400_000),
@@ -118,7 +129,7 @@ describe("setActive", () => {
   it("lets a member switch into a workspace they belong to", async () => {
     await service.setActive(sessionFor(), wsA1);
     const row = await prisma.session.findUnique({
-      where: { id: "sess_test" },
+      where: { id: SESSION_ID },
       select: { activeWorkspaceId: true },
     });
     expect(row?.activeWorkspaceId).toBe(wsA1);
@@ -155,7 +166,7 @@ describe("setActive", () => {
     const orgAdmin = sessionFor({ orgRole: "admin", role: "admin" });
     await service.setActive(orgAdmin, wsA2); // implicit admin everywhere in orgA
     const row = await prisma.session.findUnique({
-      where: { id: "sess_test" },
+      where: { id: SESSION_ID },
       select: { activeWorkspaceId: true },
     });
     expect(row?.activeWorkspaceId).toBe(wsA2);
