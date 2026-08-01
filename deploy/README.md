@@ -102,6 +102,45 @@ apt-get install -y docker.io docker-compose-plugin caddy ufw
 ufw allow 22/tcp && ufw allow 80/tcp && ufw allow 443/tcp && ufw allow 443/udp && ufw enable
 ```
 
+## 1a. Host memory: swap + the two kernel knobs
+
+One-time, and the box is materially less crash-prone with them. The service
+`mem_limit`s (api 3g, web 2g, postgres 1.5g, redis 256m) bound each container;
+these bound the HOST.
+
+```bash
+free -h && swapon --show          # nothing printed by swapon = no swap
+sudo fallocate -l 2G /swapfile    # dd if=/dev/zero of=/swapfile bs=1M count=2048  if fallocate fails
+sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+
+sudo tee /etc/sysctl.d/99-ccp.conf >/dev/null <<'EOF'
+vm.overcommit_memory = 1
+vm.swappiness = 10
+EOF
+sudo sysctl --system
+```
+
+Verify: `free -h` shows a Swap line, `sysctl vm.overcommit_memory` = 1,
+`sysctl vm.swappiness` = 10.
+
+WHY each one, because they fix different failures:
+
+- **Swap** is what turns a transient memory peak into slowness instead of the
+  kernel instantly killing a process. `swappiness = 10` belongs with it — the
+  default (60) pages out hot inbox data eagerly and makes the steady state
+  slower; 10 means "only under real pressure".
+- **`vm.overcommit_memory = 1`** is REDIS's requirement, not a general tuning
+  knob. Redis forks to write its background save; under the kernel's default
+  heuristic that fork can be refused, Redis logs `Can't save in background`,
+  and queue state stops persisting. Redis warns about this at startup.
+
+**What swap does NOT do:** it does not save a container that exceeds its own
+`mem_limit` — the cgroup OOM killer still terminates that one. Swap protects
+against TOTAL-HOST exhaustion, which is the failure that takes everything down
+at once. Keep both: per-service `mem_limit`s bound the blast radius, swap keeps
+the host itself alive.
+
 ## 1b. Create the `deploy` user + prerequisites
 
 The workflow SSHes as `deploy`, not `root`. The deploy user needs three
