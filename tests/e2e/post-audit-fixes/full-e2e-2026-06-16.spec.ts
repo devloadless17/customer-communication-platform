@@ -114,7 +114,11 @@ const ROUTES = [
   "/inbox", "/contacts", "/broadcasts", "/broadcasts/new", "/broadcasts/groups", "/broadcasts/groups/new",
   "/templates", "/templates/new", "/workflows", "/workflows/new", "/team", "/tickets", "/flags",
   "/account", "/organization", "/organization/members", "/organization/workspaces",
-  "/settings", "/settings/activity", "/settings/contact-fields", "/settings/integrations",
+  // Reports is three sibling pages, not one. `/settings/activity` is NOT a
+  // typo to restore: team activity moved to `/reports/team` (2026-07-31) and
+  // the old URL is now only a redirect.
+  "/reports", "/reports/team", "/reports/campaigns",
+  "/settings", "/settings/contact-fields", "/settings/integrations",
   "/settings/integrations/webhooks", "/settings/permissions", "/settings/snippets",
   "/settings/stages", "/settings/tags", "/settings/members", "/settings/whatsapp",
   "/settings/assignment", "/settings/channels", "/settings/message-flags", "/settings/tickets",

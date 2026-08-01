@@ -51,6 +51,11 @@ const SURFACES = [
   // 16 failing. A surface the rubric does not name is a surface the rubric
   // cannot vouch for, however green the total looks.
   { name: "reports", path: "/reports" },
+  // Added 2026-07-31. The per-agent team report is its own landing (live
+  // strip, tiles, two charts, a heatmap, a 14-column sortable table and a
+  // drill-down sheet) — the same "big surface that shipped unscanned" class
+  // /reports itself was, so it gets the full rubric rather than the axe gate.
+  { name: "reports-team", path: "/reports/team" },
   { name: "settings", path: "/settings" },
   // Added 2026-07-31 (structure program): four whole feature landings had
   // never been through the full rubric — same class as /reports above.
