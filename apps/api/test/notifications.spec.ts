@@ -202,6 +202,59 @@ describe("every other change tells whoever RAISED it", () => {
   });
 });
 
+describe("a recipient reads it in THEIR OWN workspace", () => {
+  /**
+   * The bell reads `{ userId, workspaceId: session.workspaceId }` and the socket
+   * room is `user:<ws>:<uid>`, so a row stamped with the ACTOR's workspace is
+   * invisible to a recipient sitting in their own — permanently, when they are
+   * not a member of the actor's workspace at all.
+   *
+   * That is exactly the escalation audience: the whole reason the bell exists.
+   * This is the case, and it is asserted on the WORKSPACE, not just on the
+   * presence of a row.
+   */
+  it("reaches a guest-side person who is not a member of the owner workspace", async () => {
+    // Billing only. They cannot see wsA at all.
+    const billing = await makeUser("NTF Billing", [wsB]);
+    const ticket = await makeTicket();
+    await shareTicket(prisma as unknown as Parameters<typeof shareTicket>[0], {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId: raiser, workspaceId: wsA },
+      targetWorkspaceId: wsB,
+      cause: "Billing must approve this",
+    });
+    // Billing claims their side — this writes the SHARE's assignee.
+    await updateTicket(mdb, {
+      workspaceId: wsB,
+      ticketId: ticket.id,
+      actor: { userId: billing, workspaceId: wsB },
+      assignedUserId: billing,
+    });
+    await settle();
+
+    // The owner side answers.
+    await addTicketMessage(tdb, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId: raiser, workspaceId: wsA },
+      body: "any update on this?",
+    });
+    await settle();
+
+    // Billing sees it where they actually stand...
+    const inTheirs = (await bell(billing, wsB)).filter((n) => n.ticketId === ticket.id);
+    expect(inTheirs.length).toBeGreaterThan(0);
+    expect(await countUnreadNotifications(ndb, wsB, billing)).toBeGreaterThan(0);
+
+    // ...and NOT stamped with the actor's workspace, which they cannot open.
+    expect(await countUnreadNotifications(ndb, wsA, billing)).toBe(0);
+    expect(
+      await prisma.notification.count({ where: { userId: billing, workspaceId: wsA } }),
+    ).toBe(0);
+  });
+});
+
 describe("read state is per person", () => {
   it("one reader clearing theirs leaves everyone else's alone", async () => {
     const ticket = await makeTicket();
