@@ -44,6 +44,7 @@ type SweeperName =
   | "conversation-analytics-drift"
   | "message-flag-count-drift"
   | "open-ticket-count-drift"
+  | "ticket-last-activity-drift"
   | "outbound-webhook-delivery-cleanup"
   | "message-rawpayload-retention"
   | "broadcast-delivery-drift"
@@ -70,6 +71,7 @@ const STALE_THRESHOLD_MS: Record<SweeperName, number> = {
   "contact-drift": 25 * 60 * 60 * 1000, // 24h cadence
   "message-flag-count-drift": 25 * 60 * 60 * 1000, // 24h cadence
   "open-ticket-count-drift": 25 * 60 * 60 * 1000, // 24h cadence
+  "ticket-last-activity-drift": 25 * 60 * 60 * 1000, // 24h cadence
   "customer-link": 5 * 60 * 1000, // 60s cadence
   "blob-orphan": 8 * 24 * 60 * 60 * 1000, // weekly cadence
   "outbound-event-retention": 25 * 60 * 60 * 1000,

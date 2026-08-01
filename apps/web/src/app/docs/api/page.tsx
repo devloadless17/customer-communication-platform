@@ -1726,16 +1726,23 @@ export default function ApiDocsPage() {
           work the backlog from your own system.
         </p>
         <Endpoint method="GET" path="/api/external/v1/tickets">
-          The board, newest-first, keyset-paginated. Query: <code>status</code>,{" "}
+          The board, <strong>newest ACTIVITY first</strong>, keyset-paginated — a ticket
+          someone just replied to, filed against or moved sits above ones nobody has
+          touched, which is the order people work in. Every ticket carries{" "}
+          <code>lastActivityAt</code>. Query: <code>status</code>,{" "}
           <code>priority</code>, <code>tagIds</code> (comma lists),{" "}
           <code>assignee</code> (a user id, <code>me</code>, or <code>none</code> for
           unassigned), <code>contactId</code>, <code>conversationId</code>,{" "}
           <code>channel</code>, <code>breached=true</code>,{" "}
-          <code>cursorCreatedAt</code> + <code>cursorId</code>, <code>limit</code> (max
-          50). An unknown enum value is a <code>400</code> that names it — a filter is
+          <code>cursorActivityAt</code> + <code>cursorId</code> (pass back{" "}
+          <code>nextCursor</code> verbatim — the cursor keys on the same column the list
+          sorts by, so one keyed on anything else skips and repeats rows;{" "}
+          <code>cursorCreatedAt</code> is still accepted as a deprecated alias),{" "}
+          <code>limit</code> (max 50). An unknown enum value is a <code>400</code> that names it — a filter is
           never silently ignored. <code>q=</code> searches the ticket NUMBER
           (<code>#47</code> or <code>47</code>), the subject, the cause, the customer&apos;s
-          name and every comment/note on the timeline — trigram-indexed, and it composes
+          name, the cross-department thread and YOUR OWN notes (never another
+          workspace&apos;s) — trigram-indexed, and it composes
           with the other filters rather than replacing them. <code>shared=true</code>
           returns only tickets another workspace escalated to you;{" "}
           <code>untriaged=true</code> only work nobody in your workspace has claimed.

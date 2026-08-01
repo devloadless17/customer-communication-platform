@@ -3701,6 +3701,19 @@ model Ticket {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  /// When something last HAPPENED on this ticket — a reply, a file, a note, a
+  /// status move. The board sorts on it, so the ticket someone just answered
+  /// rises above the ones nobody has touched in a week, which is the order
+  /// people actually work in.
+  ///
+  /// A real column, not `updatedAt` and not a relation aggregate: `updatedAt`
+  /// means "this row was written" (a reply deliberately does not write it, and
+  /// an SLA sweep does), and Prisma cannot order by `max()` over
+  /// TicketMessage/TicketEvent — that would be raw SQL in the one query the
+  /// access gate composes into. Recomputable, so it has a drift sweeper
+  /// (`ticket-last-activity-drift`) per §7.
+  lastActivityAt DateTime @default(now())
+
   workspace     Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   conversation  Conversation?     @relation("ConversationTickets", fields: [conversationId], references: [id], onDelete: Cascade)
   contact       Contact?          @relation(fields: [contactId], references: [id], onDelete: Cascade)
@@ -3739,6 +3752,10 @@ model Ticket {
   @@unique([workspaceId, number])
   // Board + list, keyset-paginated: WHERE workspaceId = $1 [AND status = $2]
   // ORDER BY createdAt DESC, id DESC.
+  // The BOARD's ordering. Mirrors the createdAt index beneath it, because the
+  // board's sort key moved to `lastActivityAt` — without this the default view
+  // sorts in memory over every open ticket in the workspace.
+  @@index([workspaceId, status, lastActivityAt(sort: Desc), id(sort: Desc)])
   @@index([workspaceId, status, createdAt(sort: Desc), id(sort: Desc)])
   // "My tickets" — the view an agent lives in, same shape as the Mine inbox.
   @@index([workspaceId, assignedUserId, status, createdAt(sort: Desc), id(sort: Desc)])

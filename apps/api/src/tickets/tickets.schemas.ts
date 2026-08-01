@@ -94,6 +94,13 @@ export const ListTicketsQuerySchema = z.object({
     .enum(["true", "false"])
     .optional()
     .transform((v) => v === "true"),
+  /**
+   * The previous page's `nextCursor.activityAt`. The board sorts by LAST
+   * ACTIVITY, so the cursor keys on that — `cursorCreatedAt` is kept as a
+   * deprecated alias so an integration mid-pagination when this shipped
+   * finishes its walk instead of silently repeating rows.
+   */
+  cursorActivityAt: z.string().datetime().optional(),
   cursorCreatedAt: z.string().datetime().optional(),
   cursorId: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(50).optional(),

@@ -217,6 +217,12 @@ export interface Ticket {
   createdAt: string;
   /** ISO. */
   updatedAt: string;
+  /**
+   * When something last HAPPENED here — a reply, a file, a note, a status move.
+   * ISO. The board sorts on it, and the client re-sorts a card locally when a
+   * reply frame arrives, so it ships on every ticket read.
+   */
+  lastActivityAt: string;
 }
 
 /**

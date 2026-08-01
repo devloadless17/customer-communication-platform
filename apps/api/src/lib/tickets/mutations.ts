@@ -392,6 +392,28 @@ export async function routeMessageToTicket(
  * replying at the same instant, can't move a stamped time — the first response
  * happened once.
  */
+/**
+ * Mark that something HAPPENED on a ticket.
+ *
+ * Sorting the board by this is the whole point: the ticket someone just
+ * answered rises above the ones nobody has touched in a week. Deliberately a
+ * bare column write — it bumps no `version` (a reply must not 409 a colleague's
+ * open editor), publishes nothing, and never fails a caller: an ordering hint
+ * is not worth losing the write it decorates.
+ *
+ * Callers that are ALREADY writing the row set the field inline instead, so a
+ * status change stays one statement.
+ */
+export async function touchTicketActivity(
+  tx: TxClient,
+  ticketId: string,
+  at: Date = new Date(),
+): Promise<void> {
+  await tx.ticket
+    .updateMany({ where: { id: ticketId }, data: { lastActivityAt: at } })
+    .catch(() => undefined);
+}
+
 export async function markFirstResponse(
   tx: TxClient,
   workspaceId: string,
@@ -400,7 +422,8 @@ export async function markFirstResponse(
 ): Promise<void> {
   await tx.ticket.updateMany({
     where: { id: ticketId, workspaceId, firstResponseAt: null },
-    data: { firstResponseAt: at },
+    // Answering the customer is activity on the work, not just on the thread.
+    data: { firstResponseAt: at, lastActivityAt: at },
   });
 }
 
@@ -526,6 +549,9 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
     const statusMoves = nextStatus !== undefined && nextStatus !== existing.status;
 
     const data: Prisma.TicketUncheckedUpdateInput = {
+      // Every edit is activity. Set inline so a status change stays ONE
+      // statement rather than a write plus a decorating touch.
+      lastActivityAt: new Date(),
       ...(args.subject !== undefined ? { subject: args.subject } : {}),
       ...(args.description !== undefined ? { description: args.description } : {}),
       ...(args.resolutionCode !== undefined ? { resolutionCode: args.resolutionCode } : {}),
@@ -924,6 +950,7 @@ async function reopenTicketInTx(
       resolvedById: null,
       reopenCount: { increment: 1 },
       version: { increment: 1 },
+      lastActivityAt: new Date(),
       firstResponseDueAt: recomputed.firstResponseDueAt,
       resolutionDueAt: recomputed.resolutionDueAt,
     },
@@ -1001,8 +1028,10 @@ export async function markSlaBreached(
       },
       data:
         args.leg === "first_response"
-          ? { firstResponseBreached: true }
-          : { resolutionBreached: true },
+          // A missed promise is something that HAPPENED and needs a person, so
+          // it floats the ticket up the board like any other activity.
+          ? { firstResponseBreached: true, lastActivityAt: new Date() }
+          : { resolutionBreached: true, lastActivityAt: new Date() },
     });
     if (written.count === 0) return null;
 
@@ -1398,6 +1427,9 @@ export async function addTicketNote(
       actorApiKeyId: args.actor.apiKeyId ?? null,
     },
   });
+  // A note is work on the ticket even though it changes no field — leaving it
+  // out would sink a ticket someone is actively annotating.
+  await touchTicketActivity(db as unknown as TxClient, args.ticketId);
   return { ok: true };
 }
 

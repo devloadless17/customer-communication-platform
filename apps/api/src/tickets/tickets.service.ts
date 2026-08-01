@@ -153,7 +153,7 @@ export class TicketsService {
     viewer?: ConversationViewer,
   ): Promise<{
     tickets: Ticket[];
-    nextCursor: { createdAt: string; id: string } | null;
+    nextCursor: { activityAt: string; id: string } | null;
     /** Ids on this page with a thread reply the CALLER hasn't read. Always
      *  empty for an API key — read state is per-user and a key has no user. */
     unreadTicketIds: string[];
@@ -215,8 +215,13 @@ export class TicketsService {
       ...(query.q ? { query: query.q } : {}),
       ...(query.shared ? { sharedWithUsOnly: true } : {}),
       ...(query.untriaged ? { untriagedOnly: true } : {}),
-      ...(query.cursorCreatedAt && query.cursorId
-        ? { cursor: { createdAt: new Date(query.cursorCreatedAt), id: query.cursorId } }
+      ...((query.cursorActivityAt ?? query.cursorCreatedAt) && query.cursorId
+        ? {
+            cursor: {
+              activityAt: new Date((query.cursorActivityAt ?? query.cursorCreatedAt) as string),
+              id: query.cursorId,
+            },
+          }
         : {}),
       ...(query.limit ? { limit: query.limit } : {}),
     };

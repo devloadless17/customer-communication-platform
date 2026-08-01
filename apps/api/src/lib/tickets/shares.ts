@@ -9,6 +9,7 @@ import {
   bumpOpenTicketCount,
   publishTicketEvent,
   readTicket,
+  touchTicketActivity,
   writeTicketEvent,
   type TicketActor,
 } from "./mutations";
@@ -189,9 +190,16 @@ export async function shareTicket(db: Db, args: ShareTicketArgs): Promise<ShareO
     if (!ticket.description) {
       await tx.ticket.update({
         where: { id: ticket.id },
-        data: { description: args.cause, version: { increment: 1 } },
+        data: {
+          description: args.cause,
+          version: { increment: 1 },
+          lastActivityAt: new Date(),
+        },
       });
     }
+    // Handing the ticket to another department is activity whether or not the
+    // cause was filled — the branch above only runs when it was empty.
+    await touchTicketActivity(tx, ticket.id);
 
     await writeTicketEvent(
       tx,

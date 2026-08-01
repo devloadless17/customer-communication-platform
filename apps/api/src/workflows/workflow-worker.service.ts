@@ -61,6 +61,10 @@ import {
   stopOpenTicketCountDriftSweeper,
 } from "@/lib/sweepers/open-ticket-count-drift";
 import {
+  startTicketLastActivityDriftSweeper,
+  stopTicketLastActivityDriftSweeper,
+} from "@/lib/sweepers/ticket-last-activity-drift";
+import {
   setAbandonedRegistrationDestroyer,
   startAbandonedRegistrationSweeper,
   stopAbandonedRegistrationSweeper,
@@ -186,6 +190,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private analyticsDriftSweeperStarted = false;
   private messageFlagCountDriftSweeperStarted = false;
   private openTicketCountDriftSweeperStarted = false;
+  private ticketLastActivityDriftSweeperStarted = false;
   private broadcastDeliveryDriftSweeperStarted = false;
   private authCleanupSweeperStarted = false;
   private webhookDeliveryCleanupStarted = false;
@@ -347,6 +352,17 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       this.logger.log("Open-ticket count drift sweeper started");
     } catch (err) {
       this.logger.error("Failed to start open-ticket-count-drift sweeper", err);
+    }
+    try {
+      // `Ticket.lastActivityAt` — the board's sort key. Maintained inline by
+      // every writer, but `touchTicketActivity` swallows its own failure on
+      // purpose (an ordering hint must not fail the write it decorates), so a
+      // reconciler is what makes the column trustworthy (§7).
+      startTicketLastActivityDriftSweeper();
+      this.ticketLastActivityDriftSweeperStarted = true;
+      this.logger.log("Ticket last-activity drift sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start ticket-last-activity-drift sweeper", err);
     }
     try {
       // Backstop for the campaign delivery denormalization: the live
@@ -694,6 +710,13 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.warn(
         `stopOpenTicketCountDriftSweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    try {
+      if (this.ticketLastActivityDriftSweeperStarted) stopTicketLastActivityDriftSweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopTicketLastActivityDriftSweeper threw: ${err instanceof Error ? err.message : err}`,
       );
     }
     try {

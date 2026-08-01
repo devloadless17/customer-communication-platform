@@ -118,6 +118,7 @@ export const TICKET_SELECT = {
   version: true,
   createdAt: true,
   updatedAt: true,
+  lastActivityAt: true,
   contact: { select: { name: true } },
   assignedUser: { select: { name: true } },
   resolvedBy: { select: { name: true } },
@@ -280,6 +281,7 @@ export function mapTicket(t: TicketRow, viewerWorkspaceId: string): Ticket {
     attachments: t.attachments.map((a) => mapAttachment(a, t.id)),
     createdAt: t.createdAt.toISOString(),
     updatedAt: t.updatedAt.toISOString(),
+    lastActivityAt: t.lastActivityAt.toISOString(),
   };
 }
 
@@ -456,8 +458,13 @@ export interface ListTicketsFilters {
    * every read path goes through, rather than being each caller's job.
    */
   restrictToConversationsAssignedTo?: string;
-  /** Keyset cursor: the previous page's last `{ createdAt, id }`. */
-  cursor?: { createdAt: Date; id: string };
+  /**
+   * Keyset cursor: the previous page's last `{ activityAt, id }`.
+   *
+   * Keyed on `lastActivityAt`, which is what the board ORDERS by — a cursor on
+   * a different column than the sort silently skips and repeats rows.
+   */
+  cursor?: { activityAt: Date; id: string };
   limit?: number;
 }
 
@@ -475,7 +482,7 @@ export async function listTickets(
   filters: ListTicketsFilters = {},
 ): Promise<{
   tickets: Ticket[];
-  nextCursor: { createdAt: string; id: string } | null;
+  nextCursor: { activityAt: string; id: string } | null;
   /** Ids on THIS page with a thread reply the viewer hasn't read. Envelope-only
    *  — see the comment at the return. */
   unreadTicketIds: string[];
@@ -584,11 +591,11 @@ export async function listTickets(
   }
   if (filters.cursor) {
     // Keyset: strictly older than the cursor, ties broken by id — matches the
-    // (createdAt DESC, id DESC) ordering exactly.
+    // (lastActivityAt DESC, id DESC) ordering exactly.
     and.push({
       OR: [
-        { createdAt: { lt: filters.cursor.createdAt } },
-        { createdAt: filters.cursor.createdAt, id: { lt: filters.cursor.id } },
+        { lastActivityAt: { lt: filters.cursor.activityAt } },
+        { lastActivityAt: filters.cursor.activityAt, id: { lt: filters.cursor.id } },
       ],
     });
   }
@@ -598,7 +605,10 @@ export async function listTickets(
     // pushed as the first AND element, never spread into a sibling position
     // where a later filter object could overwrite it and cross the boundary.
     where: { AND: [ticketAccessWhere(workspaceId), ...and] },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    // Newest ACTIVITY first, not newest raised: the ticket someone just replied
+    // to belongs above ones nobody has touched in a week, which is the order
+    // people actually work in. `id` breaks ties so the keyset above is exact.
+    orderBy: [{ lastActivityAt: "desc" }, { id: "desc" }],
     take: limit + 1,
     select: TICKET_SELECT,
   });
@@ -626,7 +636,7 @@ export async function listTickets(
 
   return {
     tickets: page.map((row) => mapTicket(row, workspaceId)),
-    nextCursor: last ? { createdAt: last.createdAt.toISOString(), id: last.id } : null,
+    nextCursor: last ? { activityAt: last.lastActivityAt.toISOString(), id: last.id } : null,
     unreadTicketIds,
   };
 }

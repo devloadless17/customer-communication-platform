@@ -243,7 +243,39 @@ export function TicketsBoardClient({
      * workspaces would light a pill for a conversation between two other
      * people. Same role `mentionedUserIds` plays on team chat's activity frame.
      */
-    const onReply = (payload: { ticketId: string; ticketNumber: number; notifiedUserIds: string[] }) => {
+    const onReply = (payload: {
+      ticketId: string;
+      ticketNumber: number;
+      notifiedUserIds: string[];
+      message: { createdAt: string };
+    }) => {
+      // RE-SORT FIRST, for every reply — not just the ones addressed to me.
+      // The board is ordered by last activity, so a colleague answering a
+      // ticket moves it regardless of who was notified; gating this on
+      // `notifiedUserIds` would leave the card sitting in a stale position
+      // until the next refetch.
+      setTickets((prev) => {
+        const idx = prev.findIndex((t) => t.id === payload.ticketId);
+        if (idx === -1) return prev;
+        const at = payload.message.createdAt;
+        // Already at least this fresh — return the SAME array so an
+        // at-least-once redelivery doesn't re-render every card (§15).
+        if (prev[idx]!.lastActivityAt >= at) return prev;
+        const next = prev.slice();
+        next[idx] = { ...next[idx]!, lastActivityAt: at };
+        // ISO-8601 sorts lexicographically, so no Date parsing per compare.
+        next.sort((a, b) =>
+          a.lastActivityAt === b.lastActivityAt
+            ? b.id.localeCompare(a.id)
+            : b.lastActivityAt.localeCompare(a.lastActivityAt),
+        );
+        return next;
+      });
+
+      // The rest is personal: a badge and a toast belong only to the people
+      // this reply was actually for. Without this check every open board in
+      // both workspaces would light up for a conversation between two other
+      // people — the same role `mentionedUserIds` plays on team chat.
       if (!payload.notifiedUserIds.includes(viewerUserId)) return;
       setUnreadIds((prev) => {
         if (prev.has(payload.ticketId)) return prev;
@@ -262,6 +294,7 @@ export function TicketsBoardClient({
         return prev;
       });
     };
+
     /** This viewer read it — in this tab or another. */
     const onRead = (payload: { ticketId: string }) => {
       setUnreadIds((prev) => {

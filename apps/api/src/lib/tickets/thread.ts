@@ -240,6 +240,14 @@ export async function addTicketMessage(
           skipDuplicates: true,
         });
       }
+      // The reply is the activity that matters most for ordering: a ticket
+      // someone just answered belongs above ones nobody has touched. Inside the
+      // transaction so the row and its ordering commit together — and still no
+      // `version` bump, so a colleague's open editor does not 409.
+      await tx.ticket.updateMany({
+        where: { id: ticket.id },
+        data: { lastActivityAt: row.createdAt },
+      });
       return { row, notified };
     });
   } catch (err) {

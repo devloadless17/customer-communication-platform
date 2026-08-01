@@ -658,6 +658,98 @@ describe("a guest's own conversation", () => {
   });
 });
 
+describe("the board orders by LAST ACTIVITY", () => {
+  it("a reply floats its ticket above ones raised later", async () => {
+    // Two tickets, raised in order. Without an activity sort the newer one
+    // always wins, which is the complaint: you answer a ticket and it stays
+    // buried under everything raised since.
+    const older = (await makeTicket()).ticket;
+    const newer = (await makeTicket()).ticket;
+
+    const before = await listTickets(qdb, wsA, {});
+    const beforeIds = before.tickets.map((t) => t.id);
+    expect(beforeIds.indexOf(newer.id)).toBeLessThan(beforeIds.indexOf(older.id));
+
+    await say(wsA, older.id, "answering the older one");
+
+    const after = await listTickets(qdb, wsA, {});
+    const afterIds = after.tickets.map((t) => t.id);
+    expect(afterIds.indexOf(older.id)).toBeLessThan(afterIds.indexOf(newer.id));
+    // ...and the reply moved no ticket STATE while doing it.
+    const row = await prisma.ticket.findUniqueOrThrow({
+      where: { id: older.id },
+      select: { version: true, lastActivityAt: true },
+    });
+    expect(row.version).toBe(older.version);
+    expect(row.lastActivityAt.getTime()).toBeGreaterThan(Date.parse(older.createdAt));
+  });
+
+  it("a note, a file and a status move all count as activity", async () => {
+    const { ticket } = await makeTicket();
+    const readAt = async () =>
+      (
+        await prisma.ticket.findUniqueOrThrow({
+          where: { id: ticket.id },
+          select: { lastActivityAt: true },
+        })
+      ).lastActivityAt.getTime();
+
+    const atRaise = await readAt();
+    await addTicketNote(mdb, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId, workspaceId: wsA },
+      body: `note ${randomUUID()}`,
+    });
+    const afterNote = await readAt();
+    expect(afterNote).toBeGreaterThanOrEqual(atRaise);
+
+    await addTicketAttachment(adb, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId, workspaceId: wsA },
+      bytes: Buffer.from(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a4944415478da6360000002000180fe8ecf0000000049454e44ae426082",
+        "hex",
+      ),
+      filename: "evidence.png",
+      mimeType: "image/png",
+    });
+    const afterFile = await readAt();
+    expect(afterFile).toBeGreaterThanOrEqual(afterNote);
+
+    await updateTicket(mdb, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId, workspaceId: wsA },
+      status: "open",
+    });
+    expect(await readAt()).toBeGreaterThanOrEqual(afterFile);
+  });
+
+  it("the keyset cursor walks the SAME order it sorts by", async () => {
+    // A cursor keyed on a different column than the sort silently skips and
+    // repeats rows — the classic pagination bug, and the reason this moved.
+    const a = (await makeTicket()).ticket;
+    await say(wsA, a.id, "bump a");
+    const page1 = await listTickets(qdb, wsA, { limit: 1 });
+    expect(page1.tickets).toHaveLength(1);
+    expect(page1.nextCursor).not.toBeNull();
+    const page2 = await listTickets(qdb, wsA, {
+      limit: 1,
+      cursor: {
+        activityAt: new Date(page1.nextCursor!.activityAt),
+        id: page1.nextCursor!.id,
+      },
+    });
+    // Strictly older, and never the row we just read.
+    expect(page2.tickets.map((t) => t.id)).not.toContain(page1.tickets[0]!.id);
+    if (page2.tickets[0]) {
+      expect(page2.tickets[0].lastActivityAt <= page1.tickets[0]!.lastActivityAt).toBe(true);
+    }
+  });
+});
+
 describe("internal notes stay internal", () => {
   it("a note is private to the workspace that wrote it", async () => {
     const { ticket } = await makeTicket();
