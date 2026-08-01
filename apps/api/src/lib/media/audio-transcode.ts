@@ -97,9 +97,12 @@ export async function transcodeToOggOpus(
  * In-app call recordings: browser MediaRecorder output (webm/opus, or mp4/aac
  * on Safari) → OGG/OPUS for universal in-app playback and a stable archival
  * format. STEREO is load-bearing, not a quality nicety: the browser mixer
- * puts the agent on the left channel and the customer on the right, so the
- * separation survives for future per-speaker transcription — the mono voip
- * profile above would collapse it irreversibly.
+ * puts the agent on the left channel and the customer on the right, and that
+ * split is what makes per-speaker transcription possible — the mono voip
+ * profile above would collapse it irreversibly. NOTE the browser must actually
+ * DELIVER two discrete channels; when it collapses its own mixer to mono this
+ * re-encode faithfully duplicates that mono into both channels, which
+ * `extractCallChannels` detects and reports as `duplicated`.
  */
 export async function transcodeCallRecordingToOgg(
   input: Uint8Array,
@@ -120,12 +123,6 @@ export async function transcodeCallRecordingToOgg(
 export interface CallChannelAudio {
   /** Mono 16 kHz WAV, loudness-normalised when it carries speech. */
   bytes: Uint8Array;
-  /**
-   * The SAME audio before normalisation. Speaker attribution compares the two
-   * legs' loudness, and normalising each to a common target erases exactly
-   * that difference — so the comparison must run on these.
-   */
-  rawBytes: Uint8Array;
   /** Mean level in dBFS of the RAW channel. ≈ -91 is digital silence. */
   meanVolumeDb: number;
   /**
@@ -140,31 +137,24 @@ export interface CallChannelAudio {
 
 /**
  * Split the stereo call master into its two speakers — agent (left) and
- * customer (right) — as separate mono 16 kHz WAVs.
+ * customer (right) — plus the summed mix, all as mono 16 kHz WAVs.
  *
- * WHY THIS EXISTS (measured 2026-07-29, against `gpt-4o-transcribe`).
- * Transcribing the MIXED stereo silently loses a whole speaker. Two-party
- * audio synthesised with each leg bleeding into the other at a realistic
- * -30 dB, agent "Hello? Test test." then customer "Yes, I can hear you. I
- * want to ask about my order please.":
+ * The browser mixer records the agent's microphone on the LEFT channel and the
+ * customer's leg on the RIGHT, which is what makes "who said this" answerable
+ * at all. Isolating them with `pan` is load-bearing: `-ac 1` or `-map_channel`
+ * would SUM the two, putting both voices back into each side.
  *
- *   mixed        → "Hello? Test test."          ← the customer is GONE
- *   agent channel   → "Hello? Test test."       ✓
- *   customer channel→ "Yes, I can hear you…"    ✓
+ * Three outputs because no single one is right for every recording:
+ *   - the two legs are transcribed separately when they genuinely hold
+ *     different speakers, which is both the cleanest audio per speaker and the
+ *     only attribution that is certain rather than inferred;
+ *   - the mix is used when they don't — a recording whose channels are
+ *     identical (see `duplicated`) or whose legs echo each other has no
+ *     separation to recover, and the sum is then the most faithful reading.
  *
- * Same at -20 dB. Downmixing to mono does not help — it is the same sum. The
- * model reliably transcribes ONE voice out of overlapping speech and stops,
- * and which one it picks is not predictable. Isolating the channels is what
- * fixes it, which is exactly what the browser mixer's left/right split was
- * preserved for.
- *
- * Under pathological crosstalk (-9 dB: an agent testing against their own
- * handset in the same room, no echo cancellation on the far leg) each channel
- * genuinely contains BOTH voices, so attribution blurs — but every word still
- * appears, which the mixed path could not promise.
- *
- * Returns null when the source is not stereo (nothing to split) — the caller
- * then transcribes the file as-is.
+ * The `speechSeconds` on each output is the gate that keeps a leg with no
+ * speech from being sent to a model at all, which is the one reliable defence
+ * against transcribing silence into invented words.
  */
 export async function extractCallChannels(
   input: Uint8Array,
@@ -172,21 +162,20 @@ export async function extractCallChannels(
   agent: CallChannelAudio;
   customer: CallChannelAudio;
   /**
-   * The two legs summed — the same audio a human hears on playback, and what
-   * actually gets transcribed.
+   * The two legs summed — the same audio a human hears on playback.
    *
-   * Transcribing the MIX rather than each leg separately is a reversal, and
-   * the measurements are why. The split existed because a mixed transcript
-   * dropped a whole speaker — but that was `gpt-4o-transcribe`; `whisper-1`
-   * transcribed BOTH speakers off the same mix at every crosstalk level
-   * tested. Meanwhile the split has a failure mode the mix does not: when the
-   * two devices share a room, the browser's echo canceller mangles the
-   * microphone leg and the isolated channel is far worse than the sum.
-   *
-   * So the mix carries the WORDS and the isolated legs carry only the
-   * ANSWER TO "who was speaking" — see `attributeSpeakers`.
+   * The fallback whenever the legs cannot be trusted to hold separate
+   * speakers: `duplicated` below, or legs that transcribe to nearly the same
+   * words because the two devices share a room. In those cases the sum is the
+   * most faithful reading available, and it is presented WITHOUT speaker
+   * labels rather than attributing words we did not separate.
    */
   mixed: CallChannelAudio;
+  /**
+   * The two channels carry the SAME audio, so there are no separate speakers
+   * to recover — see `channelsAreIdentical`.
+   */
+  duplicated: boolean;
 } | null> {
   const channels = await probeChannelCount(input);
   if (channels < 2) return null;
@@ -197,84 +186,38 @@ export async function extractCallChannels(
     extractOneChannel(input, 1),
     extractOneChannel(input, "mix"),
   ]);
-  return { agent, customer, mixed };
+  return { agent, customer, mixed, duplicated: await channelsAreIdentical(input) };
 }
 
 /**
- * Which speaker was talking during each transcript segment, decided by
- * comparing the two legs' loudness over that segment's time window.
+ * True when the two channels carry the SAME audio — a mono mix duplicated
+ * into a stereo container rather than one speaker per side.
  *
- * This is what makes an accurate transcript an ORGANISED one. The words come
- * from the mix (most accurate — every word, both speakers), and attribution
- * comes from the legs, which is the one thing the legs are reliably good at
- * even when their audio is too degraded to transcribe: whoever is speaking is
- * louder on their OWN leg.
+ * A file can be stereo by every metadata check and still be useless for
+ * separation. Verified on a real production recording: left minus right
+ * measured -90 dB mean (digital silence) and each leg transcribed to
+ * byte-identical text, because the browser collapsed the mixer to mono before
+ * recording. Detecting it is what lets the pipeline say "separation
+ * unavailable" instead of silently filing the whole conversation under one
+ * speaker.
  *
- * Uses the RAW legs deliberately. Loudness-normalising each channel to a
- * common target — which is right before transcription — would erase exactly
- * the level difference this depends on.
- *
- * `null` for a segment means the two legs were too close to call; the caller
- * carries the previous speaker forward rather than guessing, because a
- * confident wrong label is worse than an inherited right one.
+ * Subtracting the channels is the direct test: identical signals cancel.
+ * -80 dBFS is far below any real content and far above the numerical noise of
+ * a lossy round-trip.
  */
-export function attributeSpeakers(
-  segments: ReadonlyArray<{ start: number; end: number }>,
-  agentRaw: Uint8Array,
-  customerRaw: Uint8Array,
-  /** dB by which one leg must beat the other to claim the segment. */
-  marginDb = 2,
-): Array<"agent" | "customer" | null> {
-  const a = pcmFromWav(agentRaw);
-  const c = pcmFromWav(customerRaw);
-  return segments.map((seg) => {
-    const agentDb = rmsDb(a, seg.start, seg.end);
-    const customerDb = rmsDb(c, seg.start, seg.end);
-    const diff = agentDb - customerDb;
-    if (Math.abs(diff) < marginDb) return null;
-    return diff > 0 ? "agent" : "customer";
-  });
-}
-
-/** 16-bit mono PCM samples out of a WAV produced by `extractCallChannels`
- *  (always 16 kHz here). Returns an empty view for anything unparseable, which
- *  scores as silence and yields "too close to call". */
-function pcmFromWav(wav: Uint8Array): Int16Array {
-  // Canonical PCM WAV header is 44 bytes; ffmpeg may add a LIST chunk, so find
-  // the `data` chunk rather than assuming an offset.
-  const view = new DataView(wav.buffer, wav.byteOffset, wav.byteLength);
-  let offset = 12; // past "RIFF<size>WAVE"
-  while (offset + 8 <= wav.byteLength) {
-    const id = String.fromCharCode(
-      view.getUint8(offset), view.getUint8(offset + 1),
-      view.getUint8(offset + 2), view.getUint8(offset + 3),
-    );
-    const size = view.getUint32(offset + 4, true);
-    if (id === "data") {
-      const start = offset + 8;
-      const length = Math.min(size, wav.byteLength - start);
-      return new Int16Array(wav.buffer, wav.byteOffset + start, Math.floor(length / 2));
-    }
-    offset += 8 + size + (size % 2);
+async function channelsAreIdentical(input: Uint8Array): Promise<boolean> {
+  try {
+    const stderr = await runFfmpegStderr(input, [
+      "-af", "pan=mono|c0=c0-c1,volumedetect",
+      "-f", "null", "-",
+    ]);
+    const m = /mean_volume:\s*(-?[\d.]+) dB/.exec(stderr);
+    return m ? Number(m[1]) < -80 : false;
+  } catch {
+    return false; // unknown ⇒ assume real stereo and let attribution decide
   }
-  return new Int16Array(0);
 }
 
-const SAMPLE_RATE = 16000;
-
-/** RMS level in dBFS over [startSec, endSec). -120 for an empty window. */
-function rmsDb(samples: Int16Array, startSec: number, endSec: number): number {
-  const from = Math.max(0, Math.floor(startSec * SAMPLE_RATE));
-  const to = Math.min(samples.length, Math.ceil(endSec * SAMPLE_RATE));
-  if (to <= from) return -120;
-  let sum = 0;
-  for (let i = from; i < to; i++) {
-    const v = samples[i]! / 32768;
-    sum += v * v;
-  }
-  const rms = Math.sqrt(sum / (to - from));
-  return rms > 0 ? 20 * Math.log10(rms) : -120;
-}
 
 async function extractOneChannel(
   input: Uint8Array,
@@ -297,7 +240,7 @@ async function extractOneChannel(
   // normalisation over a silent leg would amplify its noise floor to speaking
   // level and manufacture exactly the non-speech audio the gate exists to
   // reject.
-  if (speechSeconds <= 0) return { bytes: raw, rawBytes: raw, meanVolumeDb, speechSeconds };
+  if (speechSeconds <= 0) return { bytes: raw, meanVolumeDb, speechSeconds };
 
   try {
     // The two legs arrive at wildly different levels — a browser mic against a
@@ -316,10 +259,10 @@ async function extractOneChannel(
       "-c:a", "pcm_s16le",
       "-f", "wav",
     ]);
-    return { bytes: normalised, rawBytes: raw, meanVolumeDb, speechSeconds };
+    return { bytes: normalised, meanVolumeDb, speechSeconds };
   } catch {
     // Normalisation is an improvement, never a requirement.
-    return { bytes: raw, rawBytes: raw, meanVolumeDb, speechSeconds };
+    return { bytes: raw, meanVolumeDb, speechSeconds };
   }
 }
 

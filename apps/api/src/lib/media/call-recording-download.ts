@@ -5,7 +5,6 @@ import { blobStorage } from "@/lib/blob-storage";
 import { publish } from "@/lib/events/bus";
 import { getProviderBinding } from "@/lib/providers";
 import {
-  attributeSpeakers,
   extractCallChannels,
   transcodeCallRecordingToOgg,
   type CallChannelAudio,
@@ -473,6 +472,31 @@ const MIN_AVG_LOGPROB = -1.0;
 /** Text-to-compressed-size ratio above this is a repetition loop. */
 const MAX_COMPRESSION_RATIO = 2.4;
 
+
+/**
+ * Fraction of the smaller transcript's words that also appear in the larger.
+ *
+ * Containment rather than Jaccard on purpose: when one leg picks up a faint
+ * copy of the other, the quieter side yields FEWER words, and Jaccard would
+ * score that pair as dissimilar precisely when they are the same speech.
+ */
+function wordOverlap(a: string, b: string): number {
+  const words = (t: string) =>
+    new Set(
+      t
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]/gu, " ")
+        .split(/\s+/)
+        .filter((w) => w.length > 1),
+    );
+  const wa = words(a);
+  const wb = words(b);
+  if (wa.size === 0 || wb.size === 0) return 0;
+  let shared = 0;
+  for (const w of wa) if (wb.has(w)) shared++;
+  return shared / Math.min(wa.size, wb.size);
+}
+
 /** Anything with no letters or digits — " ." and friends, what a model emits
  *  when it hears nothing but is obliged to answer. */
 function isSubstantive(text: string): boolean {
@@ -697,62 +721,103 @@ async function transcribePerSpeaker(
   }
   if (!channels) return null; // mono source — nothing to separate
 
-  // WORDS from the mix, SPEAKERS from the legs.
-  //
-  // The mix is transcribed because it is the most accurate rendering of what
-  // was said: it holds both speakers (measured — whisper-1 kept both at every
-  // crosstalk level, unlike gpt-4o-transcribe) and it is immune to the echo
-  // damage that ruins an isolated microphone leg when both devices share a
-  // room. Attribution then comes from comparing the legs' loudness per
-  // segment, which stays reliable even where their audio is too degraded to
-  // transcribe — whoever is talking is louder on their OWN leg.
-  const mixR = await transcribeOneChannel(
-    { speaker: "Business", label: "mixed", audio: channels.mixed },
-    callId,
-    policy,
-  );
-  if (mixR.segments.length === 0) return null;
-
-  const attributed = attributeSpeakers(
-    mixR.segments.map((s) => ({ start: s.start, end: s.end })),
-    channels.agent.rawBytes,
-    channels.customer.rawBytes,
-  );
-
-  // ── Assemble into an organised conversation ─────────────────────────────
-  // Each segment gets the speaker whose leg was louder while it was spoken.
-  // A segment too close to call inherits the PREVIOUS speaker rather than
-  // guessing: mid-turn the same person is almost always still talking, and a
-  // confident wrong label is worse than an inherited right one.
-  let lastSpeaker: "Business" | "Customer" = "Business";
-  const placed = mixR.segments.map((s, i) => {
-    const who = attributed[i];
-    const speaker: "Business" | "Customer" =
-      who === "agent" ? "Business" : who === "customer" ? "Customer" : lastSpeaker;
-    lastSpeaker = speaker;
-    return { speaker, start: s.start, text: s.text };
-  });
-
-  // Fold consecutive segments from the same speaker into one turn. Whisper
-  // splits on prosody, so a single sentence can arrive as three segments; a
-  // transcript that renders those as three labelled rows reads like a stutter.
-  const turns: TranscriptSegment[] = [];
-  for (const seg of placed) {
-    const last = turns[turns.length - 1];
-    if (last && last.speaker === seg.speaker) {
-      last.text = `${last.text} ${seg.text}`.trim();
-      continue;
-    }
-    turns.push({ id: turns.length, speaker: seg.speaker, start: seg.start, text: seg.text });
+  // ── Are there actually two speakers to separate? ────────────────────────
+  // A file can be stereo by every metadata check and still carry the SAME
+  // audio on both channels. That is what a real production recording turned
+  // out to be: left minus right measured -90 dB (digital silence), and each
+  // leg transcribed to byte-identical text, because the browser collapsed its
+  // mixer to mono before recording. Nothing downstream can recover speakers
+  // from that, so the honest move is to say so rather than file the whole
+  // conversation under whichever name we happened to start with.
+  if (channels.duplicated) {
+    console.warn(
+      `[call-transcript] call=${callId}: both channels carry identical audio — ` +
+        "the recording is a mono mix, so agent/customer separation is unavailable " +
+        "(browser recorder did not capture two discrete channels)",
+    );
+    const mixOnly = await transcribeOneChannel(
+      { speaker: "Business", label: "mixed", audio: channels.mixed },
+      callId,
+      policy,
+    );
+    if (mixOnly.segments.length === 0) return null;
+    return {
+      text: mixOnly.segments.map((x) => x.text).join(" "),
+      language: mixOnly.language,
+      // No attribution is possible. Empty segments say that honestly; the
+      // viewer renders the flat text rather than inventing a speaker.
+      segments: [],
+    };
   }
 
+  // ── Two real legs: transcribe each speaker on their own ─────────────────
+  // With genuinely separate channels this is both the most accurate reading
+  // (no competing voice for the model to pick between) and the only one that
+  // can be attributed with certainty — the words came off that person's own
+  // microphone.
+  const [agentR, customerR] = await Promise.all([
+    transcribeOneChannel(
+      { speaker: "Business", label: "agent", audio: channels.agent },
+      callId,
+      policy,
+    ),
+    transcribeOneChannel(
+      { speaker: "Customer", label: "customer", audio: channels.customer },
+      callId,
+      policy,
+    ),
+  ]);
+
+  const sides = [agentR, customerR].filter((r) => r.segments.length > 0);
+  if (sides.length === 0) return null;
+
+  // PARTIAL crosstalk, which the identical-channel check cannot see. When the
+  // two devices share a room each leg picks up BOTH voices, so both sides
+  // transcribe to nearly the same words — and presenting that as a dialogue
+  // shows the agent and the customer each saying every line. The channels are
+  // measurably different, so only the TEXT reveals it.
+  if (sides.length === 2) {
+    const overlap = wordOverlap(sides[0]!.segments.map((x) => x.text).join(" "),
+                                sides[1]!.segments.map((x) => x.text).join(" "));
+    if (overlap > 0.7) {
+      console.warn(
+        `[call-transcript] call=${callId}: the two legs transcribe to ` +
+          `${Math.round(overlap * 100)}% the same words — they are echoing each ` +
+          "other rather than carrying separate speakers; using the mix without labels",
+      );
+      const mixOnly = await transcribeOneChannel(
+        { speaker: "Business", label: "mixed", audio: channels.mixed },
+        callId,
+        policy,
+      );
+      if (mixOnly.segments.length > 0) {
+        return {
+          text: mixOnly.segments.map((x) => x.text).join(" "),
+          language: mixOnly.language,
+          segments: [],
+        };
+      }
+    }
+  }
+
+  // Order by when each speaker first said anything, then fold each side into
+  // one turn. Per-segment interleaving needs timestamps the configured model
+  // may not return (`sttSupportsSegments`), so this stays honest: correct
+  // words, correct speaker, in the order the conversation started.
+  const turns: TranscriptSegment[] = sides
+    .map((r) => ({
+      speaker: r.speaker,
+      start: r.segments[0]!.start,
+      text: r.segments.map((x) => x.text).join(" ").trim(),
+    }))
+    .sort((x, y) => x.start - y.start)
+    .map((t, i) => ({ id: i, speaker: t.speaker, start: t.start, text: t.text }));
+
   return {
-    // Flat rendering for consumers that don't read segments (the /v1 document,
-    // the viewer's own no-segments fallback).
     text: turns
       .map((t) => `${t.speaker === "Business" ? "Agent" : "Customer"}: ${t.text}`)
       .join("\n"),
-    language: mixR.language,
+    language: sides.find((r) => r.language)?.language,
     segments: turns,
   };
 }
@@ -886,6 +951,7 @@ export const __testing__ = {
   isPlausibleLanguage,
   languagePolicyFrom,
   isSubstantive,
+  wordOverlap,
 };
 
 /** File extension matching an audio wire type. The transcription API accepts
@@ -1042,7 +1108,6 @@ export async function transcribeInAppCallRecording(
         // what protect this path.
         audio: {
           bytes,
-          rawBytes: bytes,
           meanVolumeDb: 0,
           speechSeconds: Number.POSITIVE_INFINITY,
         },

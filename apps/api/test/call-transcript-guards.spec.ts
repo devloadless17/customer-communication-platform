@@ -25,8 +25,13 @@ import {
   __testing__,
 } from "@/lib/media/call-recording-download";
 
-const { looksLikeRepetitionLoop, isPlausibleLanguage, languagePolicyFrom, isSubstantive } =
-  __testing__;
+const {
+  looksLikeRepetitionLoop,
+  isPlausibleLanguage,
+  languagePolicyFrom,
+  isSubstantive,
+  wordOverlap,
+} = __testing__;
 
 describe("looksLikeRepetitionLoop", () => {
   it("catches the exact transcript that shipped to a customer", () => {
@@ -194,5 +199,38 @@ describe("isSubstantive", () => {
     expect(isSubstantive("مرحبا")).toBe(true);
     expect(isSubstantive("hello")).toBe(true);
     expect(isSubstantive("4421")).toBe(true);
+  });
+});
+
+describe("wordOverlap — the echo guard on speaker separation", () => {
+  it("flags two legs that are really the same speech", () => {
+    // Both devices in one room: each leg picks up BOTH voices, so the two
+    // sides transcribe to nearly the same words. Presenting that as a dialogue
+    // shows the agent and the customer each saying every line. The channels
+    // are measurably DIFFERENT here, so only the text reveals it — the
+    // identical-channel check cannot.
+    const a = "ألو كيفك عم تسمعني منيح بدي استفسر عن الطلب تكرم عينك";
+    const b = "ألو كيفك عم تسمعني منيح بدي استفسر عن الطلب تكرم عينك يالله";
+    expect(wordOverlap(a, b)).toBeGreaterThan(0.7);
+  });
+
+  it("does NOT flag a real two-sided conversation", () => {
+    // Genuine dialogue shares connectives and greetings but not content.
+    const agent = "ألو كيفك أهلا وسهلا كيف فيني ساعدك اليوم";
+    const customer = "بدي استفسر عن حالة طلبي الأخير والدفعة يلي بعتها";
+    expect(wordOverlap(agent, customer)).toBeLessThan(0.7);
+  });
+
+  it("uses CONTAINMENT so a faint echo leg is still caught", () => {
+    // The quieter leg yields fewer words. Jaccard would score this pair as
+    // dissimilar precisely when it is the same speech; containment does not.
+    const loud = "ألو كيفك عم تسمعني منيح بدي استفسر عن الطلب تكرم عينك يالله باي";
+    const faint = "كيفك عم تسمعني منيح";
+    expect(wordOverlap(loud, faint)).toBe(1);
+  });
+
+  it("is zero when either side is empty", () => {
+    expect(wordOverlap("", "مرحبا كيفك")).toBe(0);
+    expect(wordOverlap("مرحبا كيفك", "")).toBe(0);
   });
 });

@@ -41,27 +41,39 @@ export function sttModel(): string {
 }
 
 /**
- * STT for CALL RECORDINGS — deliberately NOT `sttModel()`.
+ * STT for CALL RECORDINGS — deliberately its own setting, not `sttModel()`.
  *
- * Call audio needs three things a voice note doesn't, and only `whisper-1`
- * returns them (`gpt-4o-transcribe` supports `response_format: json` alone):
+ * Settled on a REAL production call (Lebanese, phone-grade, 50s) rather than
+ * synthesised audio, which had pointed the other way. `gpt-4o-transcribe`
+ * with a dialect prompt was materially better than `whisper-1` on the thing
+ * that matters most here — Arabic with English words mixed in:
  *
- *   - `no_speech_prob` per segment — the ONLY defence against transcribing
- *     silence. Measured 2026-07-29: `gpt-4o-transcribe` answered pure digital
- *     silence with "人間失格" and faint noise with "Horecaonderneming",
- *     confidently and with no signal to catch it. whisper-1 flagged the same
- *     clips at no_speech_prob 0.94 / 0.89 against 0.009 for real speech.
- *   - `avg_logprob` — confidence, which is what lets a channel whose language
- *     was mis-detected be RETRIED pinned to the other channel's language
- *     instead of being stored as gibberish.
- *   - segment TIMESTAMPS — required to interleave the two channels into one
- *     speaker-attributed conversation instead of two blocks.
+ *   gpt-4o  : "…ولا على test number؟ … بنشوف كيف settings"
+ *   whisper : "…ولا على التاست نمبر؟ … تكون شيء بالسرينز"
  *
- * Arabic was the reason to prefer gpt-4o-transcribe; measured across three
- * Lebanese sentences the two are equivalent, so nothing is given up.
+ * whisper transliterated the English into Arabic script and turned "settings"
+ * into a non-word. Code-switching is the norm in this product's calls, so that
+ * difference is the deciding one.
+ *
+ * WHAT IS GIVEN UP, and how it is covered: whisper alone returns
+ * `verbose_json`, i.e. segment timings and the `no_speech_prob` /
+ * `avg_logprob` quality signals. Silence-hallucination is instead prevented
+ * BEFORE the request by the speech gate (a channel with no detected speech is
+ * never sent), and repetition loops and implausible languages are caught on
+ * the returned TEXT, which needs no model metadata. Set
+ * `AI_CALL_STT_MODEL=whisper-1` to trade code-switching accuracy back for
+ * per-segment timings.
  */
 export function callSttModel(): string {
-  return process.env.AI_CALL_STT_MODEL || "whisper-1";
+  return process.env.AI_CALL_STT_MODEL || "gpt-4o-transcribe";
+}
+
+/** Only `whisper-1` returns `verbose_json` (segment timings + the
+ *  `no_speech_prob` / `avg_logprob` quality signals). The gpt-4o transcribe
+ *  models accept `json` alone and ignore the rest, so the caller must know
+ *  which guards are actually available. */
+export function sttSupportsSegments(model: string): boolean {
+  return model === "whisper-1";
 }
 
 export function ttsModel(): string {

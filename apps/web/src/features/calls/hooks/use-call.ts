@@ -383,11 +383,32 @@ export function useCall(): {
     try {
       const ctx = new AudioContext();
       const dest = ctx.createMediaStreamDestination();
+      // FORCE two DISCRETE channels. Without this the browser collapsed the
+      // mix to mono and the stored file carried the SAME audio on both
+      // channels — verified on a real production recording, where left minus
+      // right measured -90 dB (digital silence) and each leg transcribed to
+      // identical text. That makes speaker separation impossible downstream:
+      // there is nothing to tell the two apart, so every line lands under one
+      // speaker. `discrete` is what stops the up/down-mix rules of the default
+      // "speakers" interpretation from applying.
+      dest.channelCount = 2;
+      dest.channelCountMode = "explicit";
+      dest.channelInterpretation = "discrete";
       const merger = ctx.createChannelMerger(2);
       // Agent → left, customer → right. See the recorder header comment.
       ctx.createMediaStreamSource(local).connect(merger, 0, 0);
       ctx.createMediaStreamSource(remote).connect(merger, 0, 1);
       merger.connect(dest);
+      // The browser does not have to honour the request, and when it silently
+      // doesn't, the only symptom is a transcript with no speaker labels weeks
+      // later. Say so at the moment it happens.
+      const recordedChannels = dest.stream.getAudioTracks()[0]?.getSettings?.().channelCount;
+      if (recordedChannels !== undefined && recordedChannels < 2) {
+        console.warn(
+          `[useCall] recorder captured ${recordedChannels} channel(s), not 2 — ` +
+            "agent/customer separation will be unavailable for this call",
+        );
+      }
       const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
         ? "audio/webm;codecs=opus"
         : MediaRecorder.isTypeSupported("audio/mp4")

@@ -1,5 +1,5 @@
 import { isAzureVoice, speakAzure } from "./azure-tts";
-import { callSttModel, sttModel, ttsModel } from "./models";
+import { callSttModel, sttModel, sttSupportsSegments, ttsModel } from "./models";
 import { speak, transcribe, type TranscriptionSegment } from "./openai-client";
 
 /**
@@ -71,6 +71,10 @@ export async function transcribeCallChannel(opts: {
   prompt?: string;
 }): Promise<CallChannelTranscription> {
   const model = callSttModel();
+  // Asking a gpt-4o transcribe model for verbose_json is rejected outright, so
+  // the request shape follows the model's actual capability rather than a
+  // hopeful default. Callers must cope with an empty `segments`.
+  const wantSegments = sttSupportsSegments(model);
   const res = await transcribe({
     model,
     bytes: opts.bytes,
@@ -79,7 +83,7 @@ export async function transcribeCallChannel(opts: {
     language: opts.language,
     temperature: opts.temperature,
     prompt: opts.prompt,
-    segments: true,
+    segments: wantSegments,
   });
   return {
     text: res.text,
