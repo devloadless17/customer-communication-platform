@@ -244,6 +244,17 @@ describe("looksLikePromptEcho — the model handing back its own prompt", () => 
     supportedLanguages: ["ar", "en"],
   }).prompt!;
 
+  it("catches a SILENT call that stored the whole prompt as its transcript", () => {
+    // Production, verbatim: a 50-second call in which NOBODY SPOKE stored the
+    // entire dialect prompt as the conversation. With no speech to transcribe
+    // the model simply continued the text it was given — and the result reads
+    // like a real call, which is what makes this the worst failure class here.
+    const produced =
+      "ألو، كيفك؟ يالله، هلق بشوفلك ياها. لحظة من فضلك، عم اسمعك منيح. تكرم عينك. " +
+      "أوكي، بعتلك الـ order عالـ delivery. please خليني أعرف الـ price. thank you، يالله bye.";
+    expect(looksLikePromptEcho(produced, prompt)).toBe(true);
+  });
+
   it("catches the exact echo seen on a real 24-second call", () => {
     // gpt-4o-transcribe returned a verbatim slice of the dialect prompt as the
     // transcript of a conversation it never rendered. The worst failure in the
