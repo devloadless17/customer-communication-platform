@@ -297,7 +297,13 @@ test("/v1 SLA policy drives the due dates of tickets opened after it", async () 
   expect(due - Date.now()).toBeLessThan(16 * 60_000);
 });
 
-test("the reopen window is wired: a fresh inbound reopens a just-solved ticket, and a zero window disables that", async () => {
+test("solved means solved: an inbound attaches to a LIVE ticket, and never reopens a solved one", async () => {
+  // Auto-REOPEN was removed 2026-08-03 ("nothing opens or reopens a ticket
+  // but a person raising one") — this spec previously asserted the reopen
+  // window and blocked deploys once the behavior was (deliberately) gone.
+  // The contract now: an inbound ATTACHES to the thread's live ticket, and
+  // after a solve it carries NO ticket at all — a later message is a new
+  // issue somebody must choose to raise.
   const psid = "6009900007777";
   await inbound(psid, "m.ticket.v1.4a", "first issue");
   const seed = await messageWithTicket("m.ticket.v1.4a");
@@ -305,40 +311,34 @@ test("the reopen window is wired: a fresh inbound reopens a just-solved ticket, 
     method: "POST",
     body: JSON.stringify({ conversationId: seed!.conversationId }),
   });
+
+  // While the ticket is LIVE the follow-up attaches to it.
+  await inbound(psid, "m.ticket.v1.4b", "more details");
+  const attached = await messageWithTicket("m.ticket.v1.4b");
+  expect(attached!.ticketId).toBe(raised.ticket.id);
+
   await apiJson(`/tickets/${raised.ticket.id}`, {
     method: "PATCH",
     body: JSON.stringify({ status: "solved", resolutionCode: "fixed" }),
   });
 
-  // Inside the (default 72h) window: the follow-up REOPENS the solved ticket
-  // rather than leaving the thread ticket-free — one issue, not two records.
-  await inbound(psid, "m.ticket.v1.4b", "it broke again");
-  const reopened = await messageWithTicket("m.ticket.v1.4b");
-  expect(reopened!.ticketId).toBe(raised.ticket.id);
-  const afterReopen = await db().ticket.findUniqueOrThrow({
+  // After the solve: the next inbound neither reopens the solved ticket nor
+  // opens anything — it carries no ticket, and the solve stands.
+  await inbound(psid, "m.ticket.v1.4c", "it broke again");
+  const afterSolve = await messageWithTicket("m.ticket.v1.4c");
+  expect(afterSolve!.ticketId).toBeNull();
+  const stillSolved = await db().ticket.findUniqueOrThrow({
     where: { id: raised.ticket.id },
     select: { status: true },
   });
-  expect(afterReopen.status).not.toBe("solved");
+  expect(stillSolved.status).toBe("solved");
 
-  // Solve again, then turn the window OFF through the real settings endpoint —
-  // the next inbound must leave the solved ticket alone AND open nothing.
-  await apiJson(`/tickets/${raised.ticket.id}`, {
-    method: "PATCH",
-    body: JSON.stringify({ status: "solved", resolutionCode: "fixed" }),
-  });
+  // `ticketReopenWindowHours` is retired from the settings schema — Zod
+  // strips unknown keys, so an integration still sending it gets a no-op
+  // (not a 400), and nothing reads the column.
   await apiJson("/tickets-settings", {
     method: "PATCH",
     body: JSON.stringify({ ticketReopenWindowHours: 0 }),
-  });
-  await inbound(psid, "m.ticket.v1.4c", "unrelated new thing");
-  const afterOff = await messageWithTicket("m.ticket.v1.4c");
-  expect(afterOff!.ticketId).toBeNull();
-
-  // Restore, so this spec leaves the shared team as it found it.
-  await apiJson("/tickets-settings", {
-    method: "PATCH",
-    body: JSON.stringify({ ticketReopenWindowHours: 72 }),
   });
 });
 
