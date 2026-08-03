@@ -320,7 +320,27 @@ export class TicketsService {
       actor,
       ...body,
     });
-    return this.unwrap(outcome);
+    const unwrapped = this.unwrap(outcome);
+
+    /**
+     * Re-map the RESPONSE for the caller's workspace.
+     *
+     * The domain returns the ticket as `readTicket` built it — mapped for the
+     * OWNER, because that is what the domain EVENT must carry (the fanout rule
+     * re-maps it per guest from `ticketByWorkspace`). Handing that same object
+     * back as the HTTP response gave a guest an owner-shaped ticket: `sharing.
+     * role` flipped to "owner", their frozen `contactSnapshot` vanished, and
+     * the assignee control — bound to their own side — reverted to the owner's
+     * column after every change they made.
+     *
+     * One extra indexed read on a user-initiated write, in exchange for the
+     * response always meaning what the caller's page assumes it means.
+     */
+    if (unwrapped.ticket.sharing) {
+      const mine = await getTicket(this.db, workspaceId, id);
+      if (mine) return { ...unwrapped, ticket: mine };
+    }
+    return unwrapped;
   }
 
   /**

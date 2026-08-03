@@ -517,6 +517,18 @@ export function TicketDetailClient({
   const breached = ticket.sla.firstResponseBreached || ticket.sla.resolutionBreached;
 
   /**
+   * WHOSE assignee this control shows and sets.
+   *
+   * The owner reads the ticket's column; a guest reads their OWN share's. The
+   * roster below it is already this workspace's people, so the two now agree —
+   * the API refuses an assignee who is not a member of the acting workspace.
+   */
+  const mySide = ticket.sharing?.guests.find((g) => g.workspaceId === viewerWorkspaceId);
+  const isGuestSide = ticket.sharing?.role === "guest";
+  const mySideAssignee = isGuestSide ? (mySide?.assignedUserId ?? null) : ticket.assignedUserId;
+  const mySideLabel = ticket.sharing ? "Assignee (your side)" : "Assignee";
+
+  /**
    * Every file on this ticket, DERIVED rather than synced.
    *
    * `ticket.attachments` is the server's full set, but the ticket object is only
@@ -730,9 +742,16 @@ export function TicketDetailClient({
           </select>
         </Field>
 
-        <Field label="Assignee">
+        {/* Assignee — YOUR side's.
+            On a shared ticket a guest's write goes to `TicketShare.assignedUserId`
+            (each department needs its own accountable person, or Billing
+            assigning Sara clears Support's Ali). This READ has to follow the
+            same rule: bound to `ticket.assignedUserId` it showed a guest the
+            OWNER's person and snapped back to them after every change, because
+            the column the guest wrote was not the one being rendered. */}
+        <Field label={mySideLabel}>
           <select
-            value={ticket.assignedUserId ?? ""}
+            value={mySideAssignee ?? ""}
             disabled={busy}
             onChange={(e) => void patch({ assignedUserId: e.target.value || null })}
             className="h-8 w-full rounded-md border bg-background px-2 text-xs"

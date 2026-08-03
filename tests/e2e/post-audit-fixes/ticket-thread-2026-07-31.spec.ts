@@ -219,6 +219,29 @@ test.describe("ticket thread", () => {
       expect(guestSees.notes.some((n) => n.body === ownerNote)).toBe(false);
       expect(guestSees.events.some((e) => e.body === ownerNote)).toBe(false);
 
+      // The ASSIGNEE control shows THIS side's person. A guest's write goes to
+      // their share, so a control bound to the ticket's own column showed them
+      // the owner's assignee and snapped back after every change.
+      await page.goto(`/tickets/${ticketId}`, { timeout: 120_000, waitUntil: "domcontentloaded" });
+      await expect(page.getByText("Assignee (your side)")).toBeVisible({ timeout: 60_000 });
+      const assignee = page.locator("select").filter({ hasText: "Unassigned" }).first();
+      await assignee.selectOption(userId);
+      await expect
+        .poll(
+          async () =>
+            (
+              await db().ticketShare.findFirst({
+                where: { ticketId, guestWorkspaceId: guestWorkspaceId },
+                select: { assignedUserId: true },
+              })
+            )?.assignedUserId,
+          { timeout: 15_000 },
+        )
+        .toBe(userId);
+      // ...and it STAYS, rather than reverting to the owner's column.
+      await page.waitForTimeout(1200);
+      expect(await assignee.inputValue()).toBe(userId);
+
       // The DELETE affordance must not be offered to a guest. `deleteTicket` is
       // deliberately owner-only (§18), so a Delete button here can only ever
       // error with the ticket still sitting there — which is exactly what an
