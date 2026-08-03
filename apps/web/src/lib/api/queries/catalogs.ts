@@ -153,7 +153,6 @@ export async function getTicketSettings(): Promise<{
 }
 
 export interface TicketSettingsView {
-  ticketReopenWindowHours: number;
   ticketCloseConversationOnLastSolved: boolean;
 }
 

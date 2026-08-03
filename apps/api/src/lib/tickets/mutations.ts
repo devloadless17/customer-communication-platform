@@ -357,11 +357,6 @@ export async function routeMessageToTicket(
   });
   if (!conversation) return { ticketId: null, opened: null };
 
-  const workspace = await tx.workspace.findUnique({
-    where: { id: args.workspaceId },
-    select: { ticketReopenWindowHours: true },
-  });
-
   if (conversation.activeTicketId) {
     const active = await tx.ticket.findFirst({
       where: { id: conversation.activeTicketId, workspaceId: args.workspaceId },
@@ -397,37 +392,23 @@ export async function routeMessageToTicket(
     return { ticketId: fallbackActive.id, opened: null };
   }
 
-  const now = args.nowMs ?? Date.now();
-  const windowHours = workspace?.ticketReopenWindowHours ?? 72;
-  if (args.direction === "in" && windowHours > 0) {
-    const since = new Date(now - windowHours * 3_600_000);
-    const solved = await tx.ticket.findFirst({
-      where: {
-        workspaceId: args.workspaceId,
-        conversationId: conversation.id,
-        status: "solved",
-        lastSolvedAt: { gte: since },
-      },
-      orderBy: { lastSolvedAt: "desc" },
-      select: { id: true },
-    });
-    if (solved) {
-      const reopened = await reopenTicketInTx(tx, {
-        workspaceId: args.workspaceId,
-        ticketId: solved.id,
-        conversationId: conversation.id,
-        actor: {},
-        nowMs: now,
-      });
-      return { ticketId: solved.id, opened: reopened };
-    }
-  }
-
-  // No auto-open. A ticket is a deliberate act — raised by an agent from the
-  // inbox (the "Raise a ticket" button) or by a workflow's `create_ticket`
-  // step, never minted just because a customer messaged. So an inbound either
-  // ATTACHES to the thread's live ticket, REOPENS a recently-solved one inside
-  // the window, or leaves the thread ticket-free (the inbox already tracks it).
+  // NOTHING opens a ticket but a person raising one.
+  //
+  // A ticket is a deliberate act — an agent pressing "Raise a ticket" in the
+  // inbox, or a workflow's `create_ticket` step. It is never minted, and never
+  // RESURRECTED, just because a customer wrote again.
+  //
+  // Auto-reopen used to live here: an inbound within
+  // `ticketReopenWindowHours` of a solve pulled the solved ticket back to
+  // `open` and wrote a "System reopened #10" line. It was removed 2026-08-01 at
+  // the maintainer's instruction, having watched it happen: solved means the
+  // customer got their answer and the work is done, so a later message is
+  // either small talk or a NEW issue — and a new issue deserves a ticket
+  // somebody chose to raise, with its own cause and its own number.
+  //
+  // So an inbound either ATTACHES to the thread's live ticket, or leaves the
+  // thread ticket-free. The inbox already tracks every conversation; nothing is
+  // lost by not having a ticket on it.
   return { ticketId: null, opened: null };
 }
 
@@ -1052,81 +1033,6 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
   };
 }
 
-/**
- * Reopen a solved ticket from inside a transaction — used by the ingest router
- * when a follow-up lands inside the reopen window.
- *
- * Kept separate from `updateTicket` because it must compose into the message
- * write's transaction: the reopen and the message that caused it commit
- * together or not at all.
- */
-async function reopenTicketInTx(
-  tx: TxClient,
-  args: {
-    workspaceId: string;
-    ticketId: string;
-    conversationId: string;
-    actor: TicketActor;
-    nowMs: number;
-  },
-): Promise<Extract<TicketOutcome, { ok: true }> | null> {
-  // Fresh SLA commitment for the reopened life — same reasoning as the
-  // updateTicket reopen branch: the stored due dates belong to the previous
-  // life, and a reopen past the old `resolutionDueAt` instantly breach-flagged
-  // a promise that was kept.
-  const row = await tx.ticket.findFirst({
-    where: { id: args.ticketId, workspaceId: args.workspaceId, status: "solved" },
-    select: { priority: true },
-  });
-  if (!row) return null;
-  const policy = await loadPolicyForPriority(tx, args.workspaceId, row.priority);
-  const schedule = await loadSchedule(tx, args.workspaceId);
-  const recomputed = computeDueDates(args.nowMs, policy, schedule);
-
-  const written = await tx.ticket.updateMany({
-    where: { id: args.ticketId, workspaceId: args.workspaceId, status: "solved" },
-    data: {
-      status: "open",
-      resolvedAt: null,
-      resolvedById: null,
-      reopenCount: { increment: 1 },
-      version: { increment: 1 },
-      lastActivityAt: new Date(),
-      firstResponseDueAt: recomputed.firstResponseDueAt,
-      resolutionDueAt: recomputed.resolutionDueAt,
-    },
-  });
-  // Lost the race — another inbound reopened it a moment earlier. Not an error:
-  // the message still attaches to the (now open) ticket.
-  if (written.count === 0) return null;
-
-  const openTicketCount = await bumpOpenTicketCount(tx, args.conversationId, 1);
-  await tx.conversation.update({
-    where: { id: args.conversationId },
-    data: { activeTicketId: args.ticketId },
-  });
-
-  const ticket = await readTicket(tx, args.ticketId);
-  await writeTicketEvent(tx, args.workspaceId, args.ticketId, "reopened", args.actor, {
-    status: "solved",
-  }, { status: "open" });
-  await writeConversationPill(
-    tx,
-    args.workspaceId,
-    args.conversationId,
-    "ticket_reopened",
-    args.actor,
-    ticket,
-  );
-  await publishTicketEvent(tx, {
-    args: { workspaceId: args.workspaceId, actor: args.actor },
-    ticket,
-    openTicketCount,
-    action: "reopened",
-    previousStatus: "solved",
-  });
-  return { ok: true, ticket, openTicketCount, action: "reopened" };
-}
 
 /**
  * Flag an SLA breach. Called only by the sweeper.

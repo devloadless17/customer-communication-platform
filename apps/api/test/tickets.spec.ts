@@ -8,8 +8,8 @@
  *      must not get #7 twice. The row lock in `allocateNumber` is invisible in
  *      a code review — only concurrent creates prove it.
  *   2. MESSAGE ROUTING is the load-bearing rule of the whole feature: attach to
- *      the active ticket, reopen a recently-solved one, otherwise open a new
- *      one. Getting the reopen window wrong turns one issue into three tickets.
+ *      the active ticket, otherwise NOTHING. Nothing opens or reopens a ticket
+ *      but a person raising one (2026-08-01).
  *   3. `openTicketCount` / `activeTicketId` never drift — the inbox badge and
  *      the ingest hot path both read them as plain columns.
  *   4. The SLA clock PAUSES and RESUMES by shifting the deadline, rather than
@@ -250,7 +250,12 @@ describe("message → ticket routing", () => {
     expect((await conversationState(conversationId)).openTicketCount).toBe(1);
   });
 
-  it("REOPENS a ticket solved inside the reopen window", async () => {
+  it("NEVER reopens a solved ticket — a follow-up carries no ticket at all", async () => {
+    // The rule the maintainer named on 2026-08-01, after watching a customer's
+    // message drag a solved ticket back with a "System reopened #10" line:
+    // nothing opens or reopens a ticket but a person raising one. Solved means
+    // the customer got their answer; a later message is small talk or a NEW
+    // issue, and a new issue deserves its own cause and its own number.
     const conversationId = await makeConversation();
     const opened = await createTicket(db, { workspaceId, conversationId, actor: { userId } });
     const ticketId = opened.ok ? opened.ticket.id : "";
@@ -261,49 +266,63 @@ describe("message → ticket routing", () => {
       status: "solved",
     });
     expect(solved.ok).toBe(true);
-    // Solving takes it out of the active set and releases the pointer.
     let convo = await conversationState(conversationId);
     expect(convo.openTicketCount).toBe(0);
     expect(convo.activeTicketId).toBeNull();
 
+    // A follow-up ARRIVES ONE SECOND LATER — well inside what used to be the
+    // 72h reopen window, which is precisely the case that used to resurrect it.
     const followUp = await prisma.$transaction((tx) =>
       routeMessageToTicket(tx, { workspaceId, conversationId, direction: "in" }),
     );
-    // Same ticket, back open — one issue, not two.
-    expect(followUp.ticketId).toBe(ticketId);
-    convo = await conversationState(conversationId);
-    expect(convo.openTicketCount).toBe(1);
-    expect(convo.activeTicketId).toBe(ticketId);
+    expect(followUp.ticketId).toBeNull();
 
+    // The ticket is untouched: still solved, never reopened, resolution intact.
+    const row = await prisma.ticket.findUniqueOrThrow({
+      where: { id: ticketId },
+      select: { status: true, reopenCount: true, resolvedAt: true },
+    });
+    expect(row.status).toBe("solved");
+    expect(row.reopenCount).toBe(0);
+    expect(row.resolvedAt).not.toBeNull();
+
+    // ...and no "System reopened" line was written to its history.
+    const events = await prisma.ticketEvent.findMany({
+      where: { ticketId },
+      select: { kind: true },
+    });
+    expect(events.map((e) => e.kind)).not.toContain("reopened");
+
+    // The conversation stays ticket-free. The inbox already tracks it.
+    convo = await conversationState(conversationId);
+    expect(convo.openTicketCount).toBe(0);
+    expect(convo.activeTicketId).toBeNull();
+  });
+
+  it("still lets a PERSON reopen a solved ticket deliberately", async () => {
+    // Removing the automatic path must not remove the manual one: moving a
+    // solved ticket back to `open` is a choice someone makes, and it still
+    // clears the stale resolution so "solved by Sara three weeks ago" cannot
+    // sit on live work.
+    const conversationId = await makeConversation();
+    const opened = await createTicket(db, { workspaceId, conversationId, actor: { userId } });
+    const ticketId = opened.ok ? opened.ticket.id : "";
+    await updateTicket(db, { workspaceId, ticketId, actor: { userId }, status: "solved" });
+
+    const reopened = await updateTicket(db, {
+      workspaceId,
+      ticketId,
+      actor: { userId },
+      status: "open",
+    });
+    expect(reopened.ok).toBe(true);
     const row = await prisma.ticket.findUniqueOrThrow({
       where: { id: ticketId },
       select: { status: true, reopenCount: true, resolvedAt: true },
     });
     expect(row.status).toBe("open");
     expect(row.reopenCount).toBe(1);
-    // The stale resolution must not sit on live work.
     expect(row.resolvedAt).toBeNull();
-  });
-
-  it("does NOT reopen when the solve is OUTSIDE the window, and opens nothing new", async () => {
-    const conversationId = await makeConversation();
-    const opened = await createTicket(db, { workspaceId, conversationId, actor: { userId } });
-    const ticketId = opened.ok ? opened.ticket.id : "";
-    await updateTicket(db, { workspaceId, ticketId, actor: { userId }, status: "solved" });
-    // Age the solve past the 72h default rather than sleeping for three days.
-    await prisma.ticket.update({
-      where: { id: ticketId },
-      data: { lastSolvedAt: new Date(Date.now() - 80 * 3_600_000) },
-    });
-
-    const fresh = await prisma.$transaction((tx) =>
-      routeMessageToTicket(tx, { workspaceId, conversationId, direction: "in" }),
-    );
-    // Outside the window, the follow-up is a genuinely new question — but with
-    // no auto-open there is nothing to open. The thread simply carries no ticket
-    // until an agent raises one.
-    expect(fresh.ticketId).toBeNull();
-    expect((await conversationState(conversationId)).openTicketCount).toBe(0);
   });
 
   it("never reopens from an OUTBOUND message — an agent's follow-up isn't new work", async () => {

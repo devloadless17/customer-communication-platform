@@ -681,10 +681,16 @@ model Workspace {
   //
   // How long after a ticket is SOLVED a follow-up message reopens it instead of
   // opening a new one. This is the single most-debatable rule in ticketing —
-  // too short and one issue becomes three tickets, too long and a genuinely new
-  // question gets buried in resolved work — so it is a per-workspace setting,
-  // not a constant. 72h is the helpdesk norm (Zendesk's default). 0 disables
-  // reopening: every message after `solved` starts fresh.
+  // RETIRED 2026-08-01 — READ BY NOTHING. Auto-reopen is gone: a customer's
+  // follow-up on a solved ticket no longer drags it back to `open`, because
+  // NOTHING opens or reopens a ticket except a person raising one (an agent's
+  // "Raise a ticket", or a workflow's `create_ticket`). Solved means the
+  // customer got their answer; a later message is small talk or a NEW issue,
+  // and a new issue deserves its own cause and its own number.
+  //
+  // The column stays rather than taking a migration to drop: it holds values
+  // workspaces once chose, dropping a column silently destroys any raw index
+  // keyed on it (§18), and nothing reads it. Do not re-wire it.
   ticketReopenWindowHours             Int     @default(72)
   // Close the CONVERSATION when its last non-terminal ticket is solved.
   // OFF by default and deliberately so: conversation status and ticket status

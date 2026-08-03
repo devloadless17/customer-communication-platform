@@ -967,10 +967,7 @@ export class TicketsService {
   async getSettings(workspaceId: string): Promise<TicketSettingsInput> {
     const ws = await this.db.workspace.findUniqueOrThrow({
       where: { id: workspaceId },
-      select: {
-        ticketReopenWindowHours: true,
-        ticketCloseConversationOnLastSolved: true,
-      },
+      select: { ticketCloseConversationOnLastSolved: true },
     });
     return ws;
   }
@@ -982,10 +979,7 @@ export class TicketsService {
     const ws = await this.db.workspace.update({
       where: { id: workspaceId },
       data: body,
-      select: {
-        ticketReopenWindowHours: true,
-        ticketCloseConversationOnLastSolved: true,
-      },
+      select: { ticketCloseConversationOnLastSolved: true },
     });
     return ws;
   }

@@ -1933,16 +1933,16 @@ export default function ApiDocsPage() {
           are in-app multipart only. Scope <code>write:tickets</code>.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/tickets-settings">
-          <code>ticketReopenWindowHours</code>,{" "}
           <code>ticketCloseConversationOnLastSolved</code>. <code>PATCH</code> the same
-          path to change them (<code>admin:settings</code>). Scope{" "}
+          path to change it (<code>admin:settings</code>). Scope{" "}
           <code>read:tickets</code>.
           <br />
-          <code>ticketReopenWindowHours</code> (default <code>72</code>, <code>0</code>{" "}
-          disables) decides how long after a ticket is solved a follow-up message joins
-          it rather than stranding the issue across two tickets. It is no longer offered
-          in the app&apos;s settings UI — it was a dial nobody turned — but it remains
-          settable here, and any value a workspace already chose is untouched.
+          <code>ticketReopenWindowHours</code> is <strong>retired</strong> as of
+          2026-08-01. Nothing opens or reopens a ticket but a person raising one, so a
+          customer&apos;s follow-up on a solved ticket no longer pulls it back to{" "}
+          <code>open</code> — it simply carries no ticket. Still accepted and ignored,
+          so an integration that sets it gets a no-op rather than a{" "}
+          <code>400</code>.
         </Endpoint>
         <Endpoint
           method="POST"
