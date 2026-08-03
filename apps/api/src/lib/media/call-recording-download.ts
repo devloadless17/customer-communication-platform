@@ -469,6 +469,26 @@ const MIN_SPEECH_SECONDS = 0.4;
  * second, rarer failure (a garbled decode of real audio).
  */
 const MAX_NO_SPEECH_PROB = 0.8;
+/**
+ * The ceiling applied to a channel the AUDIO already proved has speech.
+ *
+ * The two detectors are independent, and when they disagree the audio-domain
+ * one is right: `silencedetect` measures the waveform, while `no_speech_prob`
+ * is the model's opinion — and on a quiet leg it is wrong often enough to
+ * matter. Live: a customer channel that passed the speech gate came back with
+ * EVERY segment flagged non-speech at all three temperatures, so the entire
+ * customer side of the call was discarded and the transcript showed only the
+ * agent.
+ *
+ * A channel is never sent to the model unless the gate found speech, so
+ * "every segment is non-speech" is a contradiction, not a verdict. Above
+ * `SOLID_SPEECH_SECONDS` of measured speech the model only gets to drop
+ * segments in the range measured for actual silence (0.987-0.997) — real
+ * speech on a quiet leg measured 0.598.
+ */
+const MAX_NO_SPEECH_PROB_WITH_AUDIO = 0.95;
+/** Measured speech above which the audio-domain gate outranks the model. */
+const SOLID_SPEECH_SECONDS = 1.5;
 const MIN_AVG_LOGPROB = -1.0;
 /** Text-to-compressed-size ratio above this is a repetition loop. */
 const MAX_COMPRESSION_RATIO = 2.4;
@@ -936,10 +956,16 @@ async function transcribeOneChannel(
     // and apply the gates that do not need whisper-only signals. The rest of
     // the pipeline already treats coarse timings as expected (see the turn
     // assembly below), so this degrades attribution, not correctness.
+    // Trust the waveform over the model's opinion once the gate found real
+    // speech — otherwise a quiet speaker is deleted wholesale.
+    const noSpeechCeiling =
+      side.audio.speechSeconds >= SOLID_SPEECH_SECONDS
+        ? MAX_NO_SPEECH_PROB_WITH_AUDIO
+        : MAX_NO_SPEECH_PROB;
     const kept = res.segments.length > 0
       ? res.segments.filter(
           (s) =>
-            s.no_speech_prob <= MAX_NO_SPEECH_PROB &&
+            s.no_speech_prob <= noSpeechCeiling &&
             s.avg_logprob >= MIN_AVG_LOGPROB &&
             s.compression_ratio <= MAX_COMPRESSION_RATIO &&
             isSubstantive(s.text),
@@ -981,7 +1007,9 @@ async function transcribeOneChannel(
       ? "repetition loop"
       : wrongLanguage
         ? `detected ${res.language}, which this workspace doesn't speak`
-        : `all ${res.segments.length} segment(s) rejected as non-speech`;
+        : `all ${res.segments.length} segment(s) rejected as non-speech ` +
+          `(channel measured ${side.audio.speechSeconds.toFixed(1)}s of speech, ` +
+          `ceiling ${noSpeechCeiling})`;
     const isLast = attempt === ladder.length - 1;
     console.warn(
       `[call-transcript] call=${callId} ${side.label}: ${why} at temperature ` +
