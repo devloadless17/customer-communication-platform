@@ -287,9 +287,17 @@ describe("ingest end-to-end: the dual-key webhook heals the fork", () => {
     await ingestWithRedelivery(workspaceId, "whatsapp", events, connA);
 
     // The reconcile is fire-and-forget post-commit — converge on it.
+    //
+    // Wait for the LAST write it makes, not the first. `reconcileBsuidFork`
+    // nulls the fork's bsuid and only then calls `linkContactsViaCustomer`, so
+    // waiting on the bsuid alone returns while the Customer link is still in
+    // flight — and the customerId assertions below then read a row that is
+    // half-written. Flaky on a loaded runner, green on a fast one.
     await waitFor(
-      async () => (await contactRow(fork.id)).bsuid === null,
-      "the fork's bsuid to be re-keyed",
+      async () =>
+        (await contactRow(fork.id)).bsuid === null &&
+        (await contactRow(winner.id)).customerId !== null,
+      "the fork's bsuid to be re-keyed and both contacts linked",
     );
 
     const w = await contactRow(winner.id);
