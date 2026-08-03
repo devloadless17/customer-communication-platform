@@ -126,6 +126,37 @@ describe("enabled", () => {
     expect(url()).not.toContain("appsecret_proof");
   });
 
+  it("signs the media METADATA call but never the CDN binary URL", async () => {
+    // fetchMedia is two hops: GET /{media-id} on Graph (returns a short-lived
+    // signed lookaside URL), then GET that URL for the bytes. The CDN link is
+    // SIGNED OVER ITS QUERY STRING — appending appsecret_proof invalidates its
+    // `hash` and the CDN answers 401 "Authentication Error". This shipped: with
+    // the proof enabled in prod (2026-08-03), every inbound image/voice/document
+    // 401'd on the binary hop and parked as an eternal "Downloading…" shimmer,
+    // while sends and the metadata hop (real Graph calls) stayed green.
+    const provider = await loadProvider(true);
+    const cdnUrl =
+      "https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=MEDIA_1&ext=1754230000&hash=sig";
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", async (input: string | URL) => {
+      urls.push(String(input));
+      if (urls.length === 1) {
+        return new Response(JSON.stringify({ url: cdnUrl, mime_type: "audio/ogg" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(new Uint8Array([0x4f, 0x67, 0x67, 0x53]), { status: 200 });
+    });
+
+    const fetched = await provider.fetchMedia!("MEDIA_1", config);
+
+    expect(urls).toHaveLength(2);
+    expect(urls[0]).toContain(`appsecret_proof=${expectedProof(TOKEN, OWN_SECRET)}`);
+    expect(urls[1]).toBe(cdnUrl); // verbatim — untouched query string
+    expect(fetched.mimeType).toBe("audio/ogg");
+  });
+
   it("appends with & when the URL already has a query string", async () => {
     // A naive `?` join would produce a second question mark and Meta would read
     // the proof as part of the previous parameter's value.

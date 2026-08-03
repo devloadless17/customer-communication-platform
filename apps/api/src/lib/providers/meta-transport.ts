@@ -122,6 +122,22 @@ export function bearerFromHeaders(headers: RequestInit["headers"]): string | und
 }
 
 
+/**
+ * Is this URL on the Graph API origin (`GRAPH_BASE`, including an e2e mock
+ * override)? Decides whether `metaFetch` may sign it with `appsecret_proof` —
+ * see the comment at the call site for why a non-Graph host (the lookaside
+ * media CDN) must never be signed. Unparseable input says no: the plain
+ * `fetch` below will produce the real error, without a proof muddying it.
+ */
+function isGraphOrigin(url: string): boolean {
+  try {
+    return new URL(url).origin === new URL(GRAPH_BASE).origin;
+  } catch {
+    return false;
+  }
+}
+
+
 export async function metaFetch(
   input: string | URL,
   init?: MetaFetchOptions,
@@ -135,7 +151,8 @@ export async function metaFetch(
   const maxAttempts = retry ? META_FETCH_MAX_ATTEMPTS : 1;
   // Don't pass our own `retry` / `appSecret` flags through to fetch's RequestInit.
   const { retry: _retry, appSecret, ...fetchInit } = init ?? {};
-  // `appsecret_proof` — ONE place for every WhatsApp Graph call.
+  // `appsecret_proof` — ONE place for every WhatsApp Graph call, and GRAPH
+  // calls ONLY.
   //
   // Meta: "an access token can be stolen… then used from an entirely different
   // system", so the proof binds a call to knowledge of the app secret. It is a
@@ -143,14 +160,24 @@ export async function metaFetch(
   // Authorization header — so signing centrally here needs nothing threaded
   // through except the secret, and no call site can forget it.
   //
+  // Origin-gated because not every metaFetch target IS Graph: `fetchMedia`
+  // step 2 follows the metadata's `url` to Meta's lookaside CDN, whose
+  // short-lived link is SIGNED OVER ITS QUERY STRING — appending any extra
+  // parameter invalidates the `hash` and the CDN answers
+  // `401 {"title":"Authentication Error"}`. With the proof enabled in prod
+  // (2026-08-03) that 401'd EVERY inbound media binary: each row parked as an
+  // eternal "Downloading…" shimmer while sends and metadata reads (real Graph
+  // calls, which accept the proof) kept working. So: sign when the target's
+  // origin is GRAPH_BASE (covers the e2e mock override too); any other host
+  // gets the URL verbatim.
+  //
   // Additive and gated: `withAppsecretProof` returns the URL untouched unless
   // META_APPSECRET_PROOF=1 AND both inputs are present, so the wire is
   // byte-identical until someone opts in.
-  const target = withAppsecretProof(
-    typeof input === "string" ? input : input.toString(),
-    bearerFromHeaders(fetchInit.headers),
-    appSecret,
-  );
+  const urlStr = typeof input === "string" ? input : input.toString();
+  const target = isGraphOrigin(urlStr)
+    ? withAppsecretProof(urlStr, bearerFromHeaders(fetchInit.headers), appSecret)
+    : urlStr;
   let lastErr: unknown;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const ac = new AbortController();
