@@ -47,7 +47,15 @@ const STATUS_VIEWS: Array<{ status: TicketStatus; label: string; icon: typeof Ci
   { status: "closed", label: "Closed", icon: CircleDot },
 ];
 
-export function TicketsSubSidebar({ isAdmin }: { isAdmin: boolean }) {
+export function TicketsSubSidebar({
+  isAdmin,
+  viewerUserId,
+}: {
+  isAdmin: boolean;
+  /** Whose "Replied to you" this is — a reply for anyone else must not
+   *  re-run these counts on every open tab. */
+  viewerUserId: string;
+}) {
   const pathname = usePathname();
   const params = useSearchParams();
   const [counts, setCounts] = useState<TicketCounts | null>(null);
@@ -99,20 +107,27 @@ export function TicketsSubSidebar({ isAdmin }: { isAdmin: boolean }) {
         void load();
       }, 400);
     };
-    socket.on("ticket:changed", onChange);
     // A thread reply moves no ticket state, so it never fires `ticket:changed`
-    // — without these the "Replied to you" count would only refresh on the next
-    // unrelated write.
-    socket.on("ticket:thread:message", onChange);
+    // — without this the "Replied to you" count would only refresh on the next
+    // unrelated write. Gated on `notifiedUserIds` because that count is MINE:
+    // ungated, every open tab in both workspaces re-ran the counts query on the
+    // highest-frequency write a ticket has.
+    const onReply = (p: { notifiedUserIds?: string[] }) => {
+      if (!p.notifiedUserIds?.includes(viewerUserId)) return;
+      onChange();
+    };
+    socket.on("ticket:changed", onChange);
+    socket.on("ticket:thread:message", onReply);
+    // Already per-viewer — this user clearing their own marker.
     socket.on("ticket:thread:read", onChange);
     return () => {
       alive = false;
       if (timer) clearTimeout(timer);
       socket.off("ticket:changed", onChange);
-      socket.off("ticket:thread:message", onChange);
+      socket.off("ticket:thread:message", onReply);
       socket.off("ticket:thread:read", onChange);
     };
-  }, []);
+  }, [viewerUserId]);
 
   const badge = (n: number | undefined) =>
     n && n > 0 ? (

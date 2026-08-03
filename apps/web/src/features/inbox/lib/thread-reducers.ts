@@ -309,6 +309,15 @@ export function applyMessageMediaReady(
   const idx = prev.messages.findIndex((m) => m.id === payload.messageId);
   if (idx === -1) return prev;
   const existing = prev.messages[idx]!;
+  // Already settled exactly this way — return the SAME reference so an
+  // at-least-once redelivery (the media sweeper re-publishes a downgrade for
+  // rows still `mediaPending`) does not re-render the thread. §15's identity
+  // contract, which every sibling reducer here keeps.
+  if (payload.media) {
+    if (existing.media?.url === payload.media.url && existing.mediaPending !== true) return prev;
+  } else if (existing.media === undefined && existing.mediaPending === undefined) {
+    return prev;
+  }
   const nextMessages = prev.messages.slice();
   if (payload.media) {
     nextMessages[idx] = { ...existing, media: payload.media, mediaPending: false };

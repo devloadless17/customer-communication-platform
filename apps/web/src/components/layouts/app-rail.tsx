@@ -113,7 +113,7 @@ function useInboxUnread(): number {
  * `untriagedWhere`). Same authoritative-seed + debounce-refetch +
  * reconnect-reseed shape as useInboxUnread.
  */
-function useNewTickets(): { count: number; replied: boolean } {
+function useNewTickets(viewerUserId: string): { count: number; replied: boolean } {
   const [state, setState] = useState({ count: 0, replied: false });
   useEffect(() => {
     let alive = true;
@@ -142,21 +142,34 @@ function useNewTickets(): { count: number; replied: boolean } {
     };
     void refetch();
     const socket = getClientSocket();
-    socket.on("ticket:changed", debounced);
     // A reply changes no ticket state, so it never fires `ticket:changed` —
-    // without these two the dot would only appear on the next unrelated write.
-    socket.on("ticket:thread:message", debounced);
+    // without this the dot would only appear on the next unrelated write.
+    //
+    // ...but only for a reply addressed to ME. The frame carries
+    // `notifiedUserIds` for exactly this decision (the board already makes it),
+    // and this badge counts MY unread replies: without the check, every
+    // connected client in every participating workspace re-ran
+    // `/api/tickets/counts` on the highest-frequency write a ticket has, for a
+    // conversation between two other people.
+    const onReply = (p: { notifiedUserIds?: string[] }) => {
+      if (!p.notifiedUserIds?.includes(viewerUserId)) return;
+      debounced();
+    };
+    socket.on("ticket:changed", debounced);
+    socket.on("ticket:thread:message", onReply);
+    // The READ frame is already per-viewer (it is this user clearing their own
+    // marker), so it stays unconditional.
     socket.on("ticket:thread:read", debounced);
     socket.on("connect", debounced);
     return () => {
       alive = false;
       if (timer) clearTimeout(timer);
       socket.off("ticket:changed", debounced);
-      socket.off("ticket:thread:message", debounced);
+      socket.off("ticket:thread:message", onReply);
       socket.off("ticket:thread:read", debounced);
       socket.off("connect", debounced);
     };
-  }, []);
+  }, [viewerUserId]);
   return state;
 }
 
@@ -317,7 +330,7 @@ export function AppRail({
   const pathname = usePathname() ?? "";
   const inboxUnread = useInboxUnread();
   const teamMentions = useTeamMentions(currentUser.id);
-  const newTickets = useNewTickets();
+  const newTickets = useNewTickets(currentUser.id);
   const isOnline = onlineUserIds?.has(currentUser.id) ?? false;
   const hasPresence = onlineUserIds !== undefined;
   // Live mirror of THIS user's availability. Seeded from the session payload

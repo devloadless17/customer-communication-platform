@@ -21,7 +21,7 @@ export default async function TicketsLayout({ children }: { children: React.Reac
   const { user } = await getSession();
   return (
     <SectionShell
-      subSidebar={<TicketsSubSidebar isAdmin={user.role === "admin"} />}
+      subSidebar={<TicketsSubSidebar isAdmin={user.role === "admin"} viewerUserId={user.id} />}
       mainClassName="overflow-hidden"
     >
       {children}

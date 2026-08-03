@@ -1731,8 +1731,10 @@ export default function ApiDocsPage() {
           touched, which is the order people work in. Every ticket carries{" "}
           <code>lastActivityAt</code>. Query: <code>status</code>,{" "}
           <code>priority</code>, <code>tagIds</code> (comma lists),{" "}
-          <code>assignee</code> (a user id, <code>me</code>, or <code>none</code> for
-          unassigned), <code>contactId</code>, <code>conversationId</code>,{" "}
+          <code>assignee</code> (a user id, or <code>none</code> for unassigned —
+          <code>me</code> is a SESSION concept and an API key has no agent identity,
+          so it answers <code>400 assignee_me_requires_session</code>; the same goes
+          for <code>unread</code>), <code>contactId</code>, <code>conversationId</code>,{" "}
           <code>channel</code>, <code>breached=true</code>,{" "}
           <code>cursorActivityAt</code> + <code>cursorId</code> (pass back{" "}
           <code>nextCursor</code> verbatim — the cursor keys on the same column the list
@@ -1742,7 +1744,7 @@ export default function ApiDocsPage() {
           never silently ignored. <code>q=</code> searches the ticket NUMBER
           (<code>#47</code> or <code>47</code>), the subject, the cause, the customer&apos;s
           name, the cross-department thread and YOUR OWN notes (never another
-          workspace&apos;s) — trigram-indexed, and it composes
+          workspace&apos;s) — indexed on the ticket columns, and it composes
           with the other filters rather than replacing them. <code>shared=true</code>
           returns only tickets another workspace escalated to you;{" "}
           <code>untriaged=true</code> only work nobody in your workspace has claimed.

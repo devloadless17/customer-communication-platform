@@ -57,12 +57,42 @@ function countErrors() {
     }
   }
   const counts = {};
+  /**
+   * A tsc error with NO `file(line,col):` prefix is a GLOBAL one — a missing or
+   * unreadable tsconfig (TS5083/TS6053), a bad compiler option (TS5023), no
+   * inputs matched (TS18003). None of them match `ERROR_LINE`, so the loop
+   * below counted zero and the check reported "0 errors (baseline 45) —
+   * improved!" while having compiled nothing at all. That is a checker failing
+   * OPEN, and worse, inviting someone to run `--update` and bake the empty
+   * result in as the new baseline, permanently disarming it.
+   */
+  const globalErrors = out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^error TS\d+:/.test(l));
+  if (globalErrors.length > 0) {
+    console.error("✖ api-test type check could not run — tsc reported a project-level error:");
+    for (const g of globalErrors.slice(0, 5)) console.error(`    ${g}`);
+    console.error(`  (project: ${PROJECT})`);
+    process.exit(1);
+  }
+
   for (const line of out.split("\n")) {
     const m = ERROR_LINE.exec(line.trim());
     if (!m) continue;
     // Normalize to a repo-relative POSIX path so the baseline is portable.
     const file = m[1].replace(/\\/g, "/").replace(/^\.\//, "");
     counts[file] = (counts[file] ?? 0) + 1;
+  }
+  // Zero file-level errors AND no global error is legitimate only if tsc
+  // actually saw the suite. An empty parse of a non-empty run is the same
+  // fail-open in another disguise.
+  if (Object.keys(counts).length === 0 && out.trim() && !/^\s*$/.test(out)) {
+    // tsc prints nothing on a fully clean project, so output-with-no-matches
+    // means the shape changed under us.
+    const noise = out.trim().split("\n").slice(0, 3).join(" | ");
+    console.error(`✖ api-test type check: tsc produced unrecognized output — ${noise}`);
+    process.exit(1);
   }
   return counts;
 }

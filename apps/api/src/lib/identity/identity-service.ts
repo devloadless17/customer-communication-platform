@@ -47,6 +47,14 @@ interface ResolveContactInput {
   phoneNumber: string | null;
   email: string | null;
   name: string;
+  /**
+   * The channel this contact IS. Supplied so the strong-key rule can be applied
+   * to the SUBJECT as well as to the candidates — see the exclusion note in
+   * {@link findExistingCustomerIdByStrongKey}. Optional because several callers
+   * resolve before a row exists; absent means "not known to be ephemeral",
+   * which is the correct default for every real channel.
+   */
+  identityChannel?: string | null;
 }
 
 interface ResolveOpts {
@@ -76,6 +84,22 @@ export async function findExistingCustomerIdByStrongKey(
   if (contact.phoneNumber) strongKeys.push({ phoneNumber: contact.phoneNumber });
   if (contact.email && trustEmailAsStrongKey) strongKeys.push({ email: contact.email });
   if (strongKeys.length === 0) return null;
+
+  // ...and the SUBJECT is held to the same rule. §6 says ephemeral contacts are
+  // out of the strong-key candidate set "in both directions", but only the
+  // candidate half below was implemented: with the widget contact as the
+  // SUBJECT, a phone typed into the public pre-chat box was still used as a key
+  // to go FIND the real WhatsApp contact that owns it, and adopt that person's
+  // Customer — folding a stranger's live thread into the real owner's profile
+  // and linked-channels switcher. Exactly the merge the note below describes,
+  // reached from the other side. The value stays stored and visible to agents;
+  // it just never acts as a key until something verifies it.
+  if (
+    contact.identityChannel &&
+    (EPHEMERAL_CONTACT_CHANNELS as ReadonlySet<string>).has(contact.identityChannel)
+  ) {
+    return null;
+  }
 
   // Another ALREADY-LINKED contact in the team sharing a strong key is the same
   // person — adopt its customer. Oldest wins so the canonical customer is stable

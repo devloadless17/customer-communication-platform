@@ -351,7 +351,7 @@ function toDto(r: {
  * psql (`customFields->>'order_id'`) without letting users type collisions
  * like "Order ID" vs "order id" against the unique index.
  */
-function slugifyKey(label: string): string {
+export function slugifyKey(label: string): string {
   return label
     .toLowerCase()
     .normalize("NFKD")

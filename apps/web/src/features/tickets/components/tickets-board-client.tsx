@@ -406,6 +406,12 @@ export function TicketsBoardClient({
   const saveCurrentView = async () => {
     const name = window.prompt("Name this view (e.g. Urgent · unclaimed)")?.trim();
     if (!name) return;
+    // The unread narrow cannot travel into a saved view (see the button's
+    // condition), so say so rather than saving something that quietly differs
+    // from what is on screen.
+    if (unreadOnly) {
+      toast.info("Saved without the “replied to you” narrow — unread is per-person.");
+    }
     const shared = window.confirm(
       "Share this view with the whole workspace?\n\nOK = shared, Cancel = just for you.",
     );
@@ -503,10 +509,16 @@ export function TicketsBoardClient({
             Clear
           </button>
         ) : null}
-        {/* Only offered when there IS a narrowing to save — a "Save view" button
-            on an unfiltered board saves nothing. */}
+        {/* Only offered when there IS a SAVEABLE narrowing to save — a "Save
+            view" button on an unfiltered board saves nothing.
+            `unreadOnly` is deliberately absent: unread is a per-USER marker and
+            `TicketViewFiltersSchema` has no field for it (a shared view holding
+            "unread" would mean something different to every reader). Counting
+            it here meant the Replied-to-you board offered a Save button that
+            wrote an EMPTY filter document — a view that silently showed
+            everything. */}
         {!viewId &&
-        (priority || teamFilter || assignee || breachedOnly || sharedOnly || unreadOnly || debouncedSearch) ? (
+        (priority || teamFilter || assignee || breachedOnly || sharedOnly || debouncedSearch) ? (
           <button
             type="button"
             disabled={bulkBusy}

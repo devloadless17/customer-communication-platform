@@ -94,7 +94,10 @@ export type TicketOutcome =
   /** The cause is WRITTEN ONCE — it can be filled in while empty, never
    *  rewritten. History moves forward through comments and notes instead. */
   | { ok: false; reason: "cause_immutable" }
-  | { ok: false; reason: "tags_owner_only" };
+  | { ok: false; reason: "tags_owner_only" }
+  /** `requireNoActiveTicket` was asked for and the thread already has one.
+   *  Raced-safe: decided by a CAS on the pointer, not a prior read. */
+  | { ok: false; reason: "already_has_active_ticket" };
 
 // ---------------------------------------------------------------------------
 // Create.
@@ -114,6 +117,17 @@ export interface CreateTicketArgs extends EventGates {
   source?: TicketSource;
   tagIds?: string[];
   customFields?: Record<string, string>;
+  /**
+   * Refuse if the thread already has an active ticket — decided ATOMICALLY.
+   *
+   * A caller that checks `Conversation.activeTicketId` first and then creates
+   * has a read-then-write window: two inbound messages a few ms apart put two
+   * workflow runs through the gap together, and the thread ends up with two
+   * open tickets, one of which is no longer anybody's `activeTicketId`. So the
+   * guard is a CAS on the pointer inside this transaction instead — the loser
+   * rolls its ticket back rather than discovering the collision afterwards.
+   */
+  requireNoActiveTicket?: boolean;
 }
 
 /**
@@ -145,19 +159,39 @@ export async function createTicket(db: Db, args: CreateTicketArgs): Promise<Tick
     return { ok: false, reason: "team_not_found" };
   }
 
-  return withUniqueRetry(async () => {
-    // Allocated BEFORE the transaction opens, so the counter's row lock is held
-    // for one statement rather than for the whole create — see allocateNumber's
-    // header for the measurement that motivated this and for why a burnt number
-    // is the sanctioned tradeoff. Inside the retry, so a P2002 re-allocates
-    // (which is the entire point of retrying).
-    const number = await allocateNumber(db, args.workspaceId);
-    const created = await db.$transaction(async (tx) =>
-      createTicketInTx(tx, args, conversation, number),
-    );
-    kickOutbox();
-    return created;
-  });
+  try {
+    return await withUniqueRetry(async () => {
+      // Allocated BEFORE the transaction opens, so the counter's row lock is held
+      // for one statement rather than for the whole create — see allocateNumber's
+      // header for the measurement that motivated this and for why a burnt number
+      // is the sanctioned tradeoff. Inside the retry, so a P2002 re-allocates
+      // (which is the entire point of retrying).
+      const number = await allocateNumber(db, args.workspaceId);
+      const created = await db.$transaction(async (tx) =>
+        createTicketInTx(tx, args, conversation, number),
+      );
+      kickOutbox();
+      return created;
+    });
+  } catch (err) {
+    // The CAS lost — a concurrent create claimed the thread first. Its
+    // transaction rolled back, so nothing was written; this is a normal
+    // outcome, not a failure. Caught OUTSIDE the transaction (a Postgres tx is
+    // aborted by the failing statement, so nothing may be read inside it — the
+    // trap this repo has hit four times).
+    if (err instanceof ActiveTicketRaceLost) {
+      return { ok: false, reason: "already_has_active_ticket" };
+    }
+    throw err;
+  }
+}
+
+/** Internal signal: the `requireNoActiveTicket` CAS found the pointer taken. */
+class ActiveTicketRaceLost extends Error {
+  constructor() {
+    super("active_ticket_race_lost");
+    this.name = "ActiveTicketRaceLost";
+  }
 }
 
 interface ConversationRef {
@@ -231,10 +265,21 @@ async function createTicketInTx(
   });
 
   const openTicketCount = await bumpOpenTicketCount(tx, conversation.id, 1);
-  await tx.conversation.update({
-    where: { id: conversation.id },
-    data: { activeTicketId: row.id },
-  });
+  if (args.requireNoActiveTicket) {
+    // CAS: claim the pointer only while it is still free. `updateMany` so a
+    // miss is a count of 0 rather than a throw, and the throw below is what
+    // rolls this whole transaction (ticket row included) back.
+    const claimed = await tx.conversation.updateMany({
+      where: { id: conversation.id, activeTicketId: null },
+      data: { activeTicketId: row.id },
+    });
+    if (claimed.count === 0) throw new ActiveTicketRaceLost();
+  } else {
+    await tx.conversation.update({
+      where: { id: conversation.id },
+      data: { activeTicketId: row.id },
+    });
+  }
 
   const ticket = await readTicket(tx, row.id);
   await writeTicketEvent(tx, args.workspaceId, row.id, "created", args.actor, null, {

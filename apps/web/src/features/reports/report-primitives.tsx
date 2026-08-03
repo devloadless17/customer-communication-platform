@@ -26,7 +26,16 @@ export function fillDays<K extends string>(
   const out: Array<{ day: string; label: string } & Record<K, number>> = [];
   const cursor = new Date(from);
   cursor.setHours(0, 0, 0, 0);
-  while (cursor <= to) {
+  // The last day actually INSIDE the range — the midnight of the instant just
+  // before `to`. The two range shapes end differently: a custom range's `to` is
+  // the day AFTER the last one selected (`computeReportRange` adds 24h, an
+  // exclusive end), while a preset's is simply "now". Comparing a midnight
+  // cursor against the raw `to` therefore emitted one extra, always-empty
+  // trailing column on every daily chart for a custom range. Stepping back a
+  // millisecond first is correct for both without special-casing either.
+  const last = new Date(to.getTime() - 1);
+  last.setHours(0, 0, 0, 0);
+  while (cursor <= last) {
     const y = cursor.getFullYear();
     const m = String(cursor.getMonth() + 1).padStart(2, "0");
     const d = String(cursor.getDate()).padStart(2, "0");

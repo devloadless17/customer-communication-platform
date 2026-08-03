@@ -2276,7 +2276,15 @@ async function ingestInboundMessage(
         if (identityBackfill.phoneNumber) {
           const adoptedCustomerId = await findExistingCustomerIdByStrongKey(
             workspaceId,
-            { id: contact.id, name: contact.name, phoneNumber: identityBackfill.phoneNumber, email: null },
+            {
+              id: contact.id,
+              name: contact.name,
+              phoneNumber: identityBackfill.phoneNumber,
+              email: null,
+              // The SUBJECT's channel — an ephemeral contact's typed value must
+              // not act as a strong key in this direction either (§6).
+              identityChannel: channel,
+            },
             tx,
           );
           if (adoptedCustomerId && adoptedCustomerId !== contact.customerId) {
@@ -2344,6 +2352,7 @@ async function ingestInboundMessage(
                 phoneNumber: isPhone ? evt.contactPhone ?? null : null,
                 email: null,
                 name: evt.contactName ?? identityLabel,
+                identityChannel: channel,
               },
               tx,
             ),
@@ -3101,6 +3110,7 @@ async function ingestOutboundEcho(
                 phoneNumber: isPhone ? evt.contactPhone ?? null : null,
                 email: null,
                 name: identityLabel,
+                identityChannel: channel,
               },
               tx,
             ),

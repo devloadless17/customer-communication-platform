@@ -364,7 +364,10 @@ export class WorkspacesService {
       await this.db.$transaction(async (tx) => {
         await tx.$queryRaw`SELECT id FROM "Workspace" WHERE id = ${workspaceId} FOR UPDATE`;
         const admins = await tx.workspaceMember.count({
-          where: { workspaceId, role: "admin" },
+          // A DEACTIVATED user cannot sign in, so they cannot configure or
+          // repair anything — counting them let the last usable admin be
+          // demoted away, which the guard's own message calls unrecoverable.
+          where: { workspaceId, role: "admin", user: { deactivatedAt: null } },
         });
         if (admins <= 1) {
           throw new BadRequestException({

@@ -163,7 +163,23 @@ export function TeamChatWorkspace({
       });
     };
 
+    // A DELETED message is unpinned by consequence, and it fires no
+    // `pin:changed` — so its body stayed in the pinned bar for everyone in the
+    // channel, quoting text the author had just removed, with no way to
+    // dismiss it short of a reload. The row is gone from the message list at
+    // the same moment (`use-team-channel-events` splices it), so the bar was
+    // the one surface still showing it.
+    const onMessageDeleted = (payload: { channelId: string; messageId: string }) => {
+      if (payload.channelId !== channelId) return;
+      setPins((prev) =>
+        prev.some((p) => p.messageId === payload.messageId)
+          ? prev.filter((p) => p.messageId !== payload.messageId)
+          : prev,
+      );
+    };
+
     socket.on("team:channel:pin:changed", onPin);
+    socket.on("team:channel:message:deleted", onMessageDeleted);
     // Converge on reconnect: the pin event is one-shot, the socket recovery
     // window is only 30s, and this workspace never remounts on channel nav —
     // so a pin/unpin made while this tab was offline >30s would be missed and
@@ -173,6 +189,7 @@ export function TeamChatWorkspace({
     return () => {
       cancelled = true;
       socket.off("team:channel:pin:changed", onPin);
+      socket.off("team:channel:message:deleted", onMessageDeleted);
       socket.off("connect", refetchPins);
     };
   }, [initialChannel.id]);

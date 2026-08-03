@@ -71,6 +71,18 @@ export class ExternalV1TicketsController {
         detail: "An API key has no agent identity — pass an explicit user id or 'none'.",
       });
     }
+    // Same reasoning, same answer. `unread` is a per-USER marker row, and the
+    // service applies it only `if (query.unread && viewerUserId)` — so with a
+    // key it was accepted and silently dropped, and the caller got the whole
+    // list back believing it was filtered. Accepted-and-ignored is the shape
+    // this API has been burned by before; refuse instead.
+    if (query.unread) {
+      throw new BadRequestException({
+        error: "unread_requires_session",
+        detail:
+          "Unread is per-agent and an API key has no agent identity, so this filter cannot be answered.",
+      });
+    }
     return this.tickets.list(auth.workspaceId, "", query);
   }
 

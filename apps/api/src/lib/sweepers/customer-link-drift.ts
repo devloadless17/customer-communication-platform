@@ -30,7 +30,16 @@ let inFlight = false;
 async function sweepOnce(): Promise<void> {
   const orphans = await db.contact.findMany({
     where: { customerId: null, deletedAt: null },
-    select: { id: true, workspaceId: true, phoneNumber: true, email: true, name: true },
+    // `identityChannel` so the resolver can apply the ephemeral strong-key rule
+    // to this contact as the SUBJECT, not just as a candidate (§6).
+    select: {
+      id: true,
+      workspaceId: true,
+      phoneNumber: true,
+      email: true,
+      name: true,
+      identityChannel: true,
+    },
     // ORDERED — every other paged sweeper is, and this one's absence was a
     // starvation bug: a contact `resolveCustomerId` throws on permanently
     // occupies a slot in the unordered window, so at a 60s cadence the same

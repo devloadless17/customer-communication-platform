@@ -292,6 +292,7 @@ export async function ingestCallEvent(
                 phoneNumber: isPhone ? evt.contactPhone ?? null : null,
                 email: null,
                 name: evt.contactName ?? identityLabel,
+                identityChannel: channel,
               },
               tx,
             ),

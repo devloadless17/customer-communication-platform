@@ -17,6 +17,9 @@ import {
 } from "@nestjs/common";
 
 import { isReservedFieldKey } from "@ccp/shared/contacts/reserved-fields";
+// The SAME slug function the internal route compares labels with — a second
+// copy here would be a second definition of "these two labels collide".
+import { slugifyKey } from "@/workspace-settings/contact-fields/contact-fields.service";
 import { MAX_CHAIN_DEPTH } from "@/lib/workflows/events";
 import { ContactTransferService } from "@/contacts/transfer.service";
 import { toExternalAvatarUrl } from "@/lib/blob-storage";
@@ -1856,7 +1859,7 @@ export class ExternalV1Service {
   async createContactField(workspaceId: string, input: ExternalCreateContactFieldInput) {
     const existing = await this.db.contactFieldDefinition.findMany({
       where: { workspaceId },
-      select: { key: true, order: true },
+      select: { key: true, label: true, order: true },
       orderBy: { order: "desc" },
     });
     if (existing.length >= 50) {
@@ -1871,6 +1874,20 @@ export class ExternalV1Service {
       throw new BadRequestException({
         error: "reserved_field_label",
         detail: `"${input.label}" collides with a built-in contact field. Pick a different label.`,
+      });
+    }
+    // ...and the DUPLICATE-LABEL guard, compared by normalized slug so
+    // "Notes" / "notes " / "NOTES" all collide. The internal route has always
+    // applied it (`assertLabelAvailable`); this one re-implemented the create
+    // and left it out, so `/v1` could mint two fields with distinct keys and
+    // identical CSV column headers — which silently drops one field's data on
+    // the next export/import round trip. Parity is a locked rule (§12), and
+    // this is the half where breaking it corrupts data.
+    const slug = slugifyKey(input.label);
+    if (slug && existing.some((f) => slugifyKey(f.label) === slug)) {
+      throw new ConflictException({
+        error: "duplicate_label",
+        detail: `A contact field named "${input.label}" already exists — pick a different name.`,
       });
     }
     const baseKey = slugifyKey(input.label);
@@ -2541,15 +2558,6 @@ function normalizeColor(v: unknown): TagColor {
   return (TAG_COLORS as readonly string[]).includes(v) ? (v as TagColor) : "slate";
 }
 
-function slugifyKey(label: string): string {
-  return label
-    .toLowerCase()
-    .normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "")
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 60);
-}
 
 /**
  * External wire shape for a campaign. Never a raw Prisma row: the DB model is

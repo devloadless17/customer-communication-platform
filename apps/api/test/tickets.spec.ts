@@ -135,6 +135,53 @@ describe("numbering", () => {
     expect([...numbers].sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
   });
 
+  /**
+   * `requireNoActiveTicket` is the ATOMIC form of "only if this thread has no
+   * open ticket". The workflow step used to read `Conversation.activeTicketId`
+   * and then create — two statements, so two inbound messages milliseconds
+   * apart put two runs through the gap together and opened two tickets on one
+   * thread, one of which was no longer anybody's `activeTicketId`.
+   */
+  it("requireNoActiveTicket: concurrent creates on ONE thread yield exactly one ticket", { timeout: 20_000 }, async () => {
+    const conversationId = await makeConversation();
+    // Fired together on purpose — the pointer CAS is the only thing standing
+    // between this and two open tickets on one conversation.
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        createTicket(db, {
+          workspaceId,
+          conversationId,
+          actor: { userId },
+          requireNoActiveTicket: true,
+        }),
+      ),
+    );
+    const won = results.filter((r) => r.ok);
+    const lost = results.filter((r) => !r.ok);
+    expect(won).toHaveLength(1);
+    expect(lost).toHaveLength(5);
+    for (const l of lost) {
+      expect(l.ok).toBe(false);
+      if (!l.ok) expect(l.reason).toBe("already_has_active_ticket");
+    }
+
+    // The losers ROLLED BACK: exactly one ticket row exists on this thread, and
+    // the pointer names it. A loser that merely returned an error while leaving
+    // its row behind would still show two tickets on the board.
+    const rows = await prisma.ticket.findMany({
+      where: { workspaceId, conversationId },
+      select: { id: true },
+    });
+    expect(rows).toHaveLength(1);
+    const conv = await prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: { activeTicketId: true, openTicketCount: true },
+    });
+    expect(conv?.activeTicketId).toBe(rows[0]!.id);
+    // The rolled-back creates must not have left their count increments behind.
+    expect(conv?.openTicketCount).toBe(1);
+  });
+
   it("a burnt number leaves a GAP and is never handed out twice", async () => {
     // Pins the tradeoff that lets `createTicket` allocate OUTSIDE its
     // transaction (2026-07-29). Holding the counter's row lock until the create

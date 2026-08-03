@@ -95,6 +95,10 @@ export const createTicketStepHandler: StepHandler<CreateTicketStepConfig> = {
     const conv = envelopeConversation(envelope);
     if (!conv) return advanceWithError(400, "envelope missing conversation");
 
+    // Cheap pre-check so the common case never allocates a ticket number, but
+    // the DECISION is `requireNoActiveTicket` below: this read and the create
+    // are two statements, and two inbound messages milliseconds apart put two
+    // runs through the gap together and opened two tickets on one thread.
     if (config.onlyIfNoActiveTicket) {
       const existing = await activeTicketId(ctx.workspaceId, conv.id);
       if (existing) return advance({ skipped: "already_has_active_ticket", ticketId: existing });
@@ -108,9 +112,21 @@ export const createTicketStepHandler: StepHandler<CreateTicketStepConfig> = {
       subject: config.subject ?? null,
       description: config.description ?? null,
       ...(config.priority ? { priority: config.priority } : {}),
+      ...(config.onlyIfNoActiveTicket ? { requireNoActiveTicket: true } : {}),
       silent: true,
     });
-    if (!outcome.ok) return advanceWithError(404, outcome.reason);
+    if (!outcome.ok) {
+      // Lost the CAS: another run raised the ticket this step was going to.
+      // That is the configured outcome, not an error.
+      if (outcome.reason === "already_has_active_ticket") {
+        const winner = await activeTicketId(ctx.workspaceId, conv.id);
+        return advance({
+          skipped: "already_has_active_ticket",
+          ...(winner ? { ticketId: winner } : {}),
+        });
+      }
+      return advanceWithError(404, outcome.reason);
+    }
     return advance({ ticketId: outcome.ticket.id, number: outcome.ticket.number });
   },
 };
@@ -234,12 +250,20 @@ export const assignTicketStepHandler: StepHandler<AssignTicketStepConfig> = {
     // belong to a specialist while the thread stays with the agent who knows
     // the customer (the same reason `fillActiveTicketAssignee` is fill-only).
     if (config.mode === "team") {
+      // Pinned so the write below is a CAS, exactly as the `user` branch does:
+      // `updateTicket`'s own CAS covers STATUS only, so an agent claiming the
+      // ticket between this read and the assign did not move the status, and
+      // the automation overwrote them — the one thing §18 says it must never
+      // do. Null when overwriting is allowed, which is the caller saying the
+      // human's claim is not to be respected here.
+      let expectedVersion: number | undefined;
       if (!config.overwrite) {
         const current = await db.ticket.findFirst({
           where: { id: ticketId, workspaceId: ctx.workspaceId },
-          select: { assignedUserId: true },
+          select: { assignedUserId: true, version: true },
         });
         if (current?.assignedUserId) return advance({ skipped: "already_assigned", ticketId });
+        if (current) expectedVersion = current.version;
       }
       const built = await buildAssignmentContext(db, ctx.workspaceId, conv.id, "workflow");
       if (!built) return advance({ skipped: "conversation_not_found" });
@@ -261,6 +285,7 @@ export const assignTicketStepHandler: StepHandler<AssignTicketStepConfig> = {
         // Record WHICH queue it came through, so "how long did Sales sit on
         // this" stays answerable.
         ...(config.policyId ? { assignedTeamId: config.policyId } : {}),
+        ...(expectedVersion !== undefined ? { expectedVersion } : {}),
       });
       return applied;
     }
