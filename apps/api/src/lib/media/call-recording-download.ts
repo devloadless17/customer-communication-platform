@@ -784,7 +784,15 @@ async function transcribePerSpeaker(
     );
     return null;
   }
-  if (!channels) return null; // mono source — nothing to separate
+  if (!channels) {
+    // Mono source — nothing to separate. Logged because the alternative is a
+    // transcript with no speaker labels and no explanation anywhere.
+    console.warn(
+      `[call-transcript] call=${callId}: recording is not stereo — ` +
+        "agent/customer separation unavailable, transcribing the file whole",
+    );
+    return null;
+  }
 
   // ── Are there actually two speakers to separate? ────────────────────────
   // A file can be stereo by every metadata check and still carry the SAME
@@ -835,6 +843,15 @@ async function transcribePerSpeaker(
 
   const sides = [agentR, customerR].filter((r) => r.segments.length > 0);
   if (sides.length === 0) return null;
+  if (sides.length === 1) {
+    // One speaker survived. Real for a voicemail or a one-sided call, but it is
+    // ALSO what a leg that never carried audio looks like — and then the other
+    // leg's microphone bleed makes one person appear to say everything.
+    console.warn(
+      `[call-transcript] call=${callId}: only the ${sides[0]!.label} leg produced ` +
+        "speech — the transcript will show a single speaker",
+    );
+  }
 
   // PARTIAL crosstalk, which the identical-channel check cannot see. When the
   // two devices share a room each leg picks up BOTH voices, so both sides
@@ -929,7 +946,20 @@ async function transcribeOneChannel(
   };
   // THE gate: no detected speech ⇒ no API call. A model asked to transcribe
   // silence invents text, and nothing in its answer says so.
-  if (side.audio.speechSeconds < MIN_SPEECH_SECONDS) return empty;
+  //
+  // SAY SO. Skipping silently is how a call ends up filed under one speaker
+  // with nothing in the log to explain it: the customer's leg is dropped here,
+  // the agent's leg survives carrying both voices (a microphone hears the room),
+  // and the transcript reads as if the agent said everything.
+  if (side.audio.speechSeconds < MIN_SPEECH_SECONDS) {
+    console.warn(
+      `[call-transcript] call=${callId} ${side.label}: only ` +
+        `${side.audio.speechSeconds.toFixed(2)}s of speech detected ` +
+        `(mean ${side.audio.meanVolumeDb.toFixed(1)} dBFS, needs ` +
+        `${MIN_SPEECH_SECONDS}s) — channel skipped, this speaker will be absent`,
+    );
+    return empty;
+  }
 
   // Temperature 0 first — correct for the overwhelming majority of audio. The
   // higher rungs exist only to break a loop.
