@@ -380,6 +380,30 @@ export function useCall(): {
     // Outbound: wait for REAL pickup (see outboundAnsweredRef) so the ring
     // period is never recorded and the file length matches the conversation.
     if (live.direction === "out" && !outboundAnsweredRef.current) return;
+
+    // WAIT FOR THE REMOTE TRACK TO CARRY MEDIA.
+    //
+    // `ontrack` fires as soon as the track is negotiated, BEFORE audio flows,
+    // and a remote track is `muted` until it does. A MediaStreamAudioSourceNode
+    // created over a muted remote track produces silence for the LIFE of the
+    // call — it binds at construction and never recovers when media starts.
+    //
+    // Measured on a production recording: the customer's channel was digital
+    // silence end to end (-91 dBFS mean against -26 dBFS on the agent's), so
+    // that side of the conversation never existed in the file and no
+    // transcription setting could recover it. It was intermittent because the
+    // recorder can also be started from the connection-state path, which
+    // happens to run after media is flowing — hence some calls captured the
+    // customer and some did not.
+    const remoteTrack = remote.getAudioTracks()[0];
+    if (!remoteTrack) return; // no audio track yet; ontrack will call again
+    if (remoteTrack.muted) {
+      remoteTrack.addEventListener("unmute", () => startInAppRecorder(), {
+        once: true,
+      });
+      return;
+    }
+
     try {
       const ctx = new AudioContext();
       const dest = ctx.createMediaStreamDestination();
