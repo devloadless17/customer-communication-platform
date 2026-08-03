@@ -180,7 +180,11 @@ export function TicketThread({
                 </div>
               )}
 
-              <p className="whitespace-pre-wrap break-words text-xs leading-relaxed">{m.body}</p>
+              {/* A reply may be evidence with no caption — render nothing
+                  rather than an empty line that pushes the files down. */}
+              {m.body ? (
+                <p className="whitespace-pre-wrap break-words text-xs leading-relaxed">{m.body}</p>
+              ) : null}
 
               {m.attachments.length > 0 ? (
                 <ul className="mt-1 flex max-w-md flex-col gap-1">

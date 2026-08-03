@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -105,10 +105,6 @@ const EVENT_LABELS: Record<string, string> = {
   escalation_status: "changed the status in the other workspace",
   escalation_severed: "the linked ticket was deleted",
 };
-
-/** A ticket-level file: one that isn't already rendering inside a thread
- *  message or a migrated log entry, where it would show twice. */
-const isTicketLevel = (a: TicketAttachment) => !a.eventId && !a.messageId;
 
 /** A string field off an event's before/after JSON, or null. */
 function eventStr(v: Record<string, unknown> | null | undefined, key: string): string | null {
@@ -452,29 +448,6 @@ export function TicketDetailClient({
     [seed.id, viewerUserId],
   );
 
-  /** Attach files to the ticket itself (no comment). */
-  const attachFiles = async (files: File[]) => {
-    if (files.length === 0) return;
-    setBusy(true);
-    try {
-      const form = new FormData();
-      for (const f of files) form.append("files", f);
-      const res = await apiFetch(`/api/tickets/${ticket.id}/attachments`, {
-        method: "POST",
-        body: form,
-      });
-      if (!res.ok) {
-        const d = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
-        throw new Error(d.detail || d.error || "Couldn't attach the files");
-      }
-      await reload();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Couldn't attach the files");
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const removeAttachment = async (attachmentId: string) => {
     setBusy(true);
     try {
@@ -542,6 +515,23 @@ export function TicketDetailClient({
   };
 
   const breached = ticket.sla.firstResponseBreached || ticket.sla.resolutionBreached;
+
+  /**
+   * Every file on this ticket, DERIVED rather than synced.
+   *
+   * `ticket.attachments` is the server's full set, but the ticket object is only
+   * re-read on a reload — so a file sent in the thread (by you, or arriving on a
+   * socket frame) was in the thread and missing from the gallery until you
+   * refreshed. Unioning the two and de-duplicating by id keeps one source of
+   * truth on the server and no second piece of client state to keep in step
+   * (§14: never duplicate state you can derive).
+   */
+  const allFiles = useMemo(() => {
+    const byId = new Map<string, TicketAttachment>();
+    for (const a of ticket.attachments) byId.set(a.id, a);
+    for (const m of thread) for (const a of m.attachments) byId.set(a.id, a);
+    return [...byId.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }, [ticket.attachments, thread]);
 
   /** Who reads the thread. Empty on an unshared ticket — nobody outside this
    *  workspace has access, so promising an audience would be a lie. */
@@ -1058,36 +1048,44 @@ export function TicketDetailClient({
         </section>
       ) : null}
 
-      {/* Files on the TICKET itself. A file posted in the thread renders with
-          the message that explains it, so it is excluded here rather than
-          listed twice. Every party to a shared ticket sees all of them — the
-          ticket is meant to carry the whole issue. */}
+      {/* Files — a GALLERY, not an uploader.
+          Every file on the ticket, wherever it came in: the thread messages
+          that carry evidence, and the older log entries that did before the
+          thread existed. Read-only on purpose: a file arrives WITH the sentence
+          that explains it, so "Add files" here produced attachments nobody
+          could tell the reason for. The thread composer is the one way in. */}
       <section className="rounded-xl border bg-card p-4">
-        <h2 className="mb-1 text-sm font-semibold">Files</h2>
+        <h2 className="mb-1 flex items-center gap-1.5 text-sm font-semibold">
+          <Paperclip aria-hidden className="size-4" />
+          Files
+          {allFiles.length > 0 ? (
+            <span className="text-2xs font-normal text-muted-foreground">{allFiles.length}</span>
+          ) : null}
+        </h2>
         <p className="mb-2 text-2xs text-muted-foreground">
           {ticket.sharing
-            ? "Visible to every workspace working this ticket."
-            : "Screenshots, invoices, forms — whatever the issue needs."}
+            ? "Everything attached to this ticket, from every workspace working it."
+            : "Everything attached to this ticket. Attach a file by sending it in the thread."}
         </p>
-        {ticket.attachments.filter(isTicketLevel).length > 0 ? (
-          <ul className="mb-2 flex flex-col gap-1.5">
-            {ticket.attachments
-              .filter(isTicketLevel)
-              .map((a) => (
-                <TicketAttachmentRow
-                  key={a.id}
-                  attachment={a}
-                  busy={busy}
-                  onRemove={() => void removeAttachment(a.id)}
-                />
-              ))}
+        {allFiles.length > 0 ? (
+          <ul className="flex max-h-80 flex-col gap-1.5 overflow-y-auto">
+            {allFiles.map((a) => (
+              <TicketAttachmentRow
+                key={a.id}
+                attachment={a}
+                busy={busy}
+                // Removal stays available — the gallery is the one place you can
+                // see every file at once, which is where you notice the wrong
+                // one. The API still refuses another workspace's upload.
+                onRemove={() => void removeAttachment(a.id)}
+              />
+            ))}
           </ul>
-        ) : null}
-        <FilePicker
-          busy={busy}
-          label="Add files"
-          onPick={(files) => void attachFiles(files)}
-        />
+        ) : (
+          <p className="text-2xs text-muted-foreground">
+            Nothing yet — send a file in the thread and it appears here.
+          </p>
+        )}
       </section>
 
       <section className="rounded-xl border bg-card p-4">
@@ -1313,43 +1311,6 @@ export function TicketDetailClient({
       )}
       {confirmDialog}
     </div>
-  );
-}
-
-/**
- * A file input styled as a button. Resets its value after picking so choosing
- * the SAME file twice still fires a change event.
- */
-function FilePicker({
-  busy,
-  label,
-  onPick,
-}: {
-  busy: boolean;
-  label: string;
-  onPick: (files: File[]) => void;
-}) {
-  return (
-    <label
-      className={cn(
-        "inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border px-3 text-xs font-medium",
-        busy && "pointer-events-none opacity-50",
-      )}
-    >
-      <Paperclip aria-hidden className="size-3.5" />
-      {label}
-      <input
-        type="file"
-        multiple
-        disabled={busy}
-        className="hidden"
-        onChange={(e) => {
-          const files = Array.from(e.target.files ?? []);
-          e.target.value = "";
-          if (files.length > 0) onPick(files);
-        }}
-      />
-    </label>
   );
 }
 

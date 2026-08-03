@@ -186,6 +186,59 @@ describe("every other change tells whoever RAISED it", () => {
     expect((await bell(worker)).filter((n) => n.ticketId === ticket.id)).toHaveLength(0);
   });
 
+  it("an ATTACHMENT-ONLY reply lands, and notifies", async () => {
+    // The composer has always allowed a screenshot with no caption, but the
+    // schema required `body.min(1)` and the domain refused an empty one — so
+    // every caption-less reply 400'd. The row was never written, which is why
+    // the UI said "Didn't send" AND no bell/blue-dot ever appeared: no message,
+    // no unread marker, no notification. One bug, both symptoms.
+    const ticket = await makeTicket();
+    const png = Buffer.from(
+      "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a4944415478da6360000002000180fe8ecf0000000049454e44ae426082",
+      "hex",
+    );
+    const posted = await addTicketMessage(tdb, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId: worker, workspaceId: wsA },
+      body: "",
+      attach: (messageId) =>
+        addTicketAttachment(adb, {
+          workspaceId: wsA,
+          ticketId: ticket.id,
+          actor: { userId: worker, workspaceId: wsA },
+          messageId,
+          bytes: png,
+          filename: "screenshot.png",
+          mimeType: "image/png",
+        }).then((r) => (r.ok ? [r.attachment] : [])),
+    });
+    expect(posted.ok).toBe(true);
+    if (!posted.ok) return;
+    expect(posted.message.body).toBe("");
+    expect(posted.message.attachments).toHaveLength(1);
+
+    // The whole point: the person waiting is told, exactly as for a text reply.
+    expect(posted.notifiedUserIds).toContain(raiser);
+    await settle();
+    const mine = (await bell(raiser)).filter((n) => n.ticketId === ticket.id);
+    expect(mine.map((n) => n.kind)).toContain("ticket_replied");
+    expect(mine[0]?.summary).toContain("attached");
+    // ...and the in-app unread marker, which drives the rail's blue dot.
+    expect(
+      await prisma.ticketThreadUnread.count({ where: { ticketId: ticket.id, userId: raiser } }),
+    ).toBe(1);
+
+    // Still refused when there is genuinely nothing: no text, no files.
+    const empty = await addTicketMessage(tdb, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId: worker, workspaceId: wsA },
+      body: "   ",
+    });
+    expect(empty).toEqual({ ok: false, reason: "empty_message" });
+  });
+
   it("notifies the raiser when the ticket is escalated to another department", async () => {
     const ticket = await makeTicket();
     await shareTicket(prisma as unknown as Parameters<typeof shareTicket>[0], {

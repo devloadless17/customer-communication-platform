@@ -173,7 +173,10 @@ export async function addTicketMessage(
   },
 ): Promise<AddThreadMessageOutcome> {
   const body = args.body.trim();
-  if (!body) return { ok: false, reason: "empty_message" };
+  // A message needs SOMETHING — text, or the files `attach` is about to add.
+  // `attach` is only supplied when the caller actually has files, so its
+  // presence is the honest test for "this reply carries evidence".
+  if (!body && !args.attach) return { ok: false, reason: "empty_message" };
 
   const ticket = await db.ticket.findFirst({
     where: ticketByIdWhere(args.workspaceId, args.ticketId),
@@ -325,7 +328,9 @@ export async function addTicketMessage(
       actorName: message.authorName,
       ticketId: ticket.id,
       ticketNumber: ticket.number,
-      summary: "replied on this ticket",
+      // A caption-less screenshot is still a reply, but "replied" reads oddly
+      // in a bell entry when there is nothing to read.
+      summary: body ? "replied on this ticket" : "attached a file on this ticket",
     });
   }
 

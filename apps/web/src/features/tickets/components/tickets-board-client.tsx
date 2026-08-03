@@ -844,12 +844,26 @@ function Card({
       }}
       onDragEnd={() => setDragging(false)}
       className={cn(
-        "rounded-lg border bg-card p-2.5 shadow-xs transition-opacity",
+        "relative rounded-lg border bg-card p-2.5 shadow-xs transition-opacity",
         !busy && "cursor-grab active:cursor-grabbing",
         dragging && "opacity-40",
+        // SOMEONE ANSWERED YOU. The whole card carries it — a tinted surface,
+        // a coloured border and a left spine — because a small pill in the
+        // corner did not read as "this is the ticket that was replied on" when
+        // you are scanning a column of twenty. Ranked BELOW `selected` so a
+        // bulk selection still wins the border it needs to be unambiguous.
+        unread && "border-sky-500/60 bg-sky-500/[0.06] shadow-sm ring-1 ring-inset ring-sky-500/20",
         selected && "border-primary ring-1 ring-inset ring-primary/40",
       )}
     >
+      {unread && (
+        // A spine down the card's leading edge: visible even when the tint is
+        // washed out by the column background or a high-contrast theme.
+        <span
+          aria-hidden
+          className="pointer-events-none absolute inset-y-1 left-0 w-0.5 rounded-r bg-sky-500"
+        />
+      )}
       <div className="mb-1 flex items-center gap-1.5">
         {/* Bulk-select. Stops propagation so ticking a card can never start a
             drag or follow the title link. */}

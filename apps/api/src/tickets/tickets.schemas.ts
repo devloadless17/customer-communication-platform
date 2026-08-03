@@ -268,7 +268,15 @@ export type EscalateTicketInput = z.infer<typeof EscalateTicketSchema>;
  * message that already landed instead of posting a duplicate.
  */
 export const PostThreadMessageSchema = z.object({
-  body: z.string().trim().min(1).max(5000),
+  /**
+   * Empty is ALLOWED when the message carries files — a screenshot with no
+   * caption is a perfectly ordinary reply, and the composer has always offered
+   * it. `min(1)` here meant every attachment-only reply 400'd as
+   * `empty_message`: the row was never written, so the UI showed "Didn't send"
+   * AND nobody was notified (no message, no unread marker, no bell). The
+   * "message or file" rule is enforced where both are known — the service.
+   */
+  body: z.string().trim().max(5000).optional().default(""),
   clientTempId: z.string().trim().min(1).max(80).optional(),
 });
 export type PostThreadMessageInput = z.infer<typeof PostThreadMessageSchema>;
