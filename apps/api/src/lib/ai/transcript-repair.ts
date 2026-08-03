@@ -1,5 +1,5 @@
-import { anthropicConfigured, chatJsonAnthropic } from "./anthropic-client";
-import { anthropicReplyModel } from "./models";
+import { resolveModel } from "./models";
+import { chatJson, openaiConfigured } from "./openai-client";
 
 /**
  * Repair a Lebanese call transcript's dialect spelling.
@@ -8,8 +8,7 @@ import { anthropicReplyModel } from "./models";
  * so Lebanese comes back as near-miss forms that are almost words — measured
  * on a real call, "كيف فيني ساعدك" arrived as "كفيه سادك", "هلق" as the
  * Egyptian "دلوقتي", "ليش" as "ديش". The words are recoverable from context by
- * a model that actually knows the dialect, which this codebase already relies
- * on Claude for (see `replyTextProvider`).
+ * a model that knows the dialect.
  *
  * WHY IT IS DANGEROUS, and what bounds it: a model asked to "fix" text will
  * also fix things that were never broken. The same measured run rewrote the
@@ -23,6 +22,14 @@ import { anthropicReplyModel } from "./models";
  *
  * The raw text is stored alongside the repaired one regardless, so nothing is
  * lost and a suspicious line can always be checked against what was heard.
+ *
+ * The guard is also what makes the ENGINE swappable. This ran on Claude until
+ * the second text vendor was removed; it is the same prompt against the same
+ * thresholds now, and a worse repair is rejected rather than stored. Note the
+ * failure that sent call STT back to whisper-1 (see `callSttModel`) does not
+ * apply here — that was a model handed AUDIO returning its own prompt, and
+ * this step is text in, text out, with a length-and-retention check on the way
+ * back.
  */
 
 /** Below this share of original words retained, it rewrote rather than repaired. */
@@ -47,8 +54,12 @@ const SYSTEM = [
   "- Egyptian or MSA forms a Lebanese speaker would not use are the typical error (دلوقتي is Egyptian; Lebanese says هلق).",
 ].join("\n");
 
+// `additionalProperties: false` plus every property listed in `required` is
+// what OpenAI's strict structured output demands — without both it rejects the
+// schema outright rather than degrading.
 const SCHEMA = {
   type: "object",
+  additionalProperties: false,
   properties: {
     corrected: {
       type: "string",
@@ -81,19 +92,24 @@ export async function repairLebaneseTranscript(opts: {
 }): Promise<string | null> {
   const raw = opts.text.trim();
   if (raw.length < MIN_CHARS) return null;
-  if (!anthropicConfigured()) return null;
+  if (!openaiConfigured()) return null;
   const lang = (opts.language ?? "").toLowerCase();
   if (lang && !lang.startsWith("ar") && lang !== "arabic") return null;
 
   let corrected: string;
   try {
-    const res = await chatJsonAnthropic<{ corrected: string }>({
-      model: anthropicReplyModel(),
-      system: SYSTEM,
-      user:
-        (opts.businessContext
-          ? `Proper nouns that may appear: ${opts.businessContext}\n\n`
-          : "") + `Transcript to repair:\n${raw}`,
+    const res = await chatJson<{ corrected: string }>({
+      model: resolveModel("reply"),
+      messages: [
+        { role: "system", content: SYSTEM },
+        {
+          role: "user",
+          content:
+            (opts.businessContext
+              ? `Proper nouns that may appear: ${opts.businessContext}\n\n`
+              : "") + `Transcript to repair:\n${raw}`,
+        },
+      ],
       schemaName: "repaired_transcript",
       // No cast needed: an `as const` object is already assignable to
       // `Record<string, unknown>` (readonly properties do not block it). The
