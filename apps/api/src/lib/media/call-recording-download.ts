@@ -10,6 +10,7 @@ import {
   type CallChannelAudio,
 } from "@/lib/media/audio-transcode";
 import { transcribeCallChannel } from "@/lib/ai/voice";
+import { repairLebaneseTranscript } from "@/lib/ai/transcript-repair";
 import { configEnabled, loadAiConfig } from "@/lib/ai/runtime-config";
 
 /**
@@ -1198,6 +1199,48 @@ export async function transcribeInAppCallRecording(
     return false;
   }
 
+  // ── Dialect repair ──────────────────────────────────────────────────────
+  // The speech model renders Lebanese as near-miss MSA ("كيف فيني ساعدك" came
+  // back as "كفيه سادك"). Claude knows the dialect — this codebase already
+  // routes reply TEXT to it for that reason — so it repairs the spelling under
+  // a hard guard that discards anything that strayed from the original. The
+  // RAW text is kept in the document either way, so a suspicious line can
+  // always be checked against what was actually heard.
+  const businessContext = [aiConfig.companyName, aiConfig.products, aiConfig.services]
+    .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+    .join("، ")
+    .slice(0, 200);
+  const repairedTurns = await Promise.all(
+    result.segments.map(async (seg) => {
+      const fixed = await repairLebaneseTranscript({
+        text: seg.text,
+        language: result.language,
+        businessContext,
+      });
+      return fixed ? { ...seg, text: fixed } : seg;
+    }),
+  );
+  const repairedFlat =
+    result.segments.length > 0
+      ? null
+      : await repairLebaneseTranscript({
+          text: result.text,
+          language: result.language,
+          businessContext,
+        });
+  const anyRepaired =
+    repairedFlat !== null ||
+    repairedTurns.some((t, i) => t.text !== result.segments[i]!.text);
+
+  const finalSegments = repairedTurns;
+  const finalText =
+    repairedFlat ??
+    (finalSegments.length > 0
+      ? finalSegments
+          .map((t) => `${t.speaker === "Business" ? "Agent" : "Customer"}: ${t.text}`)
+          .join("\n")
+      : result.text);
+
   const doc = {
     metadata: {
       processed_at: new Date().toISOString(),
@@ -1205,11 +1248,16 @@ export async function transcribeInAppCallRecording(
       // Which path produced this — a mix transcript is the degraded one, and
       // when a call reads badly this is the first thing worth knowing.
       channels: result.segments.length > 0 ? "per-speaker" : "mixed",
+      dialect_repaired: anyRepaired,
     },
     transcript: {
-      text: result.text,
+      text: finalText,
       language: result.language ?? null,
-      segments: result.segments,
+      segments: finalSegments,
+      // What the speech model actually returned, before any repair. Kept so a
+      // line that reads oddly can be checked against what was heard rather
+      // than taken on trust.
+      raw_text: anyRepaired ? result.text : undefined,
     },
   };
   const key = `call-transcripts/${call.workspaceId}/${call.id}.json`;
