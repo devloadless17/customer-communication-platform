@@ -363,13 +363,22 @@ export class WorkspacesService {
     if (existing?.role === "admin" && role !== "admin") {
       await this.db.$transaction(async (tx) => {
         await tx.$queryRaw`SELECT id FROM "Workspace" WHERE id = ${workspaceId} FOR UPDATE`;
-        const admins = await tx.workspaceMember.count({
-          // A DEACTIVATED user cannot sign in, so they cannot configure or
-          // repair anything — counting them let the last usable admin be
-          // demoted away, which the guard's own message calls unrecoverable.
-          where: { workspaceId, role: "admin", user: { deactivatedAt: null } },
+        // "Somebody ELSE can still administer this workspace afterwards."
+        // Phrased as a count of OTHERS rather than of everyone, because the two
+        // differ exactly when the target is themselves unusable: a DEACTIVATED
+        // admin cannot sign in, so counting them let the last usable admin be
+        // demoted away — and excluding them without also excluding the target
+        // made a deactivated ex-employee impossible to remove while one active
+        // admin remained. Same predicate as the `users.service` sibling.
+        const otherAdmins = await tx.workspaceMember.count({
+          where: {
+            workspaceId,
+            role: "admin",
+            userId: { not: userId },
+            user: { deactivatedAt: null },
+          },
         });
-        if (admins <= 1) {
+        if (otherAdmins === 0) {
           throw new BadRequestException({
             error: "last_admin",
             detail:

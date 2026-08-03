@@ -302,6 +302,20 @@ export function applyMessageUpdated(
   return { ...prev, messages: nextMessages };
 }
 
+/**
+ * Do these two media blocks say the same thing? Shallow, key-by-key, in both
+ * directions so an ADDED optional field (`thumbnailUrl`, `caption`) counts as a
+ * change. Deliberately not a `url` comparison — see the call site.
+ */
+function sameMedia(a: MediaAttachment | undefined, b: MediaAttachment): boolean {
+  if (!a) return false;
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]) as Set<keyof MediaAttachment>;
+  for (const k of keys) {
+    if (a[k] !== b[k]) return false;
+  }
+  return true;
+}
+
 export function applyMessageMediaReady(
   prev: ConversationWithRefs,
   payload: { messageId: string; media?: MediaAttachment },
@@ -313,8 +327,16 @@ export function applyMessageMediaReady(
   // at-least-once redelivery (the media sweeper re-publishes a downgrade for
   // rows still `mediaPending`) does not re-render the thread. §15's identity
   // contract, which every sibling reducer here keeps.
+  //
+  // Compared FIELD-WISE, never on `url` alone: `media.url` is `/api/media/<id>`,
+  // a constant for the row, so it is identical on every frame for that message
+  // and proves nothing changed only by accident. An outbound video's poster
+  // arrives as a SECOND `media_ready` carrying the same url plus a new
+  // `thumbnailUrl` (`storeOutboundVideoPoster`) — a url-only check swallowed it
+  // and left the sender staring at a black box, which is the exact bug that
+  // publish exists to fix.
   if (payload.media) {
-    if (existing.media?.url === payload.media.url && existing.mediaPending !== true) return prev;
+    if (existing.mediaPending !== true && sameMedia(existing.media, payload.media)) return prev;
   } else if (existing.media === undefined && existing.mediaPending === undefined) {
     return prev;
   }

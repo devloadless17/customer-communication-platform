@@ -18,6 +18,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   applyCallArtifacts,
+  applyMessageMediaReady,
   applyContactUpdate,
   applyConversationAssignment,
   applyConversationRead,
@@ -109,6 +110,55 @@ describe("identity on no-change (re-render economy)", () => {
       contact: { id: "someone-else" } as never,
     });
     expect(next).toBe(prev);
+  });
+});
+
+describe("applyMessageMediaReady — settles without swallowing a later field", () => {
+  const MEDIA = {
+    kind: "video",
+    url: "/api/media/m1",
+    mimeType: "video/mp4",
+    sizeBytes: 10,
+  } as const;
+
+  it("applies the OUTBOUND video poster that arrives as a second frame", () => {
+    // The regression this pins: `media.url` is `/api/media/<messageId>`, a
+    // CONSTANT for the row. An outbound video is created with its url already
+    // set and no `mediaPending`; `storeOutboundVideoPoster` then publishes a
+    // second `media_ready` carrying the same url plus a new `thumbnailUrl`.
+    // A url-only equality check treated that as "no change" and the sender
+    // stared at a black box until reload — the exact bug that publish exists
+    // to fix.
+    const prev = makeThread({
+      messages: [{ id: "m1", status: "sent", media: { ...MEDIA } } as Partial<Message>],
+    });
+    const next = applyMessageMediaReady(prev, {
+      messageId: "m1",
+      media: { ...MEDIA, thumbnailUrl: "/api/media/m1/thumb" },
+    });
+    expect(next).not.toBe(prev);
+    expect(next.messages[0]!.media?.thumbnailUrl).toBe("/api/media/m1/thumb");
+  });
+
+  it("returns the SAME reference when the frame says nothing new", () => {
+    const prev = makeThread({
+      messages: [
+        { id: "m1", status: "sent", media: { ...MEDIA }, mediaPending: false } as Partial<Message>,
+      ],
+    });
+    const next = applyMessageMediaReady(prev, { messageId: "m1", media: { ...MEDIA } });
+    expect(next).toBe(prev);
+  });
+
+  it("still settles a PENDING row whose media is otherwise identical", () => {
+    const prev = makeThread({
+      messages: [
+        { id: "m1", status: "received", media: { ...MEDIA }, mediaPending: true } as Partial<Message>,
+      ],
+    });
+    const next = applyMessageMediaReady(prev, { messageId: "m1", media: { ...MEDIA } });
+    expect(next).not.toBe(prev);
+    expect(next.messages[0]!.mediaPending).toBe(false);
   });
 });
 

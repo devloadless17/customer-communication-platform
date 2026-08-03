@@ -34,8 +34,12 @@ import {
  * workflow X can't chain-trigger workflow Y mid-run (§9 loop safety); use the
  * `trigger_workflow` step when that IS the intent.
  *
- * `expectedVersion` is deliberately NOT sent: automation has no stale view to
+ * `expectedVersion` is sent by exactly the two branches that must not overwrite
+ * a human — `assign_ticket` in `user` and `team` mode with `overwrite: false`.
+ * Everywhere else it is deliberately omitted: automation has no stale view to
  * protect, and a version conflict would fail a step for a race it can't see.
+ * Where it IS sent, a lost CAS degrades to `changed_by_someone_else` rather
+ * than erroring the run — the assignment was superseded, which is the point.
  */
 
 /** The active ticket on the envelope's conversation, or null. */
@@ -250,20 +254,12 @@ export const assignTicketStepHandler: StepHandler<AssignTicketStepConfig> = {
     // belong to a specialist while the thread stays with the agent who knows
     // the customer (the same reason `fillActiveTicketAssignee` is fill-only).
     if (config.mode === "team") {
-      // Pinned so the write below is a CAS, exactly as the `user` branch does:
-      // `updateTicket`'s own CAS covers STATUS only, so an agent claiming the
-      // ticket between this read and the assign did not move the status, and
-      // the automation overwrote them — the one thing §18 says it must never
-      // do. Null when overwriting is allowed, which is the caller saying the
-      // human's claim is not to be respected here.
-      let expectedVersion: number | undefined;
       if (!config.overwrite) {
         const current = await db.ticket.findFirst({
           where: { id: ticketId, workspaceId: ctx.workspaceId },
-          select: { assignedUserId: true, version: true },
+          select: { assignedUserId: true },
         });
         if (current?.assignedUserId) return advance({ skipped: "already_assigned", ticketId });
-        if (current) expectedVersion = current.version;
       }
       const built = await buildAssignmentContext(db, ctx.workspaceId, conv.id, "workflow");
       if (!built) return advance({ skipped: "conversation_not_found" });
@@ -279,6 +275,23 @@ export const assignTicketStepHandler: StepHandler<AssignTicketStepConfig> = {
         // queue is the honest outcome — inventing an assignee would hand work to
         // someone unavailable.
         return advance({ skipped: "no_assignee", ticketId, reason: decision.reason });
+      }
+      // Pinned HERE, immediately before the write, exactly as the `user` branch
+      // does. `updateTicket`'s own CAS covers STATUS only, so an agent who
+      // claimed this ticket without moving its status would otherwise be
+      // silently overwritten — the one thing §18 says automation must never do.
+      // Read after `resolveAssignee` on purpose: routing does several round
+      // trips (policies, members, shifts, capacity), and pinning before them
+      // would fail the step for any unrelated write in that whole window.
+      let expectedVersion: number | undefined;
+      if (!config.overwrite) {
+        const fresh = await db.ticket.findFirst({
+          where: { id: ticketId, workspaceId: ctx.workspaceId },
+          select: { assignedUserId: true, version: true },
+        });
+        // Someone claimed it while we were picking. Their claim wins.
+        if (fresh?.assignedUserId) return advance({ skipped: "already_assigned", ticketId });
+        if (fresh) expectedVersion = fresh.version;
       }
       const applied = await applyTicketUpdate(ctx.workspaceId, ticketId, {
         assignedUserId: decision.userId,
