@@ -530,8 +530,10 @@ export interface NoteSearchPage {
 export interface ListContactsOpts {
   /** Free-text search across name, phone, email, and customField values. */
   search?: string;
-  /** Filter rows where customFields[key] matches value (case-insensitive contains). */
-  fieldFilter?: { key: string; value: string };
+  /** Filter rows where customFields[key] matches value. Default mode is
+   *  case-insensitive `contains` (text fields); `equals` is an exact match —
+   *  the UI sends it with an option ID for select-type fields. */
+  fieldFilter?: { key: string; value: string; mode?: "contains" | "equals" };
   /** Filter by how the contact got into the DB. */
   source?: "inbound" | "manual";
   /** Keep only contacts carrying ANY of these tag ids (union, like audience groups). */

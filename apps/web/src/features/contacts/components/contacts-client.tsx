@@ -503,6 +503,7 @@ export function ContactsClient({
       search?: string;
       fieldKey?: string;
       fieldValue?: string;
+      fieldMode?: "contains" | "equals";
       source?: "inbound" | "manual";
       tagIds?: string[];
       window?: "open" | "closed";
@@ -514,6 +515,7 @@ export function ContactsClient({
     if (list.fieldFilter) {
       f.fieldKey = list.fieldFilter.key;
       f.fieldValue = list.fieldFilter.value;
+      if (list.fieldFilter.mode) f.fieldMode = list.fieldFilter.mode;
     }
     if (list.sourceFilter !== "all") f.source = list.sourceFilter;
     if (list.windowFilter !== "any") f.window = list.windowFilter;
@@ -876,6 +878,7 @@ export function ContactsClient({
             tagIds: list.tagIds.length > 0 ? list.tagIds : undefined,
             fieldKey: list.fieldFilter?.key,
             fieldValue: list.fieldFilter?.value,
+            fieldMode: list.fieldFilter?.mode,
           }}
           selectedIds={[...selectedIds]}
           filteredCount={list.totalCount ?? 0}

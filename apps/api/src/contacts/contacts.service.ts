@@ -1,4 +1,5 @@
 import { normalizeStringMap } from "@/lib/normalize-string-map";
+import { resolveSelectFieldPatch } from "@/lib/contact-fields/select-values";
 import {
   BadRequestException,
   ConflictException,
@@ -78,6 +79,9 @@ export interface ImportResult {
   /** Stage NAMES in the CSV that didn't match any team stage — those rows
    *  fell back to the default stage. Surfaced so the user can fix typos. */
   unknownStages?: string[];
+  /** `"<field label>: <value>"` select-field cells skipped because the value
+   *  matched no option. Surfaced so the user can fix typos or add options. */
+  unknownOptions?: string[];
 }
 
 @Injectable()
@@ -103,7 +107,7 @@ export class ContactsService {
       take: query.take,
       fieldFilter:
         query.fieldKey && query.fieldValue
-          ? { key: query.fieldKey, value: query.fieldValue }
+          ? { key: query.fieldKey, value: query.fieldValue, mode: query.fieldMode }
           : undefined,
       source: query.source,
       tagIds,
@@ -158,7 +162,13 @@ export class ContactsService {
     const location = trimOrNull(input.location);
     const language = trimOrNull(input.language);
     const countryCode = input.countryCode ?? getCountryFromPhone(phone);
-    const customFields = normalizeCreateCustomFields(input.customFields ?? {});
+    // Select-type fields: resolve name-or-id → option id (or 400) before
+    // anything is written — the JSONB carries no FK, so this gate is the
+    // integrity boundary.
+    const customFields = await resolveSelectFieldPatch(
+      workspaceId,
+      normalizeCreateCustomFields(input.customFields ?? {}),
+    );
 
     // Every contact lands in the team's default stage on create — lazy-init
     // covers older teams + admins who deleted the seeded default.
@@ -365,10 +375,13 @@ export class ContactsService {
           }
         }
 
+        // Same select-field gate as create, inside the tx so the option
+        // read and the CAS write see one snapshot (an option deleted after
+        // this check aborts the tx via the delete path's same-tx re-point).
         const nextCustom = customFieldsPatch
           ? mergeCustomFields(
               (existing.customFields as Record<string, unknown> | null) ?? {},
-              customFieldsPatch,
+              await resolveSelectFieldPatch(workspaceId, customFieldsPatch, tx),
             )
           : undefined;
 
@@ -781,7 +794,7 @@ export class ContactsService {
       search: filter.search,
       fieldFilter:
         filter.fieldKey && filter.fieldValue
-          ? { key: filter.fieldKey, value: filter.fieldValue }
+          ? { key: filter.fieldKey, value: filter.fieldValue, mode: filter.fieldMode }
           : undefined,
       source: filter.source,
       tagIds: filter.tagIds,

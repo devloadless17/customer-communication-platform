@@ -7,6 +7,7 @@ import type {
   ContactFieldDefinition,
   ContactListItem,
   CursorPage,
+  TagColor,
 } from "@ccp/shared/types";
 
 import {
@@ -107,10 +108,15 @@ export function buildContactFilterWhere(
         : Prisma.empty
     }
     ${
+      /* `equals` = exact match on the stored value — the UI sends it with an
+         option ID for select-type fields. Default `contains` keeps the text
+         fields' substring semantics byte-for-byte. */
       fieldFilter
-        ? Prisma.sql`AND COALESCE(c."customFields" ->> ${fieldFilter.key}, '') ILIKE ${
-            "%" + fieldFilter.value + "%"
-          }`
+        ? fieldFilter.mode === "equals"
+          ? Prisma.sql`AND c."customFields" ->> ${fieldFilter.key} = ${fieldFilter.value}`
+          : Prisma.sql`AND COALESCE(c."customFields" ->> ${fieldFilter.key}, '') ILIKE ${
+              "%" + fieldFilter.value + "%"
+            }`
         : Prisma.empty
     }
     ${source ? Prisma.sql`AND c.source = ${source}::"ContactSource"` : Prisma.empty}
@@ -606,6 +612,9 @@ export async function listContactFieldDefinitions(
   const rows = await db.contactFieldDefinition.findMany({
     where: { workspaceId },
     orderBy: [{ order: "asc" }, { createdAt: "asc" }],
+    include: {
+      options: { orderBy: [{ position: "asc" }, { createdAt: "asc" }] },
+    },
   });
   return rows.map((r) => ({
     id: r.id,
@@ -614,6 +623,18 @@ export async function listContactFieldDefinitions(
     label: r.label,
     order: r.order,
     isVisible: r.isVisible,
+    type: r.type,
+    ...(r.type === "select"
+      ? {
+          options: r.options.map((o) => ({
+            id: o.id,
+            fieldId: o.fieldId,
+            name: o.name,
+            color: o.color as TagColor,
+            position: o.position,
+          })),
+        }
+      : {}),
   }));
 }
 

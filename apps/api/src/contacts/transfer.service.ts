@@ -182,6 +182,18 @@ export class ContactTransferService {
 
     const format = args.input.format as TransferFormat;
     const stamp = new Date().toISOString().slice(0, 10);
+    // The POST body carries the field filter FLAT (fieldKey/fieldValue —
+    // mirroring the list's query params) but the runner's
+    // `buildContactFilterWhere` reads the nested `fieldFilter` shape from
+    // ListContactsOpts. Convert here — stored flat, the runner silently
+    // ignored it and "export current filters" exported the unfiltered set.
+    const { fieldKey, fieldValue, fieldMode, ...restFilters } = args.input.filters ?? {};
+    const filters = {
+      ...restFilters,
+      ...(fieldKey && fieldValue
+        ? { fieldFilter: { key: fieldKey, value: fieldValue, mode: fieldMode } }
+        : {}),
+    };
     const job = await this.createJob({
       workspaceId: args.workspaceId,
       kind: "export",
@@ -191,7 +203,7 @@ export class ContactTransferService {
       options: {
         // Explicit selection wins over filters — see the schema's note.
         ...(args.input.ids?.length ? { scopeIds: args.input.ids } : {}),
-        filters: args.input.filters ?? {},
+        filters,
       },
       expiresAt: expiry(),
     });

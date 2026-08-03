@@ -28,6 +28,7 @@ export interface TransferJob {
     errors?: Array<{ row: number; reason: string }>;
     unknownColumns?: string[];
     unknownStages?: string[];
+    unknownOptions?: string[];
     extraSheets?: string[];
   };
 }

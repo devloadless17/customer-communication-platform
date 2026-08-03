@@ -108,7 +108,13 @@ export interface BuilderCatalogs {
   }>;
   tags: Array<{ id: string; name: string; color: string }>;
   stages: Array<{ id: string; name: string; position: number }>;
-  fields: Array<{ key: string; label: string }>;
+  fields: Array<{
+    key: string;
+    label: string;
+    type: "text" | "select";
+    /** Select-type fields carry their option catalog (values store the id). */
+    options?: Array<{ id: string; name: string }>;
+  }>;
   workflows: Array<{ id: string; name: string; trigger: Trigger }>;
   /** Named assignment policies, for the `assign_to` step's policy mode. */
   assignmentPolicies: Array<{ id: string; name: string; isDefault: boolean }>;

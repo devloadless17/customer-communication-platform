@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Tag as TagIcon } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
@@ -340,7 +340,7 @@ function Field({
   children,
 }: {
   label: string;
-  hint?: string;
+  hint?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
@@ -852,12 +852,30 @@ export function UpdateFieldEditor({
   onChange: (c: Record<string, unknown>) => void;
   fields: BuilderCatalogs["fields"];
 }) {
+  const selectedField = fields.find((f) => f.key === config.fieldKey);
+  const isSelect = selectedField?.type === "select";
+  // A select field's stored value is the option ID; the dropdown writes ids.
+  // "Custom value / token" keeps the raw input available (e.g. a $var token
+  // that resolves to an option NAME at run time — the server resolves
+  // name-or-id and rejects anything else with invalid_option).
+  const options = selectedField?.options ?? [];
+  const valueIsKnownOption =
+    config.value === undefined ||
+    config.value === "" ||
+    options.some((o) => o.id === config.value);
+  const [customValue, setCustomValue] = useState(isSelect && !valueIsKnownOption);
   return (
     <div className="flex flex-col gap-4">
       <Field label="Field" hint="The contact's custom fields. Add new ones in Settings → Contact Fields.">
         <Select
           value={config.fieldKey ?? ""}
-          onChange={(e) => onChange({ ...config, fieldKey: e.target.value })}
+          onChange={(e) => {
+            setCustomValue(false);
+            // Changing the field invalidates the old value (a text string or
+            // another field's option id) — clear it so a stale id can't ride
+            // along into the new field.
+            onChange({ ...config, fieldKey: e.target.value, value: "" });
+          }}
         >
           <option value="">Select a field…</option>
           {fields.map((f) => (
@@ -867,12 +885,64 @@ export function UpdateFieldEditor({
           ))}
         </Select>
       </Field>
-      <Field label="Value" hint="Tokens like $var.contact.email resolve per run.">
-        <Input
-          value={config.value ?? ""}
-          onChange={(e) => onChange({ ...config, value: e.target.value })}
-        />
-      </Field>
+      {isSelect && !customValue ? (
+        <Field
+          label="Option"
+          hint={
+            <>
+              The field&apos;s dropdown options.{" "}
+              <button
+                type="button"
+                className="underline hover:text-foreground"
+                onClick={() => setCustomValue(true)}
+              >
+                Use a custom value / token instead
+              </button>
+            </>
+          }
+        >
+          <Select
+            value={config.value ?? ""}
+            onChange={(e) => onChange({ ...config, value: e.target.value })}
+          >
+            <option value="">Select an option…</option>
+            {options.map((o) => (
+              <option key={o.id} value={o.id}>
+                {o.name}
+              </option>
+            ))}
+          </Select>
+        </Field>
+      ) : (
+        <Field
+          label="Value"
+          hint={
+            isSelect ? (
+              <>
+                Must resolve to one of the field&apos;s options (name or id) at
+                run time.{" "}
+                <button
+                  type="button"
+                  className="underline hover:text-foreground"
+                  onClick={() => {
+                    setCustomValue(false);
+                    if (!valueIsKnownOption) onChange({ ...config, value: "" });
+                  }}
+                >
+                  Pick an option instead
+                </button>
+              </>
+            ) : (
+              "Tokens like $var.contact.email resolve per run."
+            )
+          }
+        >
+          <Input
+            value={config.value ?? ""}
+            onChange={(e) => onChange({ ...config, value: e.target.value })}
+          />
+        </Field>
+      )}
       <TargetSelector
         target={config.target}
         onChange={(target) => onChange({ ...config, target })}
@@ -1110,7 +1180,11 @@ function BranchPresetEditor({
           <Field label="Custom field">
             <Select
               value={preset.fieldKey}
-              onChange={(e) => onChange({ ...preset, fieldKey: e.target.value })}
+              onChange={(e) =>
+                // Changing the field invalidates the old comparison value (a
+                // text string or another field's option id) — clear it.
+                onChange({ ...preset, fieldKey: e.target.value, value: "" })
+              }
             >
               <option value="">Select a field…</option>
               {catalogs.fields.map((f) => (
@@ -1120,13 +1194,38 @@ function BranchPresetEditor({
               ))}
             </Select>
           </Field>
-          <Field label="Equals">
-            <Input
-              value={preset.value}
-              onChange={(e) => onChange({ ...preset, value: e.target.value })}
-              placeholder="VIP"
-            />
-          </Field>
+          {(() => {
+            // Select-type field: compare against an OPTION (the branch
+            // evaluator matches the stored option ID — rename-stable, same
+            // as in_stage storing a stageId). Text fields keep free input.
+            const def = catalogs.fields.find((f) => f.key === preset.fieldKey);
+            if (def?.type === "select") {
+              return (
+                <Field label="Equals option">
+                  <Select
+                    value={preset.value}
+                    onChange={(e) => onChange({ ...preset, value: e.target.value })}
+                  >
+                    <option value="">Select an option…</option>
+                    {(def.options ?? []).map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.name}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+              );
+            }
+            return (
+              <Field label="Equals">
+                <Input
+                  value={preset.value}
+                  onChange={(e) => onChange({ ...preset, value: e.target.value })}
+                  placeholder="VIP"
+                />
+              </Field>
+            );
+          })()}
         </>
       )}
       {preset.type === "message_contains" && (

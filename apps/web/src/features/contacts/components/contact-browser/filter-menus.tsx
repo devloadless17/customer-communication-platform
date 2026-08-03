@@ -247,23 +247,71 @@ export function MoreFilterMenu({
       {fieldDefinitions.length > 0 && (
         <>
           <MenuLabel>Custom fields</MenuLabel>
-          <div className="space-y-1.5 px-3 pb-2 pt-1">
-            {fieldDefinitions.map((def) => {
-              const active = fieldFilter?.key === def.key;
+          {/* Select-type fields filter by OPTION (exact match on the stored
+              option id); text fields keep the contains input. One field
+              filter at a time either way — picking one clears the other. */}
+          {fieldDefinitions
+            .filter((def) => def.type === "select")
+            .map((def) => {
+              const active = fieldFilter?.key === def.key ? fieldFilter.value : null;
               return (
-                <Input
-                  key={def.id}
-                  value={active ? fieldFilter.value : ""}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    onFieldChange(v ? { key: def.key, value: v } : null);
-                  }}
-                  placeholder={`${def.label} contains…`}
-                  aria-label={`Filter by ${def.label}`}
-                  className="h-8 text-xs"
-                />
+                <div key={def.id}>
+                  <div className="px-3 pb-0.5 pt-1 text-3xs text-muted-foreground">
+                    {def.label}
+                  </div>
+                  <RadioRow
+                    active={active === null}
+                    onClick={() => {
+                      if (active !== null) onFieldChange(null);
+                    }}
+                  >
+                    Any
+                  </RadioRow>
+                  {(def.options ?? []).map((o) => (
+                    <RadioRow
+                      key={o.id}
+                      active={active === o.id}
+                      onClick={() =>
+                        onFieldChange(
+                          active === o.id
+                            ? null
+                            : { key: def.key, value: o.id, mode: "equals" },
+                        )
+                      }
+                      leading={
+                        <span
+                          className={cn(
+                            "size-2 shrink-0 rounded-full",
+                            tagColorClasses(o.color).solid,
+                          )}
+                        />
+                      }
+                    >
+                      {o.name}
+                    </RadioRow>
+                  ))}
+                </div>
               );
             })}
+          <div className="space-y-1.5 px-3 pb-2 pt-1">
+            {fieldDefinitions
+              .filter((def) => def.type !== "select")
+              .map((def) => {
+                const active = fieldFilter?.key === def.key;
+                return (
+                  <Input
+                    key={def.id}
+                    value={active ? fieldFilter.value : ""}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      onFieldChange(v ? { key: def.key, value: v } : null);
+                    }}
+                    placeholder={`${def.label} contains…`}
+                    aria-label={`Filter by ${def.label}`}
+                    className="h-8 text-xs"
+                  />
+                );
+              })}
           </div>
         </>
       )}

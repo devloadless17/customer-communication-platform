@@ -32,6 +32,7 @@ export const ExportFiltersSchema = z.object({
   search: z.string().max(200).optional(),
   fieldKey: z.string().max(80).optional(),
   fieldValue: z.string().max(200).optional(),
+  fieldMode: z.enum(["contains", "equals"]).optional(),
   source: z.string().max(40).optional(),
   channel: z.string().max(40).optional(),
   window: z.enum(["open", "closed"]).optional(),

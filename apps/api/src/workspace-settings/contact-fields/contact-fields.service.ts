@@ -7,15 +7,26 @@ import {
 } from "@nestjs/common";
 
 import { isReservedFieldKey } from "@ccp/shared/contacts/reserved-fields";
-import type { ContactFieldDefinition } from "@ccp/shared/types";
+import { invalidateSelectFieldDisplayCache } from "@/lib/contact-fields/select-values";
+import {
+  TAG_COLORS,
+  type ContactFieldDefinition,
+  type ContactFieldOption,
+  type TagColor,
+} from "@ccp/shared/types";
 
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
-import type {
-  ContactPanelBuiltins,
-  CreateContactFieldInput,
-  ReorderContactFieldsInput,
-  UpdateContactFieldInput,
+import {
+  MAX_OPTIONS_PER_FIELD,
+  type ContactPanelBuiltins,
+  type CreateContactFieldInput,
+  type CreateFieldOptionInput,
+  type DeleteFieldOptionInput,
+  type ReorderContactFieldsInput,
+  type ReorderFieldOptionsInput,
+  type UpdateContactFieldInput,
+  type UpdateFieldOptionInput,
 } from "./contact-fields.schemas";
 
 const MAX_FIELDS_PER_TEAM = 50;
@@ -64,6 +75,9 @@ export class ContactFieldsService {
     const rows = await this.db.contactFieldDefinition.findMany({
       where: { workspaceId },
       orderBy: [{ order: "asc" }, { createdAt: "asc" }],
+      include: {
+        options: { orderBy: [{ position: "asc" }, { createdAt: "asc" }] },
+      },
     });
     return rows.map(toDto);
   }
@@ -96,6 +110,10 @@ export class ContactFieldsService {
       where: { id: workspaceId },
       data: { contactPanelBuiltins: next },
     });
+    // The workflow/broadcast token layer memoizes the select-field catalog
+    // for display (lib/contact-fields/select-values.ts) — bust it so a
+    // rename/recolor/delete propagates to token rendering immediately.
+    invalidateSelectFieldDisplayCache(workspaceId);
     await this.bus.publish({
       type: "team.catalog_changed",
       workspaceId,
@@ -157,10 +175,45 @@ export class ContactFieldsService {
     }
 
     const nextOrder = (existing[0]?.order ?? -1) + 1;
+    const type = input.type ?? "text";
+
+    // Inline options (select fields only — schema-enforced): reject
+    // duplicates case-insensitively up front so the create is all-or-nothing
+    // instead of tripping the [fieldId, name] unique halfway through.
+    const inlineOptions = input.options ?? [];
+    const seenNames = new Set<string>();
+    for (const o of inlineOptions) {
+      const lowered = o.name.trim().toLowerCase();
+      if (seenNames.has(lowered)) {
+        throw new BadRequestException({
+          error: "duplicate_option_name",
+          detail: `Option "${o.name}" appears more than once.`,
+        });
+      }
+      seenNames.add(lowered);
+    }
 
     try {
-      const created = await this.db.contactFieldDefinition.create({
-        data: { workspaceId, key, label: input.label, order: nextOrder },
+      const created = await this.db.$transaction(async (tx) => {
+        const def = await tx.contactFieldDefinition.create({
+          data: { workspaceId, key, label: input.label, order: nextOrder, type },
+        });
+        if (inlineOptions.length > 0) {
+          const usedColors: string[] = [];
+          await tx.contactFieldOption.createMany({
+            data: inlineOptions.map((o, index) => {
+              const color = o.color ?? pickNextPaletteColor(usedColors);
+              usedColors.push(color);
+              return { workspaceId, fieldId: def.id, name: o.name, color, position: index };
+            }),
+          });
+        }
+        return tx.contactFieldDefinition.findUniqueOrThrow({
+          where: { id: def.id },
+          include: {
+            options: { orderBy: [{ position: "asc" }, { createdAt: "asc" }] },
+          },
+        });
       });
       await this.bus.publish({
         type: "team.catalog_changed",
@@ -217,7 +270,14 @@ export class ContactFieldsService {
 
     const updated = await this.db.contactFieldDefinition.findUniqueOrThrow({
       where: { id },
+      include: {
+        options: { orderBy: [{ position: "asc" }, { createdAt: "asc" }] },
+      },
     });
+    // The workflow/broadcast token layer memoizes the select-field catalog
+    // for display (lib/contact-fields/select-values.ts) — bust it so a
+    // rename/recolor/delete propagates to token rendering immediately.
+    invalidateSelectFieldDisplayCache(workspaceId);
     await this.bus.publish({
       type: "team.catalog_changed",
       workspaceId,
@@ -257,6 +317,10 @@ export class ContactFieldsService {
         this.db.contactFieldDefinition.update({ where: { id }, data: { order: index } }),
       ),
     );
+    // The workflow/broadcast token layer memoizes the select-field catalog
+    // for display (lib/contact-fields/select-values.ts) — bust it so a
+    // rename/recolor/delete propagates to token rendering immediately.
+    invalidateSelectFieldDisplayCache(workspaceId);
     await this.bus.publish({
       type: "team.catalog_changed",
       workspaceId,
@@ -294,11 +358,324 @@ export class ContactFieldsService {
     ]);
     if (deleted.count === 0) throw new NotFoundException({ error: "not_found" });
 
+    // The workflow/broadcast token layer memoizes the select-field catalog
+    // for display (lib/contact-fields/select-values.ts) — bust it so a
+    // rename/recolor/delete propagates to token rendering immediately.
+    invalidateSelectFieldDisplayCache(workspaceId);
     await this.bus.publish({
       type: "team.catalog_changed",
       workspaceId,
       scope: "contact-fields",
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // Select-field options. The value stored on contacts is the OPTION ID, so
+  // rename/recolor are metadata-only; delete is guarded because Prisma can't
+  // reach inside the customFields JSONB — mirrors stage delete semantics.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Per-option usage counts for one select field (settings badges + the
+   * delete dialog). One raw aggregate — the values live in JSONB so Prisma's
+   * groupBy can't express it. Only counts values matching a CURRENT option
+   * id; a stale id (deleted option) counts toward nothing, same as the
+   * export writing an empty cell for it.
+   */
+  async optionCounts(
+    workspaceId: string,
+    fieldId: string,
+  ): Promise<{ countsByOptionId: Record<string, number> }> {
+    const field = await this.getSelectField(workspaceId, fieldId);
+    const rows = await this.db.$queryRaw<{ value: string; count: number }[]>`
+      SELECT "customFields"->>${field.key} AS value, count(*)::int AS count
+      FROM "Contact"
+      WHERE "workspaceId" = ${workspaceId}
+        AND "deletedAt" IS NULL
+        AND "customFields" ? ${field.key}
+      GROUP BY 1
+    `;
+    const known = new Set(field.options.map((o) => o.id));
+    const countsByOptionId: Record<string, number> = {};
+    for (const row of rows) {
+      if (row.value && known.has(row.value)) countsByOptionId[row.value] = row.count;
+    }
+    return { countsByOptionId };
+  }
+
+  async createOption(
+    workspaceId: string,
+    canManage: boolean,
+    fieldId: string,
+    input: CreateFieldOptionInput,
+  ): Promise<ContactFieldOption> {
+    requireManage(canManage);
+    const field = await this.getSelectField(workspaceId, fieldId);
+
+    if (field.options.length >= MAX_OPTIONS_PER_FIELD) {
+      throw new BadRequestException({
+        error: "option_limit_reached",
+        detail: `This field has reached its limit of ${MAX_OPTIONS_PER_FIELD} options.`,
+      });
+    }
+    // Case-insensitive pre-check — the [fieldId, name] unique is
+    // case-sensitive, and "Vip" next to "VIP" is the CSV-corruption class
+    // (import matches names case-insensitively, so one of them becomes
+    // unimportable).
+    this.assertOptionNameAvailable(field.options, input.name, null);
+
+    const nextPosition = (field.options.at(-1)?.position ?? -1) + 1;
+    const color =
+      input.color ?? pickNextPaletteColor(field.options.map((o) => o.color));
+    try {
+      const created = await this.db.contactFieldOption.create({
+        data: { workspaceId, fieldId, name: input.name, color, position: nextPosition },
+      });
+      await this.bus.publish({
+        type: "team.catalog_changed",
+        workspaceId,
+        scope: "contact-fields",
+      });
+      return toOptionDto(created);
+    } catch (err) {
+      throwIfUniqueViolation(err, "an option with this name already exists");
+      throw err;
+    }
+  }
+
+  async updateOption(
+    workspaceId: string,
+    canManage: boolean,
+    fieldId: string,
+    optionId: string,
+    input: UpdateFieldOptionInput,
+  ): Promise<ContactFieldOption> {
+    requireManage(canManage);
+    const field = await this.getSelectField(workspaceId, fieldId);
+    if (!field.options.some((o) => o.id === optionId)) {
+      throw new NotFoundException({ error: "not_found" });
+    }
+    if (typeof input.name === "string") {
+      this.assertOptionNameAvailable(field.options, input.name, optionId);
+    }
+
+    try {
+      // Workspace-scoped mutation (defense-in-depth), same rationale as the
+      // field update above.
+      const result = await this.db.contactFieldOption.updateMany({
+        where: { id: optionId, fieldId, workspaceId },
+        data: input,
+      });
+      if (result.count === 0) throw new NotFoundException({ error: "not_found" });
+    } catch (err) {
+      throwIfUniqueViolation(err, "an option with this name already exists");
+      throw err;
+    }
+    const updated = await this.db.contactFieldOption.findUniqueOrThrow({
+      where: { id: optionId },
+    });
+    // The workflow/broadcast token layer memoizes the select-field catalog
+    // for display (lib/contact-fields/select-values.ts) — bust it so a
+    // rename/recolor/delete propagates to token rendering immediately.
+    invalidateSelectFieldDisplayCache(workspaceId);
+    await this.bus.publish({
+      type: "team.catalog_changed",
+      workspaceId,
+      scope: "contact-fields",
+    });
+    return toOptionDto(updated);
+  }
+
+  /** Bulk-reorder within one field — same contract as the field reorder. */
+  async reorderOptions(
+    workspaceId: string,
+    canManage: boolean,
+    fieldId: string,
+    input: ReorderFieldOptionsInput,
+  ): Promise<void> {
+    requireManage(canManage);
+    await this.getSelectField(workspaceId, fieldId);
+    const ids = input.orderedIds;
+    if (ids.length === 0) return;
+
+    // Cross-tenant/cross-field guard: every id must belong to THIS field or
+    // the whole request rejects.
+    const owned = await this.db.contactFieldOption.findMany({
+      where: { workspaceId, fieldId, id: { in: ids } },
+      select: { id: true },
+    });
+    if (owned.length !== ids.length) {
+      throw new BadRequestException({ error: "one_or_more_ids_are_not_in_this_field" });
+    }
+
+    await this.db.$transaction(
+      ids.map((id, index) =>
+        this.db.contactFieldOption.update({ where: { id }, data: { position: index } }),
+      ),
+    );
+    // The workflow/broadcast token layer memoizes the select-field catalog
+    // for display (lib/contact-fields/select-values.ts) — bust it so a
+    // rename/recolor/delete propagates to token rendering immediately.
+    invalidateSelectFieldDisplayCache(workspaceId);
+    await this.bus.publish({
+      type: "team.catalog_changed",
+      workspaceId,
+      scope: "contact-fields",
+    });
+  }
+
+  /**
+   * Delete an option. Three modes on `moveToOptionId`:
+   *   undefined — refuse while contacts still carry the value (409
+   *               option_in_use + count; the UI opens the move dialog);
+   *   a sibling option id — re-point every carrying contact to it, then
+   *               delete, one transaction;
+   *   null      — clear the value (drop the key) on every carrying contact,
+   *               then delete, one transaction.
+   *
+   * The value lives inside customFields JSONB with no FK, so the move/clear
+   * is raw SQL — and the delete happens in the SAME transaction so a
+   * concurrent "set this option on a contact" either lands before (and gets
+   * moved/cleared) or after (and fails validation against the now-missing
+   * option). Serializable for the refuse path, mirroring stage delete's
+   * TOCTOU reasoning.
+   */
+  async removeOption(
+    workspaceId: string,
+    canManage: boolean,
+    fieldId: string,
+    optionId: string,
+    input: DeleteFieldOptionInput,
+  ): Promise<void> {
+    requireManage(canManage);
+    const field = await this.getSelectField(workspaceId, fieldId);
+    if (!field.options.some((o) => o.id === optionId)) {
+      throw new NotFoundException({ error: "not_found" });
+    }
+    const moveTo = input?.moveToOptionId;
+
+    if (moveTo === undefined) {
+      // Fast pre-check for a friendly error; authoritative re-check in-tx.
+      const inUse = await this.countOptionUsage(workspaceId, field.key, optionId);
+      if (inUse > 0) throw optionInUse(inUse);
+      await this.db.$transaction(
+        async (tx) => {
+          const rows = await tx.$queryRaw<{ count: number }[]>`
+            SELECT count(*)::int AS count
+            FROM "Contact"
+            WHERE "workspaceId" = ${workspaceId}
+              AND "deletedAt" IS NULL
+              AND "customFields"->>${field.key} = ${optionId}
+          `;
+          const liveCount = rows[0]?.count ?? 0;
+          if (liveCount > 0) throw optionInUse(liveCount);
+          const deleted = await tx.contactFieldOption.deleteMany({
+            where: { id: optionId, fieldId, workspaceId },
+          });
+          if (deleted.count === 0) throw new NotFoundException({ error: "not_found" });
+        },
+        { isolationLevel: "Serializable" },
+      );
+    } else {
+      if (moveTo !== null) {
+        const target = field.options.find((o) => o.id === moveTo);
+        if (!target || moveTo === optionId) {
+          throw new BadRequestException({ error: "invalid_move_target" });
+        }
+      }
+      await this.db.$transaction(async (tx) => {
+        if (moveTo === null) {
+          // Clear: drop the key entirely (an empty string would render as a
+          // set-but-blank value and break the "has a value" filter).
+          await tx.$executeRaw`
+            UPDATE "Contact"
+            SET "customFields" = "customFields" - ${field.key}
+            WHERE "workspaceId" = ${workspaceId}
+              AND "customFields"->>${field.key} = ${optionId}
+          `;
+        } else {
+          await tx.$executeRaw`
+            UPDATE "Contact"
+            SET "customFields" = jsonb_set("customFields", ARRAY[${field.key}], to_jsonb(${moveTo}::text))
+            WHERE "workspaceId" = ${workspaceId}
+              AND "customFields"->>${field.key} = ${optionId}
+          `;
+        }
+        const deleted = await tx.contactFieldOption.deleteMany({
+          where: { id: optionId, fieldId, workspaceId },
+        });
+        if (deleted.count === 0) throw new NotFoundException({ error: "not_found" });
+      });
+    }
+    // The workflow/broadcast token layer memoizes the select-field catalog
+    // for display (lib/contact-fields/select-values.ts) — bust it so a
+    // rename/recolor/delete propagates to token rendering immediately.
+    invalidateSelectFieldDisplayCache(workspaceId);
+    await this.bus.publish({
+      type: "team.catalog_changed",
+      workspaceId,
+      scope: "contact-fields",
+    });
+  }
+
+  /** Live contacts carrying this option id under this field's key. */
+  private async countOptionUsage(
+    workspaceId: string,
+    fieldKey: string,
+    optionId: string,
+  ): Promise<number> {
+    const rows = await this.db.$queryRaw<{ count: number }[]>`
+      SELECT count(*)::int AS count
+      FROM "Contact"
+      WHERE "workspaceId" = ${workspaceId}
+        AND "deletedAt" IS NULL
+        AND "customFields"->>${fieldKey} = ${optionId}
+    `;
+    return rows[0]?.count ?? 0;
+  }
+
+  /** 404 unless the field exists in this workspace; 400 unless it's select. */
+  private async getSelectField(
+    workspaceId: string,
+    fieldId: string,
+  ): Promise<{
+    id: string;
+    key: string;
+    options: { id: string; name: string; color: string; position: number }[];
+  }> {
+    const field = await this.db.contactFieldDefinition.findFirst({
+      where: { id: fieldId, workspaceId },
+      select: {
+        id: true,
+        key: true,
+        type: true,
+        options: {
+          select: { id: true, name: true, color: true, position: true },
+          orderBy: [{ position: "asc" }, { createdAt: "asc" }],
+        },
+      },
+    });
+    if (!field) throw new NotFoundException({ error: "not_found" });
+    if (field.type !== "select") {
+      throw new BadRequestException({ error: "not_a_select_field" });
+    }
+    return field;
+  }
+
+  private assertOptionNameAvailable(
+    siblings: { id: string; name: string }[],
+    name: string,
+    excludeId: string | null,
+  ): void {
+    const lowered = name.trim().toLowerCase();
+    if (
+      siblings.some((o) => o.id !== excludeId && o.name.trim().toLowerCase() === lowered)
+    ) {
+      throw new ConflictException({
+        error: "option_name_taken",
+        detail: `An option named "${name}" already exists on this field.`,
+      });
+    }
   }
 
   /**
@@ -335,6 +712,8 @@ function toDto(r: {
   label: string;
   order: number;
   isVisible: boolean;
+  type: "text" | "select";
+  options?: { id: string; fieldId: string; name: string; color: string; position: number }[];
 }): ContactFieldDefinition {
   return {
     id: r.id,
@@ -343,7 +722,49 @@ function toDto(r: {
     label: r.label,
     order: r.order,
     isVisible: r.isVisible,
+    type: r.type,
+    // Present (possibly empty) for select fields, absent for text — matching
+    // the shared contract so the panel doesn't render an empty catalog UI on
+    // text fields.
+    ...(r.type === "select" ? { options: (r.options ?? []).map(toOptionDto) } : {}),
   };
+}
+
+function toOptionDto(o: {
+  id: string;
+  fieldId: string;
+  name: string;
+  color: string;
+  position: number;
+}): ContactFieldOption {
+  return {
+    id: o.id,
+    fieldId: o.fieldId,
+    name: o.name,
+    color: o.color as TagColor,
+    position: o.position,
+  };
+}
+
+/**
+ * Choose the first palette color not yet used by a sibling option. Falls
+ * back to slate once all 9 are taken. Same helper as stages — small enough
+ * that a copy beats a cross-module import from the stages feature.
+ */
+function pickNextPaletteColor(used: string[]): TagColor {
+  const usedSet = new Set(used);
+  for (const c of TAG_COLORS) {
+    if (!usedSet.has(c)) return c;
+  }
+  return "slate";
+}
+
+function optionInUse(count: number): ConflictException {
+  return new ConflictException({
+    error: "option_in_use",
+    detail: `${count} contact${count === 1 ? " has" : "s have"} this option. Move them to another option first.`,
+    contactCount: count,
+  });
 }
 
 /**

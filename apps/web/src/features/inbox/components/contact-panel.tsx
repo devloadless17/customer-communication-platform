@@ -57,6 +57,7 @@ import { CallsPanel } from "./panel/calls-panel";
 import { FlagsPanel } from "./panel/flags-panel";
 import { NotesPanel } from "./panel/notes-panel";
 import { EditableField } from "./contact-panel/editable-field";
+import { ContactFieldSelectPicker } from "@/features/contacts/components/contact-field-select-picker";
 import { EditableHeading } from "./contact-panel/editable-heading";
 import { ContactAcquisitionRow } from "./contact-panel/acquisition-row";
 import { ReadOnlyRow } from "./contact-panel/read-only-row";
@@ -1508,27 +1509,52 @@ function ContactPanelImpl({
           <ContactAcquisitionRow contactId={contact.id} />
 
           {/* Team-wide fields. Rendered in their definition order; admin-hidden
-              definitions are dropped at this level so they never paint. */}
-          {fieldDefinitions.filter((def) => def.isVisible).map((def) => (
-            <EditableField
-              key={def.id}
-              label={def.label}
-              value={customFields[def.key] ?? ""}
-              placeholder="—"
-              onSave={async (next) => {
-                const trimmed = next.trim();
-                const current = customFields[def.key] ?? "";
-                if (trimmed === current) return true;
-                const prev = customFields;
-                setCustomFields({ ...prev, [def.key]: trimmed });
-                const ok = await save({
-                  customFields: { [def.key]: trimmed === "" ? null : trimmed },
-                });
-                if (!ok) setCustomFields(prev);
-                return ok;
-              }}
-            />
-          ))}
+              definitions are dropped at this level so they never paint.
+              Select-type fields render the option picker (value = option ID);
+              text fields keep the inline editor. Both write through the same
+              optimistic save() path, so CAS conflict-parking covers both. */}
+          {fieldDefinitions.filter((def) => def.isVisible).map((def) =>
+            def.type === "select" ? (
+              <div key={def.id} className="flex items-center justify-between gap-2 py-1">
+                <span className="shrink-0 text-xs text-muted-foreground">{def.label}</span>
+                <ContactFieldSelectPicker
+                  fieldLabel={def.label}
+                  options={def.options ?? []}
+                  currentOptionId={customFields[def.key] ?? null}
+                  canManage={canManageFields}
+                  size="sm"
+                  onChange={async (optionId) => {
+                    const prev = customFields;
+                    const nextMap = { ...prev };
+                    if (optionId === null) delete nextMap[def.key];
+                    else nextMap[def.key] = optionId;
+                    setCustomFields(nextMap);
+                    const ok = await save({ customFields: { [def.key]: optionId } });
+                    if (!ok) setCustomFields(prev);
+                  }}
+                />
+              </div>
+            ) : (
+              <EditableField
+                key={def.id}
+                label={def.label}
+                value={customFields[def.key] ?? ""}
+                placeholder="—"
+                onSave={async (next) => {
+                  const trimmed = next.trim();
+                  const current = customFields[def.key] ?? "";
+                  if (trimmed === current) return true;
+                  const prev = customFields;
+                  setCustomFields({ ...prev, [def.key]: trimmed });
+                  const ok = await save({
+                    customFields: { [def.key]: trimmed === "" ? null : trimmed },
+                  });
+                  if (!ok) setCustomFields(prev);
+                  return ok;
+                }}
+              />
+            ),
+          )}
 
           {/* Per-contact one-off keys. Each carries a delete button. */}
           {perContactKeys.map((key) => (

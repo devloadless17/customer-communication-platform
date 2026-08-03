@@ -63,7 +63,7 @@ import { CHANNEL_LABEL } from "./channel-badge";
 import { useChannelAccounts } from "@/features/channels/contexts/channel-accounts-context";
 import { AccountLabel } from "@/features/channels/components/account-label";
 import type { Channel } from "@ccp/shared/types";
-import { resolveFieldTokens } from "@ccp/shared/field-tokens";
+import { buildCustomFieldsDisplay, resolveFieldTokens } from "@ccp/shared/field-tokens";
 import { useNow } from "@/hooks/use-now";
 
 import dynamic from "next/dynamic";
@@ -667,6 +667,12 @@ function ReplyBoxImpl({
         email: contact.email ?? null,
         location: contact.location ?? null,
         customFields: contact.customFields ?? {},
+        // Select-type fields store option IDs; tokens must render the option
+        // NAME — mirrors the server's token contexts.
+        customFieldsDisplay: buildCustomFieldsDisplay(
+          fieldDefinitions,
+          contact.customFields ?? {},
+        ),
         lastInboundAt,
         windowState: windowStatus.state,
         stageName: contact.stageId
@@ -701,6 +707,7 @@ function ReplyBoxImpl({
       windowStatus.state,
       stageCatalog,
       tags,
+      fieldDefinitions,
     ],
   );
 

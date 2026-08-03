@@ -82,6 +82,14 @@ export async function runContactExport(opts: {
   });
   const stageNameById = new Map(stageRows.map((s) => [s.id, s.name]));
 
+  // Select-type fields store the OPTION ID on the contact; the file carries
+  // the option NAME (same convention as the stage column). One map per field.
+  const optionNameByKey = new Map<string, Map<string, string>>(
+    fieldDefs
+      .filter((d) => d.type === "select")
+      .map((d) => [d.key, new Map((d.options ?? []).map((o) => [o.id, o.name]))]),
+  );
+
   // Account id → what a human calls it. Same precedence the inbox uses (label,
   // else the customer-visible address, else the raw id) so the file matches
   // what the person who ran the export saw on screen. A handful of rows per
@@ -151,7 +159,14 @@ export async function runContactExport(opts: {
           const v = cf[def.key];
           // fieldHeader, not def.label — a field whose label collides with a
           // built-in is written under `custom:<key>` so it round-trips.
-          row[fieldHeader(def)] = typeof v === "string" ? v : "";
+          const optionNames = optionNameByKey.get(def.key);
+          row[fieldHeader(def)] = optionNames
+            ? // Select field: id → NAME; a stale id (deleted option) is
+              // genuinely "no value", not a lookup we should leak.
+              (typeof v === "string" && optionNames.get(v)) || ""
+            : typeof v === "string"
+              ? v
+              : "";
         }
         for (const key of oneOffKeys) {
           const v = cf[key];

@@ -109,6 +109,9 @@ export interface ImportResult extends ImportCounters {
   touchedIds: string[];
   unknownColumns: string[];
   unknownStages: string[];
+  /** `"<field label>: <value>"` entries whose select-field cells were skipped
+   *  because the value matched no option. Surfaced like unknownStages. */
+  unknownOptions: string[];
   extraSheets: string[];
   automationsSkipped: boolean;
   errorSample: Array<{ row: number; reason: string }>;
@@ -164,7 +167,12 @@ export async function runContactImport(opts: {
 
   const fieldDefs: TeamFieldDef[] = await db.contactFieldDefinition.findMany({
     where: { workspaceId },
-    select: { key: true, label: true },
+    select: {
+      key: true,
+      label: true,
+      type: true,
+      options: { select: { id: true, name: true } },
+    },
   });
 
   const source = createSource(format, localPath);
@@ -236,6 +244,48 @@ export async function runContactImport(opts: {
       if (unknownStages.size < MAX_UNKNOWN_STAGES) unknownStages.add(name);
       else unknownStagesTruncated = true;
       return defaultStageId;
+    };
+
+    // Select-type custom fields: the file carries option NAMES (export
+    // convention) but a CRM dump may carry ids — accept both, store the id.
+    // An unmatched value SKIPS the cell (never store free text under a
+    // select key, never auto-create options from a possibly-mismapped
+    // column) and is surfaced like unknown stages, same cap, same reason.
+    const selectResolverByKey = new Map<string, { label: string; byValue: Map<string, string> }>();
+    for (const def of fieldDefs) {
+      if (def.type !== "select") continue;
+      const byValue = new Map<string, string>();
+      for (const o of def.options ?? []) {
+        byValue.set(o.id, o.id);
+        byValue.set(o.name.trim().toLowerCase(), o.id);
+      }
+      selectResolverByKey.set(def.key, { label: def.label, byValue });
+    }
+    const unknownOptions = new Set<string>();
+    let unknownOptionsTruncated = false;
+    const resolveSelectCells = (customFields: Record<string, string>): void => {
+      for (const [key, resolver] of selectResolverByKey) {
+        const raw = customFields[key];
+        if (raw === undefined) continue;
+        const trimmed = raw.trim();
+        if (!trimmed) {
+          // Empty cell → no value. Deleting beats storing "", which would
+          // read as a set-but-unknown option everywhere downstream.
+          delete customFields[key];
+          continue;
+        }
+        const id = resolver.byValue.get(trimmed) ?? resolver.byValue.get(trimmed.toLowerCase());
+        if (id) {
+          customFields[key] = id;
+        } else {
+          delete customFields[key];
+          if (unknownOptions.size < MAX_UNKNOWN_STAGES) {
+            unknownOptions.add(`${resolver.label}: ${trimmed}`);
+          } else {
+            unknownOptionsTruncated = true;
+          }
+        }
+      }
     };
 
     // In-file de-dupe. Bounded by TRANSFER_MAX_IMPORT_ROWS: one normalized
@@ -319,6 +369,7 @@ export async function runContactImport(opts: {
       }
 
       const row = built.row;
+      resolveSelectCells(row.customFields);
       if (seenPhones.has(row.phoneNumber)) {
         pushError(errorRows, {
           rowNumber,
@@ -398,6 +449,11 @@ export async function runContactImport(opts: {
       unknownStages: unknownStagesTruncated
         ? [...unknownStages].sort().concat("… (more values omitted — is the Stage column mapped correctly?)")
         : [...unknownStages].sort(),
+      // Same surfacing contract as unknownStages: an unmatched select-field
+      // value dropped its cell, and silence would read as "imported".
+      unknownOptions: unknownOptionsTruncated
+        ? [...unknownOptions].sort().concat("… (more values omitted — do the file's values match the field's options?)")
+        : [...unknownOptions].sort(),
       extraSheets: hasExtraSheets(source) ? source.extraSheets() : [],
       // Above the cap we deliberately send none rather than a truncated,
       // misleading subset.

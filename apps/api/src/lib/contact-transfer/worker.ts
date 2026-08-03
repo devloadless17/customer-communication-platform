@@ -258,6 +258,7 @@ async function handleTransfer(jobId: string): Promise<void> {
             errors: result.errorSample,
             unknownColumns: result.unknownColumns,
             unknownStages: result.unknownStages,
+            unknownOptions: result.unknownOptions,
             extraSheets: result.extraSheets,
           },
           finishedAt: new Date(),

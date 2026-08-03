@@ -513,12 +513,9 @@ export type ExternalBulkTagInput = z.infer<typeof ExternalBulkTagSchema>;
 // NEW — custom field definitions
 // ===========================================================================
 
-export const ExternalCreateContactFieldSchema = z.object({
-  label: z.string().trim().min(1).max(60),
-});
-export type ExternalCreateContactFieldInput = z.infer<
-  typeof ExternalCreateContactFieldSchema
->;
+// Contact-field payloads now ride the settings page's schemas directly
+// (workspace-settings/contact-fields/contact-fields.schemas.ts) — the /v1
+// routes delegate to the same service, so they must accept the same shapes.
 
 // ===========================================================================
 // NEW — tags catalog

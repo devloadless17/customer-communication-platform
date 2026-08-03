@@ -282,6 +282,13 @@ export interface ContactLike {
   email?: string | null;
   location?: string | null;
   customFields: Prisma.JsonValue;
+  // Human-readable overlay for select-type custom fields: option id → option
+  // NAME, keyed by field key. Token resolution prefers this map so templates
+  // render "VIP", never the option id — while `customFields` stays RAW (ids)
+  // because branch presets (`field_equals`) compare against stored ids.
+  // Built via `buildCustomFieldsDisplay`; callers that don't carry the
+  // catalog leave it undefined and tokens fall back to the raw value.
+  customFieldsDisplay?: Record<string, string>;
   // PR 2.4 fields — all optional. The snapshot builder populates them when
   // the call site supplies the joined data; non-workflow callers (broadcast
   // runner, snippet preview) leave them undefined and the resolver answers
@@ -515,6 +522,8 @@ function resolveContact(key: string, contact: ContactLike): string {
         return "";
     }
   }
+  const display = contact.customFieldsDisplay?.[key];
+  if (typeof display === "string") return display;
   const bag =
     contact.customFields &&
     typeof contact.customFields === "object" &&
@@ -523,6 +532,35 @@ function resolveContact(key: string, contact: ContactLike): string {
       : {};
   const v = bag[key];
   return typeof v === "string" ? v : "";
+}
+
+/**
+ * Build the `ContactLike.customFieldsDisplay` overlay: for every select-type
+ * definition whose stored value is a known option id, map key → option NAME.
+ * Text fields and unknown/stale ids are omitted (the resolver falls back to
+ * the raw value). Pure — shared by API token contexts and web-side previews.
+ */
+export function buildCustomFieldsDisplay(
+  defs: ReadonlyArray<{
+    key: string;
+    type: string;
+    options?: ReadonlyArray<{ id: string; name: string }>;
+  }>,
+  customFields: Prisma.JsonValue,
+): Record<string, string> {
+  const bag =
+    customFields && typeof customFields === "object" && !Array.isArray(customFields)
+      ? (customFields as Record<string, unknown>)
+      : {};
+  const display: Record<string, string> = {};
+  for (const def of defs) {
+    if (def.type !== "select" || !def.options?.length) continue;
+    const raw = bag[def.key];
+    if (typeof raw !== "string" || !raw) continue;
+    const option = def.options.find((o) => o.id === raw);
+    if (option) display[def.key] = option.name;
+  }
+  return display;
 }
 
 function resolveAgent(key: string, agent: AgentLike | null | undefined): string {

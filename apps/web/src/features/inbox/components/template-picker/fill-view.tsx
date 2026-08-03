@@ -22,6 +22,7 @@ import type {
   User,
 } from "@ccp/shared/types";
 import {
+  buildCustomFieldsDisplay,
   resolveFieldTokens,
   type ContactLike,
 } from "@ccp/shared/field-tokens";
@@ -245,6 +246,11 @@ export function TemplateFillView({
       email: contact.email ?? null,
       location: contact.location ?? null,
       customFields: contact.customFields ?? {},
+      // Select-type fields store option IDs; render the option NAME.
+      customFieldsDisplay: buildCustomFieldsDisplay(
+        fieldDefinitions,
+        contact.customFields ?? {},
+      ),
       lastInboundAt,
       stageName: contact.stageId
         ? stageCatalog.find((s) => s.id === contact.stageId)?.name ?? null
@@ -253,7 +259,7 @@ export function TemplateFillView({
         .map((id) => tags.find((t) => t.id === id)?.name)
         .filter((n): n is string => typeof n === "string"),
     }),
-    [contact, stageCatalog, tags, lastInboundAt],
+    [contact, fieldDefinitions, stageCatalog, tags, lastInboundAt],
   );
 
   // Resolve a single field's text against the conversation's contact. Empty

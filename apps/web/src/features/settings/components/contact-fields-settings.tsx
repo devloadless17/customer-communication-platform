@@ -5,6 +5,7 @@ import {
   ArrowDown,
   ArrowUp,
   Check,
+  ChevronDown,
   Eye,
   EyeOff,
   Loader2,
@@ -18,13 +19,16 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { ColorSwatchPicker } from "@/components/ui/color-swatch-picker";
 import { PageHeader } from "@/components/layouts/page-header";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { isReservedFieldKey } from "@ccp/shared/contacts/reserved-fields";
 import { cn } from "@ccp/shared/utils";
 import type {
   ContactFieldDefinition,
+  ContactFieldOption,
   ContactPanelBuiltins,
+  TagColor,
 } from "@ccp/shared/types";
 
 /**
@@ -56,6 +60,10 @@ export function ContactFieldsSettings({
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [newLabel, setNewLabel] = useState("");
+  // The field's kind, chosen at create time and immutable after — a select
+  // field's values are option IDs, so converting an existing text field's
+  // free-text history is a data migration, not an edit.
+  const [newType, setNewType] = useState<"text" | "select">("text");
   const [busyId, setBusyId] = useState<string | null>(null);
   const newInputRef = useRef<HTMLInputElement>(null);
   const newFieldErrorId = useId();
@@ -65,6 +73,7 @@ export function ContactFieldsSettings({
   const openCreate = useCallback(() => {
     setCreating(true);
     setNewLabel("");
+    setNewType("text");
     setError(null);
     requestAnimationFrame(() => newInputRef.current?.focus());
   }, []);
@@ -81,7 +90,7 @@ export function ContactFieldsSettings({
       const res = await apiFetch("/api/workspace/contact-fields", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ label }),
+        body: JSON.stringify({ label, ...(newType === "select" ? { type: "select" } : {}) }),
       });
       const body = (await res.json().catch(() => ({}))) as {
         definition?: ContactFieldDefinition;
@@ -95,10 +104,18 @@ export function ContactFieldsSettings({
       setDefs((cur) => [...cur, body.definition!].sort(byOrder));
       setCreating(false);
       setNewLabel("");
+      setNewType("text");
     } finally {
       setBusyId(null);
     }
-  }, [newLabel]);
+  }, [newLabel, newType]);
+
+  /** Swap one definition in place — the options editor reports back through
+   *  this after every option mutation so the row re-renders with the fresh
+   *  catalog. */
+  const replaceDef = useCallback((next: ContactFieldDefinition) => {
+    setDefs((cur) => cur.map((f) => (f.id === next.id ? next : f)));
+  }, []);
 
   const toggleBuiltin = useCallback(
     async (key: keyof ContactPanelBuiltins) => {
@@ -383,6 +400,8 @@ export function ContactFieldsSettings({
               onMoveDown={() => reorder(field.id, "down")}
               onToggleVisibility={() => toggleVisibility(field)}
               onDelete={() => deleteField(field)}
+              onReplace={replaceDef}
+              confirm={confirm}
             />
           ))}
           {creating && (
@@ -415,6 +434,30 @@ export function ContactFieldsSettings({
                     isReservedFieldKey(newLabel) ? newFieldErrorId : undefined
                   }
                 />
+                <div
+                  className="inline-flex items-center rounded-md border border-border p-0.5"
+                  role="radiogroup"
+                  aria-label="Field type"
+                >
+                  {(["text", "select"] as const).map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      role="radio"
+                      aria-checked={newType === t}
+                      onClick={() => setNewType(t)}
+                      disabled={busyId === "__new__"}
+                      className={cn(
+                        "rounded-[5px] px-2 py-1 text-xs transition-colors",
+                        newType === t
+                          ? "bg-accent font-medium text-foreground"
+                          : "text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      {t === "text" ? "Text" : "Dropdown"}
+                    </button>
+                  ))}
+                </div>
                 <div className="ml-auto flex items-center gap-2">
                   <Button
                     size="sm"
@@ -486,6 +529,8 @@ function FieldRow({
   onMoveDown,
   onToggleVisibility,
   onDelete,
+  onReplace,
+  confirm,
 }: {
   field: ContactFieldDefinition;
   isFirst: boolean;
@@ -496,9 +541,13 @@ function FieldRow({
   onMoveDown: () => void;
   onToggleVisibility: () => void;
   onDelete: () => void;
+  /** Swap the definition in the parent list (fresh options after a mutation). */
+  onReplace: (next: ContactFieldDefinition) => void;
+  confirm: ReturnType<typeof useConfirm>["confirm"];
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(field.label);
+  const [optionsOpen, setOptionsOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   function startEditing() {
@@ -574,6 +623,22 @@ function FieldRow({
         {field.key}
       </code>
 
+      {field.type === "select" && (
+        <button
+          type="button"
+          onClick={() => setOptionsOpen((v) => !v)}
+          aria-expanded={optionsOpen}
+          className="inline-flex items-center gap-1 rounded-sm bg-info-bg px-1.5 py-0.5 text-3xs font-medium text-info-fg transition-colors hover:opacity-80"
+          title="Show options"
+        >
+          Dropdown · {(field.options ?? []).length} option
+          {(field.options ?? []).length === 1 ? "" : "s"}
+          <ChevronDown
+            className={cn("size-3 transition-transform", optionsOpen && "rotate-180")}
+          />
+        </button>
+      )}
+
       {!field.isVisible && (
         <span className="rounded-sm bg-warning-bg px-1.5 py-0.5 text-3xs font-medium text-warning-fg">
           Hidden
@@ -601,7 +666,379 @@ function FieldRow({
           {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
         </button>
       </div>
+
+      {field.type === "select" && optionsOpen && (
+        <OptionsEditor field={field} onReplace={onReplace} confirm={confirm} />
+      )}
     </li>
+  );
+}
+
+/**
+ * Inline option catalog editor for one select field. Follows the stages
+ * interaction patterns (inline add, click-to-rename, swatch recolor, up/down
+ * reorder, delete guarded by usage) — deliberately copied, not extracted:
+ * stages stay untouched by this feature.
+ *
+ * Every mutation replaces the whole definition in the parent list via
+ * `onReplace`, so the row badge, the pickers, and this editor all re-render
+ * from one source.
+ */
+function OptionsEditor({
+  field,
+  onReplace,
+  confirm,
+}: {
+  field: ContactFieldDefinition;
+  onReplace: (next: ContactFieldDefinition) => void;
+  confirm: ReturnType<typeof useConfirm>["confirm"];
+}) {
+  const options = useMemo(
+    () => [...(field.options ?? [])].sort((a, b) => a.position - b.position),
+    [field.options],
+  );
+  const [error, setError] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [newName, setNewName] = useState("");
+  // Per-option usage counts — loaded once when the editor opens; refreshed
+  // after a delete. Drives the count badge and the delete dialog copy.
+  const [counts, setCounts] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await apiFetch(
+          `/api/workspace/contact-fields/${field.id}/option-counts`,
+        );
+        if (!res.ok) return;
+        const body = (await res.json()) as { countsByOptionId?: Record<string, number> };
+        if (alive && body.countsByOptionId) setCounts(body.countsByOptionId);
+      } catch {
+        // Counts are decorative here; the server re-checks on delete anyway.
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [field.id]);
+
+  const withOptions = useCallback(
+    (nextOptions: ContactFieldOption[]) => {
+      onReplace({ ...field, options: nextOptions });
+    },
+    [field, onReplace],
+  );
+
+  const addOption = useCallback(async () => {
+    const name = newName.trim();
+    if (!name) return;
+    setBusyId("__new__");
+    setError(null);
+    try {
+      const res = await apiFetch(`/api/workspace/contact-fields/${field.id}/options`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        option?: ContactFieldOption;
+        error?: string;
+        detail?: string;
+      };
+      if (!res.ok || !body.option) {
+        setError(body.detail || body.error || `Couldn't add option (HTTP ${res.status})`);
+        return;
+      }
+      withOptions([...options, body.option]);
+      setNewName("");
+    } finally {
+      setBusyId(null);
+    }
+  }, [field.id, newName, options, withOptions]);
+
+  const patchOption = useCallback(
+    async (optionId: string, patch: { name?: string; color?: TagColor }) => {
+      setBusyId(optionId);
+      setError(null);
+      const prev = options;
+      withOptions(options.map((o) => (o.id === optionId ? { ...o, ...patch } : o)));
+      try {
+        const res = await apiFetch(
+          `/api/workspace/contact-fields/${field.id}/options/${optionId}`,
+          {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(patch),
+          },
+        );
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as {
+            error?: string;
+            detail?: string;
+          };
+          withOptions(prev);
+          setError(body.detail || body.error || `Update failed (HTTP ${res.status})`);
+        }
+      } catch {
+        withOptions(prev);
+        setError("Network error");
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [field.id, options, withOptions],
+  );
+
+  const reorderOption = useCallback(
+    async (optionId: string, direction: "up" | "down") => {
+      const idx = options.findIndex((o) => o.id === optionId);
+      const swapIdx = direction === "up" ? idx - 1 : idx + 1;
+      if (idx < 0 || swapIdx < 0 || swapIdx >= options.length) return;
+      const next = options.slice();
+      [next[idx], next[swapIdx]] = [next[swapIdx]!, next[idx]!];
+      const renumbered = next.map((o, i) => ({ ...o, position: i }));
+      const prev = options;
+      withOptions(renumbered);
+      setBusyId(optionId);
+      try {
+        const res = await apiFetch(
+          `/api/workspace/contact-fields/${field.id}/options/reorder`,
+          {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ orderedIds: renumbered.map((o) => o.id) }),
+          },
+        );
+        if (!res.ok) {
+          withOptions(prev);
+          setError(`Reorder failed (HTTP ${res.status})`);
+        }
+      } catch {
+        withOptions(prev);
+        setError("Network error");
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [field.id, options, withOptions],
+  );
+
+  const deleteOption = useCallback(
+    async (option: ContactFieldOption) => {
+      const used = counts[option.id] ?? 0;
+      const ok = await confirm({
+        title: `Delete "${option.name}"?`,
+        description:
+          used > 0
+            ? `${used} contact${used === 1 ? " has" : "s have"} this option — deleting will clear their "${field.label}" value. It can't be undone.`
+            : "This removes the option from the dropdown. It can't be undone.",
+        confirmLabel: used > 0 ? "Clear & delete" : "Delete",
+        destructive: true,
+      });
+      if (!ok) return;
+      setBusyId(option.id);
+      setError(null);
+      try {
+        const res = await apiFetch(
+          `/api/workspace/contact-fields/${field.id}/options/${option.id}`,
+          {
+            method: "DELETE",
+            headers: { "content-type": "application/json" },
+            // Explicit null = clear the value on every carrying contact in
+            // the same transaction. The count shown above may be seconds
+            // stale, so we always send it rather than risk a surprise 409.
+            body: JSON.stringify({ moveToOptionId: null }),
+          },
+        );
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as {
+            error?: string;
+            detail?: string;
+          };
+          setError(body.detail || body.error || `Delete failed (HTTP ${res.status})`);
+          return;
+        }
+        withOptions(options.filter((o) => o.id !== option.id));
+        setCounts((cur) => {
+          const { [option.id]: _drop, ...rest } = cur;
+          void _drop;
+          return rest;
+        });
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [confirm, counts, field.id, field.label, options, withOptions],
+  );
+
+  return (
+    <div className="mt-2 w-full basis-full rounded-md border border-border bg-muted/30 p-2">
+      {error && (
+        <div className="mb-2 rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1.5 text-2xs text-destructive">
+          {error}
+        </div>
+      )}
+      <ul className="space-y-0.5">
+        {options.map((option, idx) => (
+          <li key={option.id} className="flex items-center gap-1.5 rounded-md px-1 py-0.5 hover:bg-accent/40">
+            <ColorSwatchPicker
+              selected={option.color}
+              onChange={(color) => void patchOption(option.id, { color })}
+              disabled={busyId === option.id}
+              label={`colour for "${option.name}"`}
+            />
+            <OptionName
+              name={option.name}
+              busy={busyId === option.id}
+              onRename={(name) => void patchOption(option.id, { name })}
+            />
+            {(counts[option.id] ?? 0) > 0 && (
+              <span
+                className="rounded-full bg-muted px-1.5 py-0.5 text-3xs tabular-nums text-muted-foreground"
+                title={`${counts[option.id]} contact${counts[option.id] === 1 ? "" : "s"}`}
+              >
+                {counts[option.id]}
+              </span>
+            )}
+            <div className="ml-auto flex items-center">
+              <button
+                type="button"
+                onClick={() => void reorderOption(option.id, "up")}
+                disabled={idx === 0 || busyId !== null}
+                aria-label={`Move ${option.name} up`}
+                className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
+              >
+                <ArrowUp className="size-3" />
+              </button>
+              <button
+                type="button"
+                onClick={() => void reorderOption(option.id, "down")}
+                disabled={idx === options.length - 1 || busyId !== null}
+                aria-label={`Move ${option.name} down`}
+                className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
+              >
+                <ArrowDown className="size-3" />
+              </button>
+              <button
+                type="button"
+                onClick={() => void deleteOption(option)}
+                disabled={busyId !== null}
+                aria-label={`Delete ${option.name}`}
+                className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/15 hover:text-destructive disabled:opacity-50"
+              >
+                {busyId === option.id ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <Trash2 className="size-3" />
+                )}
+              </button>
+            </div>
+          </li>
+        ))}
+        {options.length === 0 && (
+          <li className="px-1 py-2 text-2xs text-muted-foreground">
+            No options yet — add the first one below.
+          </li>
+        )}
+      </ul>
+      <div className="mt-1.5 flex items-center gap-2">
+        <Input
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void addOption();
+            }
+          }}
+          placeholder="Add option…"
+          aria-label={`Add option to ${field.label}`}
+          className="h-7 max-w-52 text-xs"
+          disabled={busyId === "__new__"}
+        />
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => void addOption()}
+          disabled={busyId === "__new__" || !newName.trim()}
+          className="h-7"
+        >
+          {busyId === "__new__" ? (
+            <Loader2 className="size-3 animate-spin" />
+          ) : (
+            <Plus className="size-3" />
+          )}
+          Add
+        </Button>
+        <span className="text-3xs text-muted-foreground">
+          {options.length}/30
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** Click-to-rename, mirroring the field label editor above. */
+function OptionName({
+  name,
+  busy,
+  onRename,
+}: {
+  name: string;
+  busy: boolean;
+  onRename: (name: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(name);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  function start() {
+    setDraft(name);
+    setEditing(true);
+    requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    });
+  }
+
+  function commit() {
+    const next = draft.trim();
+    setEditing(false);
+    if (!next || next === name) return;
+    onRename(next);
+  }
+
+  if (editing) {
+    return (
+      <Input
+        ref={inputRef}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            commit();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            setEditing(false);
+          }
+        }}
+        className="h-6 max-w-44 text-xs"
+      />
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={start}
+      disabled={busy}
+      className="group inline-flex items-center gap-1 rounded-md px-1 py-0.5 text-xs transition-colors hover:bg-accent"
+    >
+      <span>{name}</span>
+      <Pencil className="size-2.5 opacity-0 transition-opacity group-hover:opacity-50" />
+    </button>
   );
 }
 

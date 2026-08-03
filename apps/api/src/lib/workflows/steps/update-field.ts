@@ -2,6 +2,7 @@ import { normalizeStringMap } from "@/lib/normalize-string-map";
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
+import { resolveSelectValue } from "@/lib/contact-fields/select-values";
 import { publish } from "@/lib/events/bus";
 import type { Contact } from "@ccp/shared/types";
 import { resolveFieldTokens } from "@ccp/shared/field-tokens";
@@ -79,7 +80,14 @@ export const updateFieldStepHandler: StepHandler<UpdateFieldStepConfig> = {
       }),
       db.contactFieldDefinition.findFirst({
         where: { workspaceId: ctx.workspaceId, key: config.fieldKey },
-        select: { key: true },
+        select: {
+          key: true,
+          type: true,
+          options: {
+            select: { id: true, name: true },
+            orderBy: [{ position: "asc" }, { createdAt: "asc" }],
+          },
+        },
       }),
     ]);
     if (!contact) return advanceWithError(404, "contact not found");
@@ -97,7 +105,25 @@ export const updateFieldStepHandler: StepHandler<UpdateFieldStepConfig> = {
       ctx.workspaceId,
       contactId,
     );
-    const resolvedValue = resolveFieldTokens(config.value, contactLike, extras);
+    let resolvedValue = resolveFieldTokens(config.value, contactLike, extras);
+
+    // Select-type field: the resolved value (builder-picked option id, or a
+    // token that rendered an option NAME) must land on a real option — the
+    // stored value is the option id. Empty string means "clear" and passes.
+    if (fieldDef.type === "select" && resolvedValue !== "") {
+      const match = resolveSelectValue(
+        { key: fieldDef.key, options: fieldDef.options },
+        resolvedValue,
+      );
+      if (!match.ok) {
+        return advanceWithError(
+          400,
+          "invalid_option",
+          `"${resolvedValue}" is not an option of select field "${config.fieldKey}"`,
+        );
+      }
+      resolvedValue = match.id;
+    }
 
     const currentFields = normalizeStringMap(contact.customFields);
     const previousValue = currentFields[config.fieldKey] ?? null;

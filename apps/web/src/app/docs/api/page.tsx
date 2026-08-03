@@ -681,7 +681,9 @@ export default function ApiDocsPage() {
 
       <Section title="Custom field definitions">
         <Endpoint method="GET" path="/api/external/v1/contact-fields">
-          List every custom field definition (id, key, label, order).
+          List every custom field definition (id, key, label, order, isVisible,
+          type). A <code>select</code>-type field also carries its{" "}
+          <code>options</code> array (<code>{`{ id, name, color, position }`}</code>).
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/contact-fields/:idOrKey">
           Find a field by id or by stable key (e.g. <code>amount_usd</code>).
@@ -689,11 +691,77 @@ export default function ApiDocsPage() {
         <Endpoint
           method="POST"
           path="/api/external/v1/contact-fields"
-          body={{ label: "Amount (USD)" }}
+          body={{
+            label: "Source",
+            type: "select",
+            options: [{ name: "CRM" }, { name: "Website", color: "sky" }],
+          }}
         >
-          Create a new field. Body: <code>{`{ label: string }`}</code>. Key is
-          auto-derived from the label.
+          Create a new field. Body:{" "}
+          <code>{`{ label: string, type?: "text" | "select", options?: { name, color? }[] }`}</code>.
+          Key is auto-derived from the label; <code>type</code> defaults to{" "}
+          <code>text</code> and is <strong>immutable after create</strong>.
+          Inline <code>options</code> are only valid with{" "}
+          <code>type: &quot;select&quot;</code>.
         </Endpoint>
+        <Endpoint
+          method="PATCH"
+          path="/api/external/v1/contact-fields/:id"
+          body={{ label: "Lead source", isVisible: true }}
+        >
+          Rename a field or toggle its contact-panel visibility. The key and
+          the type never change.
+        </Endpoint>
+        <Endpoint method="DELETE" path="/api/external/v1/contact-fields/:id">
+          Delete a field — its value is stripped from every contact, and a
+          select field&apos;s options are removed with it.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/contact-fields/:id/options"
+          body={{ name: "Referral", color: "violet" }}
+        >
+          Add an option to a select field (max 30). Names are unique per field,
+          case-insensitively. <code>400 not_a_select_field</code> on a text
+          field.
+        </Endpoint>
+        <Endpoint
+          method="PATCH"
+          path="/api/external/v1/contact-fields/:id/options/reorder"
+          body={{ orderedIds: ["opt_a", "opt_b"] }}
+        >
+          Reorder a field&apos;s options; ids omitted keep their position.
+        </Endpoint>
+        <Endpoint
+          method="PATCH"
+          path="/api/external/v1/contact-fields/:id/options/:optionId"
+          body={{ name: "Partner referral", color: "amber" }}
+        >
+          Rename / recolor an option. Contacts store the option <em>id</em>, so
+          a rename needs no data migration.
+        </Endpoint>
+        <Endpoint
+          method="DELETE"
+          path="/api/external/v1/contact-fields/:id/options/:optionId"
+          body={{ moveToOptionId: "opt_b" }}
+        >
+          Delete an option. Without a body it refuses while contacts still
+          carry the value (<code>409 option_in_use</code> + count). Pass{" "}
+          <code>moveToOptionId</code> to re-point those contacts to a sibling
+          option first, or <code>null</code> to clear their value — one
+          transaction either way.
+        </Endpoint>
+        <div className="px-2 py-1.5 text-xs text-muted-foreground">
+          <strong>Select-field values.</strong> On a contact, a select field
+          stores the <em>option id</em> in <code>customFields[key]</code>.
+          Writes (contact create / PATCH / upsert) accept the option{" "}
+          <em>id or its name</em> (exact id match wins, then case-insensitive
+          name) and always store the id. An unknown value is a{" "}
+          <code>400 invalid_option</code> listing the allowed names. Webhook{" "}
+          <code>contact.updated</code> payloads carry option <em>ids</em> in{" "}
+          <code>field_changes</code> — resolve display names via{" "}
+          <code>GET /contact-fields</code>.
+        </div>
       </Section>
 
       <Section title="Tags & stages">

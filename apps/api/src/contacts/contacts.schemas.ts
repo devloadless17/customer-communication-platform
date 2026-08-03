@@ -82,6 +82,9 @@ export const ListContactsQuerySchema = z.object({
   take: z.coerce.number().int().min(1).max(100).optional(),
   fieldKey: z.string().optional(),
   fieldValue: z.string().optional(),
+  /** `equals` = exact value match (select fields send an option id);
+   *  default is the text fields' case-insensitive contains. */
+  fieldMode: z.enum(["contains", "equals"]).optional().catch(undefined),
   source: z.enum(["inbound", "manual"]).optional().catch(undefined),
   /** Comma-separated list of tag ids; ANY-match. Empty entries are dropped. */
   tagIds: z.string().optional(),
@@ -231,6 +234,7 @@ export const BulkFilterSchema = z.object({
   search: z.string().max(MAX_TEXT).optional(),
   fieldKey: z.string().max(80).optional(),
   fieldValue: z.string().max(MAX_TEXT).optional(),
+  fieldMode: z.enum(["contains", "equals"]).optional(),
   source: z.enum(["inbound", "manual"]).optional(),
   tagIds: z.array(z.string().min(1)).max(MAX_IDS).optional(),
   window: z.enum(["open", "closed"]).optional(),

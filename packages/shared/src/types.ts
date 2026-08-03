@@ -293,6 +293,27 @@ export interface Contact {
 }
 
 /**
+ * Field kind. `text` is the original free-text field; `select` is a
+ * single-choice field whose allowed values are a per-field option catalog
+ * (ContactFieldOption). Immutable after create — converting text→select is a
+ * data migration, not an edit.
+ */
+export type ContactFieldType = "text" | "select";
+
+/**
+ * One choice of a select-type field. For select fields the value stored in
+ * Contact.customFields[key] is the option ID (rename-stable), never the name.
+ * `color` reuses the TagColor named slots like ContactStage.
+ */
+export interface ContactFieldOption {
+  id: string;
+  fieldId: string;
+  name: string;
+  color: TagColor;
+  position: number;
+}
+
+/**
  * Team-wide contact field definition. Every contact in the team renders one
  * row per definition (even when blank); the value lives in
  * Contact.customFields[key]. Per-contact one-off fields are keys on
@@ -308,6 +329,10 @@ export interface ContactFieldDefinition {
    *  are dropped from the panel for all agents. Defaults to true on the
    *  server for backwards compat. */
   isVisible: boolean;
+  type: ContactFieldType;
+  /** Ordered option catalog. Present (possibly empty) for select fields;
+   *  absent for text fields. */
+  options?: ContactFieldOption[];
 }
 
 /**

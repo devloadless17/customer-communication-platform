@@ -20,6 +20,7 @@ import {
   uniquePerContactKey,
 } from "@/features/contacts/components/field-controls";
 import { EditableField } from "@/features/inbox/components/contact-panel/editable-field";
+import { ContactFieldSelectPicker } from "./contact-field-select-picker";
 import { EditableHeading } from "@/features/inbox/components/contact-panel/editable-heading";
 import { Section } from "@/features/inbox/components/contact-panel/section";
 import { apiFetch } from "@/lib/api/client-fetch";
@@ -464,28 +465,53 @@ export function ContactDetailDrawer({
               />
             )}
 
+            {/* Select-type fields render the option picker (value = option
+                ID); text fields keep the inline editor — same branch as the
+                inbox contact panel. */}
             {fieldDefinitions
               .filter((def) => def.isVisible)
-              .map((def) => (
-                <EditableField
-                  key={def.id}
-                  label={def.label}
-                  value={customFields[def.key] ?? ""}
-                  placeholder="—"
-                  onSave={async (next) => {
-                    const trimmed = next.trim();
-                    const current = customFields[def.key] ?? "";
-                    if (trimmed === current) return true;
-                    const prev = customFields;
-                    setCustomFields({ ...prev, [def.key]: trimmed });
-                    const ok = await save({
-                      customFields: { [def.key]: trimmed === "" ? null : trimmed },
-                    });
-                    if (!ok) setCustomFields(prev);
-                    return ok;
-                  }}
-                />
-              ))}
+              .map((def) =>
+                def.type === "select" ? (
+                  <div key={def.id} className="flex items-center justify-between gap-2 py-1">
+                    <span className="shrink-0 text-xs text-muted-foreground">{def.label}</span>
+                    <ContactFieldSelectPicker
+                      fieldLabel={def.label}
+                      options={def.options ?? []}
+                      currentOptionId={customFields[def.key] ?? null}
+                      canManage={canManageFields}
+                      size="sm"
+                      onChange={async (optionId) => {
+                        const prev = customFields;
+                        const nextMap = { ...prev };
+                        if (optionId === null) delete nextMap[def.key];
+                        else nextMap[def.key] = optionId;
+                        setCustomFields(nextMap);
+                        const ok = await save({ customFields: { [def.key]: optionId } });
+                        if (!ok) setCustomFields(prev);
+                      }}
+                    />
+                  </div>
+                ) : (
+                  <EditableField
+                    key={def.id}
+                    label={def.label}
+                    value={customFields[def.key] ?? ""}
+                    placeholder="—"
+                    onSave={async (next) => {
+                      const trimmed = next.trim();
+                      const current = customFields[def.key] ?? "";
+                      if (trimmed === current) return true;
+                      const prev = customFields;
+                      setCustomFields({ ...prev, [def.key]: trimmed });
+                      const ok = await save({
+                        customFields: { [def.key]: trimmed === "" ? null : trimmed },
+                      });
+                      if (!ok) setCustomFields(prev);
+                      return ok;
+                    }}
+                  />
+                ),
+              )}
 
             {perContactKeys.map((key) => (
               <EditableField

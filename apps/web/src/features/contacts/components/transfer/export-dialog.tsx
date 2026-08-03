@@ -16,6 +16,7 @@ export interface ExportFilters {
   search?: string;
   fieldKey?: string;
   fieldValue?: string;
+  fieldMode?: "contains" | "equals";
   source?: string;
   channel?: string;
   window?: "open" | "closed";

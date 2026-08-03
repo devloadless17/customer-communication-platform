@@ -2,6 +2,10 @@ import { normalizeStringMap } from "@/lib/normalize-string-map";
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
+import {
+  loadSelectFieldCatalog,
+  resolveSelectValue,
+} from "@/lib/contact-fields/select-values";
 import { publish } from "@/lib/events/bus";
 import {
   SendTextValidationError,
@@ -571,6 +575,18 @@ async function saveAnswerToField(
     include: { tags: { select: { id: true } } },
   });
   if (!contact) return;
+
+  // Select-type target field: a customer's free-text reply must resolve to a
+  // real option (name-or-id, lenient) or the save is SKIPPED — never store
+  // free text under a select key. The run already routed on the answer;
+  // dropping the write is the safe failure, same as the CAS-miss below.
+  const catalog = await loadSelectFieldCatalog(workspaceId, [key]);
+  const selectEntry = catalog.get(key);
+  if (selectEntry) {
+    const match = resolveSelectValue(selectEntry, value);
+    if (!match.ok) return;
+    value = match.id;
+  }
 
   const currentFields = normalizeStringMap(contact.customFields);
   const previousValue = currentFields[key] ?? null;

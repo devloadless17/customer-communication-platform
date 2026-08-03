@@ -103,6 +103,15 @@ export function TransferProgress({
             </Callout>
           )}
 
+          {job.details?.unknownOptions && job.details.unknownOptions.length > 0 && (
+            <Callout>
+              These values don&apos;t match any option of their dropdown field, so those
+              cells were skipped:{" "}
+              <span className="font-medium">{job.details.unknownOptions.join(", ")}</span>.
+              Fix the values or add the options first.
+            </Callout>
+          )}
+
           {job.details?.extraSheets && job.details.extraSheets.length > 0 && (
             <Callout>
               Only the first sheet was imported. Ignored:{" "}

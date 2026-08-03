@@ -56,7 +56,12 @@ export async function loadWorkflowCatalogs(): Promise<{
   }>;
   tags: Array<{ id: string; name: string; color: string }>;
   stages: Array<{ id: string; name: string; position: number }>;
-  fields: Array<{ key: string; label: string }>;
+  fields: Array<{
+    key: string;
+    label: string;
+    type: "text" | "select";
+    options?: Array<{ id: string; name: string }>;
+  }>;
   workflows: Array<{ id: string; name: string; trigger: WorkflowTriggerEvent }>;
   assignmentPolicies: Array<{ id: string; name: string; isDefault: boolean }>;
   channelAccounts: Array<{ id: string; name: string; channel: string }>;
@@ -91,7 +96,14 @@ export async function loadWorkflowCatalogs(): Promise<{
     })),
     tags: tags.map((t) => ({ id: t.id, name: t.name, color: t.color })),
     stages: stages.map((s) => ({ id: s.id, name: s.name, position: s.position })),
-    fields: fields.map((f) => ({ key: f.key, label: f.label })),
+    fields: fields.map((f) => ({
+      key: f.key,
+      label: f.label,
+      type: f.type,
+      // Options ride along so the update_field / field_equals editors can
+      // offer a dropdown (storing the option ID) for select-type fields.
+      ...(f.options ? { options: f.options.map((o) => ({ id: o.id, name: o.name })) } : {}),
+    })),
     workflows: workflows
       .filter((w) => w.trigger === "manual_trigger")
       .map((w) => ({

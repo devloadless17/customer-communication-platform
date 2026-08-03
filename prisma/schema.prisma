@@ -711,6 +711,7 @@ model Workspace {
   conversations           Conversation[]
   messages                Message[]
   contactFieldDefinitions ContactFieldDefinition[]
+  contactFieldOptions     ContactFieldOption[]
   contactTransferJobs     ContactTransferJob[]
   contactStages           ContactStage[]
   messageTemplates        MessageTemplate[]
@@ -1919,6 +1920,16 @@ model ContactStage {
   @@index([workspaceId, position])
 }
 
+// Field kind. `text` is the original free-text field; `select` is a
+// single-choice field whose allowed values live in ContactFieldOption.
+// Immutable after create (no update schema accepts it) — converting a text
+// field with arbitrary historical values into a fixed catalog is a data
+// migration, not an edit.
+enum ContactFieldType {
+  text
+  select
+}
+
 // Workspace-wide contact field definitions: an admin/manager defines a key+label
 // once, and every contact in the team renders that field in the panel. The
 // value still lives in Contact.customFields[key] so we don't need a separate
@@ -1926,7 +1937,7 @@ model ContactStage {
 // deleting it strips the key from every contact's customFields in the same
 // transaction (see /api/team/contact-fields/[id] DELETE).
 model ContactFieldDefinition {
-  id          String   @id @default(cuid())
+  id          String           @id @default(cuid())
   workspaceId String
   // Stable identifier used in Contact.customFields. Lowercased + underscored
   // at create time; immutable once set so existing data keeps mapping cleanly.
@@ -1934,18 +1945,46 @@ model ContactFieldDefinition {
   label       String
   // Sort order within the panel — lower first. Tracked so the UI can reorder
   // later without us needing alphabetical-only sorting.
-  order       Int      @default(0)
+  order       Int              @default(0)
   // Admin-controlled visibility for the inbox contact panel. Hidden fields
   // are dropped from the panel for ALL agents (including admins — they can
   // still toggle them back on from /settings/contact-fields). Default true
   // so existing definitions stay visible after the migration.
-  isVisible   Boolean  @default(true)
-  createdAt   DateTime @default(now())
+  isVisible   Boolean          @default(true)
+  type        ContactFieldType @default(text)
+  createdAt   DateTime         @default(now())
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  options   ContactFieldOption[]
 
   @@unique([workspaceId, key])
   @@index([workspaceId, order])
+}
+
+// One choice of a select-type contact field — the client-named "stage-like"
+// dimensions (Source, From, ...). For select fields the value stored in
+// Contact.customFields[key] is the option ID, never the name, so renaming an
+// option is metadata-only. There is deliberately no FK from the JSON value to
+// this table; integrity is app-level — option delete refuses while in use
+// (usage counted via customFields->>key) and offers a bulk-move, mirroring
+// ContactStage delete. `color` reuses the Tag color slot system.
+model ContactFieldOption {
+  id          String   @id @default(cuid())
+  workspaceId String
+  fieldId     String
+  name        String
+  color       String   @default("slate")
+  // Sort order within the field's catalog — lower first. Reorder is a bulk
+  // PATCH, same pattern as ContactStage.
+  position    Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  workspace Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  field     ContactFieldDefinition @relation(fields: [fieldId], references: [id], onDelete: Cascade)
+
+  @@unique([fieldId, name])
+  @@index([workspaceId])
+  @@index([fieldId, position])
 }
 
 enum ContactTransferKind {

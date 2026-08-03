@@ -79,7 +79,6 @@ import {
   ExternalContactRemoveTagsSchema,
   ExternalContactStageSchema,
   ExternalContactStatusSchema,
-  ExternalCreateContactFieldSchema,
   ExternalCreateContactSchema,
   ExternalCreateTagSchema,
   ExternalCallButtonSchema,
@@ -106,7 +105,6 @@ import {
   type ExternalContactRemoveTagsInput,
   type ExternalContactStageInput,
   type ExternalContactStatusInput,
-  type ExternalCreateContactFieldInput,
   type ExternalCreateContactInput,
   type ExternalCreateTagInput,
   type ExternalCallButtonInput,
@@ -135,6 +133,22 @@ import {
   type SetUserAvailabilityInput,
   type SetUserWorkHoursInput,
 } from "@/users/users.schemas";
+// Contact-field + option payloads likewise ride the settings page's schemas,
+// and the writes delegate to the same ContactFieldsService.
+import {
+  CreateContactFieldSchema,
+  CreateFieldOptionSchema,
+  DeleteFieldOptionSchema,
+  ReorderFieldOptionsSchema,
+  UpdateContactFieldSchema,
+  UpdateFieldOptionSchema,
+  type CreateContactFieldInput,
+  type CreateFieldOptionInput,
+  type DeleteFieldOptionInput,
+  type ReorderFieldOptionsInput,
+  type UpdateContactFieldInput,
+  type UpdateFieldOptionInput,
+} from "@/workspace-settings/contact-fields/contact-fields.schemas";
 
 /**
  * External /v1 API for n8n / Zapier / customer integrations.
@@ -159,7 +173,13 @@ import {
  * Catalogs (tags / fields / stages / channels):
  *   GET    /v1/contact-fields                 — list custom field definitions
  *   GET    /v1/contact-fields/:idOrKey        — find one by id or key
- *   POST   /v1/contact-fields                 — create
+ *   POST   /v1/contact-fields                 — create (type: text | select, inline options)
+ *   PATCH  /v1/contact-fields/:id             — rename / toggle visibility
+ *   DELETE /v1/contact-fields/:id             — delete (strips values from contacts)
+ *   POST   /v1/contact-fields/:id/options            — add a select-field option
+ *   PATCH  /v1/contact-fields/:id/options/reorder    — reorder options
+ *   PATCH  /v1/contact-fields/:id/options/:optionId  — rename / recolor
+ *   DELETE /v1/contact-fields/:id/options/:optionId  — delete (409 while in use; body moveToOptionId)
  *   GET    /v1/tags                           — list
  *   POST   /v1/tags                           — create
  *   PATCH  /v1/tags/:id                       — update
@@ -627,10 +647,87 @@ export class ExternalV1Controller {
   @RequireScope("write:catalog")
   async createContactField(
     @CurrentApiKey() auth: ApiKeyContext,
-    @Body(zBody(ExternalCreateContactFieldSchema)) body: ExternalCreateContactFieldInput,
+    // The SAME schema the settings page posts — `type: "select"` plus inline
+    // `options` create a dropdown field in one call (CRM sync convenience).
+    @Body(zBody(CreateContactFieldSchema)) body: CreateContactFieldInput,
   ) {
     const field = await this.api.createContactField(auth.workspaceId, body);
     return { field };
+  }
+
+  @Patch("contact-fields/:id")
+  @RequireScope("write:catalog")
+  async updateContactField(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(UpdateContactFieldSchema)) body: UpdateContactFieldInput,
+  ) {
+    const field = await this.api.updateContactField(auth.workspaceId, id, body);
+    return { field };
+  }
+
+  @Delete("contact-fields/:id")
+  @RequireScope("write:catalog")
+  async deleteContactField(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
+    await this.api.deleteContactField(auth.workspaceId, id);
+    return { ok: true };
+  }
+
+  // ---- Select-field options (the client-named "stage-like" catalogs) ----
+  // Granular CRUD rather than a replace-the-array PATCH: a CRM sync diffs
+  // individual options, and a replace API invites accidental deletes of
+  // in-use options.
+
+  @Post("contact-fields/:id/options")
+  @RequireScope("write:catalog")
+  async createContactFieldOption(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") fieldId: string,
+    @Body(zBody(CreateFieldOptionSchema)) body: CreateFieldOptionInput,
+  ) {
+    const option = await this.api.createContactFieldOption(auth.workspaceId, fieldId, body);
+    return { option };
+  }
+
+  // Reorder must come BEFORE :optionId PATCH so /reorder isn't matched as an id.
+  @Patch("contact-fields/:id/options/reorder")
+  @RequireScope("write:catalog")
+  async reorderContactFieldOptions(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") fieldId: string,
+    @Body(zBody(ReorderFieldOptionsSchema)) body: ReorderFieldOptionsInput,
+  ) {
+    await this.api.reorderContactFieldOptions(auth.workspaceId, fieldId, body);
+    return { ok: true };
+  }
+
+  @Patch("contact-fields/:id/options/:optionId")
+  @RequireScope("write:catalog")
+  async updateContactFieldOption(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") fieldId: string,
+    @Param("optionId") optionId: string,
+    @Body(zBody(UpdateFieldOptionSchema)) body: UpdateFieldOptionInput,
+  ) {
+    const option = await this.api.updateContactFieldOption(
+      auth.workspaceId,
+      fieldId,
+      optionId,
+      body,
+    );
+    return { option };
+  }
+
+  @Delete("contact-fields/:id/options/:optionId")
+  @RequireScope("write:catalog")
+  async deleteContactFieldOption(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") fieldId: string,
+    @Param("optionId") optionId: string,
+    @Body(zBody(DeleteFieldOptionSchema)) body: DeleteFieldOptionInput,
+  ) {
+    await this.api.deleteContactFieldOption(auth.workspaceId, fieldId, optionId, body);
+    return { ok: true };
   }
 
   // ---- Tags catalog -------------------------------------------------

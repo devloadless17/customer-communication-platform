@@ -7,6 +7,7 @@ import type {
   ListBroadcastsQueryInput,
 } from "./external-v1.schemas";
 import { normalizeStringMap } from "@/lib/normalize-string-map";
+import { resolveSelectFieldPatch } from "@/lib/contact-fields/select-values";
 import { Prisma } from "@prisma/client";
 import {
   BadRequestException,
@@ -16,10 +17,15 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 
-import { isReservedFieldKey } from "@ccp/shared/contacts/reserved-fields";
-// The SAME slug function the internal route compares labels with — a second
-// copy here would be a second definition of "these two labels collide".
-import { slugifyKey } from "@/workspace-settings/contact-fields/contact-fields.service";
+import { ContactFieldsService } from "@/workspace-settings/contact-fields/contact-fields.service";
+import type {
+  CreateContactFieldInput,
+  CreateFieldOptionInput,
+  DeleteFieldOptionInput,
+  ReorderFieldOptionsInput,
+  UpdateContactFieldInput,
+  UpdateFieldOptionInput,
+} from "@/workspace-settings/contact-fields/contact-fields.schemas";
 import { MAX_CHAIN_DEPTH } from "@/lib/workflows/events";
 import { ContactTransferService } from "@/contacts/transfer.service";
 import { toExternalAvatarUrl } from "@/lib/blob-storage";
@@ -77,7 +83,6 @@ import type {
   ExternalContactAddTagsInput,
   ExternalContactAssignInput,
   ExternalContactStatusInput,
-  ExternalCreateContactFieldInput,
   ExternalCreateContactInput,
   ExternalCreateTagInput,
   ExternalNoteInput,
@@ -139,6 +144,40 @@ function availabilityFields(u: {
   };
 }
 
+/**
+ * External wire shape of a contact field definition. `options` rides only on
+ * select fields; a select field's stored contact value is the option ID
+ * (writes accept id or name — see resolveSelectFieldPatch).
+ */
+function toExternalContactField(def: {
+  id: string;
+  key: string;
+  label: string;
+  order: number;
+  isVisible: boolean;
+  type: "text" | "select";
+  options?: { id: string; name: string; color: string; position: number }[];
+}) {
+  return {
+    id: def.id,
+    key: def.key,
+    label: def.label,
+    order: def.order,
+    isVisible: def.isVisible,
+    type: def.type,
+    ...(def.type === "select"
+      ? {
+          options: (def.options ?? []).map((o) => ({
+            id: o.id,
+            name: o.name,
+            color: o.color,
+            position: o.position,
+          })),
+        }
+      : {}),
+  };
+}
+
 @Injectable()
 export class ExternalV1Service {
   constructor(
@@ -157,6 +196,10 @@ export class ExternalV1Service {
     // Same service the composer calls — one set of audience-resolution,
     // template-validation and budget-gate rules for both entry points.
     private readonly broadcasts: BroadcastsService,
+    // Same service the contact-fields settings page calls — one copy of the
+    // field/option write rules (this file's create used to be a second copy
+    // and grew a duplicate-label bug from it).
+    private readonly contactFields: ContactFieldsService,
   ) {}
 
   /**
@@ -786,7 +829,12 @@ export class ExternalV1Service {
     // Auto-derive country code when not explicitly supplied — same convergence
     // point as the inbound webhook path (lib/providers/ingest.ts).
     const countryCode = input.countryCode ?? getCountryFromPhone(phone);
-    const customFields = normalizeCreateCustomFields(input.customFields ?? {});
+    // Select-type fields accept option name OR id (CRM sync sends names) and
+    // store the id — one shared gate with the internal write paths.
+    const customFields = await resolveSelectFieldPatch(
+      workspaceId,
+      normalizeCreateCustomFields(input.customFields ?? {}),
+    );
 
     // Honor caller-supplied stage if valid + team-scoped; otherwise fall
     // back to the team's default stage (lazy-init for older teams).
@@ -1104,10 +1152,12 @@ export class ExternalV1Service {
         });
         if (!existing) return null;
 
+        // Select-type fields: name-or-id → option id, same gate as the
+        // internal PATCH, inside the tx.
         const nextCustom = customFieldsPatch
           ? mergeCustomFields(
               (existing.customFields as Record<string, unknown> | null) ?? {},
-              customFieldsPatch,
+              await resolveSelectFieldPatch(workspaceId, customFieldsPatch, tx),
             )
           : undefined;
 
@@ -1835,13 +1885,8 @@ export class ExternalV1Service {
   // ===========================================================================
 
   async listContactFields(workspaceId: string) {
-    const rows = await this.db.contactFieldDefinition.findMany({
-      where: { workspaceId },
-      orderBy: [{ order: "asc" }, { createdAt: "asc" }],
-    });
-    return {
-      items: rows.map((r) => ({ id: r.id, key: r.key, label: r.label, order: r.order })),
-    };
+    const rows = await this.contactFields.list(workspaceId);
+    return { items: rows.map(toExternalContactField) };
   }
 
   /**
@@ -1851,76 +1896,76 @@ export class ExternalV1Service {
   async findContactField(workspaceId: string, idOrKey: string) {
     const row = await this.db.contactFieldDefinition.findFirst({
       where: { workspaceId, OR: [{ id: idOrKey }, { key: idOrKey }] },
+      include: {
+        options: { orderBy: [{ position: "asc" }, { createdAt: "asc" }] },
+      },
     });
     if (!row) throw new NotFoundException({ error: "contact_field_not_found", detail: "contact field not found" });
-    return { id: row.id, key: row.key, label: row.label, order: row.order };
+    return toExternalContactField({
+      id: row.id,
+      key: row.key,
+      label: row.label,
+      order: row.order,
+      isVisible: row.isVisible,
+      type: row.type,
+      options: row.options,
+    });
   }
 
-  async createContactField(workspaceId: string, input: ExternalCreateContactFieldInput) {
-    const existing = await this.db.contactFieldDefinition.findMany({
-      where: { workspaceId },
-      select: { key: true, label: true, order: true },
-      orderBy: { order: "desc" },
-    });
-    if (existing.length >= 50) {
-      throw new BadRequestException({ error: "too_many_contact_fields", detail: "at most 50 contact fields per team" });
-    }
-    // Same guard the internal contact-fields route applies. Without it /v1 can
-    // mint a field whose label shadows a built-in column ("Language", "City"),
-    // which renders two fields with the same name in the contact panel writing
-    // to different storage — and makes the field un-round-trippable through
-    // import/export except via the `custom:<key>` header form.
-    if (isReservedFieldKey(input.label)) {
-      throw new BadRequestException({
-        error: "reserved_field_label",
-        detail: `"${input.label}" collides with a built-in contact field. Pick a different label.`,
-      });
-    }
-    // ...and the DUPLICATE-LABEL guard, compared by normalized slug so
-    // "Notes" / "notes " / "NOTES" all collide. The internal route has always
-    // applied it (`assertLabelAvailable`); this one re-implemented the create
-    // and left it out, so `/v1` could mint two fields with distinct keys and
-    // identical CSV column headers — which silently drops one field's data on
-    // the next export/import round trip. Parity is a locked rule (§12), and
-    // this is the half where breaking it corrupts data.
-    const slug = slugifyKey(input.label);
-    if (slug && existing.some((f) => slugifyKey(f.label) === slug)) {
-      throw new ConflictException({
-        error: "duplicate_label",
-        detail: `A contact field named "${input.label}" already exists — pick a different name.`,
-      });
-    }
-    const baseKey = slugifyKey(input.label);
-    if (!baseKey) {
-      throw new BadRequestException({ error: "invalid_field_label", detail: "label must contain letters or digits" });
-    }
-    const usedKeys = new Set(existing.map((e) => e.key));
-    let key = baseKey;
-    let suffix = 2;
-    while (usedKeys.has(key)) key = `${baseKey}_${suffix++}`;
-    const nextOrder = (existing[0]?.order ?? -1) + 1;
+  // Field/option WRITES delegate to ContactFieldsService — the same
+  // implementation the settings page calls, so reserved-label / duplicate /
+  // cap / delete-while-in-use rules can't drift between the two entry points.
+  // (This file used to re-implement create and grew a duplicate-label bug
+  // from it — see git history. Don't re-inline.) canManage=true: the write
+  // authority for /v1 is the key's `write:catalog` scope, enforced by
+  // ScopeGuard before we get here.
 
-    try {
-      const created = await this.db.contactFieldDefinition.create({
-        data: { workspaceId, key, label: input.label, order: nextOrder },
-      });
-      await this.bus.publish({
-        type: "team.catalog_changed",
-        workspaceId,
-        scope: "contact-fields",
-      });
-      return { id: created.id, key: created.key, label: created.label, order: created.order };
-    } catch (err) {
-      if (
-        typeof err === "object" &&
-        err !== null &&
-        "code" in err &&
-        (err as { code?: string }).code === "P2002"
-      ) {
-        throw new ConflictException({ error: "field_key_taken", detail: "field with that key already exists" });
-      }
-      throw err;
-    }
+  async createContactField(workspaceId: string, input: CreateContactFieldInput) {
+    const def = await this.contactFields.create(workspaceId, true, input);
+    return toExternalContactField(def);
+  }
+
+  async updateContactField(workspaceId: string, id: string, input: UpdateContactFieldInput) {
+    const def = await this.contactFields.update(workspaceId, true, id, input);
+    return toExternalContactField(def);
+  }
+
+  async deleteContactField(workspaceId: string, id: string) {
+    await this.contactFields.remove(workspaceId, true, id);
+  }
+
+  async createContactFieldOption(
+    workspaceId: string,
+    fieldId: string,
+    input: CreateFieldOptionInput,
+  ) {
+    return this.contactFields.createOption(workspaceId, true, fieldId, input);
+  }
+
+  async updateContactFieldOption(
+    workspaceId: string,
+    fieldId: string,
+    optionId: string,
+    input: UpdateFieldOptionInput,
+  ) {
+    return this.contactFields.updateOption(workspaceId, true, fieldId, optionId, input);
+  }
+
+  async reorderContactFieldOptions(
+    workspaceId: string,
+    fieldId: string,
+    input: ReorderFieldOptionsInput,
+  ) {
+    await this.contactFields.reorderOptions(workspaceId, true, fieldId, input);
+  }
+
+  async deleteContactFieldOption(
+    workspaceId: string,
+    fieldId: string,
+    optionId: string,
+    input: DeleteFieldOptionInput,
+  ) {
+    await this.contactFields.removeOption(workspaceId, true, fieldId, optionId, input);
   }
 
   // ===========================================================================

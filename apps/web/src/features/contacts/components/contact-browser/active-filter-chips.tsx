@@ -173,7 +173,14 @@ export function ActiveFilterChips({
 
       {fieldFilter && (
         <FilterChip onRemove={() => onFieldChange(null)}>
-          {(fieldDef?.label ?? fieldFilter.key)}: {fieldFilter.value}
+          {/* An equals filter on a select field carries the OPTION ID as its
+              value — show the option's name (fall back to the raw value for
+              a stale id). Text filters show the typed substring as before. */}
+          {(fieldDef?.label ?? fieldFilter.key)}:{" "}
+          {fieldFilter.mode === "equals"
+            ? fieldDef?.options?.find((o) => o.id === fieldFilter.value)?.name ??
+              fieldFilter.value
+            : fieldFilter.value}
         </FilterChip>
       )}
 

@@ -12,8 +12,10 @@ export type WindowFilter = "any" | "open" | "closed";
 /** Lifecycle stage filter. "any" disables it; "none" = contacts with no stage. */
 export type StageFilter = "any" | "none" | string;
 
-/** Single custom-field substring filter. */
+/** Single custom-field filter. Default mode is substring (`contains`);
+ *  select-type fields send `equals` with `value` = the option ID. */
 export interface FieldFilter {
   key: string;
   value: string;
+  mode?: "contains" | "equals";
 }

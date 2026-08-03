@@ -1,6 +1,7 @@
 import { Module } from "@nestjs/common";
 
 import { ContactsModule } from "@/contacts/contacts.module";
+import { ContactFieldsModule } from "@/workspace-settings/contact-fields/contact-fields.module";
 
 import { InstagramModule } from "@/workspace-settings/instagram/instagram.module";
 import { MessengerModule } from "@/workspace-settings/messenger/messenger.module";
@@ -95,6 +96,11 @@ import { WorkflowsModule as WorkflowsSettingsModule } from "@/workspace-settings
     // the UI could write different shapes to the same `messenger_profile` node.
     InstagramModule,
     MessengerModule,
+    // Same service the contact-fields settings page calls — field/option
+    // writes (select-type catalogs included) share one implementation, so
+    // guards like reserved labels and delete-while-in-use can't drift. The
+    // /v1 create used to be a second copy and grew exactly that kind of bug.
+    ContactFieldsModule,
   ],
   controllers: [
     // ORDER IS LOAD-BEARING. Nest matches routes in controller-registration

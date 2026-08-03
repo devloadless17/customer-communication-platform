@@ -65,7 +65,12 @@ import {
   resolveBinding,
   type VariableBindings,
 } from "@ccp/shared/template-bindings";
-import { extractFieldTokens, resolveFieldTokens } from "@ccp/shared/field-tokens";
+import {
+  buildCustomFieldsDisplay,
+  extractFieldTokens,
+  resolveFieldTokens,
+} from "@ccp/shared/field-tokens";
+import { loadSelectFieldDisplayDefs } from "@/lib/contact-fields/select-values";
 import { computeWindowStatus } from "@ccp/shared/utils/window";
 import type { Message } from "@ccp/shared/types";
 
@@ -2107,6 +2112,9 @@ async function processOneRecipient(
       bindings,
       variables,
       recipient.contact,
+      // Memoized per workspace (5-min TTL) — a Map hit after the first
+      // recipient, not a per-recipient query.
+      await loadSelectFieldDisplayDefs(broadcast.workspaceId),
     );
 
     // Destination address by the SEND channel: phone channels (WhatsApp) dial
@@ -4134,7 +4142,12 @@ export async function reconcileCanceledMarkerRecipients(): Promise<void> {
             template && bindings
               ? renderTemplateBody(
                   template.bodyText,
-                  resolvePerRecipientVariables(bindings, variables, contact).body,
+                  resolvePerRecipientVariables(
+                    bindings,
+                    variables,
+                    contact,
+                    await loadSelectFieldDisplayDefs(broadcast.workspaceId),
+                  ).body,
                 )
               : broadcast.bodyText ?? "";
           await createOutboundMessageIdempotent({
@@ -4408,7 +4421,27 @@ function resolvePerRecipientVariables(
     location: string | null;
     customFields: Prisma.JsonValue;
   },
+  /**
+   * Select-field catalog (run-scoped, from `loadSelectFieldDisplayDefs`). A
+   * select field stores the OPTION ID on the contact; a message must render
+   * the option NAME. Substituted into a shallow copy of `customFields` so
+   * BOTH resolution layers (binding pull + token pass) see names — this
+   * contact object exists only for rendering text, nothing branches on it.
+   */
+  selectDefs?: { key: string; type: string; options: { id: string; name: string }[] }[],
 ): BroadcastVariables {
+  if (selectDefs && selectDefs.length > 0) {
+    const display = buildCustomFieldsDisplay(selectDefs, contact.customFields);
+    if (Object.keys(display).length > 0) {
+      const bag =
+        contact.customFields &&
+        typeof contact.customFields === "object" &&
+        !Array.isArray(contact.customFields)
+          ? (contact.customFields as Record<string, unknown>)
+          : {};
+      contact = { ...contact, customFields: { ...bag, ...display } as Prisma.JsonValue };
+    }
+  }
   // Two-layer resolution:
   //   1. `resolveBinding` honors the template's binding (contact_field /
   //      contact_custom_field) — pulls the matching contact value, falls

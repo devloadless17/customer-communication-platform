@@ -29,6 +29,12 @@ export type HeaderMapping =
 export interface TeamFieldDef {
   key: string;
   label: string;
+  /** Select-type fields carry their option catalog so the runners can map
+   *  option id ↔ NAME — the file always carries names (round-trip contract:
+   *  what the operator saw on screen is what lands in Excel). Text fields
+   *  (and callers that only need mapping) omit both. */
+  type?: "text" | "select";
+  options?: { id: string; name: string }[];
 }
 
 /**
@@ -71,7 +77,12 @@ export async function resolveExportColumns(workspaceId: string): Promise<{
   const fieldDefs = await db.contactFieldDefinition.findMany({
     where: { workspaceId },
     orderBy: [{ order: "asc" }, { createdAt: "asc" }],
-    select: { key: true, label: true },
+    select: {
+      key: true,
+      label: true,
+      type: true,
+      options: { select: { id: true, name: true } },
+    },
   });
 
   const baseColumns = TRANSFER_COLUMNS.map((c) => c.header);

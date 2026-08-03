@@ -97,6 +97,7 @@ export async function fetchContactsPage(
   if (filters.fieldFilter) {
     params.set("fieldKey", filters.fieldFilter.key);
     params.set("fieldValue", filters.fieldFilter.value);
+    if (filters.fieldFilter.mode) params.set("fieldMode", filters.fieldFilter.mode);
   }
   if (filters.sourceFilter !== "all") params.set("source", filters.sourceFilter);
   // Person mode rolls up across channels, so a single-channel filter is

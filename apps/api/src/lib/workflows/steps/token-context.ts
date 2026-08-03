@@ -2,7 +2,12 @@
 // outside the Next bundler context (same as the other step helpers).
 
 import { db } from "@/lib/db";
-import type { ContactLike, ResolverExtras } from "@ccp/shared/field-tokens";
+import { loadSelectFieldDisplayDefs } from "@/lib/contact-fields/select-values";
+import {
+  buildCustomFieldsDisplay,
+  type ContactLike,
+  type ResolverExtras,
+} from "@ccp/shared/field-tokens";
 import {
   workflowContactSnapshot,
   type WorkflowEventEnvelope,
@@ -38,7 +43,21 @@ export async function loadContactLikeById(
     },
   });
   if (!row) return EMPTY_CONTACT;
-  return workflowContactSnapshot(row);
+  const snapshot = workflowContactSnapshot(row);
+  // Select-type fields store option IDS in customFields; tokens should
+  // render the option NAME. The overlay is a SEPARATE key on the ContactLike
+  // — `customFields` stays raw, so `field_equals` branch evaluation (which
+  // reads the same object — branch-presets invariant IX) keeps comparing
+  // against stored ids. Catalog comes from a 5-min memo; empty for
+  // workspaces with no select fields.
+  const selectDefs = await loadSelectFieldDisplayDefs(workspaceId);
+  if (selectDefs.length > 0) {
+    return {
+      ...snapshot,
+      customFieldsDisplay: buildCustomFieldsDisplay(selectDefs, row.customFields),
+    };
+  }
+  return snapshot;
 }
 
 /**
