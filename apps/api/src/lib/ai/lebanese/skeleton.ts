@@ -68,19 +68,22 @@ export function skeleton(word: string): string {
     w = w.replace(/[aeioy]+$/, "");
   }
 
-  // ORDER IS LOAD-BEARING: collapse doubles FIRST, while the vowel that may sit
-  // between two same letters is still there, and only then drop vowels.
+  // DOUBLED CONSONANTS ARE KEPT, both of them.
   //
-  // Doing it the other way round collapses letters that were never doubled:
-  // tmam (تمام) loses its second m once the `a` is gone and lands on "tm" — the
-  // skeleton of the ENGLISH word "team", which this corpus of tech transcripts
-  // is full of. Production duly answered "kel shi team". A shadda writes a
-  // letter twice ADJACENTLY; that is the only doubling we may undo.
-  let collapsed = "";
-  for (const c of w) if (c !== collapsed[collapsed.length - 1]) collapsed += c;
-
+  // This collapsed them, twice over, and both times it merged a Lebanese word
+  // into a different one:
+  //   tmam  (تمام, "fine")   -> "tm"  = the ENGLISH "team", which a corpus of
+  //                             tech transcripts is full of -> "kel shi team"
+  //   3dd   (عدد, "number")  -> "3d"  = 3ad -> "w 3adad" came out "wa3ed"
+  //
+  // The premise was that a doubled letter is a shadda, which writes one
+  // consonant twice. It usually is not: عدد and تمام write two SEPARATE
+  // consonants with an unwritten vowel between them, and Arabic gives us no way
+  // to tell those apart from the letters alone. Keeping both is the safe
+  // reading — a shadda is spelled doubled in the corpus too (halla2, badde,
+  // msakkar), so the matches that mattered survive anyway.
   let core = "";
-  for (const c of collapsed) {
+  for (const c of w) {
     if (c === "a" || c === "e") continue; // the short vowels script omits
     core += c;
   }

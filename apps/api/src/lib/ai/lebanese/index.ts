@@ -58,7 +58,25 @@ export function canonicalizeArabizi(text: string): string {
       prev = "";
       return token;
     }
-    const candidates = LEBANESE_CORPUS.forms[skeleton(token)];
+    let candidates = LEBANESE_CORPUS.forms[skeleton(token)];
+    let conjunction = "";
+
+    // The conjunction و, which Arabic glues on and Lebanese writes separately:
+    // وعدد is "w 3adad", not "w3dd". It cannot be split on sight, because و is
+    // also the first ROOT letter of common words — وقت, وين, واحد — and
+    // splitting those yields "w 2t". The lexicon decides: split only when the
+    // whole word is unknown AND the remainder is a word we know. وقت stays
+    // whole because "wa2et" is in the corpus; وعدد splits because "w3dd" is not
+    // and "3adad" is.
+    if (!candidates && /^w./i.test(token)) {
+      const rest = token.slice(1);
+      const restCandidates = LEBANESE_CORPUS.forms[skeleton(rest)];
+      if (restCandidates?.length) {
+        conjunction = "w ";
+        candidates = restCandidates;
+      }
+    }
+
     if (!candidates || candidates.length === 0) {
       prev = token.toLowerCase();
       return token;
@@ -66,7 +84,7 @@ export function canonicalizeArabizi(text: string): string {
     const attested = prev ? candidates.find((c) => BIGRAMS.has(`${prev} ${c}`)) : undefined;
     const chosen = attested ?? candidates[0]!;
     prev = chosen;
-    return chosen;
+    return conjunction + chosen;
   });
 }
 

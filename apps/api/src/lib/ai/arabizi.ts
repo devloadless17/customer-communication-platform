@@ -75,9 +75,28 @@ export function arabicToArabizi(input: string): string {
   let runIsArabic = false;
   let runClassified = false;
 
+  let prevRunWasArabic: boolean | null = null;
+
   const flush = () => {
     if (!run) return;
-    out += runIsArabic ? canonicalizeArabizi(transliterateRun(run)) : run;
+    const text = runIsArabic ? canonicalizeArabizi(transliterateRun(run)) : run;
+    // A script change with no whitespace across it was two words in the model's
+    // Arabic — الpricing, والfeatures, الdelivery — that would otherwise be
+    // welded into one unreadable token ("elpricing"). Arabic and Latin never
+    // share a word, so a boundary here is always a word boundary.
+    // Both sides must be WORD characters. An Arabic comma is in the Arabic
+    // block, so "booking، online" changes script at the punctuation and would
+    // otherwise gain a space before the comma ("booking , online").
+    if (
+      prevRunWasArabic !== null &&
+      prevRunWasArabic !== runIsArabic &&
+      /[\p{L}\p{N}]$/u.test(out) &&
+      /^[\p{L}\p{N}]/u.test(text)
+    ) {
+      out += " ";
+    }
+    out += text;
+    prevRunWasArabic = runIsArabic;
     run = "";
     runClassified = false;
   };
@@ -101,11 +120,14 @@ export function arabicToArabizi(input: string): string {
  * `ي` and `و` are each two different sounds, and which one it is decides
  * whether the word survives canonicalisation as itself.
  *
- * They are CONSONANTS (y/w) at a word start, and before an alif or ta-marbuta —
- * حلوة is 7elwe, not 7eloa. They are LONG VOWELS (i/o) everywhere else — روح is
- * rou7. Getting this wrong is not cosmetic: transliterating حلوة ("pretty") with
- * a vowel produced the skeleton of حالة ("case"), and the canonicaliser
- * dutifully rewrote one word into the other.
+ * They are CONSONANTS (y/w) at a word start, next to an alif or ta-marbuta on
+ * EITHER side — حلوة is 7elwe not 7eloa, أول is awal not oul — and LONG VOWELS
+ * (i/o) everywhere else, where a real consonant precedes them: روح is rou7.
+ *
+ * Getting it wrong is not cosmetic, because the canonicaliser then matches the
+ * wrong word and rewrites it with confidence: حلوة ("pretty") took the skeleton
+ * of حالة ("case"), and أول ("first") took the skeleton of قول and shipped as
+ * "oul ma nefta7" instead of "awal ma nefta7".
  */
 const ALIF_FAMILY = new Set(["ا", "أ", "إ", "آ", "ٱ", "ة", "ى"]);
 const WORD_BREAK = /[\s\p{P}]/u;
@@ -140,7 +162,10 @@ function transliterateRun(run: string): string {
       const prev = chars[i - 1];
       const next = chars[i + 1];
       const atWordStart = prev === undefined || WORD_BREAK.test(prev);
-      const isConsonant = atWordStart || (next !== undefined && ALIF_FAMILY.has(next));
+      const isConsonant =
+        atWordStart ||
+        (next !== undefined && ALIF_FAMILY.has(next)) ||
+        (prev !== undefined && ALIF_FAMILY.has(prev));
       out += c === "ي" ? (isConsonant ? "y" : "i") : (isConsonant ? "w" : "o");
       continue;
     }
