@@ -69,8 +69,6 @@ export function TicketSettingsClient({
 type Saver = (path: string, init: RequestInit) => Promise<void>;
 
 function Behaviour({ settings, onSave }: { settings: TicketSettingsView; onSave: Saver }) {
-  const [reopenHours, setReopenHours] = useState(String(settings.ticketReopenWindowHours));
-
   const patch = (body: Record<string, unknown>) =>
     onSave("/api/workspace/tickets/settings", { method: "PATCH", body: JSON.stringify(body) });
 
@@ -82,39 +80,13 @@ function Behaviour({ settings, onSave }: { settings: TicketSettingsView; onSave:
         (&ldquo;Raise a ticket&rdquo;) or by a workflow. Incoming messages never
         open one on their own; the inbox already tracks every conversation.
       </p>
-
-      <Row
-        title="Reopen window"
-        hint="How long after a ticket is solved a follow-up message reopens it instead of starting a new one. Too short and one issue becomes three tickets; too long and a genuinely new question gets buried in resolved work. 0 disables reopening."
-      >
-        <form
-          className="flex items-center gap-1.5"
-          onSubmit={(e) => {
-            e.preventDefault();
-            const n = Number(reopenHours);
-            if (!Number.isInteger(n) || n < 0 || n > 720) {
-              toast.error("Enter a whole number of hours between 0 and 720");
-              return;
-            }
-            void patch({ ticketReopenWindowHours: n });
-          }}
-        >
-          <Input
-            value={reopenHours}
-            onChange={(e) => setReopenHours(e.target.value)}
-            inputMode="numeric"
-            // `Row` renders its title as plain text, so it gives sighted users
-            // context but is not programmatically associated with this control.
-            // Without a name a screen reader announces only "edit text, 72".
-            aria-label="Reopen window, in hours"
-            className="h-8 w-20 text-xs"
-          />
-          <span className="text-2xs text-muted-foreground">hours</span>
-          <Button type="submit" size="sm" variant="ghost" className="h-8 px-2 text-2xs">
-            Save
-          </Button>
-        </form>
-      </Row>
+      <p className="mb-3 text-2xs text-muted-foreground">
+        If the customer writes back within <strong className="font-medium">72 hours</strong>{" "}
+        of a ticket being solved, that message joins the same ticket instead of
+        stranding the issue across two — one number, one history. This used to be a
+        setting; it was a dial nobody turned, and an unexplained number on a settings
+        page is a question you have to answer twice a year.
+      </p>
 
       <Row
         title="Close the conversation when its last ticket is solved"

@@ -1937,6 +1937,12 @@ export default function ApiDocsPage() {
           <code>ticketCloseConversationOnLastSolved</code>. <code>PATCH</code> the same
           path to change them (<code>admin:settings</code>). Scope{" "}
           <code>read:tickets</code>.
+          <br />
+          <code>ticketReopenWindowHours</code> (default <code>72</code>, <code>0</code>{" "}
+          disables) decides how long after a ticket is solved a follow-up message joins
+          it rather than stranding the issue across two tickets. It is no longer offered
+          in the app&apos;s settings UI — it was a dial nobody turned — but it remains
+          settable here, and any value a workspace already chose is untouched.
         </Endpoint>
         <Endpoint
           method="POST"
