@@ -95,7 +95,11 @@ export async function repairLebaneseTranscript(opts: {
           ? `Proper nouns that may appear: ${opts.businessContext}\n\n`
           : "") + `Transcript to repair:\n${raw}`,
       schemaName: "repaired_transcript",
-      schema: SCHEMA as unknown as Record<string, unknown>,
+      // No cast needed: an `as const` object is already assignable to
+      // `Record<string, unknown>` (readonly properties do not block it). The
+      // `as unknown as` here tripped the double-assertion ratchet, which is CI
+      // gating — and a cast that buys nothing is exactly what that gate is for.
+      schema: SCHEMA,
       maxTokens: 2000,
     });
     corrected = (res.data?.corrected ?? "").trim();
