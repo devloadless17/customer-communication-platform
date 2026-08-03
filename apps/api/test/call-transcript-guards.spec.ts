@@ -31,6 +31,7 @@ const {
   languagePolicyFrom,
   isSubstantive,
   wordOverlap,
+  looksLikePromptEcho,
 } = __testing__;
 
 describe("looksLikeRepetitionLoop", () => {
@@ -232,5 +233,39 @@ describe("wordOverlap — the echo guard on speaker separation", () => {
   it("is zero when either side is empty", () => {
     expect(wordOverlap("", "مرحبا كيفك")).toBe(0);
     expect(wordOverlap("مرحبا كيفك", "")).toBe(0);
+  });
+});
+
+describe("looksLikePromptEcho — the model handing back its own prompt", () => {
+  const prompt = languagePolicyFrom({
+    defaultLanguage: "ar",
+    lebaneseDialect: true,
+    codeSwitching: true,
+    supportedLanguages: ["ar", "en"],
+  }).prompt!;
+
+  it("catches the exact echo seen on a real 24-second call", () => {
+    // gpt-4o-transcribe returned a verbatim slice of the dialect prompt as the
+    // transcript of a conversation it never rendered. The worst failure in the
+    // pipeline: it reads as an ordinary transcript, so nothing looks wrong.
+    expect(looksLikePromptEcho("ألو، كيفك؟ يالله، هلق بشوفلك ياها.", prompt)).toBe(true);
+  });
+
+  it("does NOT flag real speech that happens to open the same way", () => {
+    // "ألو" and "كيفك" are IN the prompt precisely because people say them —
+    // a real call starting that way must survive, or the guard deletes the
+    // very transcripts it exists to protect.
+    const real =
+      "ألو. أهلاً. صباح الخير. صباح النور، تفضل كيف فيني ساعدك؟ " +
+      "بدي استفسر عن حالة طلبي الأخير ومتى بيوصل. طيب، إذا بدك شي حكيني. يالله bye bye.";
+    expect(looksLikePromptEcho(real, prompt)).toBe(false);
+  });
+
+  it("does not flag a short genuine greeting", () => {
+    expect(looksLikePromptEcho("ألو، صباح الخير.", prompt)).toBe(false);
+  });
+
+  it("is inert when no prompt was sent", () => {
+    expect(looksLikePromptEcho("ألو، كيفك؟ يالله، هلق بشوفلك ياها.", null)).toBe(false);
   });
 });

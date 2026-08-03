@@ -497,6 +497,34 @@ function wordOverlap(a: string, b: string): number {
   return shared / Math.min(wa.size, wb.size);
 }
 
+/**
+ * Did the model hand back the PROMPT instead of transcribing the audio?
+ *
+ * Measured on a real 24-second call: `gpt-4o-transcribe` given the Lebanese
+ * dialect prompt returned "ألو، كيفك؟ يالله، هلق بشوفلك ياها." — a verbatim
+ * slice of that prompt, and nothing the caller had said. This is the most
+ * dangerous failure in the whole pipeline because the result reads as a
+ * perfectly ordinary transcript; nothing about it looks wrong.
+ *
+ * Guarded model-agnostically rather than by avoiding one model: the prompt is
+ * treated as preceding context by every speech model that accepts one, so any
+ * of them can continue it instead of the audio.
+ *
+ * Deliberately compares against the DIALECT ANCHOR only, and demands a high
+ * overlap on a SHORT result. Real speech legitimately contains "ألو" and
+ * "كيفك" — those are in the prompt precisely because people say them — so the
+ * test is "almost all of a brief answer is prompt wording", not "shares words
+ * with the prompt".
+ */
+function looksLikePromptEcho(text: string, prompt: string | null): boolean {
+  if (!prompt) return false;
+  const answer = text.trim();
+  // A long transcript that merely opens with a greeting is real speech; only a
+  // suspiciously short answer can plausibly BE the prompt.
+  if (answer.length === 0 || answer.length > prompt.length) return false;
+  return wordOverlap(answer, prompt) >= 0.9;
+}
+
 /** Anything with no letters or digits — " ." and friends, what a model emits
  *  when it hears nothing but is obliged to answer. */
 function isSubstantive(text: string): boolean {
@@ -870,6 +898,7 @@ async function transcribeOneChannel(
   // higher rungs exist only to break a loop.
   const ladder = [0, 0.4, 0.8];
   let language = pinnedLanguage;
+  let promptForAttempt: string | null = policy.prompt;
 
   for (let attempt = 0; attempt < ladder.length; attempt++) {
     let res;
@@ -885,7 +914,7 @@ async function transcribeOneChannel(
         temperature: ladder[attempt],
         // Dialect + proper-noun bias. Carried on every attempt: it is what
         // keeps Lebanese speech from being rendered as near-miss MSA.
-        ...(policy.prompt ? { prompt: policy.prompt } : {}),
+        ...(promptForAttempt ? { prompt: promptForAttempt } : {}),
         ...(language ? { language } : {}),
       });
     } catch (err) {
@@ -932,8 +961,9 @@ async function transcribeOneChannel(
     const assembled = kept.map((s) => s.text.trim()).join(" ");
     const looped = looksLikeRepetitionLoop(assembled);
     const wrongLanguage = !isPlausibleLanguage(res.language, policy);
+    const echoed = looksLikePromptEcho(assembled, policy.prompt);
 
-    if (kept.length > 0 && !looped && !wrongLanguage) {
+    if (kept.length > 0 && !looped && !wrongLanguage && !echoed) {
       return {
         speaker: side.speaker,
         label: side.label,
@@ -944,7 +974,9 @@ async function transcribeOneChannel(
       };
     }
 
-    const why = looped
+    const why = echoed
+      ? "the model returned the PROMPT instead of the audio"
+      : looped
       ? "repetition loop"
       : wrongLanguage
         ? `detected ${res.language}, which this workspace doesn't speak`
@@ -960,6 +992,9 @@ async function transcribeOneChannel(
     if ((wrongLanguage || looped) && !language && policy.fallback) {
       language = policy.fallback;
     }
+    // Retrying with the same prompt would invite the same echo. Drop it and
+    // accept slightly weaker dialect spelling over fabricated content.
+    if (echoed) promptForAttempt = null;
   }
   return empty;
 }
@@ -977,6 +1012,7 @@ export const __testing__ = {
   languagePolicyFrom,
   isSubstantive,
   wordOverlap,
+  looksLikePromptEcho,
 };
 
 /** File extension matching an audio wire type. The transcription API accepts
