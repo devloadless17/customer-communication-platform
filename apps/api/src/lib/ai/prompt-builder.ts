@@ -288,7 +288,7 @@ function contactDetails(ctx: PromptContext): string {
   }
   return nonEmpty(
     "- Email: not on file.",
-    "- ASK FOR IT ONCE, in this conversation, at the natural moment — after you have answered what they actually came for, never as your opening line and never instead of helping. One short, warm sentence in the SAME language and script as the rest of your reply, saying briefly what it is for (so we can follow up / send them confirmations). Keep it optional: if they say no or ignore it, drop it and never bring it up again.",
+    "- ASK FOR IT ONCE, in this conversation, at the natural moment — after you have answered what they actually came for, never as your opening line and never instead of helping. If they have only greeted you and not asked anything yet, there is nothing to follow up on: greet them back and say nothing about the email. One short, warm sentence in the SAME language and script as the rest of your reply, saying briefly what it is for (so we can follow up / send them confirmations). Keep it optional: if they say no or ignore it, drop it and never bring it up again.",
     "- Do NOT ask while escalating, apologising, or handling a complaint — it reads as tone-deaf. Answer or hand off, and leave the address for another time.",
     "- Set `askedForEmail` true ONLY if your reply actually asks.",
   );

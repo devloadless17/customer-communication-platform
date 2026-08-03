@@ -34,6 +34,11 @@ function corpusEnabled(): boolean {
   return process.env.AI_LEBANESE_CORPUS !== "0";
 }
 
+/** Consonants in a skeleton, ignoring its leading/final vowel markers. */
+function coreLength(sk: string): number {
+  return sk.replace(/^V/, "").replace(/[FB]$/, "").length;
+}
+
 /**
  * Swap each mechanically transliterated word for the spelling the corpus
  * actually uses. Only the SPELLING changes: a candidate always shares the
@@ -58,7 +63,18 @@ export function canonicalizeArabizi(text: string): string {
       prev = "";
       return token;
     }
-    let candidates = LEBANESE_CORPUS.forms[skeleton(token)];
+    const sk = skeleton(token);
+    // A single consonant carries too little of the word to identify it. "hay"
+    // (هاي, "hi") reduces to h + a final-vowel marker, which also matches هيي —
+    // and it duly shipped as "hiye", i.e. "she". Two consonants is the point
+    // where the skeleton is saying something. Nothing is lost by skipping the
+    // short ones: el, ma, fi, w come out of the transliterator already correct.
+    if (coreLength(sk) < 2) {
+      prev = token.toLowerCase();
+      return token;
+    }
+
+    let candidates = LEBANESE_CORPUS.forms[sk];
     let conjunction = "";
 
     // The conjunction و, which Arabic glues on and Lebanese writes separately:

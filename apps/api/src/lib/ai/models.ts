@@ -22,16 +22,21 @@ export type ModelTier = "reply" | "reply_hard" | "cheap" | "summary";
  *
  * gpt-4o also mis-set `replyScript` on the greeting, which is what put Arabic
  * script in front of a customer who wrote Latin. The 5.x models set it right
- * every time and write everyday Beirut phrasing unprompted. gpt-5.5 was the
- * most consistent and the most concise; 5.6-luna/sol were close.
+ * every time and write everyday Beirut phrasing unprompted.
+ *
+ * 5.4 over the better-writing 5.5 because a reply sits between STT and TTS on a
+ * voice turn and the customer waits through all three: 5.5 measured 10.8s
+ * against 5.4's 3.8s at `low` effort, near gpt-4o's 2.9s. 5.5 is a shade more
+ * natural, so AI_MODEL_REPLY=gpt-5.5 is there for a workspace that would rather
+ * have the polish than the seconds.
  *
  * `cheap`/`summary` stay on 4o-mini deliberately — they feed memory extraction
  * and session summaries, never customer-visible text, so there is nothing to
  * gain against the risk of moving them in the same change.
  */
 const DEFAULT_MODELS: Record<ModelTier, string> = {
-  reply: "gpt-5.5",
-  reply_hard: "gpt-5.5",
+  reply: "gpt-5.4",
+  reply_hard: "gpt-5.5", // the slow, careful one, for a workspace that opts in
   cheap: "gpt-4o-mini",
   summary: "gpt-4o-mini",
 };
@@ -105,6 +110,31 @@ export function aiGloballyEnabled(): boolean {
 
 export function openaiApiKey(): string | null {
   return process.env.OPENAI_API_KEY || null;
+}
+
+/**
+ * How hard a reasoning model should think before answering — or null when the
+ * model has no such setting and would reject the parameter.
+ *
+ * This one IS model-specific, unlike `max_completion_tokens`: gpt-4o and
+ * gpt-4o-mini answer "Unrecognized request argument supplied", so it can only
+ * be sent to the reasoning families. Hence the name check, which is otherwise
+ * the kind of thing this file exists to avoid.
+ *
+ * Default "low" because the thinking is not free and this is a chat reply, not
+ * a proof. Measured on the reply prompt, warm, median of three:
+ *
+ *   gpt-5.5 default   10.8s     gpt-5.5 low   8.3s
+ *   gpt-5.4 low        3.8s     gpt-4o        2.9s
+ *
+ * A voice turn pays this between STT and TTS, so it is a third of what the
+ * customer waits. AI_REASONING_EFFORT=default omits the parameter and lets the
+ * model choose; "medium"/"high" are there if a workspace wants the depth.
+ */
+export function reasoningEffort(model: string): string | null {
+  if (!/^(gpt-5|o\d)/.test(model)) return null;
+  const v = (process.env.AI_REASONING_EFFORT ?? "low").trim().toLowerCase();
+  return !v || v === "default" ? null : v;
 }
 
 /**

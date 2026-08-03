@@ -1,4 +1,4 @@
-import { aiGloballyEnabled, openaiApiKey } from "./models";
+import { aiGloballyEnabled, openaiApiKey, reasoningEffort } from "./models";
 
 /**
  * Thin facade over the official OpenAI SDK — the ONLY place the assistant talks
@@ -133,6 +133,8 @@ export async function chatJson<T>(opts: {
     // the new name is the only one that works everywhere, which is what lets
     // the model be an env change rather than a code change.
     max_completion_tokens: opts.maxTokens ?? 1500,
+    // Only for models that have it — the 4o family rejects the argument.
+    ...(reasoningEffort(opts.model) ? { reasoning_effort: reasoningEffort(opts.model) } : {}),
     response_format: {
       type: "json_schema",
       json_schema: { name: opts.schemaName, strict: true, schema: opts.schema },
@@ -165,6 +167,7 @@ export async function chatText(opts: {
   const res = await client.chat.completions.create({
     model: opts.model,
     max_completion_tokens: opts.maxTokens ?? 1500, // see chatJson
+    ...(reasoningEffort(opts.model) ? { reasoning_effort: reasoningEffort(opts.model) } : {}),
     messages: [
       { role: "system", content: opts.system },
       { role: "user", content: opts.user },

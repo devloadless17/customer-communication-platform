@@ -473,8 +473,12 @@ services:
       # (apps/api/src/lib/ai/models.ts), so leaving them unset is fine.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       AI_ASSISTANT_ENABLED: ${AI_ASSISTANT_ENABLED:-1}
-      AI_MODEL_REPLY: ${AI_MODEL_REPLY:-gpt-5.5}
+      AI_MODEL_REPLY: ${AI_MODEL_REPLY:-gpt-5.4}
       AI_MODEL_REPLY_HARD: ${AI_MODEL_REPLY_HARD:-gpt-5.5}
+      # How hard the reasoning models think. "low" keeps a voice turn snappy
+      # (the reply sits between STT and TTS); "default" omits the parameter.
+      # Ignored for gpt-4o models, which reject it.
+      AI_REASONING_EFFORT: ${AI_REASONING_EFFORT:-low}
       # Corpus spelling layer for Arabizi replies. "0" turns it off WITHOUT a
       # deploy (set it in /opt/ccp/.env.local and restart api) — it rewrites
       # outbound customer text, so it needs an off switch that is not CI.
