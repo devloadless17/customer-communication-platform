@@ -489,7 +489,23 @@ const MAX_NO_SPEECH_PROB = 0.8;
 const MAX_NO_SPEECH_PROB_WITH_AUDIO = 0.95;
 /** Measured speech above which the audio-domain gate outranks the model. */
 const SOLID_SPEECH_SECONDS = 1.5;
-const MIN_AVG_LOGPROB = -1.0;
+/**
+ * Confidence floor. DELIBERATELY loose, because measurement showed this signal
+ * is close to useless for catching invention and actively good at deleting
+ * real people:
+ *
+ *   silence hallucination ("人間失格", "Horecaonderneming")   lp -0.36, -0.51
+ *   a real customer on a quiet remote leg                     lp -1.11
+ *
+ * The fabrications scored BETTER than the genuine speech. At the old -1.0 floor
+ * this filter passed confident nonsense and rejected the customer's only
+ * segment, so a live call transcribed the agent alone. `no_speech_prob` is the
+ * signal that actually separates speech from silence (0.17-0.6 vs 0.99); this
+ * one now only catches output that is garbled beyond use.
+ */
+const MIN_AVG_LOGPROB = -1.6;
+/** Confidence floor once the waveform has proved speech — see below. */
+const MIN_AVG_LOGPROB_WITH_AUDIO = -2.0;
 /** Text-to-compressed-size ratio above this is a repetition loop. */
 const MAX_COMPRESSION_RATIO = 2.4;
 
@@ -958,15 +974,18 @@ async function transcribeOneChannel(
     // assembly below), so this degrades attribution, not correctness.
     // Trust the waveform over the model's opinion once the gate found real
     // speech — otherwise a quiet speaker is deleted wholesale.
-    const noSpeechCeiling =
-      side.audio.speechSeconds >= SOLID_SPEECH_SECONDS
-        ? MAX_NO_SPEECH_PROB_WITH_AUDIO
-        : MAX_NO_SPEECH_PROB;
+    const audioProvedSpeech = side.audio.speechSeconds >= SOLID_SPEECH_SECONDS;
+    const noSpeechCeiling = audioProvedSpeech
+      ? MAX_NO_SPEECH_PROB_WITH_AUDIO
+      : MAX_NO_SPEECH_PROB;
+    const logprobFloor = audioProvedSpeech
+      ? MIN_AVG_LOGPROB_WITH_AUDIO
+      : MIN_AVG_LOGPROB;
     const kept = res.segments.length > 0
       ? res.segments.filter(
           (s) =>
             s.no_speech_prob <= noSpeechCeiling &&
-            s.avg_logprob >= MIN_AVG_LOGPROB &&
+            s.avg_logprob >= logprobFloor &&
             s.compression_ratio <= MAX_COMPRESSION_RATIO &&
             isSubstantive(s.text),
         )
@@ -1009,7 +1028,7 @@ async function transcribeOneChannel(
         ? `detected ${res.language}, which this workspace doesn't speak`
         : `all ${res.segments.length} segment(s) rejected as non-speech ` +
           `(channel measured ${side.audio.speechSeconds.toFixed(1)}s of speech, ` +
-          `ceiling ${noSpeechCeiling})`;
+          `no_speech<=${noSpeechCeiling}, avg_logprob>=${logprobFloor})`;
     const isLast = attempt === ladder.length - 1;
     console.warn(
       `[call-transcript] call=${callId} ${side.label}: ${why} at temperature ` +
