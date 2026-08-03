@@ -47,8 +47,15 @@ const MAP: Record<string, string> = {
 };
 
 const SHADDA = "ّ";
-/** Arabic block + supplement + presentation forms — everything MAP covers. */
-const ARABIC_CHAR = /[؀-ۿݐ-ݿﭐ-﷿ﹰ-﻿]/;
+/**
+ * Arabic block + supplement + presentation forms — everything MAP covers.
+ *
+ * Escapes, not literal characters: the presentation-forms range ends at U+FEFF,
+ * which IS a zero-width no-break space, so writing it literally puts invisible
+ * whitespace in the source (lint catches it, and nobody reading the line could
+ * have seen it). Escapes also make the four ranges legible as ranges.
+ */
+const ARABIC_CHAR = /[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]/;
 /**
  * Characters that belong to whichever run they land in. Whitespace and ASCII
  * punctuation carry no script of their own, and splitting a run on them would
