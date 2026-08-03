@@ -99,6 +99,7 @@ export const UpdateAiConfigSchema = z
     maxAutoRepliesPerConv: z.number().int().min(0).max(1000).optional(),
     humanTakeoverBehavior: z.string().max(64).optional(),
     replyWaitSeconds: z.number().int().min(0).max(120).optional(),
+    collectCustomerEmail: z.boolean().optional(),
 
     // Voice
     incomingTranscription: z.boolean().optional(),

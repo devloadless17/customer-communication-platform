@@ -849,17 +849,9 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
           # Optional: empty if the OPENAI_API_KEY secret isn't set — the AI
-          # Assistant simply no-ops (no boot crash), same as ANTHROPIC_API_KEY.
+          # Assistant simply no-ops (no boot crash). It is the ONLY text/STT/TTS
+          # key; there is no second vendor to fall back to.
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # Optional: Claude powers the AI-Assistant reply-TEXT step (better
-          # Lebanese/Arabizi than gpt-4o) + the composer Translate feature.
-          # Empty = the assistant falls back to OpenAI for text (no boot crash).
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          # Model selector, from the GH secret rather than a literal here, so it
-          # can be retuned without editing + redeploying this workflow. Empty is
-          # safe: compose's `:-claude-opus-4-8` and the code default both cover
-          # it (lib/ai/models.ts).
-          AI_ANTHROPIC_MODEL_REPLY: ${{ secrets.AI_ANTHROPIC_MODEL_REPLY }}
           # Optional: Azure Speech TTS (authentic ar-LB Lebanese voices). Empty =
           # the assistant just uses OpenAI voices; picking an ar-LB voice falls
           # back to text. No boot gate — same optional posture as OPENAI_API_KEY.
@@ -896,7 +888,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: APP_DOMAIN,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,BETTER_AUTH_SECRET,ENCRYPTION_KEY,INTERNAL_BUS_SECRET,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET,OPENAI_API_KEY,ANTHROPIC_API_KEY,AI_ANTHROPIC_MODEL_REPLY,AZURE_SPEECH_KEY,AZURE_SPEECH_REGION,DOCKER_USERNAME,DOCKER_PASSWORD,MAIL_FROM,MAIL_FROM_NAME,MAIL_SMTP_HOST,MAIL_SMTP_PORT,MAIL_SMTP_USER,MAIL_SMTP_PASSWORD,GOOGLE_CLIENT_ID,GOOGLE_CLIENT_SECRET,META_APPSECRET_PROOF
+          envs: APP_DOMAIN,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,BETTER_AUTH_SECRET,ENCRYPTION_KEY,INTERNAL_BUS_SECRET,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET,OPENAI_API_KEY,AZURE_SPEECH_KEY,AZURE_SPEECH_REGION,DOCKER_USERNAME,DOCKER_PASSWORD,MAIL_FROM,MAIL_FROM_NAME,MAIL_SMTP_HOST,MAIL_SMTP_PORT,MAIL_SMTP_USER,MAIL_SMTP_PASSWORD,GOOGLE_CLIENT_ID,GOOGLE_CLIENT_SECRET,META_APPSECRET_PROOF
           script: |
             set -euo pipefail
             rm -rf /tmp/ccp-deploy
@@ -970,19 +962,6 @@ jobs:
             # global kill switch. This block is rendered on EVERY deploy, so
             # edit it here (not by hand on the VPS — hand edits get overwritten).
             OPENAI_API_KEY=${OPENAI_API_KEY:-}
-            # Claude powers the reply-TEXT step (much better Lebanese/Arabizi
-            # than gpt-4o) and the composer Translate feature. When this key is
-            # present, AI_TEXT_PROVIDER auto-selects Claude for text; empty =
-            # OpenAI. Model tunable via AI_ANTHROPIC_MODEL_REPLY. STT + voice
-            # synthesis stay on OpenAI/Azure regardless.
-            #
-            # Both come from GH secrets, so neither needs a workflow edit to
-            # retune. AI_ANTHROPIC_MODEL_REPLY was briefly a literal here; that
-            # silently ignored the secret of the same name, so changing it in
-            # GitHub would have had no effect. Empty is safe — compose's
-            # :-claude-opus-4-8 fallback and the code default (lib/ai/models.ts)
-            # both cover it.
-            #
             # THIS HEREDOC IS LIVE SHELL. Its delimiter is unquoted, so every
             # comment below is evaluated, not just the assignments. Two ways a
             # COMMENT can break production, both of which already have:
@@ -994,13 +973,11 @@ jobs:
             # Write comments here in plain prose: no backticks, and no
             # dollar-brace unless it names something in the envs: list above.
             #
-            # An empty ANTHROPIC_API_KEY degrades rather than crashes (Translate
-            # 503s, reply falls back to OpenAI), which is deliberate — and also
-            # why a typo'd secret name is invisible. If Claude replies look
-            # wrong after a deploy, check the rendered value with:
-            #   docker compose exec api printenv | grep ANTHROPIC
-            ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-            AI_ANTHROPIC_MODEL_REPLY=${AI_ANTHROPIC_MODEL_REPLY:-}
+            # An empty OPENAI_API_KEY degrades rather than crashes (the
+            # assistant no-ops, Translate and Refine 503), which is deliberate —
+            # and also why a typo'd secret name is invisible. If the assistant
+            # is silent after a deploy, check the rendered value with:
+            #   docker compose exec api printenv | grep OPENAI
             AI_ASSISTANT_ENABLED=1
             AI_MODEL_REPLY=gpt-4o
             AI_MODEL_SUMMARY=gpt-4o-mini
@@ -1035,7 +1012,7 @@ jobs:
 
             # Loud warning for OPTIONAL-but-probably-wanted keys that arrived
             # empty. These deliberately do NOT fail the deploy (an empty key
-            # degrades: Translate 503s, the reply brain falls back to OpenAI),
+            # degrades: the assistant no-ops, Translate and Refine 503),
             # but "degrades silently" is how a missing secret goes unnoticed
             # for days. This block is the difference between finding out now
             # and finding out from a customer.
@@ -1044,7 +1021,7 @@ jobs:
             # differently, or scoped to an Environment/Dependabot rather than
             # the repository — NOT a bug in this workflow: if a sibling value
             # rendered fine, the forwarding path is proven working.
-            for _opt in ANTHROPIC_API_KEY OPENAI_API_KEY AZURE_SPEECH_KEY; do
+            for _opt in OPENAI_API_KEY AZURE_SPEECH_KEY; do
               if ! grep -q "^${_opt}=." /opt/ccp/.env; then
                 echo "::warning title=Empty optional secret::${_opt} rendered EMPTY into /opt/ccp/.env — the feature it powers will silently fall back. Check the repository secret of that exact name."
               fi

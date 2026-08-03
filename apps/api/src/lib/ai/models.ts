@@ -2,7 +2,8 @@
  * Env-driven model + credential resolution for the AI Assistant (correction
  * #11). No model id is hardcoded at a call site — everything routes through
  * here, so switching models is an env change. The whole subsystem runs on
- * OpenAI (reasoning + STT + TTS); a single OPENAI_API_KEY.
+ * OpenAI (reasoning + STT + TTS); a single OPENAI_API_KEY. There is no second
+ * text vendor — an Anthropic reply path existed briefly and was removed.
  *
  * Tier keys come from AiAssistantConfig.replyModelTier; summaries/memory use
  * the `summary` tier.
@@ -88,39 +89,16 @@ export function openaiApiKey(): string | null {
   return process.env.OPENAI_API_KEY || null;
 }
 
-export function anthropicApiKey(): string | null {
-  return process.env.ANTHROPIC_API_KEY?.trim() || null;
-}
-
 /**
- * Which engine generates the reply TEXT (replyText + spoken ttsText). Claude is
- * markedly better at Lebanese/Arabizi dialect than gpt-4o, so it's the target.
- * Explicit override via AI_TEXT_PROVIDER ("anthropic" | "openai"); otherwise
- * auto — use Anthropic whenever a key is present, else fall back to OpenAI. STT
- * and voice synthesis are unaffected (they stay on OpenAI / Azure).
- */
-export function replyTextProvider(): "anthropic" | "openai" {
-  const explicit = (process.env.AI_TEXT_PROVIDER || "").trim().toLowerCase();
-  if (explicit === "anthropic") return "anthropic";
-  if (explicit === "openai") return "openai";
-  return anthropicApiKey() ? "anthropic" : "openai";
-}
-
-/** Claude model for the reply-text step. Tunable; defaults to the flagship. */
-export function anthropicReplyModel(): string {
-  return process.env.AI_ANTHROPIC_MODEL_REPLY || "claude-opus-4-8";
-}
-
-/**
- * Is there ANY engine available to generate reply text? `reply-service`
- * happily runs on Anthropic alone (falling back to OpenAI only on a live
- * Anthropic error) — so a deployment with only ANTHROPIC_API_KEY set is a
- * fully valid configuration. Gating the reply pipeline on `openaiConfigured()`
- * (OpenAI-only) would silently kill every reply on exactly that deployment.
- * Use this for "can the assistant reply at all"; keep using
- * `openaiConfigured()` / `azureTtsConfigured()` for paths that are genuinely
- * OpenAI/Azure-only (STT transcription, TTS voice synthesis).
+ * Can the assistant generate reply text at all? One engine, one key — kept as
+ * its own predicate (rather than inlining `openaiConfigured()`) because the
+ * CALL SITES mean different things: this one gates "the assistant may reply",
+ * while `openaiConfigured()` / `azureTtsConfigured()` gate the audio paths.
+ *
+ * Lebanese/Arabizi quality no longer depends on which vendor answers: the
+ * dialect signal is the corpus in `lib/ai/lebanese` (prompt anchor + spelling
+ * canonicalisation), which applies to whatever model this resolves to.
  */
 export function aiTextEngineConfigured(): boolean {
-  return aiGloballyEnabled() && (!!openaiApiKey() || !!anthropicApiKey());
+  return aiGloballyEnabled() && !!openaiApiKey();
 }

@@ -1,3 +1,5 @@
+import { canonicalizeArabizi } from "./lebanese";
+
 /**
  * Deterministic Arabic-script → Lebanese Arabizi transliteration.
  *
@@ -7,10 +9,24 @@
  * Arabizi, and we convert here — coherent Lebanese, in the Latin/Arabizi the
  * customer used.
  *
- * Consonant-accurate; short vowels are approximate (Arabic script omits them),
- * which reads fine for Arabizi users. `ي`/`و` are treated as consonants at a
- * word start and as long vowels elsewhere. Non-Arabic characters (spaces,
- * punctuation, Latin, emoji) pass through untouched.
+ * TWO STAGES, and the split is the point:
+ *
+ *   1. Transliterate. Consonant-accurate. Short vowels are approximate, because
+ *      Arabic script does not write them — this stage can only guess, and its
+ *      guesses are what made the output look machine-made ("bddi", "7lwa").
+ *   2. Canonicalise against the Lebanese corpus (`./lebanese`), which supplies
+ *      the real spelling for those consonants ("badde", "7elwe"). Exactly the
+ *      part stage 1 had to invent, replaced by the part the corpus knows.
+ *
+ * Stage 2 runs ONLY on text stage 1 produced. Anything the model wrote in Latin
+ * already — the English and French loanwords Lebanese speakers mix in ("menu",
+ * "delivery", "merci"), prices, times, URLs — is passed through untouched, so
+ * it is never "corrected" into a Lebanese word that happens to share its
+ * consonants. That is why the input is split into Arabic and non-Arabic runs
+ * instead of being transliterated as one string.
+ *
+ * Non-Arabic characters (spaces, punctuation, Latin, emoji) pass through
+ * untouched.
  */
 
 const MAP: Record<string, string> = {
@@ -31,9 +47,74 @@ const MAP: Record<string, string> = {
 };
 
 const SHADDA = "ّ";
+/** Arabic block + supplement + presentation forms — everything MAP covers. */
+const ARABIC_CHAR = /[؀-ۿݐ-ݿﭐ-﷿ﹰ-﻿]/;
+/**
+ * Characters that belong to whichever run they land in. Whitespace and ASCII
+ * punctuation carry no script of their own, and splitting a run on them would
+ * hand the canonicaliser one word at a time — losing the preceding word, which
+ * is exactly what its sequence tie-break needs.
+ */
+const NEUTRAL_CHAR = /[\s.,!?;:()"'–—…-]/;
 
 /** Convert Arabic-script text to (approximate) Lebanese Arabizi. */
 export function arabicToArabizi(input: string): string {
+  let out = "";
+  let run = "";
+  let runIsArabic = false;
+  let runClassified = false;
+
+  const flush = () => {
+    if (!run) return;
+    out += runIsArabic ? canonicalizeArabizi(transliterateRun(run)) : run;
+    run = "";
+    runClassified = false;
+  };
+
+  for (const c of input) {
+    if (NEUTRAL_CHAR.test(c)) {
+      run += c;
+      continue;
+    }
+    const isArabic = ARABIC_CHAR.test(c);
+    if (runClassified && isArabic !== runIsArabic) flush();
+    runIsArabic = isArabic;
+    runClassified = true;
+    run += c;
+  }
+  flush();
+  return out;
+}
+
+/**
+ * `ي` and `و` are each two different sounds, and which one it is decides
+ * whether the word survives canonicalisation as itself.
+ *
+ * They are CONSONANTS (y/w) at a word start, and before an alif or ta-marbuta —
+ * حلوة is 7elwe, not 7eloa. They are LONG VOWELS (i/o) everywhere else — روح is
+ * rou7. Getting this wrong is not cosmetic: transliterating حلوة ("pretty") with
+ * a vowel produced the skeleton of حالة ("case"), and the canonicaliser
+ * dutifully rewrote one word into the other.
+ */
+const ALIF_FAMILY = new Set(["ا", "أ", "إ", "آ", "ٱ", "ة", "ى"]);
+const WORD_BREAK = /[\s\p{P}]/u;
+
+/**
+ * The definite article, split off its noun BEFORE transliterating.
+ *
+ * Arabic glues ال onto the noun; Lebanese writes it as a separate "el" — the
+ * single most common token in the corpus. Splitting it first (rather than
+ * patching the Latin afterwards) matters twice over: the noun becomes its own
+ * word, so the canonicaliser can fix it at all, and its first letter becomes
+ * word-INITIAL, so اليوم reads as "el yom" instead of "el iom".
+ *
+ * Skipped before a second ل, where the letters are not an article: الله, اللي.
+ */
+const ARTICLE = /(^|[\s\p{P}])ال(?!ل)(?=[ء-ي]{2,})/gu;
+
+/** Stage 1 on one all-Arabic run. */
+function transliterateRun(run: string): string {
+  const input = run.replace(ARTICLE, "$1ال ");
   const chars = [...input];
   let out = "";
   for (let i = 0; i < chars.length; i++) {
@@ -46,12 +127,16 @@ export function arabicToArabizi(input: string): string {
     }
     if (c === "ي" || c === "و") {
       const prev = chars[i - 1];
-      const atWordStart = i === 0 || prev === " " || prev === "\n" || prev === undefined;
-      out += c === "ي" ? (atWordStart ? "y" : "i") : (atWordStart ? "w" : "o");
+      const next = chars[i + 1];
+      const atWordStart = prev === undefined || WORD_BREAK.test(prev);
+      const isConsonant = atWordStart || (next !== undefined && ALIF_FAMILY.has(next));
+      out += c === "ي" ? (isConsonant ? "y" : "i") : (isConsonant ? "w" : "o");
       continue;
     }
     const m = MAP[c];
     out += m !== undefined ? m : c;
   }
-  return out;
+  // ال now stands alone (see ARTICLE) — or arrived alone as الـ, the way the
+  // model writes it before a Latin loanword.
+  return out.replace(/\bal\b/g, "el");
 }

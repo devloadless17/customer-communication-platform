@@ -58,6 +58,7 @@ export const DEFAULT_AI_CONFIG = {
   confidenceThreshold: 0.55,
   maxAutoRepliesPerConv: 0,
   humanTakeoverBehavior: "cancel_and_yield",
+  collectCustomerEmail: true,
   incomingTranscription: true,
   saveTranscript: true,
   replyChannelMode: "text",

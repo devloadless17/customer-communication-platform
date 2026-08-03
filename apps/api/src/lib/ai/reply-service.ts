@@ -1,13 +1,6 @@
-import { Logger } from "@nestjs/common";
-
-import { anthropicConfigured, chatJsonAnthropic } from "./anthropic-client";
-import {
-  anthropicReplyModel,
-  replyTextProvider,
-  replyTierFromConfig,
-  resolveModel,
-} from "./models";
-import { chatJson, type ChatJsonResult } from "./openai-client";
+import type { ContactDetails } from "./contact-details";
+import { replyTierFromConfig, resolveModel } from "./models";
+import { chatJson } from "./openai-client";
 import { retrieveContextChunks } from "./knowledge-retrieval";
 import {
   buildSystemPrompt,
@@ -31,6 +24,7 @@ export interface GenerateReplyInput {
   isVoice: boolean;
   memory: MemoryItem[];
   recentMessages: RecentMessage[];
+  details: ContactDetails;
   now?: Date;
 }
 
@@ -56,50 +50,24 @@ export async function generateReply(input: GenerateReplyInput): Promise<Generate
     recentMessages: input.recentMessages,
     latestText: input.latestText,
     isVoice: input.isVoice,
+    details: input.details,
   });
 
-  const openaiModel = resolveModel(replyTierFromConfig(input.config.replyModelTier));
-  const openai = () =>
-    chatJson<ReplyPayload>({
-      model: openaiModel,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
-      schemaName: "customer_reply",
-      schema: REPLY_SCHEMA,
-      maxTokens: 1200,
-    });
-
-  // Claude is markedly better at Lebanese/Arabizi than gpt-4o, so route the
-  // reply-text step to it when configured. Both replyText and the spoken ttsText
-  // come from this one structured call. Any Anthropic failure (SDK, key, API)
-  // falls back to OpenAI so a customer never gets silence — a degraded reply
-  // beats no reply. STT + voice synthesis are untouched by this switch.
-  const useAnthropic = replyTextProvider() === "anthropic" && anthropicConfigured();
-  let model = openaiModel;
-  let res: ChatJsonResult<ReplyPayload>;
-  if (useAnthropic) {
-    model = anthropicReplyModel();
-    try {
-      res = await chatJsonAnthropic<ReplyPayload>({
-        model,
-        system,
-        user,
-        schemaName: "customer_reply",
-        schema: REPLY_SCHEMA,
-        maxTokens: 1200,
-      });
-    } catch (err) {
-      new Logger("generateReply").warn(
-        `Anthropic reply failed (${String(err)}) — falling back to OpenAI`,
-      );
-      model = openaiModel;
-      res = await openai();
-    }
-  } else {
-    res = await openai();
-  }
+  // ONE engine. Both replyText and the spoken ttsText come from this single
+  // structured call; Lebanese/Arabizi quality is carried by the corpus anchor in
+  // the system prompt plus the spelling canonicaliser applied after generation
+  // (lib/ai/lebanese), not by which vendor answers.
+  const model = resolveModel(replyTierFromConfig(input.config.replyModelTier));
+  const res = await chatJson<ReplyPayload>({
+    model,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+    schemaName: "customer_reply",
+    schema: REPLY_SCHEMA,
+    maxTokens: 1200,
+  });
 
   if (!res.data || !res.data.replyText?.trim()) {
     throw new Error("ai_empty_reply");
@@ -138,6 +106,8 @@ function normalize(p: ReplyPayload): ReplyPayload {
     complaintConfidence: clamp01(
       typeof p.complaintConfidence === "number" ? p.complaintConfidence : 0,
     ),
+    customerEmail: (p.customerEmail ?? "").trim().slice(0, 254),
+    askedForEmail: p.askedForEmail === true,
   };
 }
 

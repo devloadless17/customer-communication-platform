@@ -46,6 +46,20 @@ export interface ReplyPayload {
    * greeting, or request. Drives the auto-raised "Complaint" message flag.
    */
   complaintConfidence: number;
+  /**
+   * An email address the customer stated in their LATEST message, or "". Only
+   * ever written to `Contact.email`, never used as an identity key — see
+   * `captureCustomerEmail`, which re-validates it against a regex because a
+   * model asked for a field will happily invent a plausible one.
+   */
+  customerEmail: string;
+  /**
+   * True when replyText asks the customer for their email address. Drives the
+   * ask-once bookkeeping (`AiConversationState.emailRequestedAt`) — the model
+   * is the only thing that knows whether it actually asked, since it is told to
+   * ask only when the moment fits.
+   */
+  askedForEmail: boolean;
 }
 
 // OpenAI strict structured outputs: every property listed in `required`,
@@ -67,6 +81,8 @@ export const REPLY_SCHEMA: Record<string, unknown> = {
     "hallucinationRisk",
     "hallucinationNotes",
     "complaintConfidence",
+    "customerEmail",
+    "askedForEmail",
   ],
   properties: {
     replyText: { type: "string", description: "The reply to send to the customer." },
@@ -114,6 +130,16 @@ export const REPLY_SCHEMA: Record<string, unknown> = {
       type: "number",
       description:
         "Confidence between 0 and 1 that the CUSTOMER's latest message is a complaint (unhappy about the product/service/order, reporting a problem). 0 for a normal question, greeting, or neutral request.",
+    },
+    customerEmail: {
+      type: "string",
+      description:
+        "An email address the customer gave in their LATEST message, copied exactly as they wrote it. Empty string if they did not give one. Never guess, complete, or invent an address.",
+    },
+    askedForEmail: {
+      type: "boolean",
+      description:
+        "True only if your replyText actually asks the customer for their email address.",
     },
   },
 };

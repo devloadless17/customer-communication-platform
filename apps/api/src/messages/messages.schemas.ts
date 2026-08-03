@@ -56,7 +56,7 @@ export type DismissReactionInput = z.infer<typeof DismissReactionSchema>;
 
 /**
  * Composer translate. Stateless text transform (no conversation context).
- * `targetLang` is a language NAME (e.g. "Arabic", "French") — Claude reads a
+ * `targetLang` is a language NAME (e.g. "Arabic", "French") — a model reads a
  * name more reliably than a locale code. Constrained to letters/spaces/parens
  * so the UI's curated list is the only realistic input.
  */

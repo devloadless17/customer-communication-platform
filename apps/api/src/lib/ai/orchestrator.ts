@@ -5,6 +5,7 @@ import { publish } from "@/lib/events/bus";
 
 import { arabicToArabizi } from "./arabizi";
 import { claimInbound, legacyAutopilotOwnsTeam } from "./automation-claim";
+import { captureCustomerEmail, markEmailRequested } from "./contact-details";
 import { getState, handoffToHuman, incrementAutoReply, onCustomerInbound } from "./conversation-state";
 import { decideMode } from "./decide-mode";
 import { HALLUCINATION_FLAG_THRESHOLD } from "./hallucination";
@@ -82,7 +83,10 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
   if (!won) return; // already claimed → no double reply
 
   const startedAt = Date.now();
-  const { memory, recentMessages: recent } = await loadReplyContext(workspaceId, conversationId);
+  const { memory, recentMessages: recent, details } = await loadReplyContext(
+    workspaceId,
+    conversationId,
+  );
 
   let generated;
   try {
@@ -92,6 +96,7 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
       isVoice: job.isVoice,
       memory,
       recentMessages: recent,
+      details,
     });
   } catch (err) {
     await audit(workspaceId, conversationId, inboundMessageId, config.configVersion, {
@@ -128,6 +133,13 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
   // CUSTOMER's inbound message, not the reply the assistant is about to give.
   if (payload.complaintConfidence >= COMPLAINT_FLAG_THRESHOLD) {
     await flagComplaint(workspaceId, inboundMessageId, payload.complaintConfidence).catch(() => {});
+  }
+
+  // Also about the CUSTOMER's message, not the reply — so it lands whether we
+  // send, draft, or escalate. They gave us their address; losing it because the
+  // reply happened to need approval would mean asking them again.
+  if (config.collectCustomerEmail && payload.customerEmail) {
+    await captureCustomerEmail(workspaceId, conversationId, payload.customerEmail).catch(() => {});
   }
 
   const openNow = openingStatus(config, new Date()).open;
@@ -167,6 +179,13 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
       });
       return;
     }
+    // Mark the ask only once it has actually GONE OUT. A drafted question the
+    // customer never saw must not burn the one ask we allow ourselves; the
+    // human approving that draft is the backstop against a repeat.
+    if (payload.askedForEmail && config.collectCustomerEmail) {
+      await markEmailRequested(conversationId);
+    }
+
     const outIds = [delivery.textMessageId, delivery.voiceMessageId].filter(
       (x): x is string => typeof x === "string",
     );

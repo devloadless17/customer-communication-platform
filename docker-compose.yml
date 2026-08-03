@@ -463,24 +463,16 @@ services:
       INTERNAL_BUS_SECRET: ${INTERNAL_BUS_SECRET}
       # Optional: tunable Meta Graph fetch timeout. Default 15s.
       META_FETCH_TIMEOUT_MS: ${META_FETCH_TIMEOUT_MS:-}
-      # Optional: Anthropic API key for the composer Translate feature
-      # (/api/messages/translate). Empty = feature returns a clean 503
-      # "Translation isn't configured" instead of silently 500ing.
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # AI Assistant (OpenAI): reasoning + STT + TTS, one key for the whole
-      # subsystem. OPENAI_API_KEY is the only hard requirement — unset =
-      # openaiApiKey() returns null and the assistant no-ops (no boot crash).
+      # AI Assistant (OpenAI): reasoning + STT + TTS + the composer Translate/
+      # Refine tools — ONE vendor, one key for the whole subsystem.
+      # OPENAI_API_KEY is the only hard requirement — unset = openaiApiKey()
+      # returns null and the assistant no-ops (no boot crash), and the composer
+      # tools return a clean 503 instead of silently 500ing.
       # AI_ASSISTANT_ENABLED is the global kill switch ("0" = off). The model
       # ids are tunable overrides; each falls back to its code default
       # (apps/api/src/lib/ai/models.ts), so leaving them unset is fine.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       AI_ASSISTANT_ENABLED: ${AI_ASSISTANT_ENABLED:-1}
-      # Reply-TEXT brain selector. Claude handles Lebanese/Arabizi far better
-      # than gpt-4o. Unset = auto (Anthropic when ANTHROPIC_API_KEY is present,
-      # else OpenAI). Force with "anthropic" / "openai". STT + voice synthesis
-      # are unaffected. AI_ANTHROPIC_MODEL_REPLY tunes the Claude model.
-      AI_TEXT_PROVIDER: ${AI_TEXT_PROVIDER:-}
-      AI_ANTHROPIC_MODEL_REPLY: ${AI_ANTHROPIC_MODEL_REPLY:-claude-opus-4-8}
       AI_MODEL_REPLY: ${AI_MODEL_REPLY:-gpt-4o}
       AI_MODEL_REPLY_HARD: ${AI_MODEL_REPLY_HARD:-gpt-4o}
       AI_MODEL_CHEAP: ${AI_MODEL_CHEAP:-gpt-4o-mini}

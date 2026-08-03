@@ -9,7 +9,7 @@ import { cn } from "@ccp/shared/utils";
 
 /**
  * Composer "translate" popover. Lists target languages; clicking one POSTs the
- * current composer text to /api/messages/translate (Claude API) and shows the
+ * current composer text to /api/messages/translate and shows the
  * result as a PREVIEW. The draft is only overwritten when the agent presses
  * "Apply" (calls `onTranslated`); "Cancel" discards the preview and returns to
  * the language list — so an accidental click can never destroy a typed draft.

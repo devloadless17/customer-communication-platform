@@ -143,6 +143,31 @@ export async function chatJson<T>(opts: {
   return { data, rawContent, model: res.model, usage: res.usage };
 }
 
+/**
+ * Plain (unstructured) chat completion — one string in, one string out.
+ *
+ * For the composer tools (Translate / Refine), where the whole answer IS the
+ * text and wrapping it in a JSON schema would only add a parse step and tokens.
+ * Callers get "" when the model returns nothing and decide what that means.
+ */
+export async function chatText(opts: {
+  model: string;
+  system: string;
+  user: string;
+  maxTokens?: number;
+}): Promise<string> {
+  const { client } = await getClient();
+  const res = await client.chat.completions.create({
+    model: opts.model,
+    max_tokens: opts.maxTokens ?? 1500,
+    messages: [
+      { role: "system", content: opts.system },
+      { role: "user", content: opts.user },
+    ],
+  });
+  return (res.choices?.[0]?.message?.content ?? "").trim();
+}
+
 /** Transcribe audio bytes (STT). */
 export async function transcribe(opts: {
   model: string;

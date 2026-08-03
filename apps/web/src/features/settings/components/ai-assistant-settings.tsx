@@ -301,6 +301,7 @@ export function AiAssistantSettings({
             <Field label="Wait for customer to finish (seconds, 0 = reply instantly)"><NumberInput value={num("replyWaitSeconds", 0)} step={1} min={0} max={120} onChange={(v) => set("replyWaitSeconds", v)} /></Field>
             <Field label="Human takeover behavior"><SelectInput value={str("humanTakeoverBehavior") || "cancel_and_yield"} onChange={(v) => set("humanTakeoverBehavior", v)} options={TAKEOVER} /></Field>
             <SwitchRow label="Match customer tone" checked={bool("matchCustomerTone")} onChange={(v) => set("matchCustomerTone", v)} />
+            <SwitchRow label="Ask new customers for their email (once)" checked={bool("collectCustomerEmail")} onChange={(v) => set("collectCustomerEmail", v)} />
             <Field label="Custom instructions" full><Textarea rows={4} value={str("customInstructions")} onChange={(e) => set("customInstructions", e.target.value)} /></Field>
           </Grid>
         )}

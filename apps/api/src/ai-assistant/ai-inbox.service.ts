@@ -335,13 +335,17 @@ export class AiInboxService {
     const inbound = await getInboundText(s.inboundMessageId);
     if (!inbound || !inbound.text) throw new BadRequestException({ error: "no_inbound_text" });
 
-    const { memory, recentMessages } = await loadReplyContext(workspaceId, s.conversationId);
+    const { memory, recentMessages, details } = await loadReplyContext(
+      workspaceId,
+      s.conversationId,
+    );
     const generated = await generateReply({
       config,
       latestText: inbound.text,
       isVoice: inbound.isVoice,
       memory,
       recentMessages,
+      details,
     });
 
     const audioR2Key = wantsVoiceDraft(config.replyChannelMode, inbound.isVoice)

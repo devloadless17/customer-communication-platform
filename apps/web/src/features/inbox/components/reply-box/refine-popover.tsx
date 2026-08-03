@@ -12,7 +12,7 @@ type RefineMode = "formal" | "friendly" | "shorten" | "grammar";
 /**
  * Composer "AI refine" popover (Gmail-Polish-style: Formalise / Friendly /
  * Shorten / Fix grammar). Clicking a mode POSTs the current composer text to
- * /api/messages/refine (Claude API) and shows the result as a PREVIEW — the
+ * /api/messages/refine and shows the result as a PREVIEW — the
  * draft is only overwritten on "Apply" (calls `onRefined`), so an accidental
  * click can never destroy a typed draft. Mirrors TranslatePopover's
  * preview → Apply/Cancel → Undo shape exactly.

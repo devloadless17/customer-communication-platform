@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 
+import { loadContactDetails, type ContactDetails } from "./contact-details";
 import type { MemoryItem, RecentMessage } from "./prompt-builder";
 import { loadConversationMeta, loadRecentMessages } from "./thread";
 
@@ -10,7 +11,11 @@ import { loadConversationMeta, loadRecentMessages } from "./thread";
 export async function loadReplyContext(
   workspaceId: string,
   conversationId: string,
-): Promise<{ memory: MemoryItem[]; recentMessages: RecentMessage[] }> {
+): Promise<{
+  memory: MemoryItem[];
+  recentMessages: RecentMessage[];
+  details: ContactDetails;
+}> {
   const meta = await loadConversationMeta(conversationId);
   const memory = meta?.customerId
     ? (
@@ -23,7 +28,8 @@ export async function loadReplyContext(
       ).map((m) => ({ kind: m.kind as string, value: m.value }))
     : [];
   const recentMessages = await loadRecentMessages(conversationId, 20);
-  return { memory, recentMessages };
+  const details = await loadContactDetails(workspaceId, conversationId);
+  return { memory, recentMessages, details };
 }
 
 /**

@@ -5562,6 +5562,11 @@ model AiAssistantConfig {
   // after N consecutive AI turns without a human, to bound runaway loops.
   maxAutoRepliesPerConv Int             @default(0)
   humanTakeoverBehavior String          @default("cancel_and_yield")
+  // Ask a customer we have no email for, once, for their email address, and
+  // store it on the Contact when they give it. Contact detail only — a
+  // self-typed address is NEVER treated as an identity key (a typo or a shared
+  // family address would silently merge two people); see docs/identity.md.
+  collectCustomerEmail  Boolean         @default(true)
   // Seconds to WAIT after a customer's last message before replying, so a
   // burst of chunked messages gets ONE considered answer. The timer resets on
   // each new inbound. 0 = reply immediately (no debounce).
@@ -5579,8 +5584,8 @@ model AiAssistantConfig {
   maxVoiceDurationSec   Int                @default(60)
   voiceTextFallback     Boolean            @default(true)
 
-  // Logical tier key -> resolved to an env-configured Anthropic model id at
-  // call time (never a hardcoded display name in code; correction #11).
+  // Logical tier key -> resolved to an env-configured model id at call time
+  // (never a hardcoded display name in code; correction #11).
   replyModelTier String @default("reply")
 
   createdAt DateTime @default(now())
@@ -5647,6 +5652,14 @@ model AiConversationState {
   // Consecutive AI auto-replies since the last human/customer break — enforces
   // AiAssistantConfig.maxAutoRepliesPerConv.
   autoReplyCount Int                   @default(0)
+  // When the assistant last asked this customer for their email address (see
+  // AiAssistantConfig.collectCustomerEmail). ASKED, not answered — it exists so
+  // the question is asked ONCE. Nagging someone who declined on every thread
+  // they open is the failure mode this prevents, so it is deliberately not
+  // cleared when they ignore it. Lives here rather than on Contact because it
+  // is assistant bookkeeping, not a property of the person; one conversation
+  // per contact makes it per-person in practice either way.
+  emailRequestedAt DateTime?
   updatedAt      DateTime              @updatedAt
 
   @@index([workspaceId])

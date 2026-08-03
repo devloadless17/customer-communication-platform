@@ -57,6 +57,7 @@ export interface AiConfigRow {
   maxAutoRepliesPerConv: number;
   humanTakeoverBehavior: string;
   replyWaitSeconds: number;
+  collectCustomerEmail: boolean;
 
   incomingTranscription: boolean;
   saveTranscript: boolean;

@@ -1,5 +1,6 @@
 import type { AiConfigRow } from "./runtime-config";
 import type { RetrievedChunk } from "./knowledge-retrieval";
+import { lebanesePhraseAnchor } from "./lebanese";
 
 const UNTRUSTED_OPEN = "<<<customer_text>>>";
 const UNTRUSTED_CLOSE = "<<</customer_text>>>";
@@ -31,6 +32,8 @@ export interface PromptContext {
   recentMessages: RecentMessage[];
   latestText: string;
   isVoice: boolean;
+  /** Contact details on file + whether we've already asked for the email. */
+  details: { email: string | null; emailRequested: boolean };
 }
 
 const DAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
@@ -193,6 +196,7 @@ export function buildSystemPrompt(config: AiConfigRow): string {
     "- Always return the structured fields. `replyText` is the exact message to send. Set `confidence` honestly.",
     "- Set `hallucinationRisk`/`hallucinationNotes` honestly: if replyText states a specific price, policy, order detail, or availability that ISN'T directly supported by the company info or a retrieved knowledge snippet, flag it there instead of silently hoping it's right.",
     "- Set `complaintConfidence` honestly, based on the CUSTOMER's latest message, not your reply: score it high when they express dissatisfaction, report a defect/problem, ask for a refund/compensation, or are frustrated/angry — even if your replyText is calm and helpful. 0 for an ordinary question, greeting, or neutral request.",
+    "- `customerEmail`: if the customer's LATEST message contains an email address — including one spoken out ('john at gmail dot com') or spelled across a couple of messages — return it as a normal address. Otherwise return an empty string. Never guess, complete, or correct one, and never repeat it back to them character by character.",
     "- `ttsText`: the reply written to be SPOKEN aloud. If Arabic, it MUST be in natural everyday spoken LEBANESE dialect (Beirut) in Arabic script — exactly how a Lebanese person would say it out loud, using Lebanese words and phrasing. NEVER formal Modern Standard Arabic (Fusha), and NEVER Syrian, Egyptian, or Gulf. Otherwise repeat replyText.",
   ]
     .filter((l) => l !== "")
@@ -225,6 +229,9 @@ function buildLanguageRules(config: AiConfigRow): string {
     config.lebaneseDialect
       ? "- BEFORE you answer in Arabic, re-read your reply: it must be Lebanese spoken dialect. Replace any Modern Standard Arabic (Fusha) word with its Lebanese equivalent — zero Fusha. The everyday English/French loanwords above (menu, okay, delivery…) are welcome and stay as-is: the ban is on Fusha, NOT on the borrowed words Lebanese naturally use."
       : "",
+    // Real usage, from the corpus — the rules above say WHICH words are
+    // Lebanese, this shows how Lebanese sentences are actually put together.
+    config.lebaneseDialect ? lebanesePhraseAnchor() : "",
     config.lebaneseStyle ? `- Lebanese style guidance: ${config.lebaneseStyle}` : "",
     config.allowArabizi
       ? "- When the customer writes in Arabizi (Lebanese in Latin letters/numbers, '3'=ع '7'=ح): understand it, then write your reply in clean, natural Lebanese ARABIC SCRIPT and set replyScript='latin'. The SYSTEM transliterates your Arabic script into Arabizi automatically — do NOT type Arabizi yourself, because you cannot spell it and it comes out as gibberish. Just write good Lebanese Arabic and flag it latin."
@@ -259,6 +266,34 @@ function renderFaqs(v: unknown): string {
   return items.length ? `- FAQs:\n${items.join("\n")}` : "";
 }
 
+/**
+ * The email ask. Lives in the USER turn, not the system prompt, because it is
+ * per-customer and changes the moment they answer — putting it in the stable
+ * prefix would both break its caching and leave the assistant asking a customer
+ * for an address it already has.
+ *
+ * Three states, one instruction each, and no instruction at all once we have
+ * the address — an assistant told about a field it does not need is an
+ * assistant that finds a way to mention it.
+ */
+function contactDetails(ctx: PromptContext): string {
+  const { email, emailRequested } = ctx.details;
+  if (email) return `- Email: ${email} (already on file — do NOT ask for it again).`;
+  if (!ctx.config.collectCustomerEmail) return "- Email: not on file.";
+  if (emailRequested) {
+    return nonEmpty(
+      "- Email: not on file. You have ALREADY asked this customer for it once.",
+      "- Do NOT ask again — asking twice is nagging. If they give it now anyway, still return it in `customerEmail`.",
+    );
+  }
+  return nonEmpty(
+    "- Email: not on file.",
+    "- ASK FOR IT ONCE, in this conversation, at the natural moment — after you have answered what they actually came for, never as your opening line and never instead of helping. One short, warm sentence in the SAME language and script as the rest of your reply, saying briefly what it is for (so we can follow up / send them confirmations). Keep it optional: if they say no or ignore it, drop it and never bring it up again.",
+    "- Do NOT ask while escalating, apologising, or handling a complaint — it reads as tone-deaf. Answer or hand off, and leave the address for another time.",
+    "- Set `askedForEmail` true ONLY if your reply actually asks.",
+  );
+}
+
 // --- user turn (volatile) ---
 export function buildUserPrompt(ctx: PromptContext): string {
   const status = openingStatus(ctx.config, ctx.now);
@@ -277,6 +312,9 @@ export function buildUserPrompt(ctx: PromptContext): string {
   return [
     `# Now`,
     `Current time is ${ctx.now.toISOString()}. Business is ${status.label}.`,
+    "",
+    "# This customer's contact details",
+    contactDetails(ctx),
     "",
     "# What we know about this customer (memory)",
     memory,
