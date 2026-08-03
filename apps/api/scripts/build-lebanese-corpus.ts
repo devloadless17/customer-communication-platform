@@ -40,8 +40,17 @@ import { skeleton } from "../src/lib/ai/lebanese/skeleton";
 
 // --- tuning ---------------------------------------------------------------
 
-/** A spelling must appear at least this often to be a canonical candidate. */
-const MIN_FORM_COUNT = 2;
+/**
+ * A spelling must appear at least this often to be a canonical candidate.
+ *
+ * 1 = every word in the dataset counts. This was 2, which threw away 11,897
+ * one-off spellings — about two thirds of the vocabulary — and those one-offs
+ * are exactly the CONTENT words (verbs, conjugations, nouns) whose absence left
+ * a quarter of every reply as raw consonants. Frequency still decides which
+ * spelling wins a skeleton, so a one-off can only ever be chosen where nothing
+ * better was ever seen.
+ */
+const MIN_FORM_COUNT = 1;
 /** Candidates kept per skeleton (most frequent first). */
 const MAX_FORMS_PER_SKELETON = 3;
 /**

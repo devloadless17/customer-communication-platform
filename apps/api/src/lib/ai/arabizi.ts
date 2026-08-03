@@ -37,8 +37,12 @@ const MAP: Record<string, string> = {
   "ص": "s", "ض": "d", "ط": "t", "ظ": "z", "ع": "3", "غ": "gh",
   "ف": "f", "ق": "2", "ك": "k", "ل": "l", "م": "m", "ن": "n",
   "ه": "h", "ة": "a", "ى": "a",
-  // harakat (short vowels / shadda handled separately)
-  "َ": "a", "ُ": "o", "ِ": "i", "ً": "an", "ٌ": "on", "ٍ": "in", "ْ": "",
+  // Harakat. A speaker writing Lebanese never types these; when the model does,
+  // it is decorating Modern Standard Arabic, and the decoration must not become
+  // letters. Tanween especially: مرحبًا rendered "mr7bana" in production because
+  // ً expanded to "an" INSIDE the word. It marks case on a word we are about to
+  // strip vowels from anyway, so it contributes nothing and is dropped.
+  "َ": "", "ُ": "", "ِ": "", "ً": "", "ٌ": "", "ٍ": "", "ْ": "",
   // Arabic-indic digits → ASCII
   "٠": "0", "١": "1", "٢": "2", "٣": "3", "٤": "4",
   "٥": "5", "٦": "6", "٧": "7", "٨": "8", "٩": "9",

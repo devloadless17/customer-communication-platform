@@ -68,10 +68,20 @@ export function skeleton(word: string): string {
     w = w.replace(/[aeioy]+$/, "");
   }
 
+  // ORDER IS LOAD-BEARING: collapse doubles FIRST, while the vowel that may sit
+  // between two same letters is still there, and only then drop vowels.
+  //
+  // Doing it the other way round collapses letters that were never doubled:
+  // tmam (تمام) loses its second m once the `a` is gone and lands on "tm" — the
+  // skeleton of the ENGLISH word "team", which this corpus of tech transcripts
+  // is full of. Production duly answered "kel shi team". A shadda writes a
+  // letter twice ADJACENTLY; that is the only doubling we may undo.
+  let collapsed = "";
+  for (const c of w) if (c !== collapsed[collapsed.length - 1]) collapsed += c;
+
   let core = "";
-  for (const c of w) {
+  for (const c of collapsed) {
     if (c === "a" || c === "e") continue; // the short vowels script omits
-    if (c === core[core.length - 1]) continue; // shadda writes a letter twice
     core += c;
   }
   if (!core) return "";

@@ -127,7 +127,12 @@ export async function chatJson<T>(opts: {
   const res = await client.chat.completions.create({
     model: opts.model,
     messages: opts.messages,
-    max_tokens: opts.maxTokens ?? 1500,
+    // `max_completion_tokens`, NOT `max_tokens`. Every gpt-5.x model REJECTS
+    // `max_tokens` outright ("Unsupported parameter"), while gpt-4o and
+    // gpt-4o-mini accept both — verified against the live API on all four. So
+    // the new name is the only one that works everywhere, which is what lets
+    // the model be an env change rather than a code change.
+    max_completion_tokens: opts.maxTokens ?? 1500,
     response_format: {
       type: "json_schema",
       json_schema: { name: opts.schemaName, strict: true, schema: opts.schema },
@@ -159,7 +164,7 @@ export async function chatText(opts: {
   const { client } = await getClient();
   const res = await client.chat.completions.create({
     model: opts.model,
-    max_tokens: opts.maxTokens ?? 1500,
+    max_completion_tokens: opts.maxTokens ?? 1500, // see chatJson
     messages: [
       { role: "system", content: opts.system },
       { role: "user", content: opts.user },

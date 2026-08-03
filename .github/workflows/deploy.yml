@@ -979,7 +979,7 @@ jobs:
             # is silent after a deploy, check the rendered value with:
             #   docker compose exec api printenv | grep OPENAI
             AI_ASSISTANT_ENABLED=1
-            AI_MODEL_REPLY=gpt-4o
+            AI_MODEL_REPLY=gpt-5.5
             AI_MODEL_SUMMARY=gpt-4o-mini
             AI_STT_MODEL=gpt-4o-transcribe
             AI_TTS_MODEL=gpt-4o-mini-tts

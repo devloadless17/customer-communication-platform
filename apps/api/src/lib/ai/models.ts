@@ -11,9 +11,27 @@
 
 export type ModelTier = "reply" | "reply_hard" | "cheap" | "summary";
 
+/**
+ * `reply` decides how Lebanese the product sounds, so it was chosen by running
+ * real customer messages through every model the account can reach, not by
+ * reputation. On "Hii kifkon" and "kifak? bade es2al 3an el delivery":
+ *
+ *   gpt-4o    "مرحبا! نحن بخير شكرًا"      — Fusha, and it answered an ARABIZI
+ *                                            customer in Arabic script
+ *   gpt-5.5   "ahlin! n7na mni7, int kifak? kif fina nse3dak?"
+ *
+ * gpt-4o also mis-set `replyScript` on the greeting, which is what put Arabic
+ * script in front of a customer who wrote Latin. The 5.x models set it right
+ * every time and write everyday Beirut phrasing unprompted. gpt-5.5 was the
+ * most consistent and the most concise; 5.6-luna/sol were close.
+ *
+ * `cheap`/`summary` stay on 4o-mini deliberately — they feed memory extraction
+ * and session summaries, never customer-visible text, so there is nothing to
+ * gain against the risk of moving them in the same change.
+ */
 const DEFAULT_MODELS: Record<ModelTier, string> = {
-  reply: "gpt-4o",
-  reply_hard: "gpt-4o",
+  reply: "gpt-5.5",
+  reply_hard: "gpt-5.5",
   cheap: "gpt-4o-mini",
   summary: "gpt-4o-mini",
 };

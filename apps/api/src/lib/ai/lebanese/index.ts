@@ -22,6 +22,19 @@ import { skeleton } from "./skeleton";
 const BIGRAMS = new Set(LEBANESE_CORPUS.bigrams);
 
 /**
+ * Kill switch, read per call so it can be flipped in /opt/ccp/.env.local and
+ * take effect on restart without a deploy. "0" disables the corpus lookup and
+ * leaves the mechanical transliteration exactly as it comes out.
+ *
+ * This exists because the corpus shipped a live defect that put wrong WORDS in
+ * front of customers, and the only lever at the time was a redeploy. A layer
+ * that rewrites outbound text needs an off switch that does not require CI.
+ */
+function corpusEnabled(): boolean {
+  return process.env.AI_LEBANESE_CORPUS !== "0";
+}
+
+/**
  * Swap each mechanically transliterated word for the spelling the corpus
  * actually uses. Only the SPELLING changes: a candidate always shares the
  * input's skeleton, i.e. its consonants and long vowels.
@@ -37,6 +50,7 @@ const BIGRAMS = new Set(LEBANESE_CORPUS.bigrams);
  * model wrote has no skeleton worth matching and must survive untouched).
  */
 export function canonicalizeArabizi(text: string): string {
+  if (!corpusEnabled()) return text;
   let prev = "";
   return text.replace(/[a-z0-9']+/gi, (token) => {
     // A bare number is a price or a time, not a word.
