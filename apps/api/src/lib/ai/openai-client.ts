@@ -1,4 +1,5 @@
 import { aiGloballyEnabled, openaiApiKey, reasoningEffort } from "./models";
+import { recordUsage, type UsageContext } from "./usage-log";
 
 /**
  * Thin facade over the official OpenAI SDK — the ONLY place the assistant talks
@@ -122,8 +123,11 @@ export async function chatJson<T>(opts: {
   schemaName: string;
   schema: Record<string, unknown>;
   maxTokens?: number;
+  /** Attribution for the usage ledger. Omit and the call is still recorded. */
+  usage?: UsageContext;
 }): Promise<ChatJsonResult<T>> {
   const { client } = await getClient();
+  const started = Date.now();
   const res = await client.chat.completions.create({
     model: opts.model,
     messages: opts.messages,
@@ -140,6 +144,17 @@ export async function chatJson<T>(opts: {
       json_schema: { name: opts.schemaName, strict: true, schema: opts.schema },
     },
   });
+  void recordUsage({
+    op: opts.usage?.op ?? "reply",
+    workspaceId: opts.usage?.workspaceId,
+    model: res.model ?? opts.model,
+    inputTokens: res.usage?.prompt_tokens,
+    cachedTokens: res.usage?.prompt_tokens_details?.cached_tokens,
+    outputTokens: res.usage?.completion_tokens,
+    latencyMs: Date.now() - started,
+    ok: true,
+  });
+
   const rawContent = res.choices?.[0]?.message?.content ?? "";
   let data: T | null = null;
   try {
@@ -162,8 +177,10 @@ export async function chatText(opts: {
   system: string;
   user: string;
   maxTokens?: number;
+  usage?: UsageContext;
 }): Promise<string> {
   const { client } = await getClient();
+  const started = Date.now();
   const res = await client.chat.completions.create({
     model: opts.model,
     max_completion_tokens: opts.maxTokens ?? 1500, // see chatJson
@@ -172,6 +189,16 @@ export async function chatText(opts: {
       { role: "system", content: opts.system },
       { role: "user", content: opts.user },
     ],
+  });
+  void recordUsage({
+    op: opts.usage?.op ?? "refine",
+    workspaceId: opts.usage?.workspaceId,
+    model: res.model ?? opts.model,
+    inputTokens: res.usage?.prompt_tokens,
+    cachedTokens: res.usage?.prompt_tokens_details?.cached_tokens,
+    outputTokens: res.usage?.completion_tokens,
+    latencyMs: Date.now() - started,
+    ok: true,
   });
   return (res.choices?.[0]?.message?.content ?? "").trim();
 }
@@ -201,9 +228,11 @@ export async function transcribe(opts: {
    * for proper nouns the model would otherwise guess at.
    */
   prompt?: string;
+  usage?: UsageContext;
 }): Promise<{ text: string; language?: string; segments?: TranscriptionSegment[] }> {
   const { client, toFile } = await getClient();
   const file = await toFile(Buffer.from(opts.bytes), opts.filename, { type: opts.mimeType });
+  const started = Date.now();
   const res = await client.audio.transcriptions.create({
     model: opts.model,
     file,
@@ -214,6 +243,20 @@ export async function transcribe(opts: {
       ? { response_format: "verbose_json", timestamp_granularities: ["segment"] }
       : {}),
   });
+  // STT bills per MINUTE, so duration is the billable quantity, not tokens.
+  // `verbose_json` gives it exactly (last segment end); otherwise it is unknown
+  // and left null rather than guessed from the byte count, which varies with
+  // codec and bitrate.
+  const segs = res.segments;
+  void recordUsage({
+    op: opts.usage?.op ?? "stt",
+    workspaceId: opts.usage?.workspaceId,
+    model: opts.model,
+    audioSeconds: segs?.length ? segs[segs.length - 1]!.end : undefined,
+    latencyMs: Date.now() - started,
+    ok: true,
+  });
+
   return {
     text: res.text ?? "",
     language: res.language,
@@ -231,8 +274,10 @@ export async function speak(opts: {
   /** Natural-language delivery steering (gpt-4o-mini-tts) — tone, pacing,
    *  emotion — to make the voice sound human rather than robotic. */
   instructions?: string;
+  usage?: UsageContext;
 }): Promise<{ bytes: Uint8Array; contentType: string }> {
   const { client } = await getClient();
+  const started = Date.now();
   const format = opts.format ?? "mp3";
   const res = await client.audio.speech.create({
     model: opts.model,
@@ -251,5 +296,18 @@ export async function speak(opts: {
         : format === "aac"
           ? "audio/aac"
           : "audio/flac";
+
+  // TTS bills audio OUTPUT tokens, which this endpoint does not report, so the
+  // ledger records the call and its input size and leaves cost null — see the
+  // note in usage-log.ts. Reconcile TTS against the invoice.
+  void recordUsage({
+    op: opts.usage?.op ?? "tts",
+    workspaceId: opts.usage?.workspaceId,
+    model: opts.model,
+    inputTokens: undefined,
+    latencyMs: Date.now() - started,
+    ok: true,
+  });
+
   return { bytes: buf, contentType };
 }

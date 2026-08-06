@@ -95,6 +95,7 @@ export async function runMemoryExtraction(
     schemaName: "customer_memory",
     schema: MEMORY_SCHEMA,
     maxTokens: 700,
+    usage: { op: "memory", workspaceId: meta.workspaceId },
   });
 
   const items = (res.data?.items ?? [])

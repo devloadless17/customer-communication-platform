@@ -5,6 +5,12 @@ networks:
 volumes:
   postgres_data:
   redis_data:
+  # The AI usage ledger (AI_USAGE_LOG). A NAMED VOLUME, not a path inside the
+  # container: the api image is rebuilt and recreated on every deploy, so a file
+  # written to its own filesystem is destroyed by the next push — which would
+  # make a cost log that silently resets. Survives `docker compose up` and
+  # redeploys; removed only by an explicit `docker volume rm`.
+  ai_usage:
 
 services:
   postgres:
@@ -473,6 +479,10 @@ services:
       # (apps/api/src/lib/ai/models.ts), so leaving them unset is fine.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       AI_ASSISTANT_ENABLED: ${AI_ASSISTANT_ENABLED:-1}
+      # Append-only ledger of every paid model call (tokens + cost), written to
+      # the ai_usage volume. Operator-only: nothing in the app reads or displays
+      # it. Unset the path to turn recording off.
+      AI_USAGE_LOG: ${AI_USAGE_LOG:-/var/log/ccp/ai-usage.jsonl}
       AI_MODEL_REPLY: ${AI_MODEL_REPLY:-gpt-5.6-luna}
       AI_MODEL_REPLY_HARD: ${AI_MODEL_REPLY_HARD:-gpt-5.5}
       # How hard the reasoning models think. "low" keeps a voice turn snappy
@@ -549,6 +559,11 @@ services:
       - |
         (cd /app && pnpm prisma migrate deploy) && \
         exec node -r @swc-node/register src/main.ts
+    # The ONLY writable path that outlives a deploy. The api runs as USER node,
+    # so the ledger lives on a named volume rather than a bind mount — no host
+    # directory to create or chown before the first boot.
+    volumes:
+      - ai_usage:/var/log/ccp
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4000/health >/dev/null || exit 1"]
       # See web/postgres above — start_interval flips service_healthy

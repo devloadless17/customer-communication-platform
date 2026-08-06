@@ -117,6 +117,15 @@ COPY tsconfig.json prisma.config.ts ./
 ENV NODE_ENV=production \
     NODE_OPTIONS="--max-old-space-size=2048 --conditions=react-server" \
     SWC_NODE_PROJECT=/app/apps/api/tsconfig.json
+
+# Mount point for the ai_usage volume (AI_USAGE_LOG). Created HERE, owned by
+# node, because Docker seeds a fresh named volume from whatever the image has at
+# that path — including its ownership. Without this the volume mounts root-owned
+# and the ledger writer, which swallows its own errors by design, fails silently
+# forever. The app must never crash over bookkeeping, so nothing else would
+# surface it.
+RUN mkdir -p /var/log/ccp && chown node:node /var/log/ccp
+
 USER node
 # Verify the runtime (node) user resolves pnpm from the shared COREPACK_HOME
 # WITHOUT a network fetch — if this fails the build, the boot-path corepack

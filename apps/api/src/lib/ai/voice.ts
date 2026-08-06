@@ -84,6 +84,9 @@ export async function transcribeCallChannel(opts: {
     temperature: opts.temperature,
     prompt: opts.prompt,
     segments: wantSegments,
+    // Call recordings are minutes of audio where a voice note is seconds, so
+    // they are worth separating in the ledger rather than pooling under "stt".
+    usage: { op: "stt_call" },
   });
   return {
     text: res.text,

@@ -179,6 +179,7 @@ export class MessagesService {
    */
   async translate(input: TranslateInput): Promise<{ text: string }> {
     return this.composerRewrite("Translation", input.text, {
+      op: "translate",
       system:
         `You are a translation engine. Translate the user's message into ${input.targetLang}. ` +
         `Preserve meaning, tone, line breaks, emoji, @mentions, URLs, and any placeholders exactly. ` +
@@ -193,6 +194,7 @@ export class MessagesService {
    */
   async refine(input: RefineInput): Promise<{ text: string }> {
     return this.composerRewrite("Refinement", input.text, {
+      op: "refine",
       system:
         `You rewrite a customer-support agent's draft reply. ${REFINE_INSTRUCTIONS[input.mode]} ` +
         `Preserve the original meaning, language, line breaks, emoji, @mentions, URLs, and any placeholders. ` +
@@ -214,7 +216,7 @@ export class MessagesService {
   private async composerRewrite(
     label: string,
     text: string,
-    opts: { system: string },
+    opts: { system: string; op: "translate" | "refine" },
   ): Promise<{ text: string }> {
     try {
       const out = await chatText({
@@ -222,6 +224,7 @@ export class MessagesService {
         system: opts.system,
         user: text,
         maxTokens: 8192,
+        usage: { op: opts.op },
       });
       if (!out) throw new BadGatewayException(`${label} returned no result.`);
       return { text: out };

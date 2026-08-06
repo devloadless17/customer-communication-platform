@@ -981,6 +981,11 @@ jobs:
             AI_ASSISTANT_ENABLED=1
             AI_MODEL_REPLY=gpt-5.6-luna
             AI_REASONING_EFFORT=low
+            # Append-only ledger of every paid model call. Operator-only, no UI.
+            # Lives on the ai_usage named volume so it survives this redeploy.
+            # Read it with:
+            #   docker compose exec api node -r @swc-node/register apps/api/scripts/ai-usage-report.ts --days 7
+            AI_USAGE_LOG=/var/log/ccp/ai-usage.jsonl
             AI_MODEL_SUMMARY=gpt-4o-mini
             AI_STT_MODEL=gpt-4o-transcribe
             AI_TTS_MODEL=gpt-4o-mini-tts

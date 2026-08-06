@@ -67,6 +67,7 @@ export async function generateReply(input: GenerateReplyInput): Promise<Generate
     schemaName: "customer_reply",
     schema: REPLY_SCHEMA,
     maxTokens: 1200,
+    usage: { op: "reply", workspaceId: input.config.workspaceId },
   });
 
   if (!res.data || !res.data.replyText?.trim()) {

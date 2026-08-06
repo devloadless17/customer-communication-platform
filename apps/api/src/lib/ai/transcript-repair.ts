@@ -117,6 +117,7 @@ export async function repairLebaneseTranscript(opts: {
       // gating — and a cast that buys nothing is exactly what that gate is for.
       schema: SCHEMA,
       maxTokens: 2000,
+      usage: { op: "transcript_repair" },
     });
     corrected = (res.data?.corrected ?? "").trim();
   } catch (err) {

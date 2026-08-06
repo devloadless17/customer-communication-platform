@@ -136,6 +136,7 @@ export async function runSessionSummary(conversationId: string): Promise<void> {
     schemaName: "session_summary",
     schema: SUMMARY_SCHEMA,
     maxTokens: 550,
+    usage: { op: "summary", workspaceId: conv.workspaceId },
   });
   if (!res.data) return;
   const p = res.data;
@@ -226,6 +227,7 @@ export async function summarizeRange(
     schemaName: "range_summary",
     schema: SUMMARY_SCHEMA,
     maxTokens: 550,
+    usage: { op: "summary", workspaceId },
   });
   return res.data ?? null;
 }
