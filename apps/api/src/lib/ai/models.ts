@@ -24,18 +24,37 @@ export type ModelTier = "reply" | "reply_hard" | "cheap" | "summary";
  * script in front of a customer who wrote Latin. The 5.x models set it right
  * every time and write everyday Beirut phrasing unprompted.
  *
- * 5.4 over the better-writing 5.5 because a reply sits between STT and TTS on a
- * voice turn and the customer waits through all three: 5.5 measured 10.8s
- * against 5.4's 3.8s at `low` effort, near gpt-4o's 2.9s. 5.5 is a shade more
- * natural, so AI_MODEL_REPLY=gpt-5.5 is there for a workspace that would rather
- * have the polish than the seconds.
+ * 5.6-luna over 5.4 and 5.5 on measurement, not on being the newest. Same
+ * prompt, same seven customer messages, business open and an email already on
+ * file so neither the closed-notice nor the email ask skewed the lengths:
+ *
+ *                 $/1000 msgs   latency   facts quoted
+ *   gpt-5.4          8.30        5141ms   punted on price, punted on booking
+ *   gpt-5.6-luna     0.51        2633ms   quoted $900 + $2,000 + $1,500
+ *
+ * 16x cheaper, twice as fast, and BETTER on the two questions that sell: asked
+ * the price, 5.4 gave the starter figure and handed off, while luna gave the
+ * online-ordering figure too — both were sitting in the same config. Over 24
+ * runs on six fact-bearing questions luna quoted 32/32 of the figures the
+ * config could answer with.
+ *
+ * A grounding rule ("state every figure you were given") was written and
+ * measured against this: 32/32 either way, 8 more output tokens. Not added —
+ * the model does it unprompted, and an instruction that changes nothing is
+ * still read on every request.
+ *
+ * WATCH, on a small model: `confidence` and `hallucinationRisk` are the model
+ * scoring ITSELF, and `confidenceThreshold` is what stands between a wrong
+ * answer and auto_send. Nothing in the bake-off looked shaky, but the cases
+ * were ordinary ones. AI_MODEL_REPLY=gpt-5.5 buys the polish back for a
+ * workspace that wants it; reply_hard is already there.
  *
  * `cheap`/`summary` stay on 4o-mini deliberately — they feed memory extraction
  * and session summaries, never customer-visible text, so there is nothing to
  * gain against the risk of moving them in the same change.
  */
 const DEFAULT_MODELS: Record<ModelTier, string> = {
-  reply: "gpt-5.4",
+  reply: "gpt-5.6-luna",
   reply_hard: "gpt-5.5", // the slow, careful one, for a workspace that opts in
   cheap: "gpt-4o-mini",
   summary: "gpt-4o-mini",
