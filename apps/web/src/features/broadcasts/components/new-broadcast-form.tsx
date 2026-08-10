@@ -733,7 +733,19 @@ export function NewBroadcastForm({
   const groupCount = useAudienceCount(
     countChannel && scopedGroup ? scopedGroup.tagIds : [],
     countChannel && scopedGroup ? scopedGroup.contactIds : [],
-    { channel: countChannel, accountId, includeOtherAccounts },
+    {
+      channel: countChannel,
+      accountId,
+      includeOtherAccounts,
+      // The group's stored field filters MUST ride the count: the server
+      // resolves recipients WITH them (and the preview below passes them), so
+      // omitting them here showed a ~tags-wide number the operator confirmed
+      // a billed send against — e.g. 5,000 where the filtered audience was
+      // 800 (audit 2026-08-10).
+      ...(countChannel && scopedGroup?.fieldFilters.length
+        ? { fieldFilters: scopedGroup.fieldFilters }
+        : {}),
+    },
   );
 
   // Recipient count for the active mode. Custom mode's count comes from the

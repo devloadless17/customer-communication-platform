@@ -846,8 +846,10 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   }
   if (broadcast.status !== "queued") {
     // Already claimed by another runner / completed / explicitly failed —
-    // never restart it from here. The reconciler on boot is the only thing
-    // that revives `running` rows (by failing them).
+    // never restart it from here. Orphaned `running` rows are revived by the
+    // boot reconciler, which demotes them to paused(shutdown) and RESUMES
+    // them — it does not fail them. (This comment used to claim the opposite;
+    // corrected 2026-08-10 — do not "fix" the reconciler to match old prose.)
     return;
   }
 
@@ -4111,6 +4113,13 @@ export async function reconcileCanceledMarkerRecipients(): Promise<void> {
           externalId: attempt.externalId,
           conversationId,
           sentAt: attempt.completedAt,
+          // Seed the funnel ladder exactly like both live paths do. Without
+          // it a Meta-accepted, billed send recovered here sat at the
+          // `pending` default forever when the handset never acked — the
+          // "invisible recipient" class deliveryState exists to kill
+          // (audit 2026-08-10). Ingest deliberately skips plain `sent`
+          // webhooks BECAUSE the writer seeds this.
+          deliveryState: "sent",
         },
       });
       if (reconciled.count === 0) continue;

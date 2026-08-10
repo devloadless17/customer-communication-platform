@@ -1988,19 +1988,16 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     if (opts.status) {
       where.status = opts.status as Prisma.BroadcastRecipientWhereInput["status"];
     }
-    const filtered = !!(opts.outcome && opts.outcome !== "all") || !!opts.errorCode;
     const rows = await this.db.broadcastRecipient.findMany({
       where,
-      // Unfiltered mode: failed-first, matching the inline get() ordering
-      // rationale — the BroadcastRecipientStatus enum declares (queued, sent,
-      // failed) so `status: "desc"` yields failed → sent → queued and the
-      // actionable rows come first as "Load more" pages.
-      // Outcome-filtered mode: plain id order. The bucket is already
-      // homogeneous, and (broadcastId, deliveryState, id) / the repliedAt·
-      // clickedAt partial indexes serve `ORDER BY id` as a bounded range scan
-      // — a 100k-recipient campaign pages in index order instead of
-      // re-sorting the whole bucket per page.
-      orderBy: filtered ? { id: "asc" } : [{ status: "desc" }, { id: "asc" }],
+      // Plain id order in BOTH modes. The unfiltered branch used to sort
+      // [{status desc}, {id asc}] with an id-only cursor — but `status`
+      // MUTATES mid-send, so "Load more" during a live campaign skipped and
+      // repeated rows as recipients moved between buckets (a keyset is only
+      // stable over immutable sort keys — audit 2026-08-10). Filtered mode,
+      // CSV and /v1 already page by id; the status lens is what the filter
+      // buttons are for.
+      orderBy: { id: "asc" },
       take: take + 1,
       ...(opts.cursor
         ? { cursor: { id: opts.cursor }, skip: 1 }

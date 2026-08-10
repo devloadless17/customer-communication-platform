@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { zLiveChannel } from "@/common/channel-schema";
+import { zBroadcastableChannel, zLiveChannel } from "@/common/channel-schema";
 import { AudienceFieldFiltersSchema } from "../broadcasts/broadcasts.schemas";
 
 const MAX_IDS = 5000;
@@ -22,8 +22,12 @@ export const AudienceCountSchema = z
     tagIds: z.array(z.string().min(1)).max(MAX_IDS).default([]),
     contactIds: z.array(z.string().min(1)).max(MAX_IDS).default([]),
     /** Scope the count to one channel — a broadcast sends on a single channel, so
-     *  the composer count must match what actually gets sent. Omit = all channels. */
-    channel: zLiveChannel().optional(),
+     *  the composer count must match what actually gets sent. Omit = all channels.
+     *  BROADCASTABLE channels only, matching the create path: `webchatwidget`
+     *  is a live channel no send path can target, so accepting it here let a
+     *  direct API caller count an audience that can never receive (audit
+     *  2026-08-10). */
+    channel: zBroadcastableChannel().optional(),
     /** "All contacts" audience: count every team contact (tags/ids ignored),
      *  optionally scoped to `channel`. Distinct from the empty tags+ids case, which
      *  deliberately counts 0 so an unset custom audience never targets everyone. */

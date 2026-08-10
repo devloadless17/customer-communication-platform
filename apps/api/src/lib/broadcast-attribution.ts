@@ -108,15 +108,23 @@ export async function attributeInboundToBroadcast(ctx: InboundContext): Promise<
     });
   }
 
+  // The CLICK stamp must not ride the reply CAS either — same day-2 pattern
+  // as the opt-out above: a customer who typed "thanks" on day 1 (consuming
+  // `repliedAt: null`) and tapped the quick-reply button on day 2 was a real
+  // click the funnel never counted (audit 2026-08-10). Its own first-click CAS.
+  if (ctx.interactiveOptionId) {
+    await db.broadcastRecipient.updateMany({
+      where: { id: recipientId, clickedAt: null },
+      data: { clickedAt: ctx.timestamp, clickedOptionId: ctx.interactiveOptionId },
+    });
+  }
+
   const credited = await db.broadcastRecipient.updateMany({
     where: { id: recipientId, repliedAt: null },
     data: {
       repliedAt: ctx.timestamp,
       repliedMessageId: ctx.messageId,
       repliedAttribution: ctx.replyToMessageId ? "direct" : "window",
-      ...(ctx.interactiveOptionId
-        ? { clickedAt: ctx.timestamp, clickedOptionId: ctx.interactiveOptionId }
-        : {}),
     },
   });
 
