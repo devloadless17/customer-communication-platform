@@ -3103,7 +3103,15 @@ model Broadcast {
   /// adds, and the one the rollup runs. Partial on NOT NULL because the common
   /// case is an ad-hoc broadcast with no campaign, and indexing those nulls would
   /// be pure write cost for rows the query never reaches.
-  @@index([workspaceId, campaignName, createdAt(sort: Desc)])
+  ///
+  /// `map:` pins Prisma's name to the REAL index the migration creates
+  /// (20260730235500 — raw SQL, partial on NOT NULL, which the DSL can't
+  /// express). Without it, `migrate diff` saw a "rename" between this
+  /// non-partial approximation's default name and the actual index, and a
+  /// future `migrate dev` would have "fixed" it — dropping the WHERE clause
+  /// silently. Same trap class as 0_init's hand-maintained section;
+  /// partial-indexes.spec.ts asserts the WHERE either way. (Audit 2026-08-10.)
+  @@index([workspaceId, campaignName, createdAt(sort: Desc)], map: "Broadcast_campaign_rollup_idx")
 }
 
 // TENANCY EXCEPTION — no workspaceId by design. Reach these rows ONLY
