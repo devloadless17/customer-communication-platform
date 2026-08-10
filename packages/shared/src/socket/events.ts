@@ -102,9 +102,11 @@ export interface ServerToClientEvents {
    * A reaction on a message changed — set / replaced / removed. `actor` says
    * which side: `customer` (an inbound react) or `agent` (our own outbound
    * react), each an independent field on the message so both can show at once.
-   * Scoped to the conversation room (like `message:status`): only agents
-   * viewing the thread consume it, patching the reacted-to bubble. `emoji` is
-   * null when the reaction was removed.
+   * TEAM-scoped (via emitAboutConversation, NOT the conversation room — see
+   * the fanout rule): it is in `THREAD_REDUCER_EVENTS`, so the inbox shell
+   * patches CACHED background thread snapshots whose rooms were never joined.
+   * Human-cadence, so the team frame costs nothing. `emoji` is null when the
+   * reaction was removed.
    */
   "message:reaction": (payload: {
     workspaceId: string;
@@ -115,18 +117,13 @@ export interface ServerToClientEvents {
   }) => void;
 
   /**
-   * The customer unsent (deleted) or edited a message. Scoped to the
-   * conversation room like `message:reaction`: agents viewing the thread patch
-   * the target bubble to the tombstone / edited body. Matched by `messageId`
-   * (our internal id). `deletedAt` set → render "deleted"; `editedAt` + `body`
-   * set → replace the text with an "edited" marker.
-   */
-  /**
    * The customer unsent (deleted) or edited a message. TEAM-scoped, not
    * conversation-scoped: this event is in `THREAD_REDUCER_EVENTS`, so the inbox
    * shell patches its CACHED (background) thread snapshots from it, and those
    * conversations' rooms were never joined. Rare enough (a customer correcting
-   * their own message) that the team frame costs nothing.
+   * their own message) that the team frame costs nothing. Matched by
+   * `messageId` (our internal id). `deletedAt` set → render "deleted";
+   * `editedAt` + `body` set → replace the text with an "edited" marker.
    */
   "message:updated": (payload: {
     workspaceId: string;
@@ -989,20 +986,12 @@ export interface ServerToClientEvents {
     changedById: string | null;
   }) => void;
 
-  /**
-   * A team member updated their profile (name / avatar). Cached sender names
-   * + avatars across the inbox, assignment dropdowns, contact-panel "assigned
-   * to" labels, and team-chat author rows update against this without a
-   * refetch.
-   *
-   * Undefined fields = no change. `avatarUrl: null` = explicitly cleared.
-   */
-  "user:profile:updated": (payload: {
-    workspaceId: string;
-    userId: string;
-    name?: string;
-    avatarUrl?: string | null;
-  }) => void;
+  // `user:profile:updated` was REMOVED from this contract (audit 2026-08-10):
+  // the API never emitted it — the `user.profile_updated` fanout rule
+  // deliberately emits `team:catalog:changed {scope:"members"}` instead — and
+  // it had zero client subscribers. A declared-but-never-emitted event is the
+  // trap the total-map FANOUT_RULES design exists to prevent, reintroduced via
+  // a stale contract row: someone wires a consumer and waits forever.
 
   /**
    * A 1:1 DM was created; the recipient should surface it in their sidebar.

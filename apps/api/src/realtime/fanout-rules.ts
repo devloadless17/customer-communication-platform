@@ -176,19 +176,6 @@ export const FANOUT_RULES: FanoutRuleMap = {
     });
   },
 
-  // A triage flag was raised / changed / resolved / removed on a message.
-  // TEAM-room scoped for the same reason as message.reaction_changed —
-  // `message:flag` is in THREAD_REDUCER_EVENTS, so the inbox shell's LRU
-  // ThreadCache patches CACHED background snapshots from it, and those threads'
-  // sockets never joined `conv:<id>`. It ALSO feeds two surfaces that live
-  // outside any conversation room: the flags queue page and the inbox list's
-  // flag badge. Human-cadence (one frame per triage action), so the team frame
-  // carries no storm risk.
-  //
-  // `flag` is the post-change state and is present even on `removed` (the
-  // reducer matches on `flag.id`); `openFlagCount` is the parent conversation's
-  // post-change count, read inside the same transaction, so the list badge is
-  // exact without a follow-up query.
   // Ticket board + inbox badge. WORKSPACE-scoped on purpose — see the
   // `ticket:changed` contract comment: the board is a workspace-wide view of
   // work across threads whose conversation rooms nobody has joined.
@@ -315,6 +302,19 @@ export const FANOUT_RULES: FanoutRuleMap = {
     }
   },
 
+  // A triage flag was raised / changed / resolved / removed on a message.
+  // TEAM-room scoped for the same reason as message.reaction_changed —
+  // `message:flag` is in THREAD_REDUCER_EVENTS, so the inbox shell's LRU
+  // ThreadCache patches CACHED background snapshots from it, and those threads'
+  // sockets never joined `conv:<id>`. It ALSO feeds two surfaces that live
+  // outside any conversation room: the flags queue page and the inbox list's
+  // flag badge. Human-cadence (one frame per triage action), so the team frame
+  // carries no storm risk.
+  //
+  // `flag` is the post-change state and is present even on `removed` (the
+  // reducer matches on `flag.id`); `openFlagCount` is the parent conversation's
+  // post-change count, read inside the same transaction, so the list badge is
+  // exact without a follow-up query.
   "message.flag_changed": (e, emitter) => {
     emitter.emitAboutConversation(e.workspaceId,
       e.conversationId, "message:flag", {
