@@ -18,6 +18,7 @@ import { resolvePermissions } from "@ccp/shared/auth/permissions";
 import type { Role } from "@ccp/shared/types";
 
 import { DbService } from "../db/db.service";
+import { EventBus } from "../events/event-bus.module";
 import type {
   CreateInboxViewInput,
   ReorderInboxViewsInput,
@@ -81,7 +82,21 @@ export function actorFromSession(session: {
 
 @Injectable()
 export class InboxViewsService {
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly bus: EventBus,
+  ) {}
+
+  /**
+   * Realtime tick for SHARED-view changes — the same `team.catalog_changed`
+   * frame every other workspace catalog publishes (snippets, tags, stages).
+   * Personal views deliberately stay silent: only the owner's tab cares, and
+   * it refreshes after its own edit. Without this, a view an admin shared
+   * appeared for teammates only on their next navigation (audit 2026-08-10).
+   */
+  private async publishSharedTick(workspaceId: string): Promise<void> {
+    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "inbox-views" });
+  }
 
   /** Columns the wire shape needs. Keeps the payload lean and explicit. */
   private static readonly SELECT = {
@@ -175,6 +190,7 @@ export class InboxViewsService {
         },
         select: InboxViewsService.SELECT,
       });
+      if (visibility === "shared") await this.publishSharedTick(actor.workspaceId);
       return this.toWire(row, actor.userId, actor.canManageShared);
     } catch (err) {
       throw this.mapDuplicateName(err, visibility);
@@ -223,6 +239,11 @@ export class InboxViewsService {
         },
         select: InboxViewsService.SELECT,
       });
+      // Either side shared = teammates' lists changed (rename/refilter of a
+      // shared view, promote personal→shared, or demote shared→personal).
+      if (existing.visibility === "shared" || nextVisibility === "shared") {
+        await this.publishSharedTick(actor.workspaceId);
+      }
       return this.toWire(row, actor.userId, actor.canManageShared);
     } catch (err) {
       throw this.mapDuplicateName(err, nextVisibility);
@@ -232,6 +253,7 @@ export class InboxViewsService {
   async remove(actor: InboxViewActor, id: string): Promise<void> {
     const existing = await this.loadForWrite(actor, id);
     await this.db.inboxView.delete({ where: { id: existing.id } });
+    if (existing.visibility === "shared") await this.publishSharedTick(actor.workspaceId);
   }
 
   /**
@@ -263,6 +285,10 @@ export class InboxViewsService {
           this.db.inboxView.update({ where: { id }, data: { position: index } }),
         ),
       );
+    }
+    // A reorder that touched a shared view changes teammates' sidebar order.
+    if (rows.some((r) => r.visibility === "shared")) {
+      await this.publishSharedTick(actor.workspaceId);
     }
     return this.list(actor);
   }

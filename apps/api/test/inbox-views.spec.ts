@@ -45,7 +45,12 @@ if (existsSync(".env")) process.loadEnvFile(".env");
 if (existsSync("../../.env")) process.loadEnvFile("../../.env");
 
 const prisma = createTestPrismaClient();
-const service = new InboxViewsService(prisma as unknown as DbService);
+const service = new InboxViewsService(
+  prisma as unknown as DbService,
+  // Shared-view mutations publish a team.catalog_changed tick; the spec
+  // exercises persistence + visibility, not fanout.
+  { publish: async () => {} } as unknown as ConstructorParameters<typeof InboxViewsService>[1],
+);
 
 const S = `iv${Date.now().toString().slice(-8)}`;
 let orgId = "";

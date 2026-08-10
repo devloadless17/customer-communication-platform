@@ -56,6 +56,8 @@ const SCOPE_AFFINITY: Partial<Record<CatalogScope, readonly string[]>> = {
   workflows: ["/workflows"],
   // Audience groups are only used inside the broadcasts flow.
   "audience-groups": ["/broadcasts"],
+  // Saved inbox views render only in the inbox sub-sidebar.
+  "inbox-views": ["/inbox"],
   // Pending invites are admin-only and only shown on team settings.
   invites: ["/settings/members"],
   // API keys live on the integrations settings page only.

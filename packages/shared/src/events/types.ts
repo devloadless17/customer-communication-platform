@@ -1257,6 +1257,11 @@ export interface TeamCatalogChangedEvent {
     | "workflows"
     | "members"
     | "snippets"
+    // A SHARED inbox view was created/renamed/re-filtered/removed/reordered.
+    // Personal views never publish — only their owner's tab cares, and it
+    // already router.refresh()es after its own edit. (audit 2026-08-10:
+    // shared views were the one catalog with no realtime propagation.)
+    | "inbox-views"
     | "audience-groups"
     | "whatsapp-templates"
     | "invites"

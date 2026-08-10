@@ -754,6 +754,8 @@ export interface ServerToClientEvents {
       // navigate. The actor's own tab also waited for a click, since
       // revalidateTag doesn't push to the browser.
       | "snippets"
+      // Shared inbox views (audit 2026-08-10) — see events/types.ts.
+      | "inbox-views"
       // Broadcast audience groups (lists of saved contact filters). Used
       // by /broadcasts/new and the groups list under /broadcasts/groups.
       | "audience-groups"

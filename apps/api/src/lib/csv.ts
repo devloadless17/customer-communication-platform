@@ -34,9 +34,6 @@ function escapeCell(value: string): string {
  * Prepends a UTF-8 BOM so Excel opens UTF-8 files correctly without
  * round-tripping through "Import Text Wizard".
  */
-export function serializeCsv(columns: string[], rows: Array<Record<string, string>>): string {
-  return csvHeader(columns) + csvRows(columns, rows);
-}
 
 /**
  * Header line (with the BOM) on its own, for STREAMING exports that write the

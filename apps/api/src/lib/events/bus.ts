@@ -118,10 +118,6 @@ const state: BusState = (g.__ccpEventBus ??= {
  * bootstrap assertion (`assertSingleCriticalSubscriber`) turns that into a
  * loud boot failure instead of a race nobody can see.
  */
-export function criticalSubscriberCount(type: DomainEventType): number {
-  const list = state.handlers.get(type) ?? [];
-  return list.filter((r) => r.priority === SubscriberPriority.REALTIME).length;
-}
 
 /**
  * Boot-time invariant: at most ONE realtime-tier subscriber per event type.
