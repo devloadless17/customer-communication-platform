@@ -160,8 +160,13 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
   }) {
     // Webhook delivery is gated by `skipOutboundWebhook`, which DEFAULTS to
     // `silent` when unset. So:
-    //   - /v1 partner mutation (silent: true, flag unset) → skipped (no echo
-    //     back to the partner that caused the change).
+    //   - /v1 partner mutation: `silent` follows the request's own
+    //     `silent` field and DEFAULTS TO FALSE — so /v1 mutations DO echo to
+    //     webhooks (including the causing partner's) unless the caller opts
+    //     into silent. Loop safety comes from X-CCP-Origin-Key + the
+    //     X-CCP-Depth cap, not from a skip here. (Comment corrected
+    //     2026-08-10 — it previously claimed a no-echo default that never
+    //     existed.)
     //   - workflow STEP-driven change (silent: true for loop safety, but
     //     skipOutboundWebhook: false) → delivered, because partners DID
     //     subscribe to "On Contact Tag/Lifecycle changed" and a workflow that

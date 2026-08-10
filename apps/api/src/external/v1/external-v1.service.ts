@@ -955,9 +955,17 @@ export class ExternalV1Service {
       workflowContact: workflowContactSnapshot(created),
       // contact.created above already fans out the `contact:updated` socket
       // frame; suppress the duplicate here so the client reducer runs once.
-      // Workflow + audit + outbound-webhook subscribers don't read this flag,
-      // so they still receive this event.
       suppressSocketFanout: true,
+      // SILENT (audit 2026-08-10): nothing reads the `kind: "created"`
+      // discriminator — workflow dispatch fires `contact_tag_updated` /
+      // `contact_field_updated` off ANY non-silent contact.updated, and the
+      // webhook subscriber echoes it too. So a /v1 create with tags fired
+      // "On Contact Tag updated" workflows (billed sends possible) and
+      // update-webhooks that the IDENTICAL UI create never fired. `silent`
+      // keeps the audit-attribution purpose of this event while making the
+      // create's trigger/webhook surface exactly `contact.created`, matching
+      // the internal path.
+      silent: true,
     });
 
     return toExternalContact(created, tagIds);
@@ -1070,6 +1078,10 @@ export class ExternalV1Service {
         // contact.created above already fans out the `contact:updated` socket
         // frame; suppress the duplicate here (non-socket subscribers still fire).
         suppressSocketFanout: true,
+        // SILENT — same reasoning as the create path above: a revive is a
+        // fresh directory appearance announced by contact.created; it must
+        // not fire tag/field-UPDATED workflows or webhooks (audit 2026-08-10).
+        silent: true,
       });
     }
 
@@ -2175,9 +2187,13 @@ export class ExternalV1Service {
       apiKeyId,
       idempotencyKey,
       "POST /v1/broadcasts",
-      // Fingerprint on what defines the campaign, so the SAME key with a
-      // different audience is caught as a conflict rather than replayed.
-      { templateId: input.templateId, audience: input.audience },
+      // Fingerprint the WHOLE parsed input, like every other /v1 route. The
+      // old narrow shape ({templateId, audience}) meant a partner who fixed
+      // wrong template `variables` (or a freeform `text`) and re-POSTed with
+      // the same key got a silent replay of the OLD broadcast's response —
+      // believing the corrected campaign launched. Any payload difference on
+      // the most irreversible route must 422 (audit 2026-08-10).
+      input,
       async () => {
         // `createdById: null` — an integration is not a person.
         const out = await this.broadcasts.create(workspaceId, null, input);

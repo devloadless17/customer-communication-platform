@@ -91,6 +91,16 @@ export const PUBLIC_EVENT_TYPES = [
   // moved, solved, closed, or missed its SLA. The routing seam for a helpdesk
   // or BI system: subscribe once and every state change arrives carrying the
   // whole ticket and the contact, with no polling and no follow-up call.
+  //
+  // SHARED-ticket caveat (audit 2026-08-10): the delivery matches webhooks in
+  // the ACTING workspace only — when a guest department moves a shared
+  // ticket, the owner's webhook does not fire (and vice versa). Deliberate
+  // for now: delivering to every participating workspace needs per-workspace
+  // payload views (the guest's blanked-contact frame the realtime rule
+  // already builds), and getting that wrong leaks the owner's contact into a
+  // guest's partner system. If cross-department webhook coverage is wanted,
+  // build it from `ticketByWorkspace` in the subscriber — never by sending
+  // one workspace's payload to another's endpoint.
   "ticket.changed",
 ] as const;
 export type PublicEventType = (typeof PUBLIC_EVENT_TYPES)[number];

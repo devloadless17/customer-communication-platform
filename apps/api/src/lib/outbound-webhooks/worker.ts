@@ -66,8 +66,10 @@ if (WEBHOOK_CLOSE_TIMEOUT_MS <= WEBHOOK_LOCK_DURATION_MS) {
  * BullMQ retry, which tripped the breaker after 5 dead deliveries instead
  * of 20 because each delivery took the counter +4 (default attempts=4).
  *
- * 4 attempts × ~30s/2m/8m/30m backoff = ~40 minutes per failed delivery.
- * 20 consecutive *deliveries* ≈ ~13 hours of sustained breakage. Conservative.
+ * 7 attempts × base-2 exponential from 30s ≈ ~31.5 minutes per failed
+ * delivery (queue.ts sets attempts: 7). 20 consecutive *deliveries* ≈ ~10.5
+ * hours of sustained breakage. Conservative. (Comment corrected 2026-08-10 —
+ * it previously described a 4-attempt ladder that never matched the queue.)
  */
 const AUTO_DISABLE_THRESHOLD = 20;
 
@@ -222,7 +224,7 @@ export function startWebhookDeliverWorker(): Worker<WebhookDeliverJobData> {
       }
       try {
         // attemptsMade is 0 on first run; deliverOnce wants 1-indexed.
-        // job.opts.attempts comes from the queue default (currently 4).
+        // job.opts.attempts comes from the queue default (7 — see queue.ts).
         const attempt = job.attemptsMade + 1;
         const maxAttempts = job.opts.attempts ?? 1;
         await deliverOnce(
