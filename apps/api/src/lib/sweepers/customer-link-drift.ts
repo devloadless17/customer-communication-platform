@@ -62,6 +62,11 @@ async function sweepOnce(): Promise<void> {
       // guard (`contacts: none`) makes this safe whether `customerId` was a fresh
       // customer or an existing strong-key match (an in-use customer is skipped).
       if (linked.count === 0) {
+        // No memory adoption needed here (unlike the other reap sites, which
+        // call adoptCustomerMemories): a customer this branch deletes was
+        // minted by the resolveCustomerId call ABOVE and never rendered — no
+        // AiCustomerMemory row can point at it. An existing strong-key match
+        // that is in use survives the `contacts: none` guard.
         await db.customer.deleteMany({
           where: { id: customerId, workspaceId: c.workspaceId, contacts: { none: {} } },
         });

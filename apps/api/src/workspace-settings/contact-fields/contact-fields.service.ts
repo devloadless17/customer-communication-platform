@@ -594,16 +594,24 @@ export class ContactFieldsService {
         if (moveTo === null) {
           // Clear: drop the key entirely (an empty string would render as a
           // set-but-blank value and break the "has a value" filter).
+          // `version + 1` so a concurrent contact PATCH that read the
+          // pre-image (still carrying this option id under the key) CAS-fails
+          // instead of merging the deleted id back in — the ghost-resurrection
+          // race the refuse path's Serializable tx already prevents
+          // (audit 2026-08-10).
           await tx.$executeRaw`
             UPDATE "Contact"
-            SET "customFields" = "customFields" - ${field.key}
+            SET "customFields" = "customFields" - ${field.key},
+                "version" = "version" + 1
             WHERE "workspaceId" = ${workspaceId}
               AND "customFields"->>${field.key} = ${optionId}
           `;
         } else {
+          // Same version bump as the clear arm above.
           await tx.$executeRaw`
             UPDATE "Contact"
-            SET "customFields" = jsonb_set("customFields", ARRAY[${field.key}], to_jsonb(${moveTo}::text))
+            SET "customFields" = jsonb_set("customFields", ARRAY[${field.key}], to_jsonb(${moveTo}::text)),
+                "version" = "version" + 1
             WHERE "workspaceId" = ${workspaceId}
               AND "customFields"->>${field.key} = ${optionId}
           `;

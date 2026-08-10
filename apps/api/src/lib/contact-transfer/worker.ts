@@ -65,7 +65,8 @@ export function startContactTransferWorker(): void {
   worker = new Worker<ContactTransferJobData>(
     CONTACT_TRANSFER_QUEUE_NAME,
     async (job: Job<ContactTransferJobData>) => {
-      await handleTransfer(job.data.jobId);
+      const isFinalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
+      await handleTransfer(job.data.jobId, isFinalAttempt);
     },
     {
       connection,
@@ -138,7 +139,7 @@ export async function stopContactTransferWorker(): Promise<void> {
   }
 }
 
-async function handleTransfer(jobId: string): Promise<void> {
+async function handleTransfer(jobId: string, isFinalAttempt: boolean): Promise<void> {
   const row = await db.contactTransferJob.findUnique({ where: { id: jobId } });
   if (!row) return; // reaped by the sweeper — nothing to do
 
@@ -293,19 +294,29 @@ async function handleTransfer(jobId: string): Promise<void> {
     }
 
     const rejected = err instanceof ImportRejected;
-    await db.contactTransferJob.update({
-      where: { id: jobId },
-      data: {
-        status: "failed",
-        error: err instanceof Error ? err.message : "The transfer failed.",
-        finishedAt: new Date(),
-      },
-    });
-    await emitProgress(jobId);
+    // Write `failed` ONLY when this failure is terminal: a rejection (the
+    // user's file is wrong — retrying just delays the answer) or the FINAL
+    // BullMQ attempt. Writing it on every attempt made the retry contract
+    // dead code — the retry re-entered, hit the terminal-status early return,
+    // and the claim CAS (pending|running) refused a `failed` row, so attempts
+    // 2 and 3 were guaranteed no-ops and a transient blip permanently failed
+    // a 100k import at N% (audit 2026-08-10). A transient failure now leaves
+    // the row `running`; the retry re-claims it and resumes from the cursor.
+    if (rejected || isFinalAttempt) {
+      await db.contactTransferJob.update({
+        where: { id: jobId },
+        data: {
+          status: "failed",
+          error: err instanceof Error ? err.message : "The transfer failed.",
+          finishedAt: new Date(),
+        },
+      });
+      await emitProgress(jobId);
+    }
     // A REJECTION is the user's file being wrong (no phone column, over a cap);
     // retrying it twice more just burns the queue and delays the failure the
     // user is waiting to see. A genuine error (DB blip, R2 timeout) rethrows so
-    // BullMQ's retries can save the run.
+    // BullMQ's retries actually save the run.
     if (!rejected) throw err;
     return;
   }

@@ -54,6 +54,7 @@ import type {
 import { workflowConversationSnapshotAfterStatusChange } from "@/lib/workflows/events";
 import { findAndConsumeAwaitingReplies } from "@/lib/workflows/resume-on-inbound";
 import { sessionKindFromFlags } from "@ccp/shared/events/types";
+import { adoptCustomerMemories } from "@/lib/ai/customer-memory-adopt";
 import type {
   NormalizedContactSync,
   NormalizedContactNumberChange,
@@ -2261,7 +2262,10 @@ async function ingestInboundMessage(
 
         contact = await tx.contact.update({
           where: { id: existingContact.id },
-          data: { deletedAt: null, ...identityBackfill, ...nameBackfill },
+          // `version` bump: revive + backfill is a multi-field write; the
+          // manual revive and the import revive both bump, so an in-flight
+          // agent PATCH conflicts loudly here too (audit 2026-08-10).
+          data: { deletedAt: null, ...identityBackfill, ...nameBackfill, version: { increment: 1 } },
           // Load tags as `{ id }` so the `message.received` contact snapshot
           // (toWorkflowContact below) emits the RETURNING contact's real
           // tagIds — without this the relation is absent and tagIds is [].
@@ -2298,9 +2302,14 @@ async function ingestInboundMessage(
             // The `contacts: none` guard leaves a real merge target (one that
             // still owns other channel contacts) intact.
             if (priorCustomerId) {
-              await tx.customer.deleteMany({
+              const reaped = await tx.customer.deleteMany({
                 where: { id: priorCustomerId, workspaceId, contacts: { none: {} } },
               });
+              // Person-level AI memories follow the adoption — see
+              // lib/ai/customer-memory-adopt.ts (audit 2026-08-10).
+              if (reaped.count > 0) {
+                await adoptCustomerMemories(tx, workspaceId, priorCustomerId, adoptedCustomerId);
+              }
             }
           }
         }

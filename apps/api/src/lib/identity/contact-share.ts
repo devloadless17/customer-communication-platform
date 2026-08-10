@@ -6,6 +6,7 @@ import { workflowContactSnapshot } from "@/lib/workflows/events";
 import { resolveContactShare } from "@ccp/shared/utils/contact-share";
 import type { Channel } from "@ccp/shared/types";
 import type { ContactShareField, InteractiveReply } from "@ccp/shared/providers/types";
+import { adoptCustomerMemories } from "@/lib/ai/customer-memory-adopt";
 
 /**
  * A social contact tapped a "share your phone / email" consent chip.
@@ -105,7 +106,13 @@ export async function applyContactShareFromReply(
   // `identityChannel = 'whatsapp'`, so stamping a phone on a messenger/instagram
   // contact can't collide with the WhatsApp contact for the same person — which
   // is precisely the pair we want `resolveCustomerId` to fuse below.
-  await db.contact.update({ where: { id: contact.id }, data: next });
+  // `version` bump: enrichment is a multi-field write like any PATCH, so an
+  // in-flight agent edit must 409 rather than silently interleave (the same
+  // discipline bsuid-reconcile already applies — audit 2026-08-10).
+  await db.contact.update({
+    where: { id: contact.id },
+    data: { ...next, version: { increment: 1 } },
+  });
 
   // The contact just gained a strong key, so it may now belong to an EXISTING
   // person. This contact ALREADY has its own Customer, so we only want to MOVE it
@@ -135,15 +142,22 @@ export async function applyContactShareFromReply(
   if (adoptedCustomerId && adoptedCustomerId !== contact.customerId) {
     await db.contact.update({
       where: { id: contact.id },
-      data: { customerId: adoptedCustomerId },
+      data: { customerId: adoptedCustomerId, version: { increment: 1 } },
     });
     // The customer it used to sit alone under is now childless — reap it. The
     // `contacts: none` guard makes this safe when the old customer still owns
     // other channel contacts (a real merge target), in which case we leave it.
     if (contact.customerId) {
-      await db.customer.deleteMany({
+      const reaped = await db.customer.deleteMany({
         where: { id: contact.customerId, workspaceId, contacts: { none: {} } },
       });
+      // Person-level AI memories are a soft pointer — carry them to the person
+      // who absorbed this one, or a routine merge silently erases them
+      // (lib/ai/customer-memory-adopt.ts). Only when the reap actually fired:
+      // a still-inhabited customer keeps its own memories.
+      if (reaped.count > 0) {
+        await adoptCustomerMemories(db, workspaceId, contact.customerId, adoptedCustomerId);
+      }
     }
   }
 

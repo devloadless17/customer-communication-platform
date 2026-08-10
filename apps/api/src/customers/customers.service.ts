@@ -17,6 +17,7 @@ import {
   type ConversationViewer,
 } from "@/lib/conversations/visibility";
 import { DbService } from "../db/db.service";
+import { adoptCustomerMemories } from "@/lib/ai/customer-memory-adopt";
 
 /**
  * A brand-new social contact carries its opaque PSID/IGSID as `name` until the
@@ -475,6 +476,9 @@ export class CustomersService {
         });
         if (remaining === 0) {
           await tx.customer.deleteMany({ where: { id: previousCustomerId, workspaceId } });
+          // Carry the reaped person's AI memories to the person absorbing the
+          // contact — see lib/ai/customer-memory-adopt.ts (audit 2026-08-10).
+          await adoptCustomerMemories(tx, workspaceId, previousCustomerId, customerId);
         }
       }
       return true;
@@ -546,6 +550,9 @@ export class CustomersService {
         });
         if (remaining === 0) {
           await tx.customer.deleteMany({ where: { id: previousCustomerId, workspaceId } });
+          // The split minted a fresh solo person for this contact — the
+          // now-empty previous customer's memories follow the contact there.
+          await adoptCustomerMemories(tx, workspaceId, previousCustomerId, fresh.id);
         }
       }
       return fresh.id;

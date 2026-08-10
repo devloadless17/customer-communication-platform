@@ -20,7 +20,7 @@ import { randomUUID } from "node:crypto";
 
 import { Prisma } from "@prisma/client";
 
-import { directoryContactWhere } from "@/lib/queries/contacts";
+import { DIRECTORY_CONTACT_SQL, directoryContactWhere } from "@/lib/queries/contacts";
 
 import {
   TRANSFER_MAX_EXPORT_ROWS,
@@ -237,8 +237,13 @@ type ExportContact = {
 async function countScope(workspaceId: string, scope: ExportScope): Promise<number | null> {
   if (scope.ids) return scope.ids.length;
   const where = buildContactFilterWhere(workspaceId, scope.filters ?? {});
+  // AND the directory gate, matching hydrate(): with `channel=webchatwidget`
+  // explicitly selected, the shared filter opts anonymous visitors IN (the
+  // list view needs them) — but hydrate drops them (§6: hidden from CSV), so
+  // counting them here made the progress bar's `total` a lie and the file end
+  // short with no explanation (audit 2026-08-10).
   const rows = await db.$queryRaw<Array<{ count: bigint }>>`
-    SELECT COUNT(*)::bigint AS count FROM "Contact" c WHERE ${where}
+    SELECT COUNT(*)::bigint AS count FROM "Contact" c WHERE ${where} AND ${DIRECTORY_CONTACT_SQL}
   `;
   const n = rows[0]?.count;
   return n === undefined ? null : Number(n);
@@ -281,7 +286,7 @@ async function* iterateContacts(
     const idRows = await db.$queryRaw<Array<{ id: string; createdAt: Date }>>`
       SELECT c."id", c."createdAt"
       FROM "Contact" c
-      WHERE ${where} ${keyset}
+      WHERE ${where} AND ${DIRECTORY_CONTACT_SQL} ${keyset}
       ORDER BY c."createdAt" ASC, c."id" ASC
       LIMIT ${PAGE}
     `;

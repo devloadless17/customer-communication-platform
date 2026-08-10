@@ -304,8 +304,15 @@ export async function resolveStepTarget(
   // them on purpose) — identity-model-added-1. A soft-deleted contact still
   // holds the (workspaceId, phoneNumber) unique slot, so the create below will P2002
   // and the revive branch handles it.
+  // CHANNEL-SCOPED, like the import runner's identical hazard (see
+  // import-runner.ts "borrowed phone"): contact-share and widget pre-chat
+  // legitimately stamp a phone onto messenger/instagram/webchat contacts, so
+  // an unscoped find could resolve a SOCIAL or WIDGET sibling — including a
+  // stranger who typed a customer's number into the public pre-chat box — and
+  // deliver the automation into the wrong (unverified) thread. A workflow
+  // phone target means the WhatsApp identity, full stop (audit 2026-08-10).
   const existingContact = await db.contact.findFirst({
-    where: { workspaceId, phoneNumber: phone, deletedAt: null },
+    where: { workspaceId, phoneNumber: phone, identityChannel: "whatsapp", deletedAt: null },
     select: { id: true },
   });
   let contactId: string;
@@ -339,7 +346,11 @@ export async function resolveStepTarget(
       // the workflow targets a live contact instead of throwing (CTI-1).
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
         const slotHolder = await db.contact.findFirstOrThrow({
-          where: { workspaceId, phoneNumber: phone },
+          // Same channel scope as the find above — the (workspaceId, phone)
+          // partial unique is whatsapp-scoped, so the slot holder IS the
+          // WhatsApp identity; without the pin this could grab a social
+          // sibling that borrowed the phone.
+          where: { workspaceId, phoneNumber: phone, identityChannel: "whatsapp" },
           select: { id: true, deletedAt: true },
         });
         if (slotHolder.deletedAt) {

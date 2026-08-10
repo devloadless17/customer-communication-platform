@@ -8,6 +8,7 @@ import { toContactWire } from "@/lib/queries/_shared";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
 import { getCountryFromPhone } from "@ccp/shared/utils";
 import type { Channel } from "@ccp/shared/types";
+import { adoptCustomerMemories } from "@/lib/ai/customer-memory-adopt";
 
 /**
  * BSUID identity repair — the sibling of `canonical-wa-id.ts` for Meta's 2026
@@ -404,9 +405,14 @@ export async function applyContactRequestPhone(
       data: { customerId: adoptedCustomerId, version: { increment: 1 } },
     });
     if (contact.customerId) {
-      await db.customer.deleteMany({
+      const reaped = await db.customer.deleteMany({
         where: { id: contact.customerId, workspaceId, contacts: { none: {} } },
       });
+      // Person-level AI memories follow the adoption — see
+      // lib/ai/customer-memory-adopt.ts (audit 2026-08-10).
+      if (reaped.count > 0) {
+        await adoptCustomerMemories(db, workspaceId, contact.customerId, adoptedCustomerId);
+      }
     }
   }
 

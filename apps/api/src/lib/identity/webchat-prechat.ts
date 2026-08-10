@@ -6,6 +6,7 @@ import { workflowContactSnapshot } from "@/lib/workflows/events";
 import { normalizeStringMap } from "@/lib/normalize-string-map";
 import { splitContactName } from "@/lib/providers/ingest";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
+import { isReservedFieldKey } from "@ccp/shared/contacts/reserved-fields";
 import type { Channel } from "@ccp/shared/types";
 
 /**
@@ -100,6 +101,7 @@ export async function applyWebchatPreChatIdentity(
       email: true,
       customerId: true,
       customFields: true,
+      version: true,
       firstName: true,
       lastName: true,
       language: true,
@@ -147,6 +149,13 @@ export async function applyWebchatPreChatIdentity(
     const key = slugifyFieldKey(label);
     const val = String(rawVal ?? "").trim().slice(0, 1000);
     if (!key || !val) continue;
+    // Same reserved-key guard the contact-fields settings enforce: a custom
+    // pre-chat field labeled "Email" slugifies to `email` and would upsert a
+    // definition shadowing the built-in column — two "Email" fields writing to
+    // different storage (audit 2026-08-10). BUILTIN_FIELD_BY_SLUG below
+    // diverts the mappable ones; anything else reserved is dropped, not
+    // stored under a colliding key.
+    if (isReservedFieldKey(key) && !BUILTIN_FIELD_BY_SLUG[key]) continue;
     const builtin = BUILTIN_FIELD_BY_SLUG[key];
     if (builtin) {
       // Known contact field → set it directly (skip if already that value).
@@ -195,14 +204,24 @@ export async function applyWebchatPreChatIdentity(
     return;
   }
 
-  await db.contact.update({
-    where: { id: contact.id },
+  // CAS on the version this function READ. The customFields write is a
+  // read-modify-write over that snapshot ({ ...existingCf, ...cfPatch }), so
+  // an agent PATCH committing between our read and this write used to have
+  // its custom-field edits silently overwritten (audit 2026-08-10). Losing
+  // the race drops only this pre-chat enrichment pass — the visitor's answers
+  // are re-appliable and the next pre-chat submit re-runs it — which beats
+  // silently erasing an agent's work. The bump also makes the enrichment
+  // visible to any concurrent PATCH's own CAS.
+  const enriched = await db.contact.updateMany({
+    where: { id: contact.id, version: contact.version },
     data: {
       ...next,
       ...builtinPatch,
       ...(cfChanged ? { customFields: { ...existingCf, ...cfPatch } } : {}),
+      version: { increment: 1 },
     },
   });
+  if (enriched.count === 0) return;
 
   // Make each new custom field visible in the contact panel. Best-effort + race-
   // safe: the @@unique([workspaceId, key]) means a concurrent create just no-ops.

@@ -127,6 +127,21 @@ async function sweepOnce(): Promise<void> {
       await db.customer.deleteMany({
         where: { id: { in: customerIds }, contacts: { none: {} } },
       });
+      // The purge takes the person's AI memories with them — but ONLY for
+      // customers the guarded delete actually removed; a shared/linked
+      // Customer that survived keeps its own (lib/ai/customer-memory-adopt.ts).
+      const surviving = new Set(
+        (
+          await db.customer.findMany({
+            where: { id: { in: customerIds } },
+            select: { id: true },
+          })
+        ).map((c) => c.id),
+      );
+      const gone = customerIds.filter((id) => !surviving.has(id));
+      if (gone.length > 0) {
+        await db.aiCustomerMemory.deleteMany({ where: { customerId: { in: gone } } });
+      }
     }
     if (stale.length < MAX_PER_SWEEP) break;
   }
