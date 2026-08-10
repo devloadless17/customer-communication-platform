@@ -223,8 +223,10 @@ export class ExternalV1TicketsController {
 
   // ── Cross-workspace escalation ──────────────────────────────────────────
   // Parity with the in-app escalation flow (locked rule). The API key is
-  // scoped to the SOURCE workspace; the twin ticket is created in the sibling
-  // workspace exactly as the UI would.
+  // scoped to the acting workspace; escalation writes a TicketShare granting
+  // the sibling workspace access to the SAME ticket row — one number, one
+  // history. (No "twin ticket" exists: the twin-pair design was replaced by
+  // shares on 2026-07-28.)
 
   /** Refer a ticket to a sibling workspace in the organization. */
   @Post("tickets/:id/escalate")

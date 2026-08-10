@@ -96,6 +96,7 @@ export type TicketOutcome =
    *  rewritten. History moves forward through comments and notes instead. */
   | { ok: false; reason: "cause_immutable" }
   | { ok: false; reason: "tags_owner_only" }
+  | { ok: false; reason: "teams_owner_only" }
   /** `requireNoActiveTicket` was asked for and the thread already has one.
    *  Raced-safe: decided by a CAS on the pointer, not a prior read. */
   | { ok: false; reason: "already_has_active_ticket" };
@@ -633,6 +634,13 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
   if (args.tagIds !== undefined && isGuest) {
     return { ok: false, reason: "tags_owner_only" };
   }
+  // TEAMS are the owner's queues, same reasoning — and the same posture:
+  // REFUSED rather than accepted-and-ignored (the /v1 surface names
+  // accepted-and-ignored as the shape this API refuses; this arm used to
+  // silently drop a guest's assignedTeamId — audit 2026-08-10).
+  if (args.assignedTeamId !== undefined && isGuest) {
+    return { ok: false, reason: "teams_owner_only" };
+  }
   const result = await db.$transaction(async (tx) => {
     const nextStatus = args.status;
     const statusMoves = nextStatus !== undefined && nextStatus !== existing.status;
@@ -672,8 +680,8 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
       data.status = "open";
     }
 
-    // Teams are the OWNER's queues (an Team belongs to one
-    // workspace), so a guest cannot move the ticket between them.
+    // Teams are the OWNER's queues (a Team belongs to one workspace); a
+    // guest's write was already refused above (`teams_owner_only`).
     if (args.assignedTeamId !== undefined && !isGuest) {
       data.assignedTeamId = args.assignedTeamId;
       // Handing a ticket to another team CLEARS the current owner unless the
@@ -801,6 +809,19 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
         // targets its share, which the CAS below cannot express — automation
         // never assigns across a workspace boundary, so it never gets here.
         ...(args.onlyIfUnassigned && !isGuest ? { assignedUserId: null } : {}),
+        // WRITE-ONCE CAUSE, race half (audit 2026-08-10). The JS pre-check
+        // above (`cause_immutable`) reads a snapshot; two concurrent fills of
+        // an empty cause — or a fill racing an escalation's fill — both pass
+        // it and the last writer silently rewrote the founding context. When
+        // this write SETS a cause onto a ticket the snapshot said was empty,
+        // pin emptiness in the CAS itself so the loser conflicts instead of
+        // overwriting. (A same-value or first write still succeeds; a written
+        // cause is already refused by the pre-check.)
+        ...(args.description !== undefined &&
+        args.description !== existing.description &&
+        !existing.description
+          ? { OR: [{ description: null }, { description: "" }] }
+          : {}),
       },
       data: data as Prisma.TicketUncheckedUpdateManyInput,
     });
@@ -888,16 +909,21 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
     // "the VIP tag was removed". Snapshotted name/color, same rule as the
     // conversation audit's tag rows.
     const tagEvents = tagDiff ? tagDiff.added.length + tagDiff.removed.length : 0;
+    // The LAST TicketEvent written below — used to re-align `lastActivityAt`
+    // to the evidence's own timestamp (see the alignment write after the
+    // events). At least one event is always written: tagsOnly implies
+    // tagEvents > 0, and !tagsOnly writes the generic row.
+    let lastEventId: string | null = null;
     if (tagDiff) {
       for (const tag of tagDiff.added) {
-        await writeTicketEvent(tx, existing.workspaceId, existing.id, "tag_added", args.actor, null, {
+        lastEventId = await writeTicketEvent(tx, existing.workspaceId, existing.id, "tag_added", args.actor, null, {
           tagId: tag.id,
           name: tag.name,
           color: tag.color,
         });
       }
       for (const tag of tagDiff.removed) {
-        await writeTicketEvent(tx, existing.workspaceId, existing.id, "tag_removed", args.actor, null, {
+        lastEventId = await writeTicketEvent(tx, existing.workspaceId, existing.id, "tag_removed", args.actor, null, {
           tagId: tag.id,
           name: tag.name,
           color: tag.color,
@@ -915,7 +941,7 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
       args.resolutionCode === undefined &&
       args.resolutionNote === undefined;
     if (!tagsOnly) {
-      await writeTicketEvent(
+      lastEventId = await writeTicketEvent(
         tx,
         existing.workspaceId,
         existing.id,
@@ -930,6 +956,20 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
         // work out what was wanted.
         args.handoffReason ?? null,
       );
+    }
+    // Align `lastActivityAt` with the LAST event's own timestamp — same rule
+    // as markSlaBreached and the attachment paths ("the column and the
+    // evidence must agree to the millisecond or phantom corrections bury real
+    // ones"). The inline `new Date()` in `data` above is built ms before the
+    // event rows, so every human edit drifted once and the nightly
+    // ticket-last-activity-drift sweeper "corrected" it — permanently non-zero
+    // corrected-counts on any active workspace (audit 2026-08-10).
+    if (lastEventId) {
+      const evt = await tx.ticketEvent.findUnique({
+        where: { id: lastEventId },
+        select: { createdAt: true },
+      });
+      if (evt) await touchTicketActivity(tx, existing.id, evt.createdAt);
     }
     const pill = conversationPillFor(existing.status, statusMoves ? finalStatus : null);
     if (pill && existing.conversationId) {
@@ -1212,10 +1252,9 @@ export async function markSlaBreached(
  * without someone changing the behaviour it describes.) The collision backstop is unchanged
  * (`@@unique([workspaceId, number])` + the P2002 retry, which re-allocates).
  *
- * `escalations.ts` still calls this inside its transaction. That is left alone
- * deliberately: creating an escalation twin is a rare, operator-driven act, so
- * it has no concurrency to serialize, and keeping it in-transaction means a
- * failed escalation leaves no gap.
+ * The ONLY caller is `createTicket` (escalation no longer allocates — it
+ * grants a share to the SAME ticket row, one number for every participant;
+ * the twin-pair design this docblock once referenced was removed 2026-07-28).
  */
 export async function allocateNumber(
   tx: Pick<TxClient, "ticketNumberCounter">,
@@ -1542,7 +1581,7 @@ export async function addTicketNote(
   });
   if (!ticket) return { ok: false, reason: "ticket_not_found" };
 
-  await db.ticketEvent.create({
+  const event = await db.ticketEvent.create({
     data: {
       // The ticket's owning workspace — one history per ticket.
       workspaceId: ticket.workspaceId,
@@ -1555,10 +1594,12 @@ export async function addTicketNote(
       actorUserId: args.actor.userId ?? null,
       actorApiKeyId: args.actor.apiKeyId ?? null,
     },
+    select: { createdAt: true },
   });
   // A note is work on the ticket even though it changes no field — leaving it
-  // out would sink a ticket someone is actively annotating.
-  await touchTicketActivity(db, args.ticketId);
+  // out would sink a ticket someone is actively annotating. Aligned to the
+  // event's OWN timestamp so the drift sweeper's GREATEST agrees to the ms.
+  await touchTicketActivity(db, args.ticketId, event.createdAt);
   return { ok: true };
 }
 

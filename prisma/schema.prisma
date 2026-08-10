@@ -3707,10 +3707,11 @@ model Ticket {
   // The `@@unique([workspaceId, number])` below is the property that matters.
   number      Int
 
-  // Nullable ONLY for an escalated-in ticket (source "escalation"): the target
-  // workspace receives the work with a contact SNAPSHOT (TicketEscalation) and
-  // no thread of its own until "Message customer" binds one. Every other create
-  // path requires both — enforced in lib/tickets, not the schema.
+  // Nullable only for LEGACY rows from the pre-2026-07-28 twin-pair
+  // escalation design (a guest-side twin had no thread of its own). Under the
+  // TicketShare model every create path requires a conversation — enforced in
+  // lib/tickets, not the schema — and a guest's own thread lives on the SHARE
+  // (`TicketShare.guestConversationId`), never here.
   conversationId String?
   // Denormalized from the conversation. The board lists tickets ACROSS
   // conversations and filters by channel, so both would otherwise be a join

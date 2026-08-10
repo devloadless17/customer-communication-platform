@@ -193,21 +193,24 @@ export async function shareTicket(db: Db, args: ShareTicketArgs): Promise<ShareO
     // escalation reason becomes it — that is the founding context whoever picks
     // this up will read. If it already has one, the reason is a comment instead,
     // so nothing is rewritten and nothing is lost.
+    //
+    // Emptiness is pinned IN THE WHERE, not just the pre-tx read: two
+    // concurrent escalations of a cause-less ticket to two different guests
+    // both read empty, and the second's unconditional write silently rewrote
+    // the first's founding context (audit 2026-08-10). The loser's reason is
+    // not lost — it is always recorded verbatim as the escalated event's body
+    // below, exactly like an escalation of a ticket whose cause already exists.
     if (!ticket.description) {
-      await tx.ticket.update({
-        where: { id: ticket.id },
+      await tx.ticket.updateMany({
+        where: { id: ticket.id, OR: [{ description: null }, { description: "" }] },
         data: {
           description: args.cause,
           version: { increment: 1 },
-          lastActivityAt: new Date(),
         },
       });
     }
-    // Handing the ticket to another department is activity whether or not the
-    // cause was filled — the branch above only runs when it was empty.
-    await touchTicketActivity(tx, ticket.id);
 
-    await writeTicketEvent(
+    const escalatedEventId = await writeTicketEvent(
       tx,
       ticket.workspaceId,
       ticket.id,
@@ -217,6 +220,14 @@ export async function shareTicket(db: Db, args: ShareTicketArgs): Promise<ShareO
       { guestWorkspaceId: target.id, guestWorkspaceName: target.name },
       args.cause,
     );
+    // Handing the ticket to another department is activity — aligned to the
+    // escalated event's OWN timestamp so ticket-last-activity-drift's GREATEST
+    // agrees to the millisecond (same rule as markSlaBreached).
+    const escalatedEvent = await tx.ticketEvent.findUnique({
+      where: { id: escalatedEventId },
+      select: { createdAt: true },
+    });
+    await touchTicketActivity(tx, ticket.id, escalatedEvent?.createdAt ?? new Date());
 
     const mapped = await readTicket(tx, ticket.id);
     const openTicketCount = ticket.conversationId
@@ -307,10 +318,18 @@ export async function revokeTicketShare(
     await tx.ticketShare.delete({ where: { id: share.id } });
     // Written AFTER the delete but in the same transaction: the entry describes
     // a completed revocation, and rolling back takes both.
-    await writeTicketEvent(tx, ticket.workspaceId, ticket.id, "escalation_revoked", args.actor, null, {
+    const revokedEventId = await writeTicketEvent(tx, ticket.workspaceId, ticket.id, "escalation_revoked", args.actor, null, {
       guestWorkspaceId: args.guestWorkspaceId,
       guestWorkspaceName: share.guestWorkspace.name,
     });
+    // The event is evidence the drift sweeper's GREATEST will see — align the
+    // column now, or the sweeper silently advances this ticket a day later (a
+    // board reorder with no visible cause). Audit 2026-08-10.
+    const revokedEvent = await tx.ticketEvent.findUnique({
+      where: { id: revokedEventId },
+      select: { createdAt: true },
+    });
+    await touchTicketActivity(tx, ticket.id, revokedEvent?.createdAt ?? new Date());
     const mapped = await readTicket(tx, ticket.id);
     const openTicketCount = ticket.conversationId
       ? await bumpOpenTicketCount(tx, ticket.conversationId, 0)
@@ -437,9 +456,15 @@ export async function bindGuestConversation(
       data: { guestConversationId: conversation.id },
     });
     if (written.count === 0) return null;
-    await writeTicketEvent(tx, ticket.workspaceId, ticket.id, "field_changed", args.actor, null, {
+    const linkEventId = await writeTicketEvent(tx, ticket.workspaceId, ticket.id, "field_changed", args.actor, null, {
       guestConversationLinked: true,
     });
+    // Same alignment rule as revoke above — event written ⇒ column agrees.
+    const linkEvent = await tx.ticketEvent.findUnique({
+      where: { id: linkEventId },
+      select: { createdAt: true },
+    });
+    await touchTicketActivity(tx, ticket.id, linkEvent?.createdAt ?? new Date());
     const t = await readTicket(tx, ticket.id);
     await publishInTx(tx, {
       type: "ticket.changed",

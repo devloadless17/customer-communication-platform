@@ -61,9 +61,10 @@ export async function commitOutboundSend(args: {
     // because this is already THE single post-send commit — five copies of
     // this would drift the same way the monotonicity check once did.
     //
-    // `direction: "out"` means routing will never resurrect a solved ticket:
-    // an agent's follow-up on closed work is not new work. If there is no
-    // active ticket the reply simply carries none.
+    // Routing NEVER resurrects a solved ticket in either direction (auto-
+    // reopen was removed 2026-08-01; `routeMessageToTicket` only ATTACHES to
+    // the active ticket): an agent's follow-up on closed work is not new
+    // work. If there is no active ticket the reply simply carries none.
     //
     // BROADCASTS DO NOT REACH HERE, and that is load-bearing. The runner writes
     // its rows through `createOutboundMessageIdempotent` alone, so a 1k-recipient

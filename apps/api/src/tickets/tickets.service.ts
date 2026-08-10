@@ -293,7 +293,12 @@ export class TicketsService {
     const outcome = await createTicket(this.db, {
       workspaceId,
       conversationId: body.conversationId,
-      actor,
+      // The acting workspace rides the actor so writeTicketEvent can stamp
+      // actorWorkspaceId — the field that makes a SHARED ticket's history
+      // readable ("Billing changed the status"). create/update used to pass
+      // the bare actor while every sibling path spread workspaceId in, so the
+      // highest-traffic events carried NULL attribution (audit 2026-08-10).
+      actor: { ...actor, workspaceId },
       source: actor.apiKeyId ? "api" : "human",
       ...(body.subject !== undefined ? { subject: body.subject } : {}),
       ...(body.description !== undefined ? { description: body.description } : {}),
@@ -317,7 +322,8 @@ export class TicketsService {
     const outcome = await updateTicket(this.db, {
       workspaceId,
       ticketId: id,
-      actor,
+      // Acting workspace on the actor — see create() above.
+      actor: { ...actor, workspaceId },
       ...body,
     });
     const unwrapped = this.unwrap(outcome);
@@ -369,7 +375,7 @@ export class TicketsService {
           "Deleting a ticket is limited to admins and managers. Solve or close it instead.",
       });
     }
-    const outcome = await deleteTicket(this.db, { workspaceId, ticketId: id, actor });
+    const outcome = await deleteTicket(this.db, { workspaceId, ticketId: id, actor: { ...actor, workspaceId } });
     if (!outcome.ok) throw new NotFoundException({ error: "ticket_not_found" });
     return { ok: true };
   }
@@ -843,6 +849,12 @@ export class TicketsService {
           error: "tags_owner_only",
           detail:
             "Tags belong to the workspace that raised this ticket. Add a shared comment, or use your own team queue, instead.",
+        });
+      case "teams_owner_only":
+        throw new BadRequestException({
+          error: "teams_owner_only",
+          detail:
+            "Team queues belong to the workspace that raised this ticket. Assign a person on your side instead.",
         });
       default:
         throw new NotFoundException({ error: outcome.reason });

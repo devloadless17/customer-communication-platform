@@ -780,7 +780,12 @@ export function TicketDetailClient({
       {/* Hand this ticket to another team.
           A section rather than a field, because it is a two-part action: WHICH
           team, and WHY. The reason is what makes the difference between a
-          handoff and just dropping work in someone else's queue. */}
+          handoff and just dropping work in someone else's queue.
+
+          OWNER-side only: teams are the owner's queues, and the list below is
+          the VIEWER's own teams — for a guest that's a control that can never
+          apply (the server refuses it with `teams_owner_only`). */}
+      {!isGuestSide && (
       <section className="rounded-xl border bg-card p-4">
         <h2 className="mb-1 text-sm font-semibold">Team</h2>
         <p className="mb-3 text-2xs text-muted-foreground">
@@ -856,6 +861,7 @@ export function TicketDetailClient({
           </div>
         )}
       </section>
+      )}
 
       {/* Cross-workspace sharing. ONE ticket, several departments: escalating
           grants a sibling workspace access to THIS ticket — nothing is copied,

@@ -190,9 +190,15 @@ async function rehomeTickets(
     select: { id: true },
   });
   if (ids.length === 0) return 0;
+  // One shared timestamp for the event rows AND the activity column: the
+  // drift sweeper's truth is GREATEST over the events, so events written
+  // without touching `lastActivityAt` made it silently advance every affected
+  // ticket a day later — a board reorder with no visible cause (audit
+  // 2026-08-10). Stamping createdAt explicitly keeps the two in ms agreement.
+  const unassignedAt = new Date();
   await db.ticket.updateMany({
     where: { id: { in: ids.map((t) => t.id) }, workspaceId },
-    data: { assignedUserId: null, version: { increment: 1 } },
+    data: { assignedUserId: null, version: { increment: 1 }, lastActivityAt: unassignedAt },
   });
   await db.ticketEvent.createMany({
     data: ids.map((t) => ({
@@ -201,6 +207,7 @@ async function rehomeTickets(
       kind: "unassigned" as const,
       before: { assignedUserId: userId },
       after: { assignedUserId: null },
+      createdAt: unassignedAt,
     })),
   });
   return ids.length + (await releaseShareAssignments(db, workspaceId, userId));
