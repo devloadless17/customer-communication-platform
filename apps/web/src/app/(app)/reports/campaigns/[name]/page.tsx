@@ -20,9 +20,20 @@ export default async function CampaignPage({
   const { permissions } = await getSession();
   if (!permissions["teamActivity:view"]) redirect("/inbox");
 
-  // NOT decoded again: Next already decodes dynamic segments before handing
-  // them over, so a second pass mangles any campaign whose name contains a
-  // percent sign ("50% off" → `%20off` → a URIError that takes the page down).
-  const { name } = await params;
+  // Decode ONCE, tolerantly. The 2026-08-01 fix removed decoding on the claim
+  // that Next pre-decodes dynamic segments — it does not in this version
+  // (campaign-analytics e2e proves "Spring Sale" arrives as `Spring%20Sale`),
+  // so every campaign whose name contains a space 404'd from 08-01 until
+  // this audit (2026-08-10). The try/catch keeps the 08-01 concern covered
+  // in BOTH worlds: if a future Next version hands over a decoded "50% off",
+  // decodeURIComponent throws on the bare % and we keep the raw value instead
+  // of taking the page down.
+  const { name: rawName } = await params;
+  let name = rawName;
+  try {
+    name = decodeURIComponent(rawName);
+  } catch {
+    // Already decoded (bare % in the value) — use as-is.
+  }
   return <CampaignClient name={name} />;
 }

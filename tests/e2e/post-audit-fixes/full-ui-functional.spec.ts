@@ -211,7 +211,16 @@ test("contacts: create a contact through the dialog", async ({ page }) => {
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.getByText(name).first()).toBeVisible();
   expect(
-    await db().contact.count({ where: { phoneNumber: { contains: PHONE_DIGITS } } }),
+    // Workspace-scoped like the wipe in cleanup() — the 6-digit suffix is a
+    // birthday-collision away from ANY historical test contact in a sibling
+    // test workspace, and an unscoped count flaked on exactly that
+    // (audit 2026-08-10: a 2026-07-31 leftover shared the suffix).
+    await db().contact.count({
+      where: {
+        workspaceId: (await appAdmin()).workspaceId,
+        phoneNumber: { contains: PHONE_DIGITS },
+      },
+    }),
   ).toBe(1);
   expect(errs, "contacts create errors").toEqual([]);
 });

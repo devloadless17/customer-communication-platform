@@ -76,7 +76,11 @@ test.describe("chooseRoundRobin", () => {
     expect(picked).toBe("c");
   });
 
-  test("last resort: when nobody is available at all, still picks an active member", () => {
+  test("nobody available at all → parks unassigned (null), never lands on an off-shift agent", () => {
+    // The old "never lands nowhere" last-resort tier was removed 2026-08-10
+    // (see select.ts tierFor): it assigned a 2am inbound to whoever was
+    // asleep and made `overflow: leave_unassigned` unreachable. An empty
+    // tier now parks the thread in the Unassigned queue.
     const members = [M("a", "offline"), M("b", "busy")];
     const picked = chooseRoundRobin({
       members,
@@ -84,7 +88,7 @@ test.describe("chooseRoundRobin", () => {
       openCounts: counts(),
       cursor: null,
     });
-    expect(["a", "b"]).toContain(picked);
+    expect(picked).toBeNull();
   });
 
   test("no members → null", () => {
