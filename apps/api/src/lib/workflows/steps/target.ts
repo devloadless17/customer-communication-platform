@@ -286,6 +286,19 @@ export async function resolveStepTarget(
   }
 
   // Phone target — find or create the Contact, then the Conversation.
+  //
+  // DELIBERATELY EVENT-LESS creates (audit 2026-08-10): the creates below are
+  // bare Prisma writes that publish no `contact.created`/`conversation.created`
+  // — unlike ingest-created rows. This is a conscious tradeoff, not an
+  // omission: a workflow step publishing creation events is a re-trigger
+  // surface ("On contact created" workflows firing from inside another
+  // workflow's run), which is exactly the loop class every other step avoids
+  // by publishing `silent: true` mutations. The cost is bounded and
+  // self-healing — the row becomes visible on the next refetch, the
+  // subsequent `message.sent` lights up the inbox live, and the 60s
+  // customer-link sweeper reconciles `Contact.customerId`. If live directory
+  // views ever need these rows immediately, publish WITH `silent: true` and
+  // wire the fanout — never a bare publish.
   const phone = target.phoneNumber; // already normalized in parseStepTarget
   // `deletedAt: null` so we never target a SOFT-DELETED ghost (the user removed
   // them on purpose) — identity-model-added-1. A soft-deleted contact still

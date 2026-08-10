@@ -12,10 +12,13 @@ import IORedis from "ioredis";
  * Single job in the workflow queue: "process WorkflowRun row id=X."
  *
  * The run row already carries everything else (workflowId, payload,
- * currentStepId, jumpsUsed, stepLog) so the job stays trivially small and
- * survives Redis evictions/repacks. The runner re-loads the row on each
- * pickup, which also lets a paused (waiting) run resume cleanly even if
- * the workflow definition itself changed mid-wait.
+ * currentStepId, jumpsUsed, stepLog, graphSnapshot) so the job stays
+ * trivially small and survives Redis evictions/repacks. The runner re-loads
+ * the row on each pickup and executes the run's PINNED `graphSnapshot` —
+ * deliberately NOT the live workflow definition, so an edit mid-wait cannot
+ * change the remaining path of an in-flight run. (This comment used to claim
+ * the opposite; corrected 2026-08-10 — do not "restore" live-graph reads to
+ * match old prose.)
  */
 export interface WorkflowJobData {
   runId: string;

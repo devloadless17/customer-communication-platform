@@ -22,7 +22,7 @@ field below is the single source of truth for what it carries.
 | Run status                               | `WorkflowRun.status`            | Updated after each step   |
 | Trigger payload (what fired this run)    | `WorkflowRun.eventPayload`      | Forever                   |
 | "Resume after T" delay                   | BullMQ delayed job (workflows queue) | Until job fires       |
-| Step handler config (e.g. "assign to X") | Workflow graph node            | Read fresh per step       |
+| Step handler config (e.g. "assign to X") | `WorkflowRun.graphSnapshot` node | Pinned at run creation — a mid-run edit never changes an in-flight run's path |
 | Bus subscribers + dispatcher mappings    | Process memory (registered at boot) | Process lifetime     |
 
 There is **no in-memory run state**. The runner reads `WorkflowRun` at the
@@ -128,7 +128,9 @@ apps/api/src/workflows/                ← NestJS layer (DI-aware)
   workflow-worker.service.ts             starts/stops the BullMQ worker
                                          based on RUN_WORKER_INLINE
   workflow-subscribers.service.ts        registers DomainEvent bus subs
-  workflow-dispatcher.service.ts         matches events → workflows
+                                         (the event→workflow matching itself
+                                         lives in lib/events/subscribers/
+                                         workflow-dispatch.ts + dispatcher.ts)
   workflows.module.ts                    wires the above
 
 apps/api/src/lib/workflows/            ← framework-agnostic engine
