@@ -420,7 +420,12 @@ async function retryDownload(row: ParkedRow): Promise<void> {
       mediaKey: saved.key,
       mediaUrl: saved.url,
       mediaSizeBytes: saved.sizeBytes,
-      mediaMimeType: fetched.mimeType,
+      // The RECONCILED mime, matching both live ingest paths, the uploaded
+      // blob and the `media_ready` frame below. Storing `fetched.mimeType`
+      // here made a sweeper-recovered voice note (CDN mislabels them
+      // `video/mp4` — see reconcileInboundMediaMime) render as audio live but
+      // as video after any refetch, with a `.mp4` download extension.
+      mediaMimeType: reconciledMime,
       ...(thumbKey ? { mediaThumbnailKey: thumbKey, mediaThumbnailUrl: thumbUrl } : {}),
     },
   });

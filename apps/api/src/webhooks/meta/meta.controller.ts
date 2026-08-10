@@ -266,9 +266,17 @@ export class MetaWebhookController {
       ingested += res.ingested ?? 0;
     }
 
-    // Every group throttled and nothing ingested — say so with a 429 so Meta
-    // retries, rather than reporting a silent success.
-    if (ingested === 0 && rateLimited > 0) {
+    // ANY group throttled — say so with a 429 so Meta redelivers, rather than
+    // reporting a silent success. This used to fire only when EVERY group was
+    // throttled (`ingested === 0`), which meant a co-batched body — one tenant
+    // over its bucket, another under — returned 200 and the throttled tenant's
+    // inbound was dropped on its ONLY delivery: silent, permanent message
+    // loss, the exact class the transient-DB 503 path exists to prevent. The
+    // 429 is lossless in the other direction: redelivery re-runs the
+    // already-ingested groups as no-ops (every event dedupes on
+    // (workspaceId, channel, externalId)), and Meta's retry backoff outlives
+    // the one-minute bucket window. (Audit 2026-08-10.)
+    if (rateLimited > 0) {
       throw new HttpException(
         {
           error: "rate_limited",
