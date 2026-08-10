@@ -70,12 +70,27 @@ export class WorkspacesService {
       }));
     }
 
-    // Scoped to the caller's own org even for a platform operator: `setActive`
-    // lets them reach any workspace on the box, but the switcher is a workspace
-    // picker, not a directory of every tenant — operators manage from the
-    // (platform) shell, and the (app) layout redirects them there anyway.
+    // WHICH ORG'S workspaces to list. Normally the caller's own. In OPERATOR
+    // MODE it is the org they ENTERED — `session.organizationId` is still the
+    // operator's platform anchor (deliberately: the platform pages compare
+    // against it to refuse acting on their own org), so listing that would show
+    // the operator a switcher belonging to a different tenant than the inbox
+    // they are looking at.
+    //
+    // Still ONE org, never a directory of every tenant on the box: the switcher
+    // is a workspace picker, and an operator moving BETWEEN clients does it from
+    // the (platform) shell, which is where the audit row gets written.
+    const scopeOrganizationId = session.isOperator
+      ? (
+          await this.db.workspace.findUnique({
+            where: { id: session.workspaceId },
+            select: { organizationId: true },
+          })
+        )?.organizationId ?? session.organizationId
+      : session.organizationId;
+
     const all = await this.db.workspace.findMany({
-      where: { organizationId: session.organizationId },
+      where: { organizationId: scopeOrganizationId },
       orderBy: { createdAt: "asc" },
       select: { id: true, name: true },
     });
@@ -99,7 +114,13 @@ export class WorkspacesService {
    * membership revoked moments ago must not remain switchable for the 15s
    * cache window. An org owner/admin may select any workspace in their own org
    * (they are implicitly admin everywhere in it); a platform superAdmin may
-   * select any workspace at all.
+   * select any workspace on the box (OPERATOR MODE — see the branch comment in
+   * `makeCanAccessBeyondMembership`).
+   *
+   * Note this route does NOT write an `OperatorAccess` row, and shouldn't:
+   * moving between workspaces of a tenant already entered is one visit, and
+   * logging every switcher click would bury the entries that matter. The
+   * crossing into a tenant is what `POST /api/admin/operator-access` records.
    *
    * Writes `Session.activeWorkspaceId` (the durable, per-device truth) and
    * busts the session cache so the very next request resolves the new scope.
@@ -124,6 +145,17 @@ export class WorkspacesService {
    * who is in them is directory information, not a privileged secret, and the
    * page is unusable without it. MUTATING any of it is gated separately
    * (`assertCanManage`).
+   *
+   * OPERATOR MODE CAVEAT, deliberate and safe: this reads `session.organizationId`,
+   * which for an operator inside a client's workspace is still their OWN platform
+   * anchor — so Settings → Organization describes the operator's org, not the
+   * client's. Confusing to look at, but it is the CORRECT behaviour to leave
+   * alone: every sibling write here (`renameOrganization`, `create`,
+   * `setMembership`) is scoped the same way, so the page and its buttons agree.
+   * Re-pointing the READ at the entered org without re-pointing the writes would
+   * render a client's organization with controls that mutate the operator's —
+   * strictly worse than being merely confusing. Onboarding work happens in
+   * Workspace settings (channels, keys), which IS correctly scoped.
    */
   async organization(session: ApiSession): Promise<OrganizationOverview> {
     const org = await this.db.organization.findUniqueOrThrow({

@@ -313,6 +313,23 @@ export class ConversationsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
+    // THE STEALTH GATE, and the reason operator mode is safe to hand a tenant's
+    // inbox to. Unread is TEAM-WIDE (§10: there is no per-agent read state), so
+    // the platform operator opening a thread to check the system would clear
+    // the badge for every agent in that workspace — silently marking as read
+    // work nobody on the team has seen. `markRead` also fires the Meta read
+    // receipt, so the END CUSTOMER would get blue ticks from a person who is
+    // not their support agent.
+    //
+    // Gated HERE rather than inside `ConversationsService.markRead` so the
+    // shared `markConversationRead` (lib/conversations/mutations.ts) and its
+    // other callers — the /v1 route, mark-read-on-agent-send — stay untouched:
+    // this is a property of WHO is asking, which only the controller knows.
+    //
+    // Returns ok, not a 403: the client calls this on every visible thread
+    // mount and an error would surface as a broken inbox for the operator.
+    // Nothing is lost — there is no per-agent read state for it to write.
+    if (session.isOperator) return { ok: true };
     await this.conversations.markRead(session.workspaceId, session.userId, id);
     return { ok: true };
   }
@@ -324,6 +341,12 @@ export class ConversationsController {
     @Param("id") id: string,
     @Body(zBody(TypingSchema)) body: TypingInput,
   ) {
+    // Stealth gate's outward-facing half. This relays a typing indicator to the
+    // END CUSTOMER over the provider, so an operator idly clicking into the
+    // composer of a live thread would show "typing…" to a real customer from
+    // someone who is not their agent. The socket twin (`typing:start`) covers
+    // the team-facing bubble; both are dropped for the same reason.
+    if (session.isOperator) return { ok: true as const, skipped: "operator_mode" };
     return this.conversations.sendTyping(session.workspaceId, id, body.active ?? true);
   }
 }

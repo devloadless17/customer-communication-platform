@@ -301,6 +301,7 @@ export function AppRail({
   team,
   workspaces,
   organizationName,
+  isOperatorMode = false,
   connected,
   onlineUserIds,
   canManageAvailability,
@@ -316,6 +317,10 @@ export function AppRail({
   /** Shown as the switcher dropdown's header. Falls back to the workspace name
    *  on the (transitional) sessions that don't carry it. */
   organizationName?: string;
+  /** OPERATOR MODE — the platform operator is inside a CUSTOMER's workspace.
+   *  Surfaced in the switcher (the one piece of chrome on every screen) so
+   *  whose data is on screen is never in doubt, and so there is a way back. */
+  isOperatorMode?: boolean;
   connected?: boolean;
   onlineUserIds?: Set<string>;
   /** Resolved `availability:manage` capability. When false the picker is
@@ -462,6 +467,7 @@ export function AppRail({
               activeWorkspaceId={team.id}
               organizationName={organizationName ?? teamName}
               collapsed={collapsed}
+              isOperatorMode={isOperatorMode}
             >
               <span className={cn(
                 "relative flex items-center rounded-xl bg-primary text-primary-foreground shadow-sm",

@@ -94,7 +94,8 @@ export async function resolveActiveWorkspaceId(
  * THE beyond-membership access rule, as a factory.
  *
  * Encodes who may act in a workspace they hold no `WorkspaceMember` row for:
- *   - a platform superAdmin → any workspace that exists;
+ *   - a platform superAdmin → any workspace on the box (OPERATOR MODE — read
+ *     the branch comment below before touching it);
  *   - an org owner/admin  → any workspace IN THEIR OWN org (DB-verified —
  *     trusting an unscoped "is org admin" boolean is exactly the bug that let
  *     any org owner set `ccp.ws` to another tenant's workspace);
@@ -126,23 +127,55 @@ export function makeCanAccessBeyondMembership(
   const cache = new Map<string, Promise<boolean>>();
   const uncached = async (wsId: string): Promise<boolean> => {
     if (input.memberWorkspaceIds.has(wsId)) return true;
-    if (input.isSuperAdmin || input.isOrgAdmin) {
-      // ORG-SCOPED FOR BOTH, deliberately. A platform superAdmin used to be
-      // granted ANY workspace that exists (`countWorkspaces({ id })`, no org
-      // filter) and `resolveSession` then handed them role "admin" in it — so
-      // setting one cookie (`ccp.ws=<any customer workspace>`) turned every
-      // workspace-scoped API into that tenant's inbox: message bodies, contact
-      // names, phone numbers. Unlogged, unaudited, and contradicting what
-      // `lib/queries/super-admin.ts` states as the invariant ("a superAdmin's
-      // visibility ends at aggregate counts + the member roster, never at
-      // message bodies or contact names"). The only thing standing in front of
-      // it was a client-side redirect to /platform.
+    if (input.isSuperAdmin) {
+      // OPERATOR MODE — platform-wide, and deliberately so. THE TWO BRANCHES
+      // ARE SEPARATE AND MUST STAY SEPARATE; re-merging them is the bug.
       //
-      // Platform operations do not need this: the (platform) surface is gated
-      // on the `isSuperAdmin` FLAG through RoleGuard and reads its own
-      // aggregate queries. If support impersonation is ever wanted, it belongs
-      // here as an EXPLICIT, audited mode — not as a silent side effect of the
-      // active-workspace resolver.
+      // History: this used to be one branch, org-scoped for both, because a
+      // superAdmin granted ANY workspace meant setting one cookie
+      // (`ccp.ws=<any customer workspace>`) turned every workspace-scoped API
+      // into that tenant's inbox — message bodies, contact names, phone
+      // numbers — with nothing in front of it but a client-side redirect to
+      // /platform. Two DIFFERENT problems were fixed together, and only one of
+      // them was ever about the superAdmin:
+      //
+      //   - the ORG-ADMIN half (below) is the actual vulnerability: an ordinary
+      //     customer's org owner reaching a SIBLING TENANT. It stays org-scoped
+      //     and DB-verified, forever.
+      //   - the SUPERADMIN half is the platform's owner reaching their own
+      //     platform. That is not privilege escalation, it is the job: onboarding
+      //     a client who cannot paste their own channel credentials, and watching
+      //     a live workspace to confirm the system is healthy. Denying it forced
+      //     the alternative of one mailbox and one invite per tenant.
+      //
+      // What makes it the "EXPLICIT, audited mode" the old comment asked for
+      // rather than a silent side effect:
+      //   - entry is an action, not an ambient capability — `POST /api/admin/
+      //     operator-access` (superAdmin-gated) writes an append-only
+      //     `OperatorAccess` row before it sets the cookie, and the platform
+      //     org page renders that log;
+      //   - the operator is never a `WorkspaceMember`, so they are absent from
+      //     every people-surface (assignment pools, availability, seat counts,
+      //     rosters) — present to administer, never counted as workforce;
+      //   - passive viewing writes NOTHING a tenant could observe: no team
+      //     unread cleared, no read receipt, no presence, no viewer pill, no
+      //     typing (see `isOperatorAccess` below and its call sites).
+      //
+      // The honest limit, stated so nobody mistakes the log for a gate: a
+      // superAdmin who hand-sets `ccp.ws` reaches a tenant without writing an
+      // `OperatorAccess` row. The log records intent, it does not enforce it.
+      // That is accepted because the only principal who can do it is the sole
+      // platform operator the log exists to describe. If this ever becomes a
+      // MULTI-operator platform, this branch must gate on an active grant row
+      // instead of on the flag — the shape is already here, it just has to
+      // consult `OperatorAccess` rather than `countWorkspaces`.
+      return (await input.countWorkspaces({ id: wsId })) > 0;
+    }
+    if (input.isOrgAdmin) {
+      // ORG-SCOPED, DB-VERIFIED, AND NOT NEGOTIABLE. Trusting an unscoped "is
+      // org admin" boolean is exactly the bug that let any customer's org owner
+      // set `ccp.ws` to another tenant's workspace. An org admin's reach ends
+      // at their own organization; there is no operator mode here.
       return (
         (await input.countWorkspaces({
           id: wsId,
@@ -159,6 +192,32 @@ export function makeCanAccessBeyondMembership(
     cache.set(wsId, p);
     return p;
   };
+}
+
+/**
+ * Is this session ACTING AS THE PLATFORM OPERATOR right now?
+ *
+ * True when a superAdmin is acting in a workspace they hold no
+ * `WorkspaceMember` row for — i.e. they got here through the operator branch of
+ * `makeCanAccessBeyondMembership` above. One definition, because four places
+ * need the same answer: the HTTP session, the socket handshake, the RSC session
+ * and the web chrome.
+ *
+ * Deliberately keyed on NON-MEMBERSHIP rather than on the `isSuperAdmin` flag.
+ * In their own anchor workspace the operator IS a member and should behave like
+ * any other admin — their presence dot, their viewer pill and their read state
+ * are all real there. The flag says who they are; this says what they are doing.
+ *
+ * Every stealth gate reads this, and the direction of failure is always
+ * "behave like a member": a missing gate leaks the operator's presence into a
+ * tenant's UI, it never denies a tenant anything.
+ */
+export function isOperatorAccess(input: {
+  isSuperAdmin: boolean;
+  workspaceId: string;
+  memberWorkspaceIds: ReadonlySet<string>;
+}): boolean {
+  return input.isSuperAdmin && !input.memberWorkspaceIds.has(input.workspaceId);
 }
 
 /**

@@ -2,7 +2,16 @@
 
 import { useEffect, useState, useTransition } from "react";
 import Link from "next/link";
-import { Building2, Check, ChevronsUpDown, Loader2, Plus, Settings } from "lucide-react";
+import {
+  Building2,
+  Check,
+  ChevronsUpDown,
+  Loader2,
+  LogOut,
+  Plus,
+  Settings,
+  ShieldAlert,
+} from "lucide-react";
 
 import {
   DropdownMenu,
@@ -42,6 +51,7 @@ export function WorkspaceSwitcher({
   activeWorkspaceId,
   organizationName,
   collapsed,
+  isOperatorMode = false,
   children,
 }: {
   workspaces: WorkspaceOption[];
@@ -49,6 +59,18 @@ export function WorkspaceSwitcher({
   /** Shown as the dropdown's header so the hierarchy is legible at a glance. */
   organizationName: string;
   collapsed: boolean;
+  /**
+   * OPERATOR MODE: the platform operator is inside a CUSTOMER's workspace.
+   * `organizationName` and `workspaces` already describe that customer (the
+   * session swaps them), so this only changes what the dropdown SAYS about
+   * where you are — and gives the one way back out.
+   *
+   * The rail is the right home for this rather than a page banner: it is the
+   * one piece of chrome present on every screen, and it costs no layout. A bar
+   * above the shell would shorten the viewport under the inbox's own `h-svh`
+   * islands and reintroduce exactly the scroll bug the shell comment describes.
+   */
+  isOperatorMode?: boolean;
   /** The existing rail badge — reused verbatim as the dropdown trigger. */
   children: React.ReactNode;
 }) {
@@ -135,18 +157,41 @@ export function WorkspaceSwitcher({
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" side="right" className="w-60">
+        {/* Operator mode says so FIRST, before the org name — the whole risk of
+            this feature is forgetting whose data is on screen, and the org name
+            alone reads identically to being a member of it. */}
+        {isOperatorMode && (
+          <>
+            <div className="flex items-center gap-2 px-2 py-1.5 text-3xs font-medium uppercase tracking-wide text-amber-600 dark:text-amber-500">
+              <ShieldAlert aria-hidden className="size-3.5 shrink-0" />
+              <span>Operator mode</span>
+            </div>
+            <DropdownMenuSeparator />
+          </>
+        )}
         {/* Org first, then its workspaces — the dropdown IS the explanation of
             the hierarchy for anyone who has never seen it. */}
         <DropdownMenuLabel className="pb-0 text-3xs font-normal uppercase tracking-wide text-muted-foreground">
           Organization
         </DropdownMenuLabel>
-        <DropdownMenuItem asChild>
-          <Link href="/organization" className="flex items-center gap-2">
+        {isOperatorMode ? (
+          // NOT a link in operator mode. `/organization` renders the session's
+          // OWN organization — the operator's platform anchor, not the customer
+          // whose name is printed right here — and its buttons write that same
+          // anchor. Offering it would be an invitation to edit the wrong org.
+          <div className="flex items-center gap-2 px-2 py-1.5 text-sm">
             <Building2 aria-hidden className="size-4 shrink-0 text-muted-foreground" />
             <span className="min-w-0 flex-1 truncate font-medium">{organizationName}</span>
-            <Settings aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
-          </Link>
-        </DropdownMenuItem>
+          </div>
+        ) : (
+          <DropdownMenuItem asChild>
+            <Link href="/organization" className="flex items-center gap-2">
+              <Building2 aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 flex-1 truncate font-medium">{organizationName}</span>
+              <Settings aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+            </Link>
+          </DropdownMenuItem>
+        )}
         <DropdownMenuSeparator />
         <DropdownMenuLabel className="pb-0 text-3xs font-normal uppercase tracking-wide text-muted-foreground">
           Workspaces
@@ -175,15 +220,27 @@ export function WorkspaceSwitcher({
           );
         })}
         <DropdownMenuSeparator />
-        <DropdownMenuItem asChild>
-          <Link href="/organization" className="flex items-center gap-2 text-muted-foreground">
-            <Plus aria-hidden className="size-4 shrink-0" />
-            {/* Deliberately a LINK to Organization settings, not an inline
-                create: naming a workspace is a decision, and the page it lands
-                on is where you then add people to it. */}
-            <span>New workspace</span>
-          </Link>
-        </DropdownMenuItem>
+        {isOperatorMode ? (
+          // The way out. A plain link, not a "switch": leaving a tenant means
+          // going back to the platform shell, and the operator's own workspace
+          // re-resolves from their session there.
+          <DropdownMenuItem asChild>
+            <Link href="/platform" className="flex items-center gap-2 text-muted-foreground">
+              <LogOut aria-hidden className="size-4 shrink-0" />
+              <span>Back to platform</span>
+            </Link>
+          </DropdownMenuItem>
+        ) : (
+          <DropdownMenuItem asChild>
+            <Link href="/organization" className="flex items-center gap-2 text-muted-foreground">
+              <Plus aria-hidden className="size-4 shrink-0" />
+              {/* Deliberately a LINK to Organization settings, not an inline
+                  create: naming a workspace is a decision, and the page it lands
+                  on is where you then add people to it. */}
+              <span>New workspace</span>
+            </Link>
+          </DropdownMenuItem>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

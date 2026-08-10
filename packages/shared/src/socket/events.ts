@@ -1261,6 +1261,14 @@ export interface SocketData {
   /** `Team.agentConversationVisibility` — decides whether this socket joins the
    *  team firehose room. See RealtimeGateway.handleConnection. */
   agentConversationVisibility?: string;
+  /**
+   * OPERATOR MODE: a platform superAdmin acting in a workspace they hold no
+   * `WorkspaceMember` row for (see `isOperatorAccess` in
+   * ../auth/active-workspace). This socket RECEIVES the workspace's feed but
+   * must never APPEAR in it — no presence add, no viewer registration, no
+   * typing broadcast. Read by those handlers in RealtimeGateway.
+   */
+  isOperator?: boolean;
   /** Conversations this socket is currently flagged as typing in. */
   typingIn?: Set<string>;
   /** Channels (team chat) this socket is currently flagged as typing in. */

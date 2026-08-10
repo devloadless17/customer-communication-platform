@@ -74,6 +74,17 @@ export interface Session {
   /** The organization above those workspaces — the switcher's header, and the
    *  thing Organization settings is about. */
   organizationName: string;
+  /**
+   * OPERATOR MODE: the platform operator is acting inside a workspace of a
+   * CUSTOMER organization, holding no `WorkspaceMember` row (see
+   * `isOperatorAccess`). Mirrors `ApiSession.isOperator` — same predicate, same
+   * inputs — so the chrome and the API can't disagree about it.
+   *
+   * The web reads it for exactly two things: rendering the "you are in someone
+   * else's workspace" banner, and scoping the switcher below to the ENTERED
+   * org. It is not a permission — every real gate is server-side.
+   */
+  isOperatorMode: boolean;
 }
 
 export const getSession = cache(async (): Promise<Session> => {
@@ -158,9 +169,16 @@ export const getSession = cache(async (): Promise<Session> => {
     // below clears the cookie, so the next login loops straight back here.
     // Answered from the already-loaded org workspace list — no extra query —
     // and still DB/list-verified through `canAccess`.
-    beyondMembershipFallbacks: isOrgAdmin
-      ? (row.organization?.workspaces ?? []).map((w) => w.id).slice(0, 1)
-      : [],
+    //
+    // `isSuperAdmin` belongs in this condition and was MISSING: both API
+    // resolvers (session.guard, socket-auth) include it, so an operator with
+    // `orgRole: member` and no membership rows resolved fine over HTTP while
+    // the browser sent them to /logout — which clears the cookie, so the next
+    // login looped. Same rule, four callers, one behaviour.
+    beyondMembershipFallbacks:
+      row.isSuperAdmin || isOrgAdmin
+        ? (row.organization?.workspaces ?? []).map((w) => w.id).slice(0, 1)
+        : [],
   });
   // No workspace to act in = unauthenticated, exactly like the API guard's
   // null → 401. This used to fall through as `?? ""` and render the whole app
@@ -178,6 +196,36 @@ export const getSession = cache(async (): Promise<Session> => {
   );
   const effectiveRole: Role =
     row.isSuperAdmin || isOrgAdmin ? "admin" : ((activeMembership?.role ?? "agent") as Role);
+
+  // OPERATOR MODE — same predicate as the API (`isOperatorAccess`), expressed
+  // against the same membership set that just resolved the workspace.
+  const isOperatorMode = row.isSuperAdmin && !activeMembership;
+
+  // In operator mode the chrome must describe the org being VISITED, not the
+  // operator's platform anchor: `row.organization` is still their own, so the
+  // switcher would list a different tenant than the inbox on screen. One extra
+  // query, and only for an operator inside a customer's workspace — every
+  // ordinary session skips it entirely.
+  //
+  // `organizationId` on the returned session deliberately stays the OPERATOR'S
+  // own: the platform pages gate "is this my own organization?" on it before
+  // allowing suspend/delete, and re-pointing it would make those refuse the
+  // wrong org. Only the DISPLAY fields move.
+  const visitedOrg = isOperatorMode
+    ? await db.workspace
+        .findUnique({
+          where: { id: activeWorkspaceId },
+          select: {
+            organization: {
+              select: {
+                name: true,
+                workspaces: { orderBy: { createdAt: "asc" }, select: { id: true, name: true } },
+              },
+            },
+          },
+        })
+        .then((w) => w?.organization ?? null)
+    : null;
 
   return {
     user: {
@@ -213,26 +261,35 @@ export const getSession = cache(async (): Promise<Session> => {
     orgRole: row.orgRole as OrgRole,
     orgStatus: (row.organization?.status ?? "active") as OrgStatus,
     permissions: resolvePermissions(effectiveRole, activeMembership?.workspace.rolePermissions ?? {}),
-    organizationName: row.organization?.name ?? "",
+    isOperatorMode,
+    organizationName: visitedOrg?.name ?? row.organization?.name ?? "",
     // Every workspace this person may OPEN, which for an org owner/admin is the
     // whole organization — not just the ones they hold a membership row in.
     // `GET /api/workspaces` applies the same rule; if this list were narrower
     // the rail would omit a workspace the Organization page offers to open, and
     // an org admin sitting in a non-membership workspace would see no entry
     // marked active.
-    workspaces: isOrgAdmin
-      ? row.organization.workspaces.map((w) => ({
-          id: w.id,
-          name: w.name,
-          // No membership row → they are here by org authority, which resolves
-          // to admin everywhere in the org.
-          role: (row.workspaceMemberships.find((m) => m.workspace.id === w.id)?.role ??
-            "admin") as Role,
-        }))
-      : row.workspaceMemberships.map((m) => ({
-          id: m.workspace.id,
-          name: m.workspace.name,
-          role: m.role as Role,
-        })),
+    //
+    // In operator mode that organization is the VISITED one, so the switcher
+    // moves between the client's workspaces instead of offering the operator's
+    // own — which would silently drop them out of the tenant they entered. Still
+    // one org, never every tenant on the box: crossing INTO a tenant is an
+    // audited action on the platform page, not a dropdown item.
+    workspaces: visitedOrg
+      ? visitedOrg.workspaces.map((w) => ({ id: w.id, name: w.name, role: "admin" as Role }))
+      : isOrgAdmin
+        ? row.organization.workspaces.map((w) => ({
+            id: w.id,
+            name: w.name,
+            // No membership row → they are here by org authority, which resolves
+            // to admin everywhere in the org.
+            role: (row.workspaceMemberships.find((m) => m.workspace.id === w.id)?.role ??
+              "admin") as Role,
+          }))
+        : row.workspaceMemberships.map((m) => ({
+            id: m.workspace.id,
+            name: m.workspace.name,
+            role: m.role as Role,
+          })),
   };
 });

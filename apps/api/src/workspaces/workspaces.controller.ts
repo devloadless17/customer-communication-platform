@@ -11,8 +11,9 @@ import {
 } from "@nestjs/common";
 import type { Response } from "express";
 
+import { setActiveWorkspaceCookie } from "../auth/active-workspace-cookie";
 import { CurrentSession } from "../auth/current-session.decorator";
-import { ACTIVE_WORKSPACE_COOKIE, SessionGuard, type ApiSession } from "../auth/session.guard";
+import { SessionGuard, type ApiSession } from "../auth/session.guard";
 import { zBody } from "../common/zod-validation.pipe";
 import { WorkspacesService } from "./workspaces.service";
 import {
@@ -115,17 +116,10 @@ export class WorkspacesController {
 
     // Mirror the durable choice into the cookie so the NEXT request (and the
     // socket handshake, which only sees cookies) resolves the new scope without
-    // waiting on a session re-read. `sameSite: lax` matches the auth cookie —
-    // see the CSRF posture in the security docs. Not `httpOnly: false`: nothing
-    // client-side needs to read it, and the value is echoed back by GET
-    // /api/workspaces anyway.
-    res.cookie(ACTIVE_WORKSPACE_COOKIE, body.workspaceId, {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      path: "/",
-      maxAge: 90 * 24 * 60 * 60 * 1000,
-    });
+    // waiting on a session re-read. Shared writer — operator entry
+    // (`POST /api/admin/operator-access`) sets the same cookie, and the two
+    // must not drift on attributes.
+    setActiveWorkspaceCookie(res, body.workspaceId);
 
     return { ok: true, workspaceId: body.workspaceId };
   }

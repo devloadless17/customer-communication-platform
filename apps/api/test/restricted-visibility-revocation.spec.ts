@@ -31,6 +31,9 @@ function makeSession(userId: string, workspaceId: string): ApiSession {
     organizationId: "org_1",
     orgRole: "member",
     isSuperAdmin: false,
+    // Ordinary member, so never operator mode — this fixture is about the
+    // restricted-agent visibility boundary, not the platform operator.
+    isOperator: false,
     workspaceId,
     role: "agent",
     workspaceMemberships: [{ workspaceId, name: "WS", role: "agent" }],

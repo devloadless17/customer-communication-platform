@@ -3,6 +3,7 @@ import type { Socket } from "socket.io";
 
 import { auth } from "@/auth/better-auth";
 import {
+  isOperatorAccess,
   makeCanAccessBeyondMembership,
   readActiveWorkspaceCookie,
   resolveActiveWorkspaceId,
@@ -24,6 +25,13 @@ export interface SocketIdentity {
   /** `Team.agentConversationVisibility` — decides whether this socket may join
    *  the team firehose room. See RealtimeGateway.handleConnection. */
   agentConversationVisibility: string;
+  /** OPERATOR MODE (see `ApiSession.isOperator`). This socket RECEIVES the
+   *  workspace's realtime feed but must never APPEAR in it: no presence add,
+   *  no viewer registration, no typing broadcast. Not registering beats
+   *  filtering at emit time — `buildVisibleViewers` is fail-soft and returns
+   *  the raw set on a DB blip, which would flash the operator's id onto a
+   *  tenant's screen. Absent from the set, there is nothing to leak. */
+  isOperator: boolean;
 }
 
 export type SocketAuthResult =
@@ -112,6 +120,7 @@ export class SocketAuthService {
           workspaceId: cachedFromCookie.workspaceId,
           role: cachedFromCookie.role,
           agentConversationVisibility: cachedFromCookie.agentConversationVisibility,
+          isOperator: cachedFromCookie.isOperator,
         },
       };
     }
@@ -170,6 +179,7 @@ export class SocketAuthService {
           workspaceId: cached.workspaceId,
           role: cached.role,
           agentConversationVisibility: cached.agentConversationVisibility,
+          isOperator: cached.isOperator,
         },
       };
     }
@@ -295,6 +305,14 @@ export class SocketAuthService {
     const effectiveRole: Role =
       dbUser.isSuperAdmin || isOrgAdmin ? "admin" : ((active?.role ?? "agent") as Role);
     const visibility = active?.workspace.agentConversationVisibility ?? "team";
+    // Same predicate, same membership set as the HTTP guard — the two must not
+    // disagree, or the operator's socket would announce a presence their HTTP
+    // session suppresses.
+    const isOperator = isOperatorAccess({
+      isSuperAdmin: dbUser.isSuperAdmin,
+      workspaceId: activeWorkspaceId,
+      memberWorkspaceIds,
+    });
 
     sessionCacheSet({
       sessionId,
@@ -302,6 +320,7 @@ export class SocketAuthService {
       organizationId: dbUser.organizationId,
       orgRole: dbUser.orgRole,
       isSuperAdmin: dbUser.isSuperAdmin,
+      isOperator,
       emailVerified: dbUser.emailVerified,
       workspaceId: activeWorkspaceId,
       role: effectiveRole,
@@ -325,6 +344,7 @@ export class SocketAuthService {
         workspaceId: activeWorkspaceId,
         role: effectiveRole,
         agentConversationVisibility: visibility,
+        isOperator,
       },
     };
   }

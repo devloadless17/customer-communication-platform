@@ -427,6 +427,10 @@ export class RealtimeGateway
         // the DB read still carries the boundary.
         socket.data.agentConversationVisibility =
           result.identity.agentConversationVisibility;
+        // OPERATOR MODE (see SocketIdentity.isOperator). Stashed alongside the
+        // rest of the identity so every handler that could ANNOUNCE this socket
+        // to the workspace can check it without a lookup.
+        socket.data.isOperator = result.identity.isOperator;
         return next();
       }
       if (result.kind === "unavailable") {
@@ -467,6 +471,10 @@ export class RealtimeGateway
     }
     const agentConversationVisibility =
       (client.data.agentConversationVisibility as string | undefined) ?? "team";
+    // OPERATOR MODE. The auth middleware sets this in the same assignment as
+    // userId/workspaceId/role, and the guard above already drops a socket
+    // missing any of those — so this is never independently absent.
+    const isOperator = client.data.isOperator === true;
     const identity = { userId, workspaceId, role, agentConversationVisibility };
 
     // Identity already stashed on socket.data by the auth middleware in
@@ -585,11 +593,16 @@ export class RealtimeGateway
       );
     }
 
-    const cameOnline = this.presence.add(
-      identity.workspaceId,
-      identity.userId,
-      client.id,
-    );
+    // STEALTH GATE (operator mode). The platform operator watching a tenant's
+    // workspace must not light a green dot on that team's sidebar. NOT
+    // REGISTERING is the mechanism, not filtering at emit time: `presence.add`
+    // also feeds `PresenceService`'s online set, which the assignment
+    // round-robin consults to prefer online agents — an operator in that set
+    // could be preferred for real customer work they cannot even be assigned.
+    // Absent from the set, both leaks are structurally impossible.
+    const cameOnline = isOperator
+      ? false
+      : this.presence.add(identity.workspaceId, identity.userId, client.id);
     // Stamp the transition synchronously (before the async snapshot build) so
     // ordering is preserved against a racing disconnect — see `presenceSeq`.
     const presenceSeq = cameOnline
@@ -1316,14 +1329,21 @@ export class RealtimeGateway
     // Register as a viewer (idempotent at the presence layer — add is a
     // no-op when this socketId is already in the set). Track on the socket
     // so disconnect cleans up.
+    //
+    // STEALTH GATE (operator mode): the operator is never REGISTERED as a
+    // viewer, so no "also viewing" eye appears on the tenant's inbox row and
+    // none can appear later — `buildVisibleViewers` is fail-soft and falls back
+    // to the RAW viewer set when its availability lookup throws, so filtering
+    // at emit time would still flash the operator's id on a DB blip. They keep
+    // receiving the snapshot below: the operator sees who else is looking, the
+    // team never sees the operator. `viewingConversations` is likewise not
+    // populated, which keeps disconnect's release loop a no-op for them.
+    const isOperator = client.data.isOperator === true;
     const viewing = client.data.viewingConversations as Set<string>;
-    viewing.add(body.conversationId);
-    const startedViewing = this.presence.addViewer(
-      body.conversationId,
-      userId,
-      client.id,
-      workspaceId,
-    );
+    if (!isOperator) viewing.add(body.conversationId);
+    const startedViewing = isOperator
+      ? false
+      : this.presence.addViewer(body.conversationId, userId, client.id, workspaceId);
     // Snapshot to THIS socket immediately so the pill paints without
     // waiting for the next change — same posture as team presence. Fires
     // on every (re-)subscribe so a long reconnect catches a fresh snapshot.
@@ -1400,6 +1420,14 @@ export class RealtimeGateway
     // rooms aren't team-namespaced, so the join-time ownership check is the only
     // gate). typing:stop is implicitly protected by the `typingIn.delete` gate.
     if (!client.rooms.has(conversationRoom(body.conversationId))) return;
+    // STEALTH GATE (operator mode): drop the start outright rather than
+    // registering and filtering. A typing bubble is a live "someone is here
+    // right now" signal — the strongest passive tell there is — and it relays
+    // out to the webchat VISITOR too (`relayWidgetTyping`), i.e. to the
+    // customer, not just the team. Dropping the start also means the matching
+    // `typing:stop` no-ops on its own `typingIn.delete` gate, so there is no
+    // stuck-bubble half-state to clean up.
+    if (client.data.isOperator === true) return;
     const wasTyping = typingIn.has(body.conversationId);
     typingIn.add(body.conversationId);
     this.typing.addConv(body.conversationId, userId, client.id);

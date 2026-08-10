@@ -11,6 +11,7 @@ import type { Request } from "express";
 import { auth } from "@/auth/better-auth";
 import {
   ACTIVE_WORKSPACE_COOKIE,
+  isOperatorAccess,
   makeCanAccessBeyondMembership,
   readActiveWorkspaceCookie,
   resolveActiveWorkspaceId,
@@ -58,6 +59,16 @@ export interface ApiSession {
   /** Platform-level operator. Replaces the removed `Role.superAdmin`: bypasses
    *  the org-approval gate and every per-workspace permission check. */
   isSuperAdmin: boolean;
+  /** OPERATOR MODE: a superAdmin acting in a workspace they hold no
+   *  `WorkspaceMember` row for (see `isOperatorAccess`). Distinct from
+   *  `isSuperAdmin`, which is also true in their OWN anchor workspace where
+   *  they are an ordinary member.
+   *
+   *  Read by the stealth gates — passive viewing by the platform operator must
+   *  leave no trace a tenant could observe (no team unread cleared, no read
+   *  receipt, no presence, no viewer pill, no typing). Actions the operator
+   *  TAKES stay ordinary audited writes; only watching is silent. */
+  isOperator: boolean;
   /** The ACTIVE workspace for this request — the data-isolation scope that
    *  every `where: { workspaceId }` uses. Resolved server-side from the
    *  membership-validated `ccp.ws` cookie / `Session.activeWorkspaceId`, NEVER
@@ -570,6 +581,13 @@ export async function resolveSession(
     organizationId: user.organizationId,
     orgRole: user.orgRole,
     isSuperAdmin: user.isSuperAdmin,
+    // Computed from the SAME membership set the resolution used, so the flag
+    // and the scope can never disagree about whether this is operator mode.
+    isOperator: isOperatorAccess({
+      isSuperAdmin: user.isSuperAdmin,
+      workspaceId: activeWorkspaceId,
+      memberWorkspaceIds,
+    }),
     workspaceId: activeWorkspaceId,
     role: effectiveRole,
     workspaceMemberships: memberships.map((m) => ({

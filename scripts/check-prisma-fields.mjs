@@ -117,6 +117,10 @@ const TENANTLESS_ALLOWLIST = new Set([
   // `ticketAccessWhere()` on the parent ticket — the one place the
   // "mine OR shared with me" predicate lives (see its TENANCY EXCEPTION note)
   "TicketShare",
+  // The operator-entry audit log is ABOUT crossing the tenant boundary, so it
+  // is org-scoped rather than workspace-scoped, and reachable only from the
+  // superAdmin-gated /api/admin routes (see its TENANCY EXCEPTION note)
+  "OperatorAccess",
 ]);
 {
   const missing = [];

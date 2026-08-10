@@ -22,6 +22,13 @@ test.describe("platform shell", () => {
   });
 
   test("super-admin is blocked from the customer app (/inbox → /platform)", async ({ page }) => {
+    // Still true, and load-bearing: login lands every user on /inbox, so this
+    // bounce is what makes /platform the operator's home rather than an empty
+    // anchor-workspace inbox. OPERATOR MODE narrowed the gate but did not remove
+    // it — the redirect now keys on "superAdmin NOT inside a tenant" rather than
+    // on the flag alone, so entering a client's workspace deliberately (via
+    // "Enter workspace") stays put while everything else comes back here.
+    // See tests/e2e/platform/operator-access.spec.ts for the other half.
     await page.goto("/inbox");
     await expect(page).toHaveURL(/\/platform/);
   });

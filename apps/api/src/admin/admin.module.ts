@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 
 import { WorkspaceSettingsModule } from "../workspace-settings/workspace-settings.module";
 import { AdminAnalyticsController } from "./admin-analytics.controller";
+import { AdminOperatorAccessController } from "./admin-operator-access.controller";
 import { AdminOrganizationsController } from "./admin-organizations.controller";
 import { AdminWorkspacesController } from "./admin-workspaces.controller";
 
@@ -14,6 +15,7 @@ import { AdminWorkspacesController } from "./admin-workspaces.controller";
     AdminWorkspacesController,
     AdminOrganizationsController,
     AdminAnalyticsController,
+    AdminOperatorAccessController,
   ],
 })
 export class AdminModule {}

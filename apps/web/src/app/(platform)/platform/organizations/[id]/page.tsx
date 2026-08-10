@@ -1,27 +1,35 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, CheckCircle2, ShieldX, Users, X } from "lucide-react";
+import { ArrowLeft, CheckCircle2, LogIn, ShieldX, Users, X } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { LocalTime } from "@/components/local-time";
 import { OrgStatusBadge } from "@/components/platform/org-status-badge";
 import { OrgStatusControls } from "@/components/platform/org-status-actions";
 import { getSession } from "@/lib/auth/current-user";
-import { getWorkspaceDetailForSuperAdmin } from "@/lib/api/queries";
+import { getWorkspaceDetailForSuperAdmin, listOperatorAccess } from "@/lib/api/queries";
+import { soft } from "@/lib/api/soft";
 import { roleLabel } from "@ccp/shared/auth/permissions";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
 
 import { DeleteOrganizationButton } from "./delete-organization-button";
+import { EnterWorkspaceButton } from "./enter-workspace-button";
 import { LimitControl } from "./limit-control";
 
 export const metadata = { title: "Organization · Platform" };
 export const dynamic = "force-dynamic";
 
 /**
- * Org detail for the super-admin. Member roster + headline counts +
- * approval controls (approve / suspend / reactivate). We intentionally DON'T
- * expose the inbox itself — this is a visibility + management layer, not a
- * support-impersonation tool.
+ * Org detail for the super-admin. Member roster + headline counts + approval
+ * controls (approve / suspend / reactivate), and the one audited door into the
+ * tenant's actual workspace.
+ *
+ * The page's own reads stop at aggregates and the roster — never a message body
+ * or a contact name (see the invariant in lib/queries/super-admin.ts). Reaching
+ * the inbox is a SEPARATE, deliberate act: "Enter workspace" writes an
+ * `OperatorAccess` row and re-scopes the session, and every entry it has ever
+ * recorded is listed further down this page. This used to say we don't expose
+ * the inbox at all; operator mode replaced that with exposing it on the record.
  */
 export default async function PlatformOrganizationDetailPage({
   params,
@@ -34,6 +42,13 @@ export default async function PlatformOrganizationDetailPage({
     getSession(),
   ]);
   if (!detail) notFound();
+
+  // Best-effort: the audit panel is a read ABOUT the management surface, so a
+  // failure there must not take the management surface down. Fetched after the
+  // 404 gate because it needs the organization id off the detail.
+  const accessLog = await soft("operator-access log", [], () =>
+    listOperatorAccess(detail.workspace.organizationId),
+  );
 
   const { workspace, members } = detail;
   // Compared on the ORGANIZATION, not the workspace: both controls it gates
@@ -63,11 +78,19 @@ export default async function PlatformOrganizationDetailPage({
           <ArrowLeft className="size-3.5" />
           All organizations
         </Link>
-        <DeleteOrganizationButton
-          organizationId={workspace.organizationId}
-          orgName={workspace.name}
-          isOwnOrg={isOwnOrg}
-        />
+        <div className="flex items-start gap-2">
+          <EnterWorkspaceButton
+            workspaceId={workspace.id}
+            workspaceName={workspace.name}
+            orgName={workspace.name}
+            isOwnOrg={isOwnOrg}
+          />
+          <DeleteOrganizationButton
+            organizationId={workspace.organizationId}
+            orgName={workspace.name}
+            isOwnOrg={isOwnOrg}
+          />
+        </div>
       </div>
 
       <header className="flex flex-col gap-2">
@@ -232,11 +255,62 @@ export default async function PlatformOrganizationDetailPage({
         )}
       </section>
 
+      {/* OPERATOR ACCESS LOG. Append-only, newest first, and deliberately on the
+          same page as the button that writes it — an audit trail filed somewhere
+          else is one nobody reads. Every crossing into this organization, not
+          just this workspace. */}
+      <section className="rounded-xl border border-border bg-card">
+        <header className="flex items-center justify-between gap-3 border-b border-border bg-muted/30 px-4 py-3">
+          <div className="text-sm font-semibold">Operator access</div>
+          <span className="text-2xs text-muted-foreground">
+            {accessLog.length === 0
+              ? "Never entered"
+              : `${accessLog.length} recent ${accessLog.length === 1 ? "entry" : "entries"}`}
+          </span>
+        </header>
+        {accessLog.length === 0 ? (
+          <div className="px-6 py-8 text-center text-xs text-muted-foreground">
+            No platform operator has entered this organization&apos;s workspaces.
+          </div>
+        ) : (
+          <ul className="divide-y divide-border">
+            {accessLog.map((entry) => (
+              <li key={entry.id} className="flex items-center gap-3 px-4 py-2.5">
+                <LogIn aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-xs">
+                    {/* Null when the account has since been deleted — the row
+                        outlives it on purpose, so show the id rather than
+                        pretending the visit didn't happen. */}
+                    <span className="font-medium">
+                      {entry.operatorName ?? entry.userId}
+                    </span>
+                    <span className="text-muted-foreground">
+                      {" entered "}
+                      {entry.workspaceName ?? "a deleted workspace"}
+                    </span>
+                  </div>
+                  {entry.operatorEmail && (
+                    <div className="truncate text-2xs text-muted-foreground">
+                      {entry.operatorEmail}
+                    </div>
+                  )}
+                </div>
+                <span className="shrink-0 text-2xs text-muted-foreground">
+                  <LocalTime iso={entry.createdAt} format="listTime" />
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
       <div className="flex items-center gap-2 rounded-md border border-warning-border bg-warning-bg px-3 py-2 text-2xs text-warning-fg">
         <Users className="size-3.5 shrink-0" />
         <span>
-          Platform-admin view. Members and aggregate counts only — conversations
-          and message bodies stay private to each workspace.
+          Platform-admin view: members and aggregate counts only — conversations
+          and message bodies stay private to each workspace. Reaching them means
+          entering the workspace, which is recorded above.
         </span>
       </div>
     </div>

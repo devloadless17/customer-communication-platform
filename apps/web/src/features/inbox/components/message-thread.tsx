@@ -63,7 +63,7 @@ import type { SearchHit } from "./message-search";
 import { SelectionBar } from "./message-thread/selection-bar";
 import { ThreadHeader } from "./message-thread/thread-header";
 import { TypingIndicator } from "./message-thread/typing-indicator";
-import { readError, unknownAuthor } from "./message-thread/utils";
+import { actorName, readError, unknownAuthor } from "./message-thread/utils";
 
 type TimelineEntry =
   | { kind: "message"; data: Message }
@@ -331,11 +331,7 @@ const TimelineRows = memo(function TimelineRows({
                 {entry.kind === "message" ? (
                   <MessageBubble
                     message={entry.data}
-                    senderName={
-                      entry.data.senderUserId
-                        ? memberById.get(entry.data.senderUserId)?.name ?? null
-                        : null
-                    }
+                    senderName={actorName(memberById, entry.data.senderUserId)}
                     senderAvatarUrl={
                       entry.data.senderUserId
                         ? memberById.get(entry.data.senderUserId)?.avatarUrl ?? null
@@ -379,16 +375,8 @@ const TimelineRows = memo(function TimelineRows({
                 ) : entry.kind === "call" ? (
                   <CallBubble
                     call={entry.data}
-                    initiatedByName={
-                      entry.data.initiatedByUserId
-                        ? memberById.get(entry.data.initiatedByUserId)?.name ?? null
-                        : null
-                    }
-                    answeredByName={
-                      entry.data.answeredByUserId
-                        ? memberById.get(entry.data.answeredByUserId)?.name ?? null
-                        : null
-                    }
+                    initiatedByName={actorName(memberById, entry.data.initiatedByUserId)}
+                    answeredByName={actorName(memberById, entry.data.answeredByUserId)}
                   />
                 ) : (
                   <ActivityEntry event={entry.data} />
@@ -744,11 +732,7 @@ function MessageThreadImpl({
   const beginReply = useCallback(
     (msg: Message) => {
       const senderName =
-        msg.direction === "out"
-          ? msg.senderUserId
-            ? memberById.get(msg.senderUserId)?.name ?? null
-            : null
-          : null;
+        msg.direction === "out" ? actorName(memberById, msg.senderUserId) : null;
       setReplyTarget({
         id: msg.id,
         body: msg.body,

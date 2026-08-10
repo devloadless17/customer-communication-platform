@@ -582,6 +582,54 @@ model Organization {
   workspaces        Workspace[]
   users             User[]
   ticketShares      TicketShare[]
+  operatorAccesses  OperatorAccess[]
+}
+
+// TENANCY EXCEPTION — no workspaceId by design: this row is ABOUT crossing the
+// tenant boundary, so scoping it to one workspace would defeat its purpose. It
+// is org-scoped instead, and reached ONLY from the superAdmin-gated
+// `/api/admin/operator-access` routes.
+//
+// The append-only record of the platform operator entering a customer's
+// workspace (OPERATOR MODE — see `makeCanAccessBeyondMembership` in
+// packages/shared/src/auth/active-workspace.ts, which is the branch that grants
+// the access this table describes).
+//
+// A LOG, NOT A GATE, and the distinction is deliberate — do not "fix" the
+// resolver to require a row here without reading that branch's comment first.
+// Access is granted by the `isSuperAdmin` flag; this records that it was
+// exercised, and on which tenant. A superAdmin who hand-sets the `ccp.ws`
+// cookie reaches a workspace without writing a row. That is accepted only
+// because there is exactly ONE operator, who is the same person the log
+// describes; a multi-operator platform must make this a gate.
+//
+// Written AFTER nothing and BEFORE the cookie is set, so a failed write fails
+// the entry rather than silently granting an unlogged one — the opposite of the
+// notification convention (a courtesy attached to a real write), because here
+// the record IS the accountability.
+model OperatorAccess {
+  id String @id @default(cuid())
+
+  // Plain User id with NO relation, matching `Organization.statusUpdatedById`:
+  // deleting an operator account must never cascade away the record of what it
+  // did. Reads are display-only.
+  userId String
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Which workspace the entry went through. Plain id, no relation: a workspace
+  // may be deleted while the fact that it was entered stays true.
+  enteredWorkspaceId String
+
+  createdAt DateTime @default(now())
+
+  // The audit panel reads "recent entries into THIS org, newest first". `sort:
+  // Desc` is not decoration — it is what makes the migration's DDL and this
+  // model agree, so `migrate diff` reports no drift.
+  @@index([organizationId, createdAt(sort: Desc)])
+  // "Everywhere this operator has been, newest first" — the platform-wide view.
+  @@index([userId, createdAt(sort: Desc)])
 }
 
 // A Workspace is the data-ISOLATION boundary (formerly `Workspace`): every one of

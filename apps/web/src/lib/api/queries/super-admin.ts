@@ -48,6 +48,35 @@ export async function getWorkspaceDetailForSuperAdmin(
   }
 }
 
+/** One recorded crossing into a customer organization by the platform operator. */
+export interface OperatorAccessEntry {
+  id: string;
+  userId: string;
+  /** Null once the account or the workspace has been deleted — both are plain
+   *  ids on the row on purpose, so the visit outlives what it visited. */
+  operatorName: string | null;
+  operatorEmail: string | null;
+  workspaceId: string;
+  workspaceName: string | null;
+  createdAt: string;
+}
+
+/**
+ * The operator-entry log for one organization, newest first.
+ *
+ * Read on the org detail page so entering a tenant is visible AFTER the fact,
+ * next to the button that does it. Best-effort at the call site: an audit panel
+ * that fails to load must not take the management page down with it.
+ */
+export async function listOperatorAccess(
+  organizationId: string,
+): Promise<OperatorAccessEntry[]> {
+  const { entries } = await api<{ entries: OperatorAccessEntry[] }>(
+    `/api/admin/operator-access?organizationId=${encodeURIComponent(organizationId)}`,
+  );
+  return entries;
+}
+
 export async function getPlatformAnalytics(): Promise<PlatformAnalytics> {
   return api<PlatformAnalytics>("/api/admin/analytics");
 }

@@ -53,19 +53,36 @@ export default async function AppShellLayout({
 }) {
   // getSession() first (React.cached → child layouts reuse it for free) so we
   // can apply the two access gates BEFORE fetching any team-scoped data.
-  const { user, permissions, orgStatus, workspaces, organizationName } = await getSession();
+  const { user, permissions, orgStatus, workspaces, organizationName, isOperatorMode } =
+    await getSession();
 
-  // Super-admins live in the (platform) shell — a separate, management-only
-  // surface with no inbox / contacts / workflows. Bounce them out of the
-  // customer app entirely.
-  if (user.isSuperAdmin) redirect("/platform");
+  // Super-admins live in the (platform) shell — EXCEPT in operator mode.
+  //
+  // This gate used to key on `isSuperAdmin` alone, which closed the customer app
+  // to the platform operator entirely. Keying it on operator mode instead is
+  // what makes both halves true at once:
+  //
+  //   - inside a TENANT's workspace (operator mode) this is exactly where they
+  //     mean to be — setting a client's channel credentials and watching a live
+  //     system cannot be done from an aggregate console;
+  //   - anywhere else, a superAdmin is sitting in their own ANCHOR workspace,
+  //     which is an FK placeholder rather than a real inbox (see
+  //     `Organization.isPlatform`), so there is nothing here for them. Login
+  //     lands on /inbox for everyone, so without this bounce the operator's
+  //     home surface silently became an empty inbox.
+  if (user.isSuperAdmin && !isOperatorMode) redirect("/platform");
 
   // Org-approval gate. A `pending` org (awaiting super-admin review) or a
   // `suspended` org (access revoked) can't use the app — route to the status
   // screen, which lives OUTSIDE this (app) group so there's no redirect loop.
   // Reading status off the session (not /api/workspace, which is now org-gated)
   // is what keeps this redirect working for a locked-out org.
-  if (orgStatus !== "active") redirect("/pending");
+  //
+  // `orgStatus` is the OPERATOR'S own org while in operator mode (their anchor,
+  // always active), so an operator can open a pending org's workspace — which is
+  // the point: onboarding happens before approval, and the API's SessionGuard
+  // exempts superAdmins from this same gate.
+  if (!user.isSuperAdmin && orgStatus !== "active") redirect("/pending");
 
   // Now safe to fetch team-scoped chrome. Parallel — independent reads, both
   // React.cached so child layouts re-calling them are free cache hits.
@@ -133,6 +150,7 @@ export default async function AppShellLayout({
               team={{ id: team.id, name: team.name }}
               workspaces={workspaces}
               organizationName={organizationName}
+              isOperatorMode={isOperatorMode}
               canManageAvailability={permissions["availability:manage"]}
               canViewReports={permissions["teamActivity:view"]}
               restrictedViewer={
