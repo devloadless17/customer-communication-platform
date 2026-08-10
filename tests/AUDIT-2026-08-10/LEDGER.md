@@ -363,6 +363,24 @@ frozen lockfile for nothing); three sweeper `*Once` test hooks with no test cons
 Clean: zero TODO/FIXME anywhere, all dangerous env flags refuse prod boot, migration
 hygiene, no missing runtime deps, 5-feature wiring spot-checks coherent.
 
+## Final gate (Phase B exit)
+
+`pnpm check` green (all 12 checkers); web units 49/49; API units 1523/1524 (the one =
+the documented call-csw-window box-contention flake, passes isolated — twice re-proven).
+Batched e2e: the box cannot complete all 8 batches in one pass (dev servers OOM mid-
+suite — the documented limitation), so the gate is the UNION on current code: batches
+0/3/4/5/6/7 green in the definitive run, batch 1 38/38 and batch 2 green on fresh-stack
+reruns (message-flags 12/12 on its final run; its one failure was state pollution from
+earlier aborted runs).
+
+**FG-1 (P1, FIXED in `audit(final-gate)`) — LIVE PROD BUG, predates this audit:** the
+2026-08-01 review removed `decodeURIComponent` from the campaign detail page on the
+claim that Next pre-decodes dynamic segments — it does not, so every campaign whose
+name contains a space rendered "No campaign by that name" IN PRODUCTION since Aug 1.
+Fixed with decode-once-in-try/catch (covers the 08-01 bare-% concern in both worlds).
+**FG-2/3 (spec truths, FIXED):** round-robin last-resort spec now pins the 2026-08-10
+deliberate parks-Unassigned behavior; contacts-dialog count workspace-scoped.
+
 ## Fix commits (local, NOT pushed — push = deploy)
 
 | Commit | Section | Content |
@@ -371,3 +389,6 @@ hygiene, no missing runtime deps, 5-feature wiring spot-checks coherent.
 | `audit(a2)` | A2 | platform-org delete guard |
 | `audit(a3)` | A3 | campaign-rollup index `map:` pin |
 | `audit(a4)` | A4 | dead socket-contract entry + scope docblock drift |
+| `audit(a5)` | A5 | inbound-media mime + app-level webhook 429 |
+| `audit(b8)`…`audit(b17)` | B7–B17 | eleven Phase B section commits |
+| `audit(final-gate)` | FG | campaign-name decode (prod bug) + two spec truths |
