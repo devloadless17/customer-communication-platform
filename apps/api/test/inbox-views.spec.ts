@@ -56,6 +56,9 @@ let bobId = "";
 let tagAId = "";
 let tagBId = "";
 let stageId = "";
+let fieldKey = "";
+let optRedId = "";
+let optBlueId = "";
 
 /** An actor that may manage shared views. */
 const admin = (userId: string, ws = workspaceId): InboxViewActor => ({
@@ -115,6 +118,22 @@ beforeAll(async () => {
   stageId = (
     await prisma.contactStage.create({
       data: { workspaceId, name: `Lead ${S}`, color: "amber", position: 0 },
+    })
+  ).id;
+
+  // A select-type dimension for the `fields` criteria tests.
+  fieldKey = `src_${S}`;
+  const fieldDef = await prisma.contactFieldDefinition.create({
+    data: { workspaceId, key: fieldKey, label: `Src ${S}`, type: "select" },
+  });
+  optRedId = (
+    await prisma.contactFieldOption.create({
+      data: { workspaceId, fieldId: fieldDef.id, name: `Red ${S}`, color: "rose", position: 0 },
+    })
+  ).id;
+  optBlueId = (
+    await prisma.contactFieldOption.create({
+      data: { workspaceId, fieldId: fieldDef.id, name: `Blue ${S}`, color: "sky", position: 1 },
     })
   ).id;
 });
@@ -316,6 +335,45 @@ describe("where builder", () => {
       { contact: { stageId: { in: [stageId] }, deletedAt: null } },
     ]);
   });
+
+  it("emits one INDEPENDENT clause per field entry — options OR'd within, entries AND'd", () => {
+    const clauses = inboxViewWhereClauses({
+      fields: [
+        { key: fieldKey, optionIds: [optRedId, optBlueId] },
+        { key: "plan", optionIds: ["opt_x"] },
+      ],
+    });
+    // Two entries → two AND elements. Merging them into one contact object
+    // would let a later key clobber an earlier predicate — the spread bug.
+    expect(clauses).toEqual([
+      {
+        contact: {
+          deletedAt: null,
+          AND: [
+            {
+              OR: [
+                { customFields: { path: [fieldKey], equals: optRedId } },
+                { customFields: { path: [fieldKey], equals: optBlueId } },
+              ],
+            },
+          ],
+        },
+      },
+      {
+        contact: {
+          deletedAt: null,
+          AND: [{ OR: [{ customFields: { path: ["plan"], equals: "opt_x" } }] }],
+        },
+      },
+    ]);
+  });
+
+  it("treats an empty fields list — and an emptied entry — as no opinion", () => {
+    expect(inboxViewWhereClauses({ fields: [] })).toEqual([]);
+    // Schema-impossible (optionIds.min(1)) but the builder must not turn it
+    // into an unsatisfiable OR: [] either.
+    expect(inboxViewWhereClauses({ fields: [{ key: fieldKey, optionIds: [] }] })).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -361,6 +419,38 @@ describe("dangling references", () => {
       assignee: { kind: "users", userIds: [aliceId, "ghost"] },
     });
     expect(resolved.assignee).toEqual({ kind: "users", userIds: [aliceId] });
+  });
+
+  it("drops dead option ids from a field entry but keeps the survivors", async () => {
+    const resolved = await service.resolveFilters(workspaceId, {
+      fields: [{ key: fieldKey, optionIds: [optRedId, "ghost-option"] }],
+    });
+    expect(resolved.fields).toEqual([{ key: fieldKey, optionIds: [optRedId] }]);
+  });
+
+  it("drops a field entry whose key no longer names a select field, and the list when emptied", async () => {
+    const resolved = await service.resolveFilters(workspaceId, {
+      fields: [{ key: `deleted_${S}`, optionIds: [optRedId] }],
+    });
+    // Absent, NOT [] — same "no opinion" rule as the tag case above.
+    expect(resolved.fields).toBeUndefined();
+    expect(inboxViewWhereClauses(resolved)).toEqual([]);
+  });
+
+  it("never resolves a sibling workspace's field as live", async () => {
+    // Same key name in the OTHER workspace must not satisfy this one's filter.
+    const foreign = await prisma.contactFieldDefinition.create({
+      data: {
+        workspaceId: otherWorkspaceId,
+        key: `foreign_${S}`,
+        label: `Foreign ${S}`,
+        type: "select",
+      },
+    });
+    const resolved = await service.resolveFilters(workspaceId, {
+      fields: [{ key: foreign.key, optionIds: [optRedId] }],
+    });
+    expect(resolved.fields).toBeUndefined();
   });
 });
 
@@ -409,6 +499,40 @@ describe("client matcher", () => {
     const mine = row({ assignedUserId: "u1" });
     expect(matchesInboxViewFilters({ assignee: { kind: "me" } }, "u1", mine)).toBe(true);
     expect(matchesInboxViewFilters({ assignee: { kind: "me" } }, "u2", mine)).toBe(false);
+  });
+
+  it("matches field filters against the stored option id, OR within an entry", () => {
+    const red = row({
+      contact: { stageId: null, tagIds: [], customFields: { [fieldKey]: optRedId } },
+    });
+    const filters: InboxViewFilters = {
+      fields: [{ key: fieldKey, optionIds: [optRedId, optBlueId] }],
+    };
+    expect(matchesInboxViewFilters(filters, "u1", red)).toBe(true);
+    expect(
+      matchesInboxViewFilters(
+        { fields: [{ key: fieldKey, optionIds: [optBlueId] }] },
+        "u1",
+        red,
+      ),
+    ).toBe(false);
+    // No value stored under the key at all.
+    const bare = row({
+      contact: { stageId: null, tagIds: [], customFields: {} },
+    });
+    expect(matchesInboxViewFilters(filters, "u1", bare)).toBe(false);
+  });
+
+  it("EXCLUDES a row whose customFields it cannot see — same rule as tags", () => {
+    // `customFields` undefined = built by a route that skips the column.
+    const unknown = row({ contact: { stageId: null, tagIds: [], customFields: undefined } });
+    expect(
+      matchesInboxViewFilters(
+        { fields: [{ key: fieldKey, optionIds: [optRedId] }] },
+        "u1",
+        unknown,
+      ),
+    ).toBe(false);
   });
 });
 

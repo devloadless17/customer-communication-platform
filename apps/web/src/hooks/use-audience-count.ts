@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { apiFetch } from "@/lib/api/client-fetch";
+import type { ContactFieldFilter } from "@ccp/shared/types";
 
 /**
  * Live recipient count for an audience expressed as `{ tagIds, contactIds }` —
@@ -24,6 +25,7 @@ export function useAudienceCount(
     all = false,
     accountId,
     includeOtherAccounts,
+    fieldFilters,
   }: {
     initial?: number;
     debounceMs?: number;
@@ -34,6 +36,8 @@ export function useAudienceCount(
      *  when the include-other-accounts checkbox does. */
     accountId?: string | null;
     includeOtherAccounts?: boolean;
+    /** Select-field predicates — AND-narrow the counted set server-side. */
+    fieldFilters?: ContactFieldFilter[];
   } = {},
 ): { count: number; loading: boolean; resolved: boolean } {
   const [count, setCount] = useState(initial);
@@ -48,6 +52,9 @@ export function useAudienceCount(
   // on every render that produces a new array identity.
   const tagKey = tagIds.join(",");
   const contactKey = contactIds.join(",");
+  const fieldKey = (fieldFilters ?? [])
+    .map((f) => `${f.key}:${f.optionIds.join("|")}`)
+    .join(",");
 
   useEffect(() => {
     // A new key invalidates the previous answer until this run succeeds.
@@ -74,6 +81,7 @@ export function useAudienceCount(
             ...(all ? { all: true } : {}),
             ...(accountId ? { accountId } : {}),
             ...(includeOtherAccounts ? { includeOtherAccounts: true } : {}),
+            ...(fieldFilters?.length ? { fieldFilters } : {}),
           }),
           signal: controller.signal,
         });
@@ -103,7 +111,7 @@ export function useAudienceCount(
       window.clearTimeout(t);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tagKey, contactKey, channel, all, accountId, includeOtherAccounts]);
+  }, [tagKey, contactKey, fieldKey, channel, all, accountId, includeOtherAccounts]);
 
   return { count, loading, resolved };
 }

@@ -4,7 +4,9 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 
+import { fieldFiltersToJson, ownedFieldFilters } from "@/lib/contact-fields/filter-where";
 import { getAudienceGroup, listAudienceGroups } from "@/lib/queries";
+import { Prisma } from "@prisma/client";
 
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
@@ -36,9 +38,10 @@ export class AudienceGroupsService {
 
     // Cross-team id stuffing defense: filter to ids that actually belong
     // to this team. Foreign ids get silently dropped.
-    const [validTagIds, validContactIds] = await Promise.all([
+    const [validTagIds, validContactIds, validFieldFilters] = await Promise.all([
       this.ownedTagIds(workspaceId, input.tagIds),
       this.ownedContactIds(workspaceId, input.contactIds),
+      ownedFieldFilters(workspaceId, input.fieldFilters),
     ]);
 
     try {
@@ -50,6 +53,12 @@ export class AudienceGroupsService {
           description,
           tags: { connect: validTagIds.map((id) => ({ id })) },
           contacts: { connect: validContactIds.map((id) => ({ id })) },
+          // Empty stays NULL — "no opinion" must not be stored as `[]`, which
+          // reads like a filter (same normalization the views service does).
+          fieldFilters:
+            validFieldFilters.length > 0
+              ? fieldFiltersToJson(validFieldFilters)
+              : Prisma.JsonNull,
         },
         select: { id: true },
       });
@@ -77,6 +86,7 @@ export class AudienceGroupsService {
       description?: string | null;
       tags?: { set: { id: string }[] };
       contacts?: { set: { id: string }[] };
+      fieldFilters?: Prisma.InputJsonValue | typeof Prisma.JsonNull;
     } = {};
 
     if (input.name !== undefined) data.name = input.name;
@@ -88,6 +98,11 @@ export class AudienceGroupsService {
     if (input.contactIds !== undefined) {
       const owned = await this.ownedContactIds(workspaceId, input.contactIds);
       data.contacts = { set: owned.map((cid) => ({ id: cid })) };
+    }
+    if (input.fieldFilters !== undefined) {
+      // Full-replace like tagIds; emptied (or fully-foreign) → NULL, never `[]`.
+      const owned = await ownedFieldFilters(workspaceId, input.fieldFilters);
+      data.fieldFilters = owned.length > 0 ? fieldFiltersToJson(owned) : Prisma.JsonNull;
     }
 
     try {

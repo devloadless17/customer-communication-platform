@@ -55,6 +55,7 @@ export function GroupForm({
   const [audience, setAudience] = useState<AudienceValue>({
     tagIds: initial?.tagIds ?? [],
     contactIds: initial?.contactIds ?? [],
+    fieldFilters: initial?.fieldFilters ?? [],
   });
   const [submitting, setSubmitting] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -68,7 +69,8 @@ export function GroupForm({
       (description.trim() || "") !== (initial.description ?? "") ||
       [...audience.tagIds].sort().join(",") !== [...(initial.tagIds ?? [])].sort().join(",") ||
       [...audience.contactIds].sort().join(",") !==
-        [...(initial.contactIds ?? [])].sort().join(",")
+        [...(initial.contactIds ?? [])].sort().join(",") ||
+      fieldFilterKey(audience.fieldFilters) !== fieldFilterKey(initial.fieldFilters ?? [])
     : false;
 
   async function submit(redirectTo = "/broadcasts/groups") {
@@ -84,6 +86,7 @@ export function GroupForm({
         description: description.trim() || null,
         tagIds: audience.tagIds,
         contactIds: audience.contactIds,
+        fieldFilters: audience.fieldFilters,
       };
       const res = initial
         ? await apiFetch(`/api/workspace/audience-groups/${initial.id}`, {
@@ -290,4 +293,13 @@ export function GroupForm({
       {confirmDialog}
     </div>
   );
+}
+
+/** Order-insensitive identity for the dirty check — mirrors the tag/contact
+ *  sort-join pattern above. */
+function fieldFilterKey(filters: { key: string; optionIds: string[] }[]): string {
+  return [...filters]
+    .map((f) => `${f.key}:${[...f.optionIds].sort().join("+")}`)
+    .sort()
+    .join(",");
 }

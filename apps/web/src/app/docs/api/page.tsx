@@ -1457,8 +1457,13 @@ export default function ApiDocsPage() {
           <code>{`{ kind: "users", userIds: [...] }`}</code>),{" "}
           <code>channels</code>, <code>stageIds</code>, <code>tagIds</code> +{" "}
           <code>tagMatch</code> (<code>&quot;any&quot;</code> default or{" "}
-          <code>&quot;all&quot;</code>), <code>hasOpenFlags</code>,{" "}
-          <code>unreadOnly</code>.
+          <code>&quot;all&quot;</code>), <code>fields</code>,{" "}
+          <code>hasOpenFlags</code>, <code>unreadOnly</code>.{" "}
+          <code>fields</code> filters on select-type contact fields:{" "}
+          <code>{`[{ key, optionIds: [...] }]`}</code> — option ids are OR&apos;d
+          within an entry, entries AND with everything else. Select fields only
+          (text fields have no option catalog); get keys and option ids from{" "}
+          <code>GET /v1/contact-fields</code>.
         </Endpoint>
         <Endpoint method="PATCH" path="/api/external/v1/inbox-views/:id" body={{ name: "Renamed" }}>
           Any subset of the create fields.
@@ -1467,10 +1472,10 @@ export default function ApiDocsPage() {
           Removes the saved filter. Conversations are untouched.
         </Endpoint>
         <p className="text-sm text-muted-foreground">
-          A view referencing a tag, stage or teammate that has since been
-          deleted is <strong>widened</strong>, not emptied: the dead ids are
-          dropped at read time. Deleting one tag of five must not silently blank
-          a view. Errors: <code>inbox_view_not_found</code> (404),{" "}
+          A view referencing a tag, stage, teammate or select-field option that
+          has since been deleted is <strong>widened</strong>, not emptied: the
+          dead ids are dropped at read time. Deleting one tag of five must not
+          silently blank a view. Errors: <code>inbox_view_not_found</code> (404),{" "}
           <code>inbox_view_name_taken</code> (400),{" "}
           <code>inbox_view_limit_reached</code> (400, 30 per scope).
         </p>
@@ -2163,7 +2168,15 @@ export default function ApiDocsPage() {
           the template&apos;s buttons carry a send-time value) and{" "}
           <code>tapTarget</code> (<code>{`{ url, title }`}</code>, one
           call-to-action destination for the whole campaign; Meta gates it on a
-          fully verified, high-quality WABA). Returns the{" "}
+          fully verified, high-quality WABA). The <code>all</code>,{" "}
+          <code>by_tag</code> and <code>custom</code> audience modes also accept{" "}
+          <code>fieldFilters</code> (
+          <code>{`[{ key, optionIds: [...] }]`}</code>, select-type contact
+          fields): option ids OR within an entry, entries AND — they only ever{" "}
+          <strong>narrow</strong> the audience, hand-picked contacts included. A
+          filter naming a deleted field or option matches nothing (an audience
+          never silently widens); a saved group applies its own stored{" "}
+          <code>fieldFilters</code> instead. Returns the{" "}
           <code>broadcastId</code> and the resolved <code>totalCount</code>. Scope{" "}
           <code>write:broadcasts</code>.
         </Endpoint>
@@ -2429,11 +2442,17 @@ export default function ApiDocsPage() {
         >
           <strong>Create an audience.</strong> Contact ids from another workspace are
           silently dropped rather than rejected — the audience is always a subset of what
-          you can actually reach. Scope <code>write:catalog</code>.
+          you can actually reach. Optional <code>fieldFilters</code> (
+          <code>{`[{ key, optionIds: [...] }]`}</code>, select-type contact fields)
+          NARROW the tag∪contact union — a member must match every entry, hand-picked
+          included; ids are pruned to this workspace&apos;s catalog at save, and a stored
+          id whose option is later deleted matches nothing (a group never silently
+          widens). Scope <code>write:catalog</code>.
         </Endpoint>
         <Endpoint method="PATCH" path="/api/external/v1/audience-groups/:id" body={{ name: "Lapsed — Q3" }}>
-          <strong>Rename or re-populate an audience.</strong> Scope{" "}
-          <code>write:catalog</code>.
+          <strong>Rename or re-populate an audience.</strong>{" "}
+          <code>fieldFilters</code> is full-replace when sent (<code>[]</code>{" "}
+          clears). Scope <code>write:catalog</code>.
         </Endpoint>
         <Endpoint method="DELETE" path="/api/external/v1/audience-groups/:id">
           <strong>Delete an audience.</strong> Campaigns already sent keep their recipient

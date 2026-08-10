@@ -22,7 +22,13 @@ import {
   AVAILABILITY_DOT_CLASSES,
   AVAILABILITY_LABELS,
 } from "@ccp/shared/presence";
-import type { ContactStage, ConversationWithRefs, Tag, User } from "@ccp/shared/types";
+import type {
+  ContactFieldDefinition,
+  ContactStage,
+  ConversationWithRefs,
+  Tag,
+  User,
+} from "@ccp/shared/types";
 import type {
   Filter,
   PresetFilterId,
@@ -65,6 +71,7 @@ export function InboxSubSidebar({
   conversations,
   stages,
   tags,
+  fieldDefinitions,
   teammates,
   onlineUserIds,
   availabilityByUserId,
@@ -78,6 +85,8 @@ export function InboxSubSidebar({
   stages: ContactStage[];
   /** Tag catalog, for the saved-view builder's tag filter. */
   tags: Tag[];
+  /** Contact field catalog, for the builder's select-field criteria. */
+  fieldDefinitions?: ContactFieldDefinition[];
   /** Active teammates rendered under the Stages section with a presence dot. */
   teammates?: User[];
   /** When provided, teammate avatars get a green/grey dot. */
@@ -315,6 +324,7 @@ export function InboxSubSidebar({
         canShare={canManageSharedViews}
         stages={stages}
         tags={tags}
+        fieldDefinitions={fieldDefinitions ?? []}
         teammates={teammates ?? []}
       />
 

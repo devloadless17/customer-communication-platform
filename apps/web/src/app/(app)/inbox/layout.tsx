@@ -13,6 +13,7 @@ import {
 import type { Filter } from "@/features/inbox/components/inbox-controls";
 import { getSession } from "@/lib/auth/current-user";
 import {
+  listContactFieldDefinitions,
   listContactStages,
   listConversations,
   listInboxViews,
@@ -51,6 +52,7 @@ export default async function InboxLayout({
     conversationsPage,
     savedViews,
     tags,
+    fieldDefinitions,
     cookieStore,
   ] = await Promise.all([
     getSession(),
@@ -59,6 +61,9 @@ export default async function InboxLayout({
     listConversations(),
     listInboxViews(),
     listTags(),
+    // Select-field catalog for the view builder's field criteria + the view
+    // summaries. `React.cache`d like its siblings.
+    listContactFieldDefinitions(),
     // NOTE: the channel-account directory is seeded by the APP layout, above
     // this one — the call layer sits above the inbox and needs it too. It is
     // `cache()`d, so nothing here pays for that move.
@@ -106,6 +111,7 @@ export default async function InboxLayout({
               currentUser={user}
               stages={stages}
               tags={tags}
+              fieldDefinitions={fieldDefinitions}
               teammates={teammates}
               initialConversations={conversationsPage.items}
               canManageSharedViews={permissions["inboxViews:manageShared"]}

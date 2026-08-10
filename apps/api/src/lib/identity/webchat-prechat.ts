@@ -1,3 +1,4 @@
+import { loadSelectFieldCatalog, resolveSelectValue } from "@/lib/contact-fields/select-values";
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 import { toContactWire } from "@/lib/queries/_shared";
@@ -141,6 +142,7 @@ export async function applyWebchatPreChatIdentity(
   // directly (it's a first-class field the contacts system already understands),
   // NOT stored as a custom field.
   const builtinPatch: Partial<Record<"firstName" | "lastName" | "language" | "countryCode" | "location", string>> = {};
+  const candidates: Array<{ key: string; label: string; val: string }> = [];
   for (const [label, rawVal] of Object.entries(fields.custom ?? {})) {
     const key = slugifyFieldKey(label);
     const val = String(rawVal ?? "").trim().slice(0, 1000);
@@ -151,9 +153,32 @@ export async function applyWebchatPreChatIdentity(
       if (contact[builtin] !== val) builtinPatch[builtin] = val.slice(0, 120);
       continue;
     }
+    candidates.push({ key, label, val });
+  }
+  // A key that belongs to a SELECT-type definition must store an option ID, never
+  // the visitor's raw text — an unresolvable value is skipped, the same lenient
+  // posture the workflow ask_question save takes (steps/ask-question.ts). One
+  // catalog query (skipped internally when there are no keys); text/one-off keys
+  // don't appear in it and keep raw-text behavior.
+  const selectCatalog = await loadSelectFieldCatalog(
+    workspaceId,
+    candidates.map((c) => c.key),
+  );
+  for (const { key, label, val } of candidates) {
+    const entry = selectCatalog.get(key);
+    if (entry) {
+      const match = resolveSelectValue(entry, val);
+      if (!match.ok) continue;
+      // Idempotency compares the RESOLVED id — a re-submitted form must no-op.
+      if (existingCf[key] === match.id) continue;
+      cfPatch[key] = match.id;
+      // The definition exists by construction — nothing to ensure.
+      continue;
+    }
     if (existingCf[key] === val) continue;
     cfPatch[key] = val;
-    ensureDefs.push({ key, label: label.trim().slice(0, 80) });
+    // 60 = MAX_LABEL (workspace-settings/contact-fields/contact-fields.schemas.ts)
+    ensureDefs.push({ key, label: label.trim().slice(0, 60) });
   }
   const cfChanged = Object.keys(cfPatch).length > 0;
   const builtinChanged = Object.keys(builtinPatch).length > 0;

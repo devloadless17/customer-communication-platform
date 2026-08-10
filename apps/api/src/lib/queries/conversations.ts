@@ -281,13 +281,17 @@ export async function listConversations(
       // (one contact = one conversation, so per-thread tags would be dead
       // complexity).
       contact: {
-        // `customFields` is JSONB — potentially many keys × N rows × every
-        // refresh. Dropped here because the list UI never renders it (only
-        // name/stage/tags). Re-fetched in full by the per-conversation
-        // query when an agent opens a thread.
+        // `customFields` is selected since saved views gained select-field
+        // predicates: the client-side view matcher (matchesInboxViewFilters)
+        // needs it to decide, without a refetch, whether a live-updated row
+        // still belongs in a field-filtered view — without it every matching
+        // row would flicker out on its next event. Bounded cost: the bag is
+        // capped (MAX_TOTAL_FIELDS) and values are short; this is the same
+        // opt-in the tags JOIN already made for the same mirror.
         select: {
           id: true,
           workspaceId: true,
+          customFields: true,
           name: true,
           firstName: true,
           lastName: true,

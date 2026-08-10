@@ -215,6 +215,10 @@ export class ContactFieldsService {
           },
         });
       });
+      // The display cache memoizes even an EMPTY select-def list, so without
+      // this bust a workspace's first select field (and its inline options)
+      // stays invisible to token rendering for up to 5 minutes.
+      invalidateSelectFieldDisplayCache(workspaceId);
       await this.bus.publish({
         type: "team.catalog_changed",
         workspaceId,
@@ -431,6 +435,9 @@ export class ContactFieldsService {
       const created = await this.db.contactFieldOption.create({
         data: { workspaceId, fieldId, name: input.name, color, position: nextPosition },
       });
+      // Bust the token-display memo so a just-created option renders its name
+      // (not the raw id) the moment an agent assigns it.
+      invalidateSelectFieldDisplayCache(workspaceId);
       await this.bus.publish({
         type: "team.catalog_changed",
         workspaceId,

@@ -167,8 +167,11 @@ test("browser: filter by option (equals) and read the chip by NAME", async ({
   });
 
   await page.getByRole("button", { name: "More", exact: true }).click();
-  // The select field renders per-option radio rows in the More menu.
-  await page.getByRole("button", { name: "CRM", exact: true }).click();
+  // The select field renders per-option radio rows in the More menu. Scoped to
+  // buttons WITHOUT a title attribute: since the contacts table grew editable
+  // select-field row lanes (2026-08-10), each row also renders a "CRM" pill —
+  // but the pill carries title="<label>: <name>" while the menu row does not.
+  await page.locator("button:not([title])", { hasText: /^CRM$/ }).click();
 
   // Chip shows label + option NAME (not the id); contact A (CRM) survives
   // the server-side equals filter, contact B (Website) drops out.

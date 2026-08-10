@@ -269,7 +269,8 @@ export class InboxViewsService {
 
   /**
    * Resolve a view's stored filters into a document safe to turn into SQL,
-   * dropping references to tags / stages / users that no longer exist.
+   * dropping references to tags / stages / users / select-field options that
+   * no longer exist.
    *
    * Why drop rather than match-nothing: deleting one tag of five would
    * otherwise empty the view completely, which reads as "the inbox is broken"
@@ -277,7 +278,7 @@ export class InboxViewsService {
    * recoverable by editing it. Policy stated once in
    * `INBOX_VIEW_DANGLING_POLICY`.
    *
-   * Three cheap id-only lookups, and only for the fields actually present —
+   * Four cheap id-only lookups, and only for the fields actually present —
    * a view with no tag/stage/user filter costs nothing.
    */
   async resolveFilters(
@@ -286,11 +287,12 @@ export class InboxViewsService {
   ): Promise<InboxViewFilters> {
     const wantsStages = !!filters.stageIds?.length;
     const wantsTags = !!filters.tagIds?.length;
+    const wantsFields = !!filters.fields?.length;
     const assignee = filters.assignee;
     const wantsUsers = assignee?.kind === "users" && assignee.userIds.length > 0;
-    if (!wantsStages && !wantsTags && !wantsUsers) return filters;
+    if (!wantsStages && !wantsTags && !wantsUsers && !wantsFields) return filters;
 
-    const [stages, tags, users] = await Promise.all([
+    const [stages, tags, users, fieldDefs] = await Promise.all([
       wantsStages
         ? this.db.contactStage.findMany({
             where: { workspaceId, id: { in: filters.stageIds! } },
@@ -310,6 +312,16 @@ export class InboxViewsService {
               userId: { in: (assignee as { userIds: string[] }).userIds },
             },
             select: { userId: true },
+          })
+        : Promise.resolve([]),
+      wantsFields
+        ? this.db.contactFieldDefinition.findMany({
+            where: {
+              workspaceId,
+              key: { in: filters.fields!.map((f) => f.key) },
+              type: "select",
+            },
+            select: { key: true, options: { select: { id: true } } },
           })
         : Promise.resolve([]),
     ]);
@@ -338,6 +350,24 @@ export class InboxViewsService {
       // view's intent legible in the builder — it still says "assigned to",
       // just to nobody in particular.
       resolved.assignee = kept.length ? { kind: "users", userIds: kept } : { kind: "anyone" };
+    }
+    if (wantsFields) {
+      // Same drop policy: a deleted field or option widens the view visibly
+      // instead of silently emptying it. Entry-level: dead key drops the whole
+      // entry; dead option ids drop from the entry; an emptied entry drops.
+      const liveByKey = new Map(
+        fieldDefs.map((d) => [d.key, new Set(d.options.map((o) => o.id))]),
+      );
+      const kept = filters
+        .fields!.map((f) => {
+          const live = liveByKey.get(f.key);
+          if (!live) return null;
+          const optionIds = f.optionIds.filter((id) => live.has(id));
+          return optionIds.length ? { key: f.key, optionIds } : null;
+        })
+        .filter((f): f is { key: string; optionIds: string[] } => f !== null);
+      if (kept.length) resolved.fields = kept;
+      else delete resolved.fields;
     }
 
     return resolved;
@@ -457,6 +487,9 @@ export class InboxViewsService {
       delete filters.tagMatch;
     }
     if (filters.stageIds && filters.stageIds.length === 0) delete filters.stageIds;
+    // Entry-level emptiness is schema-impossible (optionIds.min(1)); only the
+    // outer list can arrive empty.
+    if (filters.fields && filters.fields.length === 0) delete filters.fields;
   }
 
   private mapDuplicateName(err: unknown, visibility: InboxViewVisibility): unknown {

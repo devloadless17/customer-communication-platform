@@ -98,12 +98,26 @@ export function buildContactFilterWhere(
         : Prisma.sql`AND ${DIRECTORY_CONTACT_SQL}`
     }
     ${
+      /* The customFields::text arm serves text-field values (and raw option
+         ids); select fields STORE option ids, so matching what the user actually
+         typed — the option NAME — needs the EXISTS arm through the catalog.
+         Bounded: ≤50 fields × 30 options per workspace, a tiny nested loop on a
+         query that already scans for the ILIKE arms (see the KNOWN INDEX-MISS
+         note below). */
       search
         ? Prisma.sql`AND (
             c.name ILIKE ${"%" + search + "%"}
             OR c."phoneNumber" ILIKE ${"%" + search + "%"}
             OR COALESCE(c.email, '') ILIKE ${"%" + search + "%"}
             OR c."customFields"::text ILIKE ${"%" + search + "%"}
+            OR EXISTS (
+              SELECT 1
+              FROM "ContactFieldOption" o
+              JOIN "ContactFieldDefinition" d ON d.id = o."fieldId"
+              WHERE o."workspaceId" = c."workspaceId"
+                AND o.name ILIKE ${"%" + search + "%"}
+                AND c."customFields" ->> d.key = o.id
+            )
           )`
         : Prisma.empty
     }
@@ -231,8 +245,11 @@ export async function listContacts(
   // 20260611130200). It seq-scans, but ONLY over this team's LIVE rows (workspaceId
   // + deletedAt IS NULL narrow first via Contact_workspaceId_deletedAt_idx), so it's
   // bounded by one tenant's contact count. Dropping the arm would lose "find a
-  // contact by any custom-field value" from quick-search. TRIGGER to revisit: a
-  // team crosses ~50k contacts AND EXPLAIN shows this as the hot cost.
+  // contact by any custom-field value" from quick-search. The option-name EXISTS
+  // arm beside it is the same complexity class: the catalog it probes is capped
+  // at 50 fields × 30 options per workspace, so it adds a tiny nested loop to a
+  // scan that is already happening. TRIGGER to revisit (both arms): a team
+  // crosses ~50k contacts AND EXPLAIN shows this as the hot cost.
   const filterWhere = buildContactFilterWhere(workspaceId, opts);
 
   // Tag filter is now pushed down as `EXISTS (... _ContactToTag ...)` in

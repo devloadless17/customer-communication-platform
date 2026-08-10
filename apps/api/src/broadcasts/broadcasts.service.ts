@@ -59,13 +59,18 @@ import {
   templateNamedPlaceholders,
   unsupportedTemplateFeature,
 } from "@ccp/shared/template-render";
-import type { Channel } from "@ccp/shared/types";
+import type { Channel, ContactFieldFilter } from "@ccp/shared/types";
 import {
   BROADCASTABLE_CHANNELS,
   CHANNEL_CAPABILITIES,
   isAccountScopedIdentity,
 } from "@ccp/shared/providers/capabilities";
 import { checkTextCap } from "../lib/messaging/text-cap";
+import {
+  contactFieldFilterClauses,
+  fieldFiltersToJson,
+  parseStoredFieldFilters,
+} from "@/lib/contact-fields/filter-where";
 import { directoryContactWhere, resolveAudienceGroupMembers } from "@/lib/queries";
 import { channelAccountDisplayName } from "@/lib/channel-accounts/display";
 import {
@@ -570,6 +575,23 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     let resolvedGroupId: string | null = null;
     let resolvedGroupName: string | null = null;
 
+    // Select-field predicates: AND-narrow the WHOLE resolved audience (see
+    // AudienceFieldFiltersSchema). Deliberately NOT pruned to owned ids here —
+    // a stale/foreign option id matches nothing, which NARROWS; pruning it
+    // would silently widen a billed send past what the operator asked for.
+    // (`group` mode overwrites this with the group's STORED filters below.)
+    let appliedFieldFilters: ContactFieldFilter[] =
+      (audience.mode === "all" ||
+        audience.mode === "by_tag" ||
+        audience.mode === "custom") &&
+      audience.fieldFilters?.length
+        ? audience.fieldFilters
+        : [];
+    const fieldAnd = () =>
+      appliedFieldFilters.length > 0
+        ? { AND: contactFieldFilterClauses(appliedFieldFilters) }
+        : {};
+
     if (audience.mode === "all") {
       // COUNT BEFORE FETCH. The ceiling is enforced below, but it used to be
       // checked only AFTER this findMany had already materialised every id — so a
@@ -590,6 +612,9 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         workspaceId,
         deletedAt: null,
         ...directoryContactWhere,
+        // Field predicates ride an AND key — no collision with the directory
+        // filter's OR, and they can only narrow.
+        ...fieldAnd(),
       };
       await this.assertAudienceWithinCap(
         this.db.contact.count({ where: allModeWhere }),
@@ -623,10 +648,11 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       }
       // Same count-before-fetch guard as `mode: "all"` — a broadly-applied tag
       // reaches the same size and the same OOM shape.
-      const tagWhere = {
+      const tagWhere: Prisma.ContactWhereInput = {
         workspaceId,
         deletedAt: null,
         tags: { some: { id: { in: validatedTagIds } } },
+        ...fieldAnd(),
       };
       await this.assertAudienceWithinCap(this.db.contact.count({ where: tagWhere }));
       const taggedContacts = await this.db.contact.findMany({
@@ -657,10 +683,13 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       }
       // Snapshot the group's tag + manual membership into a concrete id set
       // at THIS moment. New contacts matching the tag criteria after this
-      // point won't join the in-flight broadcast.
+      // point won't join the in-flight broadcast. The group's STORED field
+      // filters apply here (and are stamped on the row for the audit trail).
+      appliedFieldFilters = parseStoredFieldFilters(group.fieldFilters);
       recipientIds = await resolveAudienceGroupMembers(workspaceId, {
         tagIds: group.tags.map((t) => t.id),
         manualContactIds: group.contacts.map((c) => c.id),
+        fieldFilters: appliedFieldFilters,
         // +1 so the over-cap check below still sees "more than the limit".
         limit: MAX_RECIPIENTS_IN_PROCESS + 1,
       });
@@ -681,6 +710,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       recipientIds = await resolveAudienceGroupMembers(workspaceId, {
         tagIds: validatedTagIds,
         manualContactIds: audience.contactIds,
+        fieldFilters: appliedFieldFilters,
         limit: MAX_RECIPIENTS_IN_PROCESS + 1,
       });
     } else {
@@ -872,7 +902,9 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
               `from this one.`
             : hadAnyBeforeFilter
               ? `None of the selected contacts are on ${filterChannel}.`
-              : "Pick at least one contact (or 'All contacts') to broadcast to.",
+              : appliedFieldFilters.length > 0
+                ? "No contacts match this audience — your field filters may have excluded everyone."
+                : "Pick at least one contact (or 'All contacts') to broadcast to.",
       });
     }
 
@@ -1043,6 +1075,12 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       variables: variables as unknown as Prisma.InputJsonValue,
       audienceMode: audience.mode,
       audienceTagIds: validatedTagIds,
+      // Audit snapshot, sibling of audienceTagIds — the predicates as APPLIED
+      // (inline ones, or the group's stored set). Null when none.
+      audienceFieldFilters:
+        appliedFieldFilters.length > 0
+          ? fieldFiltersToJson(appliedFieldFilters)
+          : Prisma.JsonNull,
       audienceGroupId: resolvedGroupId,
       audienceGroupName: resolvedGroupName,
       totalCount: recipientRows.length,
@@ -1357,10 +1395,19 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     limit: number,
   ): Promise<string[]> {
     try {
+      // Mirror `create`'s field-predicate narrowing so the preview warns
+      // against the audience that will actually send.
+      const inlineFieldAnd =
+        (audience.mode === "all" ||
+          audience.mode === "by_tag" ||
+          audience.mode === "custom") &&
+        audience.fieldFilters?.length
+          ? { AND: contactFieldFilterClauses(audience.fieldFilters) }
+          : {};
       if (audience.mode === "all") {
         return (
           await this.db.contact.findMany({
-            where: { workspaceId, deletedAt: null },
+            where: { workspaceId, deletedAt: null, ...inlineFieldAnd },
             select: { id: true },
             take: limit,
           })
@@ -1376,7 +1423,12 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         if (validTagIds.length === 0) return [];
         return (
           await this.db.contact.findMany({
-            where: { workspaceId, deletedAt: null, tags: { some: { id: { in: validTagIds } } } },
+            where: {
+              workspaceId,
+              deletedAt: null,
+              tags: { some: { id: { in: validTagIds } } },
+              ...inlineFieldAnd,
+            },
             select: { id: true },
             take: limit,
           })
@@ -1392,6 +1444,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         const ids = await resolveAudienceGroupMembers(workspaceId, {
           tagIds: group.tags.map((t) => t.id),
           manualContactIds: group.contacts.map((c) => c.id),
+          fieldFilters: parseStoredFieldFilters(group.fieldFilters),
           limit,
         });
         return ids;
@@ -1406,6 +1459,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         const ids = await resolveAudienceGroupMembers(workspaceId, {
           tagIds: tagRows.map((t) => t.id),
           manualContactIds: audience.contactIds ?? [],
+          fieldFilters: audience.fieldFilters ?? [],
           limit,
         });
         return ids;
@@ -1860,6 +1914,9 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       templateBody: template?.bodyText || null,
       audienceMode: row.audienceMode,
       audienceTagIds: row.audienceTagIds,
+      // The applied field predicates ([{ key, optionIds }]) — the audit answer
+      // to "who was this sent to" alongside the tag ids. Empty when none.
+      audienceFieldFilters: parseStoredFieldFilters(row.audienceFieldFilters),
       audienceGroupId: row.audienceGroupId,
       variables: row.variables,
       totalCount: row.totalCount,

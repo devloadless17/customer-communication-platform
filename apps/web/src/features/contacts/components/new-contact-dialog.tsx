@@ -17,6 +17,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 import type {
@@ -264,20 +265,59 @@ export function NewContactDialog({
                 Custom fields
               </div>
               <div className="space-y-2">
-                {fieldDefinitions.map((def) => (
-                  <Field key={def.id} label={def.label}>
-                    <Input
-                      value={customValues[def.key] ?? ""}
-                      onChange={(e) =>
-                        setCustomValues((prev) => ({
-                          ...prev,
-                          [def.key]: e.target.value,
-                        }))
+                {fieldDefinitions.map((def) =>
+                  def.type === "select" ? (
+                    // Select fields store an OPTION ID — a free-text input here
+                    // would hit the server's strict `invalid_option` 400 on any
+                    // typo, so offer the catalog instead.
+                    <Field
+                      key={def.id}
+                      label={def.label}
+                      helper={
+                        (def.options ?? []).length === 0
+                          ? "No options yet — add some in Settings → Contact fields."
+                          : undefined
                       }
-                      placeholder="—"
-                    />
-                  </Field>
-                ))}
+                    >
+                      <Select
+                        value={customValues[def.key] ?? ""}
+                        disabled={(def.options ?? []).length === 0}
+                        onChange={(e) => {
+                          const id = e.target.value;
+                          setCustomValues((prev) => {
+                            if (!id) {
+                              const { [def.key]: _drop, ...rest } = prev;
+                              return rest;
+                            }
+                            return { ...prev, [def.key]: id };
+                          });
+                        }}
+                      >
+                        <option value="">—</option>
+                        {[...(def.options ?? [])]
+                          .sort((a, b) => a.position - b.position)
+                          .map((o) => (
+                            <option key={o.id} value={o.id}>
+                              {o.name}
+                            </option>
+                          ))}
+                      </Select>
+                    </Field>
+                  ) : (
+                    <Field key={def.id} label={def.label}>
+                      <Input
+                        value={customValues[def.key] ?? ""}
+                        onChange={(e) =>
+                          setCustomValues((prev) => ({
+                            ...prev,
+                            [def.key]: e.target.value,
+                          }))
+                        }
+                        placeholder="—"
+                      />
+                    </Field>
+                  ),
+                )}
 
                 {perContactKeys.map((key) => (
                   <Field key={key} label={prettifyKey(key)}>

@@ -12,7 +12,15 @@ import {
   type InboxViewIcon,
 } from "@ccp/shared/inbox-views/types";
 import { LIVE_CHANNELS } from "@ccp/shared/providers/capabilities";
-import { TAG_COLORS, type Channel, type ContactStage, type Tag, type TagColor, type User } from "@ccp/shared/types";
+import {
+  TAG_COLORS,
+  type Channel,
+  type ContactFieldDefinition,
+  type ContactStage,
+  type Tag,
+  type TagColor,
+  type User,
+} from "@ccp/shared/types";
 import type { ConversationStatus } from "@ccp/shared/types";
 import { cn } from "@ccp/shared/utils";
 import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
@@ -57,6 +65,7 @@ export function ViewBuilderDialog({
   canShare,
   stages,
   tags,
+  fieldDefinitions,
   teammates,
   onSubmit,
 }: {
@@ -68,6 +77,8 @@ export function ViewBuilderDialog({
   canShare: boolean;
   stages: ContactStage[];
   tags: Tag[];
+  /** Contact field catalog — only select-type definitions render as criteria. */
+  fieldDefinitions: ContactFieldDefinition[];
   teammates: User[];
   onSubmit: (input: {
     name: string;
@@ -116,6 +127,14 @@ export function ViewBuilderDialog({
       .sort((a, b) => a.channel.localeCompare(b.channel) || a.name.localeCompare(b.name));
   }, [accountsById]);
 
+  // ALL select-type definitions, not just `isVisible` — visibility governs the
+  // contact PANEL; a view is a filter tool, and hiding a dimension from the
+  // panel shouldn't make it unfilterable.
+  const selectFields = useMemo(
+    () => fieldDefinitions.filter((d) => d.type === "select"),
+    [fieldDefinitions],
+  );
+
   const summary = useMemo(
     () =>
       summarizeInboxViewFilters(filters, {
@@ -126,8 +145,12 @@ export function ViewBuilderDialog({
         accountNames: Object.fromEntries(
           [...accountsById.values()].map((a) => [a.id, a.name]),
         ),
+        fieldLabels: Object.fromEntries(selectFields.map((d) => [d.key, d.label])),
+        optionNames: Object.fromEntries(
+          selectFields.flatMap((d) => (d.options ?? []).map((o) => [o.id, o.name])),
+        ),
       }),
-    [filters, stages, tags, teammates, accountsById],
+    [filters, stages, tags, teammates, accountsById, selectFields],
   );
 
   const assigneeMode = filters.assignee?.kind ?? "anyone";
@@ -142,6 +165,25 @@ export function ViewBuilderDialog({
     // saved document never carries `[]`, which reads as a filter but behaves
     // as none.
     return next.length ? next : undefined;
+  }
+
+  /** Toggle one option inside a field's entry; an emptied entry drops from the
+   *  list, and an emptied list collapses to `undefined` — same "no opinion"
+   *  discipline as `toggle()` above. */
+  function toggleFieldOption(key: string, optionId: string) {
+    setFilters((f) => {
+      const entries = f.fields ?? [];
+      const entry = entries.find((e) => e.key === key);
+      const currentIds = entry?.optionIds ?? [];
+      const nextIds = currentIds.includes(optionId)
+        ? currentIds.filter((id) => id !== optionId)
+        : [...currentIds, optionId];
+      const nextEntries = [
+        ...entries.filter((e) => e.key !== key),
+        ...(nextIds.length ? [{ key, optionIds: nextIds }] : []),
+      ];
+      return { ...f, fields: nextEntries.length ? nextEntries : undefined };
+    });
   }
 
   async function handleSubmit() {
@@ -419,6 +461,38 @@ export function ViewBuilderDialog({
               )}
             </Group>
           )}
+
+          {selectFields.map((def) => {
+            const options = def.options ?? [];
+            if (options.length === 0) return null;
+            const selected =
+              filters.fields?.find((e) => e.key === def.key)?.optionIds ?? [];
+            return (
+              <Group
+                key={def.id}
+                label={def.label}
+                hint={selected.length > 1 ? "Any of the selected" : undefined}
+              >
+                <ChipRow>
+                  {options.map((o) => (
+                    <Chip
+                      key={o.id}
+                      active={selected.includes(o.id)}
+                      onClick={() => toggleFieldOption(def.key, o.id)}
+                    >
+                      <span
+                        className={cn(
+                          "size-1.5 rounded-full",
+                          tagColorClasses(o.color).solid,
+                        )}
+                      />
+                      {o.name}
+                    </Chip>
+                  ))}
+                </ChipRow>
+              </Group>
+            );
+          })}
 
           <Group label="Also">
             <div className="flex flex-col gap-2">

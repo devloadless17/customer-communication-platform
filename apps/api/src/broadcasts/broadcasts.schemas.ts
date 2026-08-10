@@ -14,8 +14,30 @@ const MAX_AUDIENCE_IDS = 5000;
  * for the "all" mode won't 400) — irrelevant fields are silently ignored.
  */
 
+/**
+ * Select-field predicate over the audience: customFields[key] must equal ANY
+ * of `optionIds` (OR within an entry); entries AND with each other and with
+ * the rest of the audience — they only ever NARROW, hand-picked contacts
+ * included. A predicate naming a deleted field/option matches NOTHING —
+ * deliberately the opposite of the inbox-view drop policy: dropping WIDENS,
+ * and a silently widened audience is a billed, irreversible send to people
+ * the operator excluded. (Stored filters are additionally pruned to owned
+ * ids at write time — lib/contact-fields/filter-where.ts.)
+ */
+export const AudienceFieldFiltersSchema = z
+  .array(
+    z
+      .object({
+        key: z.string().min(1).max(80),
+        optionIds: z.array(z.string().min(1)).min(1).max(50),
+      })
+      .strict(),
+  )
+  .max(10);
+
 const AudienceAllSchema = z.object({
   mode: z.literal("all"),
+  fieldFilters: AudienceFieldFiltersSchema.optional(),
 });
 
 const AudienceSelectedSchema = z.object({
@@ -26,6 +48,7 @@ const AudienceSelectedSchema = z.object({
 const AudienceByTagSchema = z.object({
   mode: z.literal("by_tag"),
   tagIds: z.array(z.string().min(1)).max(MAX_AUDIENCE_IDS).default([]),
+  fieldFilters: AudienceFieldFiltersSchema.optional(),
 });
 
 const AudienceGroupSchema = z.object({
@@ -39,11 +62,15 @@ const AudienceGroupSchema = z.object({
  * `{ tagIds, contactIds }` shape the count/preview endpoints already resolve.
  * `by_tag` and `selected` stay in the union for backwards-compat (history rows
  * + deep links), but the UI now always sends `custom` for inline audiences.
+ * `fieldFilters` deliberately absent from `selected` (legacy) and `group` (a
+ * saved group carries its OWN stored filters — layering inline ones on top
+ * would be a second composition rule nobody asked for).
  */
 const AudienceCustomSchema = z.object({
   mode: z.literal("custom"),
   tagIds: z.array(z.string().min(1)).max(MAX_AUDIENCE_IDS).default([]),
   contactIds: z.array(z.string().min(1)).max(MAX_AUDIENCE_IDS).default([]),
+  fieldFilters: AudienceFieldFiltersSchema.optional(),
 });
 
 export const AudienceSchema = z.union([

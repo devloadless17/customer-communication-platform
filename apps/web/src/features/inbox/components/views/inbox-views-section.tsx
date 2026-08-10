@@ -15,7 +15,7 @@ import {
   summarizeInboxViewFilters,
   type InboxView,
 } from "@ccp/shared/inbox-views/types";
-import type { ContactStage, Tag, User } from "@ccp/shared/types";
+import type { ContactFieldDefinition, ContactStage, Tag, User } from "@ccp/shared/types";
 import { cn } from "@ccp/shared/utils";
 
 import {
@@ -47,6 +47,7 @@ export function InboxViewsSection({
   canShare,
   stages,
   tags,
+  fieldDefinitions,
   teammates,
 }: {
   filter: Filter;
@@ -54,6 +55,7 @@ export function InboxViewsSection({
   canShare: boolean;
   stages: ContactStage[];
   tags: Tag[];
+  fieldDefinitions: ContactFieldDefinition[];
   teammates: User[];
 }) {
   const { views, counts, createView, updateView, deleteView } = useInboxViews();
@@ -70,8 +72,16 @@ export function InboxViewsSection({
       tagNames: Object.fromEntries(tags.map((t) => [t.id, t.name])),
       userNames: Object.fromEntries(teammates.map((u) => [u.id, u.name])),
       channelLabels: CHANNEL_LABEL,
+      fieldLabels: Object.fromEntries(
+        fieldDefinitions.map((d) => [d.key, d.label]),
+      ),
+      optionNames: Object.fromEntries(
+        fieldDefinitions.flatMap((d) =>
+          (d.options ?? []).map((o) => [o.id, o.name]),
+        ),
+      ),
     }),
-    [stages, tags, teammates],
+    [stages, tags, teammates, fieldDefinitions],
   );
 
   function openCreate() {
@@ -248,6 +258,7 @@ export function InboxViewsSection({
         canShare={canShare}
         stages={stages}
         tags={tags}
+        fieldDefinitions={fieldDefinitions}
         teammates={teammates}
         onSubmit={async (input) => {
           if (editing) {

@@ -36,7 +36,13 @@ import {
   EMPTY_CAMPAIGN_ASSIGNMENT,
   type CampaignAssignmentValue,
 } from "@/features/broadcasts/components/campaign-assignment";
-import type { ContactFieldDefinition, ContactStage, Tag, TemplateDto } from "@ccp/shared/types";
+import type {
+  ContactFieldDefinition,
+  ContactFieldFilter,
+  ContactStage,
+  Tag,
+  TemplateDto,
+} from "@ccp/shared/types";
 import { CHANNEL_LABEL } from "@/features/inbox/components/channel-badge";
 import {
   CHANNEL_CAPABILITIES,
@@ -181,6 +187,7 @@ export function NewBroadcastForm({
         mode: "all",
         selectedIds: [],
         selectedTagIds: [],
+        selectedFieldFilters: [],
         selectedGroupId: null,
       };
     }
@@ -189,6 +196,7 @@ export function NewBroadcastForm({
         mode: "group",
         selectedIds: [],
         selectedTagIds: [],
+        selectedFieldFilters: [],
         selectedGroupId: preselectedGroupId,
       };
     }
@@ -197,6 +205,7 @@ export function NewBroadcastForm({
         mode: "custom",
         selectedIds: preselectedContactIds,
         selectedTagIds: preselectedTagIds,
+        selectedFieldFilters: [],
         selectedGroupId: null,
       };
     }
@@ -204,6 +213,7 @@ export function NewBroadcastForm({
       mode: "all",
       selectedIds: [],
       selectedTagIds: [],
+      selectedFieldFilters: [],
       selectedGroupId: null,
     };
   });
@@ -766,6 +776,7 @@ export function NewBroadcastForm({
   const previewPayload: {
     tagIds: string[];
     contactIds: string[];
+    fieldFilters?: ContactFieldFilter[];
     channel?: "whatsapp" | "messenger" | "instagram";
     accountId?: string | null;
     includeOtherAccounts?: boolean;
@@ -784,6 +795,9 @@ export function NewBroadcastForm({
       return {
         tagIds: audience.selectedTagIds,
         contactIds: audience.selectedIds,
+        ...(audience.selectedFieldFilters.length
+          ? { fieldFilters: audience.selectedFieldFilters }
+          : {}),
         ...scope,
       };
     }
@@ -791,6 +805,11 @@ export function NewBroadcastForm({
       return {
         tagIds: scopedGroup.tagIds,
         contactIds: scopedGroup.contactIds,
+        // The group's STORED predicates — the preview must narrow like the
+        // send will.
+        ...(scopedGroup.fieldFilters.length
+          ? { fieldFilters: scopedGroup.fieldFilters }
+          : {}),
         ...scope,
       };
     }
@@ -857,6 +876,9 @@ export function NewBroadcastForm({
       mode: "custom" as const,
       tagIds: audience.selectedTagIds,
       contactIds: audience.selectedIds,
+      ...(audience.selectedFieldFilters.length
+        ? { fieldFilters: audience.selectedFieldFilters }
+        : {}),
     };
   }, [audience]);
   const [missingPreview, setMissingPreview] = useState<MissingFieldsPreview | null>(
@@ -1258,6 +1280,9 @@ export function NewBroadcastForm({
                       mode: "custom",
                       tagIds: audience.selectedTagIds,
                       contactIds: audience.selectedIds,
+                      ...(audience.selectedFieldFilters.length
+                        ? { fieldFilters: audience.selectedFieldFilters }
+                        : {}),
                     },
           }),
         });

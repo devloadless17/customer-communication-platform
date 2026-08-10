@@ -311,12 +311,15 @@ export function toContactWire(
 // races) so we omit it from the mapper's input type too. `deletedAt` is the
 // soft-delete tombstone — likewise an internal column that never reaches the
 // wire. Listing them alongside `customFields` keeps the strict shape's `Omit`
-// tractable.
+// tractable. `customFields` is re-admitted as OPTIONAL: the inbox list select
+// opted back in (saved views filter on select fields and the client-side view
+// matcher needs the values), while other narrow callers still omit it.
 // `callPermissionRevokedUntil` + `consecutiveUnansweredOutCalls` are calling-
 // state internals — never read by the list UI (the contact-panel can fetch
 // them separately when needed), and excluding them keeps the contact-list
 // select narrow.
-type PrismaContactListItem = Omit<
+type PrismaContactListItem = Partial<Pick<PrismaContact, "customFields">> &
+  Omit<
   PrismaContact,
   | "customFields"
   | "version"
@@ -365,7 +368,10 @@ export function mapContactListItem(c: PrismaContactListItem): Contact {
     avatarUrl: c.avatarUrl ?? undefined,
     email: c.email ?? undefined,
     location: c.location ?? undefined,
-    customFields: {},
+    // Populated only when the caller's select opted into the column (the
+    // inbox list does, for the saved-view matcher); `{}` elsewhere.
+    customFields:
+      c.customFields !== undefined ? normalizeStringMap(c.customFields) : {},
     source: c.source,
     stageId: c.stageId,
     createdAt: c.createdAt.toISOString(),

@@ -22,7 +22,7 @@
  * the document.
  */
 
-import type { Channel, ConversationStatus } from "../types";
+import type { Channel, ContactFieldFilter, ConversationStatus } from "../types";
 
 /**
  * Who can see a view.
@@ -93,6 +93,17 @@ export interface InboxViewFilters {
   /** Contact tags. */
   tagIds?: string[];
   tagMatch?: InboxViewTagMatch;
+  /**
+   * Select-type custom-field predicates — the stage-like dimensions
+   * (`ContactFieldDefinition.type === "select"`). Within one entry the
+   * optionIds are OR'd ("Source is Ad or Referral"); entries are ANDed with
+   * each other and with every other filter. Deliberately select-only: text
+   * fields have no enumerable options to chip, and a substring predicate is a
+   * different (unindexed) query shape — a discriminated variant can be added
+   * later if asked for. Dangling keys/option ids follow
+   * `INBOX_VIEW_DANGLING_POLICY` like stages/tags.
+   */
+  fields?: ContactFieldFilter[];
   /** Only threads carrying at least one UNRESOLVED message flag. */
   hasOpenFlags?: boolean;
   /** Only threads with unread inbound messages. */
@@ -220,6 +231,12 @@ export interface InboxViewMatchTarget {
      * "cannot decide" and excludes; see the note there.
      */
     tagIds?: string[] | null;
+    /**
+     * `Contact.customFields` (key → stored value; option ID for select
+     * fields). `undefined` on rows from routes that don't select it — the
+     * matcher treats that as "cannot decide" and excludes, same as `tagIds`.
+     */
+    customFields?: Record<string, string> | null;
   };
 }
 
@@ -288,6 +305,17 @@ export function matchesInboxViewFilters(
     if (!ok) return false;
   }
 
+  if (filters.fields?.length) {
+    // `customFields` undefined = built by a route that skips the column —
+    // "cannot decide", exclude (same rule as tagIds above).
+    const cf = row.contact.customFields;
+    for (const f of filters.fields) {
+      if (f.optionIds.length === 0) continue;
+      const stored = cf?.[f.key];
+      if (!stored || !f.optionIds.includes(stored)) return false;
+    }
+  }
+
   if (filters.hasOpenFlags && !((row.openFlagCount ?? 0) > 0)) return false;
   if (filters.unreadOnly && !((row.unreadCount ?? 0) > 0)) return false;
 
@@ -311,6 +339,10 @@ export function summarizeInboxViewFilters(
     channelLabels?: Record<string, string>;
     /** ChannelConnection id → display name ("Sales line", "+961 70 …"). */
     accountNames?: Record<string, string>;
+    /** ContactFieldDefinition.key → label ("source" → "Source"). */
+    fieldLabels?: Record<string, string>;
+    /** ContactFieldOption id → name. */
+    optionNames?: Record<string, string>;
   },
 ): string {
   const parts: string[] = [];
@@ -347,6 +379,15 @@ export function summarizeInboxViewFilters(
   if (filters.tagIds?.length) {
     const joined = namesOrCount(filters.tagIds, lookup?.tagNames, "tag");
     parts.push(filters.tagMatch === "all" ? `${joined} (all)` : joined);
+  }
+
+  if (filters.fields?.length) {
+    for (const f of filters.fields) {
+      if (!f.optionIds.length) continue;
+      const label = lookup?.fieldLabels?.[f.key];
+      const values = namesOrCount(f.optionIds, lookup?.optionNames, "option");
+      parts.push(label ? `${label}: ${values}` : values);
+    }
   }
 
   if (filters.hasOpenFlags) parts.push("Flagged");

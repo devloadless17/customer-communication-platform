@@ -9,7 +9,7 @@ import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { TagChip } from "@/features/tags/components/tag-chip";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { formatPhone, initials } from "@ccp/shared/utils";
-import type { Tag } from "@ccp/shared/types";
+import type { ContactFieldFilter, Tag } from "@ccp/shared/types";
 
 interface PreviewResult {
   total: number;
@@ -40,6 +40,8 @@ export function RecipientsPreviewDialog({
   payload: {
     tagIds: string[];
     contactIds: string[];
+    /** Select-field predicates — the preview must narrow like the send does. */
+    fieldFilters?: ContactFieldFilter[];
     channel?: "whatsapp" | "messenger" | "instagram";
     accountId?: string | null;
     includeOtherAccounts?: boolean;
@@ -57,7 +59,9 @@ export function RecipientsPreviewDialog({
   // `channel` is part of the key: switching the broadcast's channel resolves a
   // different recipient set, so it has to re-POST rather than show the stale one.
   const payloadKey = payload
-    ? `${payload.tagIds.join(",")}|${payload.contactIds.join(",")}|${payload.channel ?? ""}|${payload.accountId ?? ""}|${payload.includeOtherAccounts ? 1 : 0}`
+    ? `${payload.tagIds.join(",")}|${payload.contactIds.join(",")}|${(payload.fieldFilters ?? [])
+        .map((f) => `${f.key}:${f.optionIds.join("+")}`)
+        .join(",")}|${payload.channel ?? ""}|${payload.accountId ?? ""}|${payload.includeOtherAccounts ? 1 : 0}`
     : null;
 
   useEffect(() => {
@@ -76,6 +80,9 @@ export function RecipientsPreviewDialog({
           body: JSON.stringify({
             tagIds: payload.tagIds,
             contactIds: payload.contactIds,
+            ...(payload.fieldFilters?.length
+              ? { fieldFilters: payload.fieldFilters }
+              : {}),
             ...(payload.channel ? { channel: payload.channel } : {}),
             ...(payload.accountId ? { accountId: payload.accountId } : {}),
             ...(payload.includeOtherAccounts ? { includeOtherAccounts: true } : {}),

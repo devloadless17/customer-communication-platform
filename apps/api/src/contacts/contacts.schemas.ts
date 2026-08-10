@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { zLiveChannel } from "@/common/channel-schema";
+import { AudienceFieldFiltersSchema } from "../broadcasts/broadcasts.schemas";
 
 const MAX_IDS = 5000;
 const MAX_TEXT = 500;
@@ -33,6 +34,10 @@ export const AudienceCountSchema = z
      *  below does. */
     accountId: z.string().min(1).optional(),
     includeOtherAccounts: z.boolean().optional(),
+    /** Select-field predicates — AND-narrow the counted set (allowed WITH
+     *  `all`: narrowing "all contacts" is the point). Same shape + semantics
+     *  as broadcast create; see AudienceFieldFiltersSchema. */
+    fieldFilters: AudienceFieldFiltersSchema.optional(),
   })
   // `all` IGNORES tagIds/contactIds server-side, so accepting both would silently
   // answer a different question than the caller asked ("all contacts tagged VIP"
@@ -55,6 +60,8 @@ export const AudiencePreviewSchema = z.object({
    *  to", so it must resolve the same account-scoped set the send does. */
   accountId: z.string().min(1).optional(),
   includeOtherAccounts: z.boolean().optional(),
+  /** Mirrors `AudienceCountSchema.fieldFilters` for the same reason. */
+  fieldFilters: AudienceFieldFiltersSchema.optional(),
 });
 export type AudiencePreviewInput = z.infer<typeof AudiencePreviewSchema>;
 

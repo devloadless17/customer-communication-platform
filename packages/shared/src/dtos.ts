@@ -13,6 +13,7 @@
 import type {
   Channel,
   ContactFieldDefinition,
+  ContactFieldFilter,
   MediaKind,
   MessageDirection,
   Role,
@@ -46,6 +47,10 @@ export interface AudienceGroupDto {
    *  `contactIds.length`; kept as its own field so callers that only need the
    *  number don't imply a dependency on the id array staying complete. */
   manualContactCount: number;
+  /** Select-field predicates that NARROW the union (AND; empty = none).
+   *  `memberCount` already reflects them; `manualContactCount` deliberately
+   *  does not — it counts hand-picked chips, not reach. */
+  fieldFilters: ContactFieldFilter[];
   /** Computed member count at read time: manual ∪ tag-matched, deduped. */
   memberCount: number;
   /** Null when the creator was hard-deleted; UI shows "Removed user". */

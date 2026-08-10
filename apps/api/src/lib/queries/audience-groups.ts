@@ -1,8 +1,12 @@
 import { Prisma } from "@prisma/client";
 
+import {
+  contactFieldFilterClauses,
+  parseStoredFieldFilters,
+} from "@/lib/contact-fields/filter-where";
 import { db } from "@/lib/db";
 import type { AudienceGroupDto } from "@ccp/shared/dtos";
-import type { Channel, Tag, TagColor } from "@ccp/shared/types";
+import type { Channel, ContactFieldFilter, Tag, TagColor } from "@ccp/shared/types";
 import { BROADCASTABLE_CHANNELS } from "@ccp/shared/providers/capabilities";
 
 /**
@@ -132,6 +136,31 @@ export async function listAudienceGroups(workspaceId: string): Promise<AudienceG
     counts.map((r) => [r.groupId, { total: Number(r.count), manual: Number(r.manualCount) }]),
   );
 
+  // Groups carrying select-field predicates can't be answered by the aggregate
+  // above (it knows nothing about customFields), so their memberCount is
+  // recomputed through the same `countAudienceContacts` the composer and the
+  // send path use — one bounded extra query per FILTERED group, which is the
+  // rare case; the aggregate stays the fast path for everything else.
+  // `manualContactCount` deliberately stays UNfiltered everywhere: it counts
+  // hand-picked chips, not reach.
+  const filteredCounts = await Promise.all(
+    rows.map(async (g) => {
+      const fieldFilters = parseStoredFieldFilters(g.fieldFilters);
+      if (fieldFilters.length === 0) return null;
+      const total = await countAudienceContacts(workspaceId, {
+        tagIds: g.tags.map((t) => t.id),
+        contactIds: g.contacts.map((c) => c.id),
+        fieldFilters,
+      });
+      return [g.id, total] as const;
+    }),
+  );
+  for (const entry of filteredCounts) {
+    if (!entry) continue;
+    const existing = countByGroup.get(entry[0]);
+    countByGroup.set(entry[0], { total: entry[1], manual: existing?.manual ?? 0 });
+  }
+
   return rows.map((g) => ({
     id: g.id,
     workspaceId: g.workspaceId,
@@ -139,6 +168,7 @@ export async function listAudienceGroups(workspaceId: string): Promise<AudienceG
     description: g.description,
     tagIds: g.tags.map((t) => t.id),
     contactIds: g.contacts.map((c) => c.id),
+    fieldFilters: parseStoredFieldFilters(g.fieldFilters),
     manualContactCount: countByGroup.get(g.id)?.manual ?? 0,
     memberCount: countByGroup.get(g.id)?.total ?? 0,
     createdById: g.createdById,
@@ -165,9 +195,11 @@ export async function getAudienceGroup(
     },
   });
   if (!g) return null;
+  const fieldFilters = parseStoredFieldFilters(g.fieldFilters);
   const memberCount = await resolveAudienceGroupMemberCount(workspaceId, {
     tagIds: g.tags.map((t) => t.id),
     manualContactIds: g.contacts.map((c) => c.id),
+    fieldFilters,
   });
   return {
     id: g.id,
@@ -176,6 +208,7 @@ export async function getAudienceGroup(
     description: g.description,
     tagIds: g.tags.map((t) => t.id),
     contactIds: g.contacts.map((c) => c.id),
+    fieldFilters,
     // Complete here (unlike the list), so the length IS the count.
     manualContactCount: g.contacts.length,
     memberCount,
@@ -196,22 +229,34 @@ export async function resolveAudienceGroupMembers(
   {
     tagIds,
     manualContactIds,
+    fieldFilters = [],
     limit,
-  }: { tagIds: string[]; manualContactIds: string[]; limit?: number },
+  }: {
+    tagIds: string[];
+    manualContactIds: string[];
+    /** Select-field predicates — AND-narrow the whole union, manual included. */
+    fieldFilters?: ContactFieldFilter[];
+    limit?: number;
+  },
 ): Promise<string[]> {
   if (tagIds.length === 0 && manualContactIds.length === 0) return [];
 
+  // Field predicates ride in a top-level AND — an independent sibling of the
+  // union OR, never spread into it, so they can only ever narrow.
+  const fieldAnd =
+    fieldFilters.length > 0 ? { AND: contactFieldFilterClauses(fieldFilters) } : {};
   const where: Prisma.ContactWhereInput =
     tagIds.length > 0
       ? {
           workspaceId,
           deletedAt: null,
+          ...fieldAnd,
           OR: [
             { id: { in: manualContactIds } },
             { tags: { some: { id: { in: tagIds } } } },
           ],
         }
-      : { workspaceId, deletedAt: null, id: { in: manualContactIds } };
+      : { workspaceId, deletedAt: null, ...fieldAnd, id: { in: manualContactIds } };
 
   // `limit` is a MEMORY guard, not the policy. A tag matching the whole contact
   // book resolves the entire set into the caller's heap before anything checks
@@ -229,11 +274,16 @@ export async function resolveAudienceGroupMembers(
 
 async function resolveAudienceGroupMemberCount(
   workspaceId: string,
-  args: { tagIds: string[]; manualContactIds: string[] },
+  args: {
+    tagIds: string[];
+    manualContactIds: string[];
+    fieldFilters?: ContactFieldFilter[];
+  },
 ): Promise<number> {
   return countAudienceContacts(workspaceId, {
     tagIds: args.tagIds,
     contactIds: args.manualContactIds,
+    fieldFilters: args.fieldFilters,
   });
 }
 
@@ -277,12 +327,15 @@ export async function countAudienceContacts(
   {
     tagIds = [],
     contactIds = [],
+    fieldFilters = [],
     all = false,
     accountId,
     includeOtherAccounts,
   }: {
     tagIds?: string[];
     contactIds?: string[];
+    /** Select-field predicates — AND-narrow the whole set (see filter-where.ts). */
+    fieldFilters?: ContactFieldFilter[];
     all?: boolean;
     /** The "Send from" account — scopes the count like the send itself. */
     accountId?: string | null;
@@ -297,12 +350,16 @@ export async function countAudienceContacts(
 ): Promise<number> {
   const channelFilter = audienceChannelFilter(channel);
   const accountFilter = audienceAccountFilter(accountId, includeOtherAccounts);
+  // Field predicates as a top-level AND key — independent of the union OR and
+  // of the spread filters (none of which carry an AND of their own).
+  const fieldAnd =
+    fieldFilters.length > 0 ? { AND: contactFieldFilterClauses(fieldFilters) } : {};
   // "All contacts" audience: every team contact (channel-scoped), tags/ids
   // ignored. Kept separate from the empty-selection case below, which returns 0
   // on purpose so an unconfigured custom audience never fans out to everyone.
   if (all) {
     return db.contact.count({
-      where: { workspaceId, deletedAt: null, ...channelFilter, ...accountFilter },
+      where: { workspaceId, deletedAt: null, ...channelFilter, ...accountFilter, ...fieldAnd },
     });
   }
   const tags = tagIds.filter((s) => s.length > 0);
@@ -315,6 +372,7 @@ export async function countAudienceContacts(
           deletedAt: null,
           ...channelFilter,
           ...accountFilter,
+          ...fieldAnd,
           OR: [{ id: { in: ids } }, { tags: { some: { id: { in: tags } } } }],
         }
       : tags.length > 0
@@ -323,9 +381,17 @@ export async function countAudienceContacts(
             deletedAt: null,
             ...channelFilter,
             ...accountFilter,
+            ...fieldAnd,
             tags: { some: { id: { in: tags } } },
           }
-        : { workspaceId, deletedAt: null, ...channelFilter, ...accountFilter, id: { in: ids } };
+        : {
+            workspaceId,
+            deletedAt: null,
+            ...channelFilter,
+            ...accountFilter,
+            ...fieldAnd,
+            id: { in: ids },
+          };
   return db.contact.count({ where });
 }
 
@@ -340,11 +406,14 @@ export async function previewAudienceContacts(
   {
     tagIds = [],
     contactIds = [],
+    fieldFilters = [],
     accountId,
     includeOtherAccounts,
   }: {
     tagIds?: string[];
     contactIds?: string[];
+    /** Select-field predicates — same AND-narrowing as the count. */
+    fieldFilters?: ContactFieldFilter[];
     /** Same sending-account scoping as the count — see audienceAccountFilter. */
     accountId?: string | null;
     includeOtherAccounts?: boolean;
@@ -366,6 +435,8 @@ export async function previewAudienceContacts(
 }> {
   const channelFilter = audienceChannelFilter(channel);
   const accountFilter = audienceAccountFilter(accountId, includeOtherAccounts);
+  const fieldAnd =
+    fieldFilters.length > 0 ? { AND: contactFieldFilterClauses(fieldFilters) } : {};
   const tags = tagIds.filter((s) => s.length > 0);
   const ids = contactIds.filter((s) => s.length > 0);
   if (tags.length === 0 && ids.length === 0) return { total: 0, sample: [] };
@@ -376,6 +447,7 @@ export async function previewAudienceContacts(
           deletedAt: null,
           ...channelFilter,
           ...accountFilter,
+          ...fieldAnd,
           OR: [{ id: { in: ids } }, { tags: { some: { id: { in: tags } } } }],
         }
       : tags.length > 0
@@ -384,9 +456,17 @@ export async function previewAudienceContacts(
             deletedAt: null,
             ...channelFilter,
             ...accountFilter,
+            ...fieldAnd,
             tags: { some: { id: { in: tags } } },
           }
-        : { workspaceId, deletedAt: null, ...channelFilter, ...accountFilter, id: { in: ids } };
+        : {
+            workspaceId,
+            deletedAt: null,
+            ...channelFilter,
+            ...accountFilter,
+            ...fieldAnd,
+            id: { in: ids },
+          };
   const [total, sample] = await Promise.all([
     db.contact.count({ where }),
     db.contact.findMany({

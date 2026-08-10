@@ -336,6 +336,20 @@ export interface ContactFieldDefinition {
 }
 
 /**
+ * One select-field predicate: the contact's customFields[key] must equal ANY
+ * of `optionIds` (OR within an entry). A list of these is always ANDed —
+ * "Source is Ad or Referral, AND Plan is Pro". Shared by inbox saved views
+ * and broadcast audiences; the SQL shape lives in exactly one place
+ * (apps/api/src/lib/contact-fields/filter-where.ts).
+ */
+export interface ContactFieldFilter {
+  /** ContactFieldDefinition.key — immutable, the JSON path into customFields. */
+  key: string;
+  /** ContactFieldOption ids. Never empty in a stored filter. */
+  optionIds: string[];
+}
+
+/**
  * Built-in contact-panel field visibility. Per-team admin toggle for the
  * rows in the inbox contact panel + contact detail drawer. Phone is NOT in
  * this map — it's the WhatsApp identity and always renders, as is `name`

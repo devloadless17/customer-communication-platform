@@ -1,6 +1,12 @@
 "use client";
 
-import type { ContactStage, ConversationWithRefs, Tag, User } from "@ccp/shared/types";
+import type {
+  ContactFieldDefinition,
+  ContactStage,
+  ConversationWithRefs,
+  Tag,
+  User,
+} from "@ccp/shared/types";
 
 import { usePresence } from "@/hooks/use-presence";
 import { useInboxFilter } from "@/features/inbox/contexts/inbox-filter-context";
@@ -23,6 +29,7 @@ export function InboxSubSidebarLive({
   currentUser,
   stages,
   tags,
+  fieldDefinitions,
   teammates,
   initialConversations,
   canManageSharedViews,
@@ -31,6 +38,8 @@ export function InboxSubSidebarLive({
   stages: ContactStage[];
   /** Tag catalog — the saved-view builder filters on it. */
   tags: Tag[];
+  /** Contact field catalog — the saved-view builder's select-field criteria. */
+  fieldDefinitions: ContactFieldDefinition[];
   teammates: User[];
   initialConversations: ConversationWithRefs[];
   /** Resolved server-side from `inboxViews:manageShared`; decides whether the
@@ -52,6 +61,7 @@ export function InboxSubSidebarLive({
       conversations={initialConversations}
       stages={stages}
       tags={tags}
+      fieldDefinitions={fieldDefinitions}
       teammates={teammates}
       canManageSharedViews={canManageSharedViews}
       onlineUserIds={onlineUserIds}

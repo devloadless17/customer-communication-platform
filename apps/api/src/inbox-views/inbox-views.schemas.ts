@@ -59,6 +59,21 @@ export const InboxViewFiltersSchema = z
     stageIds: idList(50).optional(),
     tagIds: idList(50).optional(),
     tagMatch: z.enum(["any", "all"]).optional(),
+    // Select-field predicates (stage-like dimensions). `optionIds.min(1)` so a
+    // stored entry can never read as a filter while behaving as none; existence
+    // of key/options is deliberately NOT checked at save time — stages/tags
+    // aren't either, dangling ids are a read-time concern (resolveFilters).
+    fields: z
+      .array(
+        z
+          .object({
+            key: z.string().min(1).max(80),
+            optionIds: idList(50).min(1),
+          })
+          .strict(),
+      )
+      .max(10)
+      .optional(),
     hasOpenFlags: z.boolean().optional(),
     unreadOnly: z.boolean().optional(),
   })

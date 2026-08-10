@@ -20,7 +20,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AudienceBuilder } from "@/features/broadcasts/components/audience-builder";
 import type { ContactLabel } from "@/features/contacts/components/contact-select-dialog";
-import type { ContactFieldDefinition, ContactStage, Tag } from "@ccp/shared/types";
+import type {
+  ContactFieldDefinition,
+  ContactFieldFilter,
+  ContactStage,
+  Tag,
+} from "@ccp/shared/types";
 import type { AudienceGroupDto } from "@ccp/shared/dtos";
 
 /**
@@ -45,6 +50,8 @@ export interface AudienceState {
   selectedIds: string[];
   /** custom: tag ids (dynamic membership). */
   selectedTagIds: string[];
+  /** custom: select-field predicates NARROWING the union (hand-picked included). */
+  selectedFieldFilters: ContactFieldFilter[];
   /** group: the chosen saved group. */
   selectedGroupId: string | null;
 }
@@ -109,9 +116,18 @@ export function AudiencePicker({
         ) : (
           <ModePanel key="custom">
             <AudienceBuilder
-              value={{ tagIds: value.selectedTagIds, contactIds: value.selectedIds }}
+              value={{
+                tagIds: value.selectedTagIds,
+                contactIds: value.selectedIds,
+                fieldFilters: value.selectedFieldFilters,
+              }}
               onChange={(v) =>
-                onChange({ ...value, selectedTagIds: v.tagIds, selectedIds: v.contactIds })
+                onChange({
+                  ...value,
+                  selectedTagIds: v.tagIds,
+                  selectedIds: v.contactIds,
+                  selectedFieldFilters: v.fieldFilters,
+                })
               }
               tags={tags}
               fieldDefinitions={fieldDefinitions}
@@ -129,6 +145,7 @@ export function AudiencePicker({
             <SaveAudienceAsGroup
               tagIds={value.selectedTagIds}
               contactIds={value.selectedIds}
+              fieldFilters={value.selectedFieldFilters}
               onSaved={onGroupSaved}
             />
           </ModePanel>
@@ -221,10 +238,14 @@ function ModeButton({
 function SaveAudienceAsGroup({
   tagIds,
   contactIds,
+  fieldFilters,
   onSaved,
 }: {
   tagIds: string[];
   contactIds: string[];
+  /** Saved WITH the group — dropping them would save a wider audience than
+   *  the one on screen. */
+  fieldFilters: ContactFieldFilter[];
   onSaved?: (group: AudienceGroupDto) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -246,7 +267,7 @@ function SaveAudienceAsGroup({
       const res = await apiFetch("/api/workspace/audience-groups", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: name.trim(), tagIds, contactIds }),
+        body: JSON.stringify({ name: name.trim(), tagIds, contactIds, fieldFilters }),
       });
       const data = (await res.json().catch(() => ({}))) as {
         group?: AudienceGroupDto;

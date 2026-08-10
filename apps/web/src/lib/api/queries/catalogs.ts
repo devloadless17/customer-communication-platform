@@ -237,12 +237,19 @@ export async function getStageContactCounts(): Promise<{
   }>("/api/workspace/stages/counts");
 }
 
-export async function listContactFieldDefinitions(): Promise<ContactFieldDefinition[]> {
-  const { definitions } = await api<{ definitions: ContactFieldDefinition[] }>(
-    "/api/workspace/contact-fields",
-  );
-  return definitions;
-}
+/**
+ * `cache`d like the stage/tag catalogs: the inbox LAYOUT now loads it for the
+ * view builder's field criteria, and pages that also need it (contacts) should
+ * dedupe within the same render.
+ */
+export const listContactFieldDefinitions = cache(
+  async (): Promise<ContactFieldDefinition[]> => {
+    const { definitions } = await api<{ definitions: ContactFieldDefinition[] }>(
+      "/api/workspace/contact-fields",
+    );
+    return definitions;
+  },
+);
 
 export async function listContactFieldsWithBuiltins(): Promise<{
   definitions: ContactFieldDefinition[];

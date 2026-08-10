@@ -64,6 +64,7 @@ import {
 } from "@/features/contacts/components/contact-browser";
 import { SelectAllRow } from "@/features/contacts/components/contact-browser/select-all-row";
 import { ContactRowsSkeleton } from "@/features/contacts/components/contact-browser/row-skeleton";
+import { ContactFieldSelectPicker } from "@/features/contacts/components/contact-field-select-picker";
 import { ContactStagePicker } from "@/features/contacts/components/contact-stage-picker";
 import { Pagination } from "@/components/ui/pagination";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -233,6 +234,32 @@ export function ContactsClient({
       );
     },
     [setItems],
+  );
+  // Same shape/stability contract as patchContactStage, for the select-field
+  // row lanes. `null` deletes the key ("clear").
+  const patchContactField = useCallback(
+    (contactId: string, key: string, optionId: string | null) => {
+      setItems((prev) =>
+        prev.map((row) => {
+          if (row.contact.id !== contactId) return row;
+          const nextFields = { ...row.contact.customFields };
+          if (optionId === null) delete nextFields[key];
+          else nextFields[key] = optionId;
+          return { ...row, contact: { ...row.contact, customFields: nextFields } };
+        }),
+      );
+    },
+    [setItems],
+  );
+  // Row lanes for select-type dimensions: visible fields only (the panel
+  // toggle doubles as "worth a column"), capped at 2 — the rest stay in the
+  // drawer, which the row click already opens.
+  const selectFieldLanes = useMemo(
+    () =>
+      fieldDefinitions
+        .filter((d) => d.type === "select" && d.isVisible)
+        .slice(0, 2),
+    [fieldDefinitions],
   );
   // Selection state for bulk actions. Set<string> keeps add/remove O(1) and
   // makes "select all on this page" a simple union.
@@ -817,12 +844,15 @@ export function ContactsClient({
                   tagCatalog={tags}
                   tagById={tagById}
                   stageCatalog={stages}
+                  selectFieldLanes={selectFieldLanes}
                   canManageStages={canManageStages}
+                  canManageFields={canManageFields}
                   selected={selectedIds.has(item.contact.id)}
                   onSelectChange={handleSelectChange}
                   onTagsChanged={patchContactTags}
                   onTagCreated={handleTagCreated}
                   onStageChanged={patchContactStage}
+                  onFieldChanged={patchContactField}
                   onOpen={handleOpenDetail}
                 />
               ))}
@@ -1092,19 +1122,25 @@ const ContactRow = memo(function ContactRow({
   tagCatalog,
   tagById,
   stageCatalog,
+  selectFieldLanes,
   canManageStages,
+  canManageFields,
   selected,
   onSelectChange,
   onTagsChanged,
   onTagCreated,
   onStageChanged,
+  onFieldChanged,
   onOpen,
 }: {
   item: ContactListItem;
   tagCatalog: Tag[];
   tagById: Map<string, Tag>;
   stageCatalog: ContactStage[];
+  /** Visible select-type definitions rendered as row lanes (parent caps at 2). */
+  selectFieldLanes: ContactFieldDefinition[];
   canManageStages: boolean;
+  canManageFields: boolean;
   selected: boolean;
   // Callbacks take the contact id so the parent can pass ONE stable
   // function per callback (not a per-row closure) — that's what makes the
@@ -1113,6 +1149,7 @@ const ContactRow = memo(function ContactRow({
   onTagsChanged: (id: string, tagIds: string[]) => void;
   onTagCreated: (tag: Tag) => void;
   onStageChanged: (id: string, stageId: string | null) => void;
+  onFieldChanged: (id: string, key: string, optionId: string | null) => void;
   /** Open the detail drawer for this contact. */
   onOpen: (id: string) => void;
 }) {
@@ -1169,6 +1206,24 @@ const ContactRow = memo(function ContactRow({
     if (!res.ok) {
       onStageChanged(contact.id, prev);
       toast.error("Couldn't change stage", {
+        description: await safeReadError(res),
+      });
+    }
+  }
+
+  // Mirrors persistStage: optimistic paint first, PATCH, rollback + toast on
+  // failure. `null` clears the key (the PATCH schema treats null as delete).
+  async function persistField(key: string, label: string, optionId: string | null) {
+    const prev = contact.customFields?.[key] ?? null;
+    onFieldChanged(contact.id, key, optionId);
+    const res = await apiFetch(`/api/contacts/${contact.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ customFields: { [key]: optionId } }),
+    });
+    if (!res.ok) {
+      onFieldChanged(contact.id, key, prev);
+      toast.error(`Couldn't change ${label}`, {
         description: await safeReadError(res),
       });
     }
@@ -1315,6 +1370,26 @@ const ContactRow = memo(function ContactRow({
             size="xs"
           />
         </div>
+
+        {/* Select-field lanes — the client-named stage-like dimensions, same
+            editable-pill treatment as the stage lane. Fixed width per lane so
+            values align down the list; shown only when the list is wide enough
+            that the name/tags/stage lanes already breathe. */}
+        {selectFieldLanes.map((def) => (
+          <div
+            key={def.id}
+            className="hidden w-28 shrink-0 items-center justify-start @2xl:flex"
+          >
+            <ContactFieldSelectPicker
+              fieldLabel={def.label}
+              options={def.options ?? []}
+              currentOptionId={contact.customFields?.[def.key] ?? null}
+              onChange={(optionId) => persistField(def.key, def.label, optionId)}
+              canManage={canManageFields}
+              size="xs"
+            />
+          </div>
+        ))}
 
         {/* Window lane — wide enough for the longest one-line badge
             ("Window closed · closed 24m ago") so it never wraps or clips. */}

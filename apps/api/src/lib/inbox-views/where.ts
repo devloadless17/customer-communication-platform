@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 
+import { contactFieldFilterClauses } from "@/lib/contact-fields/filter-where";
 import type {
   InboxViewFilters,
 } from "@ccp/shared/inbox-views/types";
@@ -104,6 +105,18 @@ export function inboxViewWhereClauses(
       }
     } else {
       clauses.push({ contact: { tags: { some: { id: { in: filters.tagIds } } } } });
+    }
+  }
+
+  // --- Select-field predicates (stage-like dimensions) ----------------------
+  // One clause PER entry — like `tagMatch: "all"` above, and for the same
+  // reason: merging entries into one contact object would let a later key
+  // clobber an earlier one. The JSON fragment itself lives in
+  // lib/contact-fields/filter-where.ts (shared with broadcast audiences).
+  // `deletedAt: null` for the same tombstone reason as the stage clause.
+  if (filters.fields?.length) {
+    for (const clause of contactFieldFilterClauses(filters.fields)) {
+      clauses.push({ contact: { deletedAt: null, AND: [clause] } });
     }
   }
 

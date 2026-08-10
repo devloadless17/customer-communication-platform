@@ -1,7 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Loader2, Tag as TagIcon, UserPlus, Users } from "lucide-react";
+import { Loader2, SlidersHorizontal, Tag as TagIcon, UserPlus, Users } from "lucide-react";
+
+import { cn } from "@ccp/shared/utils";
+import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
 
 import { useAudienceCount } from "@/hooks/use-audience-count";
 import { TagChip } from "@/features/tags/components/tag-chip";
@@ -9,7 +12,12 @@ import { TagFilterControl } from "@/features/contacts/components/contact-browser
 import { ContactMultiSelectField } from "@/features/contacts/components/contact-multi-select-field";
 import { RecipientsPreviewDialog } from "@/features/broadcasts/components/recipients-preview-dialog";
 import type { ContactLabel } from "@/features/contacts/components/contact-select-dialog";
-import type { ContactFieldDefinition, ContactStage, Tag } from "@ccp/shared/types";
+import type {
+  ContactFieldDefinition,
+  ContactFieldFilter,
+  ContactStage,
+  Tag,
+} from "@ccp/shared/types";
 
 /**
  * The one place an "audience" is built, anywhere in the app.
@@ -28,6 +36,9 @@ import type { ContactFieldDefinition, ContactStage, Tag } from "@ccp/shared/type
 export interface AudienceValue {
   tagIds: string[];
   contactIds: string[];
+  /** Select-field predicates that NARROW the whole union — a contact must
+   *  match every field set here, hand-picked included. Empty = no opinion. */
+  fieldFilters: ContactFieldFilter[];
 }
 
 export function AudienceBuilder({
@@ -81,7 +92,36 @@ export function AudienceBuilder({
     channel,
     accountId,
     includeOtherAccounts,
+    fieldFilters: value.fieldFilters,
   });
+
+  const selectFields = useMemo(
+    () =>
+      fieldDefinitions.filter(
+        (d) => d.type === "select" && (d.options ?? []).length > 0,
+      ),
+    [fieldDefinitions],
+  );
+  const fieldFilterCount = value.fieldFilters.reduce(
+    (n, f) => n + f.optionIds.length,
+    0,
+  );
+
+  function toggleFieldOption(key: string, optionId: string) {
+    const entries = value.fieldFilters;
+    const entry = entries.find((e) => e.key === key);
+    const currentIds = entry?.optionIds ?? [];
+    const nextIds = currentIds.includes(optionId)
+      ? currentIds.filter((id) => id !== optionId)
+      : [...currentIds, optionId];
+    onChange({
+      ...value,
+      fieldFilters: [
+        ...entries.filter((e) => e.key !== key),
+        ...(nextIds.length ? [{ key, optionIds: nextIds }] : []),
+      ],
+    });
+  }
 
   useEffect(() => {
     onCountChange?.(count, loading);
@@ -140,6 +180,61 @@ export function AudienceBuilder({
         />
       </Section>
 
+      {/* By field value — NARROWS the union above (hand-picked included). */}
+      {selectFields.length > 0 && (
+        <Section
+          icon={SlidersHorizontal}
+          tone="amber"
+          title="By field value"
+          hint="Narrows the whole audience — a contact must match every field you set, hand-picked included."
+          count={fieldFilterCount}
+        >
+          <div className="flex flex-col gap-3">
+            {selectFields.map((def) => {
+              const selected =
+                value.fieldFilters.find((e) => e.key === def.key)?.optionIds ?? [];
+              return (
+                <div key={def.id}>
+                  <div className="mb-1.5 text-2xs font-medium text-muted-foreground">
+                    {def.label}
+                    {selected.length > 1 && (
+                      <span className="ml-1 font-normal">· any of the selected</span>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {(def.options ?? []).map((o) => {
+                      const active = selected.includes(o.id);
+                      return (
+                        <button
+                          key={o.id}
+                          type="button"
+                          aria-pressed={active}
+                          onClick={() => toggleFieldOption(def.key, o.id)}
+                          className={cn(
+                            "flex h-7 cursor-pointer items-center gap-1.5 rounded-full border px-2.5 text-xs transition-colors",
+                            active
+                              ? "border-primary bg-primary/10 font-medium text-foreground"
+                              : "border-border text-muted-foreground hover:bg-accent hover:text-foreground",
+                          )}
+                        >
+                          <span
+                            className={cn(
+                              "size-1.5 rounded-full",
+                              tagColorClasses(o.color).solid,
+                            )}
+                          />
+                          {o.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </Section>
+      )}
+
       {/* Resolved count + preview */}
       <section className="rounded-xl border border-success-border bg-success-bg px-4 py-3">
         <div className="flex items-center gap-2 text-sm">
@@ -184,7 +279,11 @@ export function AudienceBuilder({
         <RecipientsPreviewDialog
           open={previewOpen}
           onClose={() => setPreviewOpen(false)}
-          payload={{ tagIds: value.tagIds, contactIds: value.contactIds }}
+          payload={{
+            tagIds: value.tagIds,
+            contactIds: value.contactIds,
+            fieldFilters: value.fieldFilters,
+          }}
           title={`${noun[0]?.toUpperCase()}${noun.slice(1)}s`}
           subtitle={`${manualCount} hand-picked · the rest matched by ${value.tagIds.length} tag${value.tagIds.length === 1 ? "" : "s"}`}
         />
@@ -196,6 +295,7 @@ export function AudienceBuilder({
 const TONES = {
   sky: "bg-sky-500/10 text-sky-700 dark:text-sky-300",
   violet: "bg-violet-500/10 text-violet-700 dark:text-violet-300",
+  amber: "bg-amber-500/10 text-amber-700 dark:text-amber-300",
 } as const;
 
 function Section({

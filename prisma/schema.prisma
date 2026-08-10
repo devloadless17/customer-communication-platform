@@ -2847,6 +2847,15 @@ model AudienceGroup {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  /// Select-field predicates that NARROW the group's membership (AND over the
+  /// tag∪contact union): `[{ key, optionIds: [...] }]` — the shared
+  /// `ContactFieldFilter` shape, pruned to owned ids at write time. Null/empty
+  /// = no opinion. A stored id whose option/field was later deleted matches
+  /// NOTHING (never widens — an audience feeds billed sends). There is
+  /// deliberately no FK into ContactFieldOption; integrity is app-level, same
+  /// as Contact.customFields itself.
+  fieldFilters Json?
+
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   createdBy User?     @relation("CreatedAudienceGroups", fields: [createdById], references: [id], onDelete: SetNull)
   tags      Tag[]     @relation("AudienceGroupTags")
@@ -2926,6 +2935,11 @@ model Broadcast {
   // detail page so the audit trail can show "Sent to VIP, Ramadan buyers"
   // even after the tag is renamed.
   audienceTagIds        String[]            @default([])
+  // Select-field predicates that narrowed the audience at creation — the same
+  // audit-trail role as audienceTagIds: `[{ key, optionIds }]` snapshot so the
+  // detail page can answer "who was this sent to" after options are renamed
+  // or deleted. Null = none were applied. Never re-evaluated after create.
+  audienceFieldFilters  Json?
   // Group used when mode = "group". Held as a soft reference (just the id +
   // a denormalized name) — no FK because we never want to cascade-delete a
   // broadcast's audit trail when the group gets removed.

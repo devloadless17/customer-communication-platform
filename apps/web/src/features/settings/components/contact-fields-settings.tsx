@@ -548,10 +548,15 @@ function FieldRow({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(field.label);
   const [optionsOpen, setOptionsOpen] = useState(false);
+  // Same reserved-name guard the create form runs — without it the doomed
+  // PATCH round-trips just to land the same message in the page-level banner.
+  const [renameReserved, setRenameReserved] = useState(false);
+  const renameErrorId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
 
   function startEditing() {
     setDraft(field.label);
+    setRenameReserved(false);
     setEditing(true);
     requestAnimationFrame(() => {
       inputRef.current?.focus();
@@ -561,6 +566,13 @@ function FieldRow({
 
   function commit() {
     const next = draft.trim();
+    if (next && next !== field.label && isReservedFieldKey(next)) {
+      // Stay in edit mode so the error has an anchor and the user can fix it.
+      // No refocus — commit() also runs on blur, and yanking focus back would
+      // trap a user who clicked away deliberately.
+      setRenameReserved(true);
+      return;
+    }
     setEditing(false);
     if (!next || next === field.label) return;
     onRename(next);
@@ -593,7 +605,12 @@ function FieldRow({
         <Input
           ref={inputRef}
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          aria-invalid={renameReserved || undefined}
+          aria-describedby={renameReserved ? renameErrorId : undefined}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            setRenameReserved(false);
+          }}
           onBlur={commit}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
@@ -601,6 +618,7 @@ function FieldRow({
               commit();
             } else if (e.key === "Escape") {
               e.preventDefault();
+              setRenameReserved(false);
               setEditing(false);
             }
           }}
@@ -666,6 +684,17 @@ function FieldRow({
           {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
         </button>
       </div>
+
+      {renameReserved && (
+        <div
+          id={renameErrorId}
+          role="alert"
+          className="basis-full text-2xs text-destructive"
+        >
+          &ldquo;{draft.trim()}&rdquo; is a built-in contact field — pick a different
+          name.
+        </div>
+      )}
 
       {field.type === "select" && optionsOpen && (
         <OptionsEditor field={field} onReplace={onReplace} confirm={confirm} />
