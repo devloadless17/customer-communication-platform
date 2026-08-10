@@ -89,6 +89,8 @@ export async function repairLebaneseTranscript(opts: {
   language?: string;
   /** Proper nouns the model should recognise rather than re-spell. */
   businessContext?: string | null;
+  /** Ledger attribution — which workspace this paid call bills against. */
+  workspaceId?: string;
 }): Promise<string | null> {
   const raw = opts.text.trim();
   if (raw.length < MIN_CHARS) return null;
@@ -117,7 +119,7 @@ export async function repairLebaneseTranscript(opts: {
       // gating — and a cast that buys nothing is exactly what that gate is for.
       schema: SCHEMA,
       maxTokens: 2000,
-      usage: { op: "transcript_repair" },
+      usage: { op: "transcript_repair", workspaceId: opts.workspaceId },
     });
     corrected = (res.data?.corrected ?? "").trim();
   } catch (err) {

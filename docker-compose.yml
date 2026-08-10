@@ -496,6 +496,10 @@ services:
       AI_MODEL_CHEAP: ${AI_MODEL_CHEAP:-gpt-4o-mini}
       AI_MODEL_SUMMARY: ${AI_MODEL_SUMMARY:-gpt-4o-mini}
       AI_STT_MODEL: ${AI_STT_MODEL:-gpt-4o-transcribe}
+      # CALL transcription is deliberately separate (whisper-1: segment-level
+      # quality signals feed the hallucination gates; gpt-4o once returned the
+      # prompt as the transcript — e2643747). Escape hatch for deprecation.
+      AI_CALL_STT_MODEL: ${AI_CALL_STT_MODEL:-whisper-1}
       AI_TTS_MODEL: ${AI_TTS_MODEL:-gpt-4o-mini-tts}
       # Azure Speech TTS — the ONLY authentically Lebanese voices (ar-LB Layla /
       # Rami). Optional: unset = the assistant just uses OpenAI voices. When set,

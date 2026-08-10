@@ -988,6 +988,10 @@ jobs:
             AI_USAGE_LOG=/var/log/ccp/ai-usage.jsonl
             AI_MODEL_SUMMARY=gpt-4o-mini
             AI_STT_MODEL=gpt-4o-transcribe
+            # Call transcription stays on whisper-1 (segment quality signals
+            # feed the hallucination gates; gpt-4o echoed the prompt as a
+            # transcript on a real call — e2643747).
+            AI_CALL_STT_MODEL=whisper-1
             AI_TTS_MODEL=gpt-4o-mini-tts
             # Azure Speech TTS — authentic Lebanese (ar-LB Layla/Rami) voices.
             # Optional: empty = OpenAI voices only. Rendered every deploy, so set

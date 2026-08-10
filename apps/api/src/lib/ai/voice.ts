@@ -69,6 +69,8 @@ export async function transcribeCallChannel(opts: {
   /** Vocabulary/style bias — dialect spellings and the business's own proper
    *  nouns, which a speech model otherwise guesses at. */
   prompt?: string;
+  /** Ledger attribution — which workspace this paid call bills against. */
+  workspaceId?: string;
 }): Promise<CallChannelTranscription> {
   const model = callSttModel();
   // Asking a gpt-4o transcribe model for verbose_json is rejected outright, so
@@ -86,7 +88,7 @@ export async function transcribeCallChannel(opts: {
     segments: wantSegments,
     // Call recordings are minutes of audio where a voice note is seconds, so
     // they are worth separating in the ledger rather than pooling under "stt".
-    usage: { op: "stt_call" },
+    usage: { op: "stt_call", workspaceId: opts.workspaceId },
   });
   return {
     text: res.text,

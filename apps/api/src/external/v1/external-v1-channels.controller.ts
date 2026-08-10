@@ -147,8 +147,10 @@ export class ExternalV1ChannelsController {
   }
 
   /**
-   * The transcript JSON document (speaker-attributed segments with word
-   * timings; `transcript.language` is the auto-detected spoken language).
+   * The transcript JSON document — flat `transcript.text` plus, when speaker
+   * separation succeeded, one Business/Customer turn per side in
+   * `transcript.segments` (no word timings); `transcript.language` is the
+   * auto-detected spoken language.
    * 404s until `hasTranscript` is true on the call row.
    */
   @Get("calls/:callId/transcript")

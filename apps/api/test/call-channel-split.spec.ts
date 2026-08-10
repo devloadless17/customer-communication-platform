@@ -89,6 +89,32 @@ describe.skipIf(!hasFfmpeg)("extractCallChannels", () => {
     // other's, not the precision of the estimate.
     expect(agentHz, `agent channel measured ${agentHz.toFixed(0)} Hz`).toBeLessThan(700);
     expect(customerHz, `customer channel measured ${customerHz.toFixed(0)} Hz`).toBeGreaterThan(700);
+    // Two genuinely different legs must NOT be flagged as a mono collapse, or
+    // every healthy recording would lose its speaker labels.
+    expect(ch!.duplicated).toBe(false);
+  }, 60_000);
+
+  it("flags a stereo file carrying the SAME audio on both channels as duplicated", async () => {
+    // THE production failure this exists for: the browser mixer collapsed to
+    // mono and duplicated it into both channels — stereo by every metadata
+    // check, left minus right at -90 dB, each leg transcribing to identical
+    // text. `duplicated` is what routes such a file to the honest unlabelled
+    // mix instead of filing the whole conversation under one speaker. Two
+    // lavfi sine generators with the same parameters are sample-identical,
+    // which is exactly that file.
+    const stereo = buildStereo(
+      "sine=frequency=440:duration=2:sample_rate=48000",
+      "sine=frequency=440:duration=2:sample_rate=48000",
+    );
+    const ch = await extractCallChannels(stereo);
+    expect(ch).not.toBeNull();
+    expect(
+      ch!.duplicated,
+      "identical legs must be detected, or the crosstalk guard is blind to mono collapses",
+    ).toBe(true);
+    // The mix leg is what the duplicated path transcribes — it must carry the
+    // audio and its own speech measurement.
+    expect(ch!.mixed.speechSeconds).toBeGreaterThan(0.4);
   }, 60_000);
 
   it("reports a silent far end as silence so it is never transcribed", async () => {

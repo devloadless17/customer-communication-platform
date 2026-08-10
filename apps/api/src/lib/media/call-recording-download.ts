@@ -370,6 +370,55 @@ export async function storeInAppRecording(
 }
 
 /**
+ * Finish an in-app recording whose FINAL upload never arrived — tab crash,
+ * network death mid-call, the browser's three upload retries exhausted — or
+ * whose remux/transcription died with the API process. The durable evidence
+ * is a `.raw` interim key on an ENDED call: the browser overwrote that key
+ * every flush, so it holds the recording up to the last checkpoint, and
+ * nobody is coming back to finalize it.
+ *
+ * Driven by the call-recordings sweeper (never the request path). Idempotent:
+ * it replays the exact final-upload code path, whose writes overwrite the
+ * same keys / CAS the same columns, so racing a very late real final upload
+ * converges instead of corrupting.
+ */
+export async function finalizeInAppRecording(
+  callId: string,
+  opts: { transcribe: boolean; retainRecording: boolean },
+): Promise<boolean> {
+  const call = await db.call.findUnique({
+    where: { id: callId },
+    select: {
+      id: true,
+      endedAt: true,
+      recordingKey: true,
+      recordingMimeType: true,
+      recordingMediaId: true,
+    },
+  });
+  if (!call?.recordingKey || !call.recordingKey.endsWith(".raw")) return false;
+  // Meta-artifact rows are a different pipeline (downloadCallRecording) and
+  // never store `.raw` keys — refuse rather than remux a foreign object.
+  if (call.recordingMediaId) return false;
+  // Still live: interim flushes are still overwriting the key.
+  if (!call.endedAt) return false;
+  const fetched = await blobStorage.fetch(call.recordingKey);
+  await storeInAppRecording(
+    callId,
+    {
+      bytes: fetched.bytes,
+      mimeType: fetched.mimeType || call.recordingMimeType || "audio/webm",
+    },
+    {
+      final: true,
+      transcribe: opts.transcribe,
+      retainRecording: opts.retainRecording,
+    },
+  );
+  return true;
+}
+
+/**
  * Drop a call's stored audio once its transcript exists, for the
  * transcription-only policy ("Transcribe calls" on, "Record calls" off).
  *
@@ -387,8 +436,12 @@ export async function storeInAppRecording(
  * leaves an unreferenced object the blob-orphan sweeper reclaims — never a
  * `recordingKey` naming an object that no longer exists (the failure mode
  * that file's header documents four instances of).
+ *
+ * Exported for the call-recordings sweeper, which owns the retention step
+ * when it re-drives a transcription the original process didn't live to
+ * finish. Safe to call speculatively — it re-checks the transcript itself.
  */
-async function discardStoredRecording(callId: string): Promise<void> {
+export async function discardStoredRecording(callId: string): Promise<void> {
   try {
     const row = await db.call.findUnique({
       where: { id: callId },
@@ -630,6 +683,10 @@ interface LanguagePolicy {
   /** Decoding bias for this workspace's dialect + proper nouns; see
    *  `buildCallPrompt`. Null when the workspace isn't Arabic-default. */
   prompt: string | null;
+  /** Ledger attribution only — which workspace the paid STT/repair calls bill
+   *  against. Stamped by the orchestrator, not by `languagePolicyFrom` (which
+   *  stays a pure config mapping); no decoding decision reads it. */
+  workspaceId?: string;
 }
 
 function languagePolicyFrom(config: {
@@ -756,9 +813,6 @@ interface ChannelResult {
   label: string;
   segments: Array<{ start: number; end: number; text: string }>;
   language?: string;
-  /** Mean confidence of the surviving segments — drives which channel's
-   *  language detection is trusted when the two disagree. */
-  confidence: number;
   speechSeconds: number;
 }
 
@@ -768,11 +822,25 @@ interface ChannelResult {
  * whole-file pass. Never throws for a per-channel failure: one side failing
  * still yields the other side's words.
  */
+/**
+ * Distinguishes the two ways this can produce nothing, because they need
+ * OPPOSITE follow-ups. `null` means the split itself was unavailable (mono
+ * source, ffmpeg failure) — the caller's whole-file fallback is the first
+ * time any audio meets the ladder, so it should run. `"mix_ladder_exhausted"`
+ * means the MIX was already decoded through the full gated ladder here and
+ * every rung rejected it — re-transcribing the same audio again would bill a
+ * second STT pass only to store what the stricter gate just refused.
+ */
+type PerSpeakerOutcome =
+  | { text: string; language?: string; segments: TranscriptSegment[] }
+  | "mix_ladder_exhausted"
+  | null;
+
 async function transcribePerSpeaker(
   bytes: Uint8Array,
   callId: string,
   policy: LanguagePolicy,
-): Promise<{ text: string; language?: string; segments: TranscriptSegment[] } | null> {
+): Promise<PerSpeakerOutcome> {
   let channels: Awaited<ReturnType<typeof extractCallChannels>>;
   try {
     channels = await extractCallChannels(bytes);
@@ -813,7 +881,7 @@ async function transcribePerSpeaker(
       callId,
       policy,
     );
-    if (mixOnly.segments.length === 0) return null;
+    if (mixOnly.segments.length === 0) return "mix_ladder_exhausted";
     return {
       text: mixOnly.segments.map((x) => x.text).join(" "),
       language: mixOnly.language,
@@ -842,7 +910,28 @@ async function transcribePerSpeaker(
   ]);
 
   const sides = [agentR, customerR].filter((r) => r.segments.length > 0);
-  if (sides.length === 0) return null;
+  if (sides.length === 0) {
+    // Both legs were discarded by the ladder. The MIX is a genuinely different
+    // signal — an echo canceller can mangle each isolated leg while the mix
+    // (what a human hears on playback) stays clean (measured 2026-07-29) — so
+    // it gets one gated pass of its own, with its MEASURED speech seconds,
+    // before this recording is given up on.
+    console.warn(
+      `[call-transcript] call=${callId}: both legs were discarded — ` +
+        "trying the mix as the last gated pass",
+    );
+    const mixOnly = await transcribeOneChannel(
+      { speaker: "Business", label: "mixed", audio: channels.mixed },
+      callId,
+      policy,
+    );
+    if (mixOnly.segments.length === 0) return "mix_ladder_exhausted";
+    return {
+      text: mixOnly.segments.map((x) => x.text).join(" "),
+      language: mixOnly.language,
+      segments: [],
+    };
+  }
   if (sides.length === 1) {
     // One speaker survived. Real for a voicemail or a one-sided call, but it is
     // ALSO what a leg that never carried audio looks like — and then the other
@@ -879,6 +968,15 @@ async function transcribePerSpeaker(
           segments: [],
         };
       }
+      // The mix failed the ladder too. Falling through to the turn assembly
+      // here would store exactly the "each speaker says every line" dialogue
+      // this guard just rejected — the split is KNOWN crosstalk, so nothing
+      // below is safe to keep.
+      console.warn(
+        `[call-transcript] call=${callId}: the mix produced nothing either — ` +
+          "discarding the crosstalk split rather than storing it as a dialogue",
+      );
+      return "mix_ladder_exhausted";
     }
   }
 
@@ -941,7 +1039,6 @@ async function transcribeOneChannel(
     speaker: side.speaker,
     label: side.label,
     segments: [],
-    confidence: 0,
     speechSeconds: side.audio.speechSeconds,
   };
   // THE gate: no detected speech ⇒ no API call. A model asked to transcribe
@@ -983,6 +1080,7 @@ async function transcribeOneChannel(
         // keeps Lebanese speech from being rendered as near-miss MSA.
         ...(promptForAttempt ? { prompt: promptForAttempt } : {}),
         ...(language ? { language } : {}),
+        ...(policy.workspaceId ? { workspaceId: policy.workspaceId } : {}),
       });
     } catch (err) {
       console.warn(
@@ -1045,7 +1143,6 @@ async function transcribeOneChannel(
         label: side.label,
         segments: kept.map((s) => ({ start: s.start, end: s.end, text: s.text.trim() })),
         language: res.language,
-        confidence: kept.reduce((a, s) => a + s.avg_logprob, 0) / kept.length,
         speechSeconds: side.audio.speechSeconds,
       };
     }
@@ -1091,6 +1188,14 @@ export const __testing__ = {
   isSubstantive,
   wordOverlap,
   looksLikePromptEcho,
+  // The composite pipeline, testable with the STT adapter mocked
+  // (`vi.mock("@/lib/ai/voice")`) — the retry ladder, the gates' interplay and
+  // the per-speaker/mix routing decisions are behavior, not implementation
+  // detail, and they shipped three separate incidents while only their pure
+  // helpers had tests.
+  transcribeOneChannel,
+  transcribePerSpeaker,
+  languageToIso,
 };
 
 /** File extension matching an audio wire type. The transcription API accepts
@@ -1184,11 +1289,12 @@ const LANGUAGE_ISO: Record<string, string> = {
  * mix-transcript beats no transcript.
  *
  * Output carries `segments` tagged `Business` / `Customer`, which the
- * transcript viewer already renders as "Agent" / "Customer". There are no
- * per-utterance timestamps: the configured STT model (`gpt-4o-transcribe` —
- * measurably better than whisper-1 on Arabic, which is this product's primary
- * language) doesn't expose them, so the two sides appear as one block each
- * rather than interleaved turns.
+ * transcript viewer already renders as "Agent" / "Customer". Each side is
+ * folded into ONE turn (see the turn assembly in `transcribePerSpeaker`): the
+ * configured model (`callSttModel()`, whisper-1 since e2643747 — gpt-4o
+ * returned the PROMPT as the transcript on a real call) does return segment
+ * timestamps, but interleaving per-utterance turns from two independent
+ * decodes is an open follow-up, not a promise this document shape makes.
  */
 export async function transcribeInAppCallRecording(
   callId: string,
@@ -1224,12 +1330,20 @@ export async function transcribeInAppCallRecording(
     return false;
   }
 
-  const policy = languagePolicyFrom(aiConfig);
-  let result = await transcribePerSpeaker(bytes, call.id, policy);
+  const policy: LanguagePolicy = {
+    ...languagePolicyFrom(aiConfig),
+    workspaceId: call.workspaceId,
+  };
+  const perSpeaker = await transcribePerSpeaker(bytes, call.id, policy);
+  let result =
+    perSpeaker !== null && perSpeaker !== "mix_ladder_exhausted"
+      ? perSpeaker
+      : null;
 
-  if (!result) {
-    // Not stereo, no ffmpeg, or every channel was discarded. Transcribe the
-    // file whole — but through the SAME gated path, never a raw one.
+  if (perSpeaker === null) {
+    // Split unavailable (not stereo, or ffmpeg failed) — the audio has never
+    // met the ladder, so transcribe the file whole. Through the SAME gated
+    // path, never a raw one.
     //
     // THIS IS WHERE THE GIBBERISH CAME FROM. The fallback used to call the
     // voice-note transcriber directly: a different model, no segment
@@ -1237,14 +1351,19 @@ export async function transcribeInAppCallRecording(
     // Lebanese Arabic call came back as one English sentence repeated
     // twenty-five times and was stored verbatim. An unguarded fallback behind
     // a guarded path just relocates the failure.
+    //
+    // When `transcribePerSpeaker` returned "mix_ladder_exhausted" instead,
+    // this branch is deliberately SKIPPED: the mix already went through every
+    // rung of the ladder in there, so a second billed pass on the same audio
+    // could only store what the gate just rejected.
     const mixed = await transcribeOneChannel(
       {
         speaker: "Business",
         label: "mixed",
         // The whole file as one "channel". `speechSeconds` is asserted rather
-        // than measured: the split already failed, and a recording that
-        // reached this function has audio in it — the segment gates below are
-        // what protect this path.
+        // than measured: the split never ran, so there is no measurement to
+        // pass, and a recording that reached this function has audio in it —
+        // the segment gates below are what protect this path.
         audio: {
           bytes,
           meanVolumeDb: 0,
@@ -1278,11 +1397,11 @@ export async function transcribeInAppCallRecording(
 
   // ── Dialect repair ──────────────────────────────────────────────────────
   // The speech model renders Lebanese as near-miss MSA ("كيف فيني ساعدك" came
-  // back as "كفيه سادك"). Claude knows the dialect — this codebase already
-  // routes reply TEXT to it for that reason — so it repairs the spelling under
-  // a hard guard that discards anything that strayed from the original. The
-  // RAW text is kept in the document either way, so a suspicious line can
-  // always be checked against what was actually heard.
+  // back as "كفيه سادك"). A text model repairs the spelling (OpenAI via
+  // `resolveModel("reply")` since f4a57722 — the reply path's corpus-taught
+  // Lebanese) under a hard guard that discards anything that strayed from the
+  // original. The RAW text is kept in the document either way, so a
+  // suspicious line can always be checked against what was actually heard.
   const businessContext = [aiConfig.companyName, aiConfig.products, aiConfig.services]
     .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
     .join("، ")
@@ -1293,6 +1412,7 @@ export async function transcribeInAppCallRecording(
         text: seg.text,
         language: result.language,
         businessContext,
+        workspaceId: call.workspaceId,
       });
       return fixed ? { ...seg, text: fixed } : seg;
     }),
@@ -1304,6 +1424,7 @@ export async function transcribeInAppCallRecording(
           text: result.text,
           language: result.language,
           businessContext,
+          workspaceId: call.workspaceId,
         });
   const anyRepaired =
     repairedFlat !== null ||
@@ -1343,13 +1464,18 @@ export async function transcribeInAppCallRecording(
     bytes: new TextEncoder().encode(JSON.stringify(doc)),
     contentType: "application/json",
   });
+  // The denormalized column promises ISO-639 (the Meta download path and the
+  // `call:artifacts` frame both carry codes), while whisper answers with a
+  // NAME ("arabic") — normalize here so every consumer sees one format. An
+  // unmappable name is stored as-is: a truncated name still beats null.
+  const isoLanguage = result.language
+    ? (languageToIso(result.language) ?? result.language.slice(0, 16))
+    : null;
   const written = await db.call.updateMany({
     where: { id: call.id, transcriptKey: null },
     data: {
       transcriptKey: key,
-      ...(result.language
-        ? { transcriptLanguage: result.language.slice(0, 16) }
-        : {}),
+      ...(isoLanguage ? { transcriptLanguage: isoLanguage } : {}),
     },
   });
   if (written.count > 0) await publishCallArtifacts(call.id);

@@ -18,6 +18,10 @@ import { getProviderBinding, requireProviderMethod } from "@/lib/providers";
 import { sendInteractiveInternal } from "@/lib/messaging/send-interactive-internal";
 import { storeInAppRecording } from "@/lib/media/call-recording-download";
 import {
+  callArtifactPoliciesFor,
+  deriveTranscriptPending,
+} from "@/lib/media/call-artifact-policy";
+import {
   providerPlaceCall,
   providerAnswerCall,
   providerCompleteAccept,
@@ -797,13 +801,11 @@ export class CallsService {
   }
 
   /**
-   * The number's standing recording policy, read fresh from its connection
-   * config (OURS — the provider stores no such setting; recording is a
-   * per-call opt-in that this policy applies to every placed/answered call).
-   * Returns undefined unless the policy is enabled AND complete: the provider
-   * hard-rejects ENABLED without purpose + announcement_language, and a
-   * half-configured policy must degrade to "don't record", never to a call
-   * that fails outright.
+   * The number's standing artifact policy, read fresh from its connection
+   * config (OURS — the provider stores no such setting). Two bare per-number
+   * toggles: should this call be recorded, should it be transcribed. They
+   * drive `recordInApp` on the initiate/answer responses and the retention
+   * decision after transcription.
    */
   private async callArtifactPolicies(
     workspaceId: string,
@@ -817,37 +819,27 @@ export class CallsService {
     transcriptionEnabled: boolean;
   }> {
     // Artifacts are produced IN-APP only (maintainer decision 2026-07-28):
-    // the agent's browser records silently and our own Whisper transcribes.
+    // the agent's browser records silently and our own STT transcribes.
     // Meta's built-in recording/transcription objects are NEVER attached to a
     // call, and nothing is sent to the customer about recording either — the
     // maintainer removed the consent-notice message outright as well; the
     // notice posture is the business's own responsibility. (The webhook
     // ingest for `call_recording_available`/`call_transcript_available`
     // remains as a safety net for artifacts of historical calls.)
-    if (channel !== "whatsapp") {
-      return { recordingEnabled: false, transcriptionEnabled: false };
-    }
-    const conn = await this.db.channelConnection.findFirst({
-      where: channelConnectionId
-        ? { id: channelConnectionId, workspaceId }
-        : { workspaceId, channel, isDefault: true },
-      select: { config: true },
-    });
-    const config = conn?.config as {
-      callRecording?: { enabled?: boolean };
-      callTranscription?: { enabled?: boolean };
-    } | null;
-    return {
-      recordingEnabled: config?.callRecording?.enabled === true,
-      transcriptionEnabled: config?.callTranscription?.enabled === true,
-    };
+    //
+    // The read itself lives in the domain layer (`callArtifactPoliciesFor`)
+    // because the call-recordings sweeper needs the SAME answer when it
+    // finishes work for a call whose browser or API process died mid-pipeline.
+    return callArtifactPoliciesFor(workspaceId, channel, channelConnectionId);
   }
 
   /**
-   * Admin: set the number's standing recording policy. Stored on the
+   * Admin: set the number's standing artifact policy. Stored on the
    * connection's config (local, not a provider write) and applied to every
-   * subsequent placed/answered call on that number, which then plays the
-   * provider's consent announcement to both parties before recording starts.
+   * subsequent placed/answered call on that number — the agent's browser then
+   * records the call silently (there is no announcement; the maintainer
+   * removed Meta's built-in flow and the consent notice outright, see
+   * `callArtifactPolicies`).
    */
   async updateCallArtifactPolicy(
     session: ApiSession,
@@ -2445,6 +2437,12 @@ export class CallsService {
     const items: ConversationCallRow[] = page.map((c) => ({
       ...serializeCall(c),
       channel: c.channel,
+      transcriptPending: deriveTranscriptPending({
+        recordingKey: c.recordingKey,
+        transcriptKey: c.transcriptKey,
+        endedAt: c.endedAt,
+        channelConnectionConfig: c.conversation.channelConnection?.config ?? null,
+      }),
       initiatedByName: c.initiatedBy?.name ?? null,
       answeredByName: c.answeredBy?.name ?? null,
       connected:
@@ -2571,6 +2569,7 @@ export class CallsService {
         durationSeconds: true,
         ctaPayload: true,
         deeplinkPayload: true,
+        endedAt: true,
         recordingKey: true,
         transcriptKey: true,
         transcriptLanguage: true,
@@ -2619,6 +2618,12 @@ export class CallsService {
       hasRecording: c.recordingKey !== null,
       hasTranscript: c.transcriptKey !== null,
       transcriptLanguage: c.transcriptLanguage,
+      transcriptPending: deriveTranscriptPending({
+        recordingKey: c.recordingKey,
+        transcriptKey: c.transcriptKey,
+        endedAt: c.endedAt,
+        channelConnectionConfig: c.conversation.channelConnection?.config ?? null,
+      }),
       errorTitle: c.errorTitle,
       channel: c.channel,
       accountId: c.conversation.channelConnectionId,
@@ -2675,6 +2680,11 @@ export class CallsService {
  */
 export interface ConversationCallRow extends SerializedCall {
   channel: Channel;
+  /** Derived "Transcribing…" state — transcription is ON for the number, the
+   *  recording exists, the transcript doesn't, and the recovery sweeper is
+   *  still inside its retry horizon. Live frames carry the same flag; this is
+   *  what keeps it truthful across a reload. */
+  transcriptPending: boolean;
   /** Agent who placed an outbound call (null for inbound). */
   initiatedByName: string | null;
   /** Agent who answered an inbound call (null if unanswered). */
@@ -2714,6 +2724,8 @@ export interface TeamCallRow {
   hasTranscript: boolean;
   /** Auto-detected spoken language of the transcript (ISO 639, e.g. "ar"). */
   transcriptLanguage: string | null;
+  /** Derived "Transcribing…" state (see ConversationCallRow). */
+  transcriptPending: boolean;
   /** Why a FAILED call failed, from the provider's terminate webhook. */
   errorTitle: string | null;
   /**

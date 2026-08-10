@@ -138,7 +138,8 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
         if (
           row.hasRecording === p.hasRecording &&
           row.hasTranscript === p.hasTranscript &&
-          row.transcriptLanguage === p.transcriptLanguage
+          row.transcriptLanguage === p.transcriptLanguage &&
+          (row.transcriptPending ?? false) === (p.transcriptPending ?? false)
         ) {
           return prev;
         }
@@ -148,6 +149,7 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
           hasRecording: p.hasRecording,
           hasTranscript: p.hasTranscript,
           transcriptLanguage: p.transcriptLanguage,
+          transcriptPending: p.transcriptPending ?? false,
         };
         return next;
       });

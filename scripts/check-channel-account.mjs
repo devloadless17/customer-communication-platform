@@ -157,7 +157,11 @@ const DEFAULT_READ_BUDGET = new Map([
   ],
   [
     "apps/api/src/calls/calls.service.ts",
-    { max: 4, why: "Thread's own connection when known, default for workspace-level settings reads." },
+    { max: 3, why: "Thread's own connection when known, default for workspace-level settings reads. (Was 4: the artifact-policy read moved to lib/media/call-artifact-policy.ts so the recovery sweeper shares the one definition.)" },
+  ],
+  [
+    "apps/api/src/lib/media/call-artifact-policy.ts",
+    { max: 1, why: "callArtifactPoliciesFor — the thread's own connection when the caller passes one, default fallback otherwise. Extracted verbatim from calls.service.ts (its budget dropped by one in the same commit)." },
   ],
   [
     "apps/api/src/workspace-settings/whatsapp/whatsapp.service.ts",

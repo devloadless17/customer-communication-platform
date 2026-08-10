@@ -1284,10 +1284,16 @@ export interface CallSnapshot {
   /** Auto-detected spoken language of the transcript (ISO 639, e.g. "ar"). */
   transcriptLanguage?: string | null;
   /**
-   * A transcript is still being produced for this call (live-frame state
-   * only — never hydrated). Set by a `call:artifacts` frame and always
-   * cleared by a later one, so the "Transcribing…" affordance it drives
-   * cannot get stuck on a failed or skipped transcription.
+   * A transcript is still being produced (or owed by the recovery sweeper)
+   * for this call. Two sources that agree by construction: live
+   * `call:artifacts` frames set and clear it in real time, and hydration
+   * DERIVES it (`deriveTranscriptPending`) from the number's transcription
+   * policy + missing transcript + the sweeper's retry horizon — so a reload
+   * mid-transcription no longer loses the "Transcribing…" state. Bounded, not
+   * perfect: on the rare call whose audio yields no usable speech (or a
+   * workspace whose AI config is off while the number's toggle is on), the
+   * derived value can persist until the 24h horizon expires — a bounded
+   * cosmetic staleness, never a spinner that outlives the horizon.
    */
   transcriptPending?: boolean;
   /** Why a FAILED call failed, from the provider's terminate webhook (e.g.

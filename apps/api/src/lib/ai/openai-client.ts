@@ -233,16 +233,32 @@ export async function transcribe(opts: {
   const { client, toFile } = await getClient();
   const file = await toFile(Buffer.from(opts.bytes), opts.filename, { type: opts.mimeType });
   const started = Date.now();
-  const res = await client.audio.transcriptions.create({
-    model: opts.model,
-    file,
-    ...(opts.language ? { language: opts.language } : {}),
-    ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
-    ...(opts.prompt ? { prompt: opts.prompt } : {}),
-    ...(opts.segments
-      ? { response_format: "verbose_json", timestamp_granularities: ["segment"] }
-      : {}),
-  });
+  let res;
+  try {
+    res = await client.audio.transcriptions.create({
+      model: opts.model,
+      file,
+      ...(opts.language ? { language: opts.language } : {}),
+      ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+      ...(opts.prompt ? { prompt: opts.prompt } : {}),
+      ...(opts.segments
+        ? { response_format: "verbose_json", timestamp_granularities: ["segment"] }
+        : {}),
+    });
+  } catch (err) {
+    // A thrown call is still an operator-relevant event — an STT outage that
+    // is invisible in the ledger reads as "no calls happened" instead of
+    // "every call failed". Failed requests aren't billed, so cost stays null.
+    void recordUsage({
+      op: opts.usage?.op ?? "stt",
+      workspaceId: opts.usage?.workspaceId,
+      model: opts.model,
+      latencyMs: Date.now() - started,
+      ok: false,
+      error: err instanceof Error ? err.message.slice(0, 300) : String(err),
+    });
+    throw err;
+  }
   // STT bills per MINUTE, so duration is the billable quantity, not tokens.
   // `verbose_json` gives it exactly (last segment end); otherwise it is unknown
   // and left null rather than guessed from the byte count, which varies with

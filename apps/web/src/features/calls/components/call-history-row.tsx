@@ -56,6 +56,10 @@ export interface CallHistoryRowData {
   hasTranscript: boolean;
   /** Auto-detected spoken language of the transcript (ISO 639, e.g. "ar"). */
   transcriptLanguage: string | null;
+  /** Transcription in flight (or queued for the recovery sweeper). Hydrated
+   *  by the API and kept live by `call:artifacts` frames — same contract as
+   *  the thread bubble's "Transcribing…" chip. */
+  transcriptPending?: boolean;
   /** Why a FAILED call failed, from the provider's terminate webhook. */
   errorTitle: string | null;
   /** WHICH of our accounts on the channel this call was on (the thread's). */
@@ -253,6 +257,17 @@ export function CallHistoryRow({
       />
 
       <div className="flex shrink-0 items-center gap-1">
+        {row.transcriptPending === true && !row.hasTranscript && (
+          <span
+            className="flex items-center gap-1 whitespace-nowrap text-2xs text-muted-foreground"
+            // Announced politely: it resolves on its own and must not
+            // interrupt whatever the agent is doing.
+            aria-live="polite"
+          >
+            <Loader2 className="size-3 animate-spin" aria-hidden />
+            Transcribing…
+          </span>
+        )}
         {row.hasRecording && (
           <Button
             variant="ghost"

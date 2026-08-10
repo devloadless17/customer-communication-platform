@@ -245,10 +245,11 @@ export class CallsController {
 
   /**
    * Set the number's standing call-recording policy — stored on OUR
-   * connection config (Meta has no such setting; recording is a per-call
-   * opt-in this policy applies to every placed/answered call). ADMIN-only:
-   * it makes every future call on the number open with a legally required
-   * consent announcement.
+   * connection config (Meta has no such setting). ADMIN-only: it makes the
+   * agent's browser record every future call on the number, silently — the
+   * maintainer removed Meta's announcement flow and the consent notice
+   * outright (see `CallsService.callArtifactPolicies`); any notice posture is
+   * the business's own responsibility.
    */
   @Patch("api/calls/admin/recording-policy")
   @HttpCode(200)
@@ -299,10 +300,11 @@ export class CallsController {
   }
 
   /**
-   * Same shape for the transcription policy — an independent provider feature
-   * (own webhook, own artifact, own pricing). The transcript LANGUAGE is
-   * auto-detected from the call audio (Arabic supported); the announcement
-   * language here only picks the consent phrase's voice.
+   * Same shape for the transcription policy — an independent toggle (a
+   * workspace can transcribe without keeping audio, see
+   * `discardStoredRecording`). The transcript LANGUAGE is auto-detected from
+   * the call audio (Arabic supported); there is no announcement (see the
+   * recording-policy note above).
    */
   @Patch("api/calls/admin/transcription-policy")
   @HttpCode(200)

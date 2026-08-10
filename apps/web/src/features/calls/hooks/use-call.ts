@@ -200,6 +200,18 @@ export function useCall(): {
   // apply-or-stash, then drain on rebind.
   const pendingAnswersRef = useRef<Map<string, string>>(new Map());
 
+  // Pending `call:answered` frames, keyed by Meta's REAL callId — the SAME
+  // race class as pendingAnswersRef, with a worse failure mode. The pickup
+  // frame is fanned to the whole team and can beat the POST /call response
+  // that rebinds our optimistic `tmp_` id; the old handler matched strictly on
+  // `prev.callId === payload.callId` and DROPPED the frame in that window, so
+  // the recorder never armed (no recording, no transcript), the status stayed
+  // `ringing`, and the 60s ring-timeout tore down a call two people were
+  // already talking on. Apply-or-stash, drain on rebind; a foreign agent's
+  // pickup sits inert under its own key and is GC'd by that call's own
+  // `call:ended`. Value = the provider's answeredAt ISO timestamp.
+  const pendingAnsweredRef = useRef<Map<string, string>>(new Map());
+
   // Peer connection + media stream live as refs so swapping doesn't trigger
   // a re-render. Re-renders are driven by liveCall changes only.
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -229,8 +241,22 @@ export function useCall(): {
     ctx: AudioContext;
     chunks: Blob[];
     mimeType: string;
-    flushTimer: ReturnType<typeof setInterval>;
+    flushTimer: ReturnType<typeof setTimeout>;
+    // Interim flushes re-send the WHOLE file-so-far (the server overwrites one
+    // key — crash insurance, not a chunk protocol), so a fixed 30s cadence is
+    // O(n²) bytes: a 30-minute call re-uploads ~400MB in total. The delay
+    // doubles after every flush (30s → 60 → 120 → 240, capped at 300s), which
+    // keeps early crash-loss small while bounding what a long call re-sends.
+    flushDelayMs: number;
     callId: string;
+    // Kept so a mid-call renegotiation can re-point the customer leg at the
+    // new remote media (see rebindRecorderRemoteSource). `remoteTrack` is the
+    // identity the rebind decision keys on: a renegotiation usually replaces
+    // the TRACK inside the SAME MediaStream object, so comparing streams
+    // would miss exactly the case the rebind exists for.
+    merger: ChannelMergerNode;
+    remoteSource: MediaStreamAudioSourceNode;
+    remoteTrack: MediaStreamTrack | null;
   } | null>(null);
   // Mirror liveCall in a ref so socket handlers (bound once) read the
   // current call state without forcing the effect to re-subscribe.
@@ -300,7 +326,7 @@ export function useCall(): {
     const rec = recorderRef.current;
     if (!rec) return;
     recorderRef.current = null;
-    clearInterval(rec.flushTimer);
+    clearTimeout(rec.flushTimer);
     try {
       if (rec.recorder.state !== "inactive") rec.recorder.stop();
     } catch {
@@ -320,7 +346,7 @@ export function useCall(): {
       if (!rec) return;
       if (final) {
         recorderRef.current = null;
-        clearInterval(rec.flushTimer);
+        clearTimeout(rec.flushTimer);
         if (rec.recorder.state !== "inactive") {
           // stop() flushes the buffered tail through ondataavailable before
           // onstop — awaited so the final blob carries the last words.
@@ -363,7 +389,18 @@ export function useCall(): {
         }
         if (i < attempts - 1) await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
       }
-      if (final) console.warn("[useCall] final recording upload failed after retries");
+      if (final) {
+        // The final upload is what triggers remux + transcription server-side.
+        // The server-side recovery sweeper finalizes from the last interim
+        // flush, so a failure here degrades to "recording up to the last
+        // checkpoint" — but the agent must hear about it NOW, while re-asking
+        // the customer is still possible, not weeks later from a missing
+        // transcript.
+        console.warn("[useCall] final recording upload failed after retries");
+        toast.error(
+          "Call recording upload failed — only audio up to the last checkpoint could be saved.",
+        );
+      }
     },
     [],
   );
@@ -405,7 +442,33 @@ export function useCall(): {
     }
 
     try {
-      const ctx = new AudioContext();
+      // Same constructor fallback as the voice recorder / notification sound.
+      const AudioCtxCtor: typeof AudioContext | undefined =
+        window.AudioContext ??
+        (window as Window & { webkitAudioContext?: typeof AudioContext })
+          .webkitAudioContext;
+      if (!AudioCtxCtor) {
+        console.warn("[useCall] AudioContext unavailable — recording skipped");
+        return;
+      }
+      const ctx = new AudioCtxCtor();
+      // This runs from a socket handler or a track `unmute` event — NOT a user
+      // gesture — so the context can be born `suspended`, and a suspended
+      // context records digital silence with no diagnostic anywhere. Resume it
+      // and say so if the browser refuses.
+      if (ctx.state !== "running") {
+        void ctx
+          .resume()
+          .then(() => {
+            if ((ctx.state as AudioContextState) !== "running") {
+              console.warn(
+                `[useCall] recorder AudioContext is ${ctx.state} after resume() — ` +
+                  "this recording may be silent",
+              );
+            }
+          })
+          .catch(() => {});
+      }
       const dest = ctx.createMediaStreamDestination();
       // FORCE two DISCRETE channels. Without this the browser collapsed the
       // mix to mono and the stored file carried the SAME audio on both
@@ -421,7 +484,8 @@ export function useCall(): {
       const merger = ctx.createChannelMerger(2);
       // Agent → left, customer → right. See the recorder header comment.
       ctx.createMediaStreamSource(local).connect(merger, 0, 0);
-      ctx.createMediaStreamSource(remote).connect(merger, 0, 1);
+      const remoteSource = ctx.createMediaStreamSource(remote);
+      remoteSource.connect(merger, 0, 1);
       merger.connect(dest);
       // The browser does not have to honour the request, and when it silently
       // doesn't, the only symptom is a transcript with no speaker labels weeks
@@ -447,21 +511,72 @@ export function useCall(): {
         if (e.data.size > 0) chunks.push(e.data);
       };
       recorder.start(5_000);
-      const flushTimer = setInterval(() => {
-        void uploadInAppRecording(false);
-      }, 30_000);
-      recorderRef.current = {
+      const rec = {
         recorder,
         ctx,
         chunks,
         mimeType: mimeType || "audio/webm",
-        flushTimer,
+        flushTimer: setTimeout(() => {}, 0),
+        flushDelayMs: 30_000,
         callId: live.callId,
+        merger,
+        remoteSource,
+        remoteTrack: remoteTrack ?? null,
       };
+      // Self-rescheduling flush with backoff (see flushDelayMs on the ref).
+      const scheduleFlush = () => {
+        rec.flushTimer = setTimeout(() => {
+          void uploadInAppRecording(false).finally(() => {
+            if (recorderRef.current === rec) {
+              rec.flushDelayMs = Math.min(rec.flushDelayMs * 2, 300_000);
+              scheduleFlush();
+            }
+          });
+        }, rec.flushDelayMs);
+      };
+      scheduleFlush();
+      recorderRef.current = rec;
     } catch (err) {
       console.warn("[useCall] in-app recorder failed to start", err);
     }
   }, [uploadInAppRecording]);
+
+  /**
+   * Re-point the recorder's CUSTOMER channel at a new remote stream.
+   *
+   * A mid-call renegotiation (`media_update` — Meta sends one post-pickup on
+   * Messenger) replaces the remote track, but a MediaStreamAudioSourceNode
+   * binds at construction: with the recorder already running, the merger
+   * stayed wired to the DEAD stream and the customer's leg went silent for
+   * the rest of the file — the same -91 dBFS failure class the `unmute` wait
+   * exists for, reintroduced through a different door. Honors the same
+   * muted-track gate: binding a muted track records silence forever.
+   */
+  const rebindRecorderRemoteSource = useCallback(
+    (remote: MediaStream, track: MediaStreamTrack) => {
+      const rec = recorderRef.current;
+      if (!rec) return;
+      const bind = () => {
+        const cur = recorderRef.current;
+        // The recorder may have stopped, or the media been superseded again,
+        // while we waited on `unmute` — binding then would wire a stale source.
+        if (cur !== rec || remoteStreamRef.current !== remote) return;
+        if (!remote.getAudioTracks().includes(track)) return;
+        try {
+          rec.remoteSource.disconnect();
+          const src = rec.ctx.createMediaStreamSource(remote);
+          src.connect(rec.merger, 0, 1);
+          rec.remoteSource = src;
+          rec.remoteTrack = track;
+        } catch (err) {
+          console.warn("[useCall] failed to rebind recorder to new remote track", err);
+        }
+      };
+      if (track.muted) track.addEventListener("unmute", bind, { once: true });
+      else bind();
+    },
+    [],
+  );
 
   const releaseMedia = useCallback(() => {
     clearDisconnectGrace();
@@ -555,8 +670,48 @@ export function useCall(): {
     releaseMedia();
     // Clear any stashed answers so they can't leak into the next call's PC.
     pendingAnswersRef.current.clear();
+    pendingAnsweredRef.current.clear();
     setLiveCall(null);
   }, [releaseMedia, uploadInAppRecording]);
+
+  /**
+   * The customer picked up our outbound call (a `call:answered` frame that
+   * matched this call, live or drained from the stash after the tmp_→real
+   * rebind). Side effects run HERE, outside the state updater — an updater
+   * must be pure (StrictMode runs it twice), and the old code started the
+   * recorder from inside one.
+   */
+  const applyOutboundAnswered = useCallback(
+    (callId: string, answeredAt: string) => {
+      // Open the outbound recorder gate first: the ref flips synchronously so
+      // the start call below (and any later ontrack/connected path) sees it.
+      // Harmless when the frame turns out not to apply — the gate is only
+      // consulted for a live outbound ring, and teardown resets it.
+      outboundAnsweredRef.current = true;
+      startInAppRecorder();
+      const answeredAtMs = Date.parse(answeredAt);
+      setLiveCall((prev) => {
+        // Only our own still-ringing OUTBOUND call. Inbound calls set their
+        // own state when the agent answers.
+        if (
+          !prev ||
+          prev.callId !== callId ||
+          prev.direction !== "out" ||
+          prev.status !== "ringing"
+        ) {
+          return prev;
+        }
+        return {
+          ...prev,
+          status: "in_progress",
+          // Start the timer from the provider's real pickup time, not from
+          // when this frame happened to arrive.
+          answeredAt: Number.isFinite(answeredAtMs) ? answeredAtMs : Date.now(),
+        };
+      });
+    },
+    [startInAppRecorder],
+  );
 
   // Socket subscribers. Bound once on mount; read liveCallRef inside
   // handlers so a callId change doesn't force a re-subscribe.
@@ -646,32 +801,18 @@ export function useCall(): {
      * sits on "Calling…" forever while the two parties are already talking.
      */
     const onAnswered = (payload: { callId: string; answeredAt: string }) => {
-      const answeredAtMs = Date.parse(payload.answeredAt);
-      setLiveCall((prev) => {
-        // Only our own still-ringing OUTBOUND call. Inbound calls set their own
-        // state when the agent answers, and this frame is fanned to the whole
-        // team, so every other agent's browser sees it too.
-        if (
-          !prev ||
-          prev.callId !== payload.callId ||
-          prev.direction !== "out" ||
-          prev.status !== "ringing"
-        ) {
-          return prev;
-        }
-        // Real pickup — open the outbound recorder gate and start it. The ref
-        // flips synchronously (no render-cycle race), and the start call is
-        // idempotent.
-        outboundAnsweredRef.current = true;
-        startInAppRecorder();
-        return {
-          ...prev,
-          status: "in_progress",
-          // Start the timer from the provider's real pickup time, not from
-          // when this frame happened to arrive.
-          answeredAt: Number.isFinite(answeredAtMs) ? answeredAtMs : Date.now(),
-        };
-      });
+      // Apply-or-stash, like the answer SDP above. This frame is fanned to
+      // the whole team, so a non-matching callId is EITHER a foreign agent's
+      // call (inert in the stash, GC'd by its call:ended) OR our own outbound
+      // pickup beating the tmp_→real rebind — and dropping that one used to
+      // disable recording for the whole call and let the ring-timeout kill a
+      // live conversation (see pendingAnsweredRef).
+      const live = liveCallRef.current;
+      if (live && live.callId === payload.callId) {
+        applyOutboundAnswered(payload.callId, payload.answeredAt);
+        return;
+      }
+      pendingAnsweredRef.current.set(payload.callId, payload.answeredAt);
     };
 
     const onEnded = (payload: { callId: string }) => {
@@ -682,6 +823,7 @@ export function useCall(): {
       // GC any stashed answer for this call — including foreign-call answers
       // that landed here via the team-room fanout but were never ours to apply.
       pendingAnswersRef.current.delete(payload.callId);
+      pendingAnsweredRef.current.delete(payload.callId);
     };
 
     socket.on("call:sdp_offer", onSdpOffer);
@@ -692,7 +834,7 @@ export function useCall(): {
       socket.off("call:answered", onAnswered);
       socket.off("call:ended", onEnded);
     };
-  }, [tearDown, applyOutboundAnswer, startInAppRecorder]);
+  }, [tearDown, applyOutboundAnswer, applyOutboundAnswered]);
 
 
   // ── Surviving a reload / tab close ──────────────────────────────────────
@@ -917,10 +1059,21 @@ export function useCall(): {
       }
       if (e.streams[0]) {
         remoteStreamRef.current = e.streams[0];
-        // Both legs may now exist — the recorder start is idempotent and
-        // guards on the armed flag, so calling from here AND from the
-        // connected state covers either arrival order.
-        startInAppRecorder();
+        const rec = recorderRef.current;
+        if (rec && e.track !== rec.remoteTrack) {
+          // Renegotiation replaced the remote media mid-recording. Compare
+          // TRACKS, not streams: under unified-plan the renegotiated track
+          // usually arrives inside the SAME MediaStream object, so a stream
+          // comparison misses it — and a MediaStreamAudioSourceNode binds at
+          // construction, so without a rebind the customer leg records
+          // silence for the rest of the file (the -91 dBFS class).
+          rebindRecorderRemoteSource(e.streams[0], e.track);
+        } else if (!rec) {
+          // Both legs may now exist — the recorder start is idempotent and
+          // guards on the armed flag, so calling from here AND from the
+          // connected state covers either arrival order.
+          startInAppRecorder();
+        }
       }
     };
 
@@ -982,7 +1135,7 @@ export function useCall(): {
 
     pcRef.current = pc;
     return pc;
-  }, [tearDown, releaseMedia, clearDisconnectGrace, startInAppRecorder]);
+  }, [tearDown, releaseMedia, clearDisconnectGrace, startInAppRecorder, rebindRecorderRemoteSource]);
 
   /**
    * Finish a two-hop accept: hold our audio, wait for the peer connection to
@@ -1297,6 +1450,15 @@ export function useCall(): {
             pendingAnswersRef.current.delete(realCallId);
             void applyOutboundAnswer(realCallId, stashed);
           }
+          // Same drain for a stashed PICKUP frame: without it a fast customer
+          // answer that beat this rebind leaves the recorder gate closed and
+          // the status on `ringing` until the ring-timeout kills a call two
+          // people are talking on.
+          const stashedAnswered = pendingAnsweredRef.current.get(realCallId);
+          if (stashedAnswered !== undefined) {
+            pendingAnsweredRef.current.delete(realCallId);
+            applyOutboundAnswered(realCallId, stashedAnswered);
+          }
           // Messenger: the answer came back in THIS response (not a webhook), so
           // apply it directly. Reuses the same have-local-offer → setRemote path;
           // WhatsApp responses carry no sdpAnswer, so this is a no-op there.
@@ -1312,7 +1474,7 @@ export function useCall(): {
         busyRef.current = false;
       }
     },
-    [setupPeer, tearDown, applyOutboundAnswer],
+    [setupPeer, tearDown, applyOutboundAnswer, applyOutboundAnswered],
   );
 
   const reject = useCallback(async (callId: string) => {

@@ -1,6 +1,7 @@
 import { type ConversationEventKind, Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
+import { deriveTranscriptPending } from "@/lib/media/call-artifact-policy";
 import { inboxViewWhereClauses } from "@/lib/inbox-views/where";
 import type { InboxViewFilters } from "@ccp/shared/inbox-views/types";
 import type {
@@ -447,6 +448,11 @@ export async function getConversationWithRefs(
           errorTitle: true,
         },
       },
+      // The thread's account config — one extra single-row join, read only to
+      // derive `transcriptPending` on the calls below (is transcription ON
+      // for this number). Live frames carry the flag; hydration must agree or
+      // a reload during transcription loses the "Transcribing…" state.
+      channelConnection: { select: { config: true } },
       // database-added-1: only COUNT the bounded `notes` relation here. The
       // message total now reads the denormalized `incoming+outgoingMessagesCount`
       // columns (auto-returned by this `include`) instead of an UNCAPPED
@@ -499,6 +505,12 @@ export async function getConversationWithRefs(
     hasRecording: c.recordingKey !== null,
     hasTranscript: c.transcriptKey !== null,
     transcriptLanguage: c.transcriptLanguage,
+    transcriptPending: deriveTranscriptPending({
+      recordingKey: c.recordingKey,
+      transcriptKey: c.transcriptKey,
+      endedAt: c.endedAt,
+      channelConnectionConfig: row.channelConnection?.config ?? null,
+    }),
     errorTitle: c.errorTitle,
   }));
 
