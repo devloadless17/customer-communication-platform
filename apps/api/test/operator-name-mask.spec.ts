@@ -156,7 +156,7 @@ describe("conversation activity timeline", () => {
         },
       ],
     });
-    const events = await listConversationEvents(ws, conversationId);
+    const events = (await listConversationEvents(ws, conversationId)) ?? [];
     // The DTO exposes actorName, not the id — tell the two rows apart by the
     // status each one wrote.
     const byOperator = events.find(
