@@ -38,10 +38,17 @@ function stripForWire(m: Message): Message {
  * Room-scoping rules — DO NOT REGRESS (this is the "two tabs disagree" /
  * "broadcast storm" decision-tree class):
  *
- *   - emitToWorkspace        → use when EVERY agent on the team needs to know.
- *                          Examples: message:new (list ordering), conversation
- *                          status / assigned / read (badges), contact:updated
- *                          (panel + filter pruning), team-wide presence.
+ *   - emitToWorkspace        → use when every UNRESTRICTED member needs to know
+ *                          and the frame carries thread content (message
+ *                          bodies, conversation state, note text). Restricted
+ *                          agents never join this room — conversation frames
+ *                          reach them via emitAboutConversation's user-room
+ *                          co-target.
+ *   - emitToWorkspaceMeta → use for content-free workspace METADATA every
+ *                          member — restricted agents included — renders from:
+ *                          catalog ticks, presence/availability, contact
+ *                          directory updates, broadcast progress, team rename.
+ *                          Never a frame naming a conversation. See rooms.ts.
  *   - emitToConversation → use when only viewers OF this thread care.
  *                          Examples: message:status, message:media:ready,
  *                          typing:update, broadcast recipient frames (storm
@@ -269,11 +276,18 @@ export const FANOUT_RULES: FanoutRuleMap = {
     };
     // Same co-targeting as `ticket.changed`, for the same reason: a restricted
     // agent must see a reply on their own ticket without refreshing. The event
-    // already names its audience (`notifiedUserIds`).
-    emitter.emitToWorkspaceAndUsers(e.workspaceId, e.notifiedUserIds, "ticket:thread:message", frame);
+    // already names its audience (`notifiedUserIds`) — PLUS the author: they
+    // are deliberately excluded from notifiedUserIds (no self-toast, no
+    // self-unread — the bell and badge key off that list), but a restricted
+    // AUTHOR still needs the FRAME, or their own reply never converges their
+    // other tab / device. Unrestricted authors get it via the ws: room.
+    const targetUserIds = e.message.authorUserId
+      ? [...e.notifiedUserIds, e.message.authorUserId]
+      : e.notifiedUserIds;
+    emitter.emitToWorkspaceAndUsers(e.workspaceId, targetUserIds, "ticket:thread:message", frame);
     for (const guestWorkspaceId of new Set(e.sharedWithWorkspaceIds ?? [])) {
       if (guestWorkspaceId === e.workspaceId) continue;
-      emitter.emitToWorkspaceAndUsers(guestWorkspaceId, e.notifiedUserIds, "ticket:thread:message", {
+      emitter.emitToWorkspaceAndUsers(guestWorkspaceId, targetUserIds, "ticket:thread:message", {
         ...frame,
         // Named for the RECEIVING workspace: the client filters frames by its
         // own active workspace, same rule as `ticket:changed`.
@@ -411,6 +425,12 @@ export const FANOUT_RULES: FanoutRuleMap = {
     });
   },
 
+  // Asymmetry with `conversation.assigned` above, on purpose: when a status
+  // change accompanies an UNASSIGN, the resolved assignee is null, so this
+  // frame reaches only the ws: room — the restricted ex-owner never gets it.
+  // That is fine BECAUSE their list row was already dropped by the
+  // co-targeted `conversation:assigned` frame; if a client ever keeps the row
+  // after an unassign, this rule needs the previous-assignee co-target too.
   "conversation.status_changed": (e, emitter) => {
     emitter.emitAboutConversation(e.workspaceId,
       e.conversationId, "conversation:status", {
@@ -453,7 +473,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
     // see the per-contact event for granular dispatch (they don't read this
     // flag) — only socket fanout is short-circuited.
     if (e.suppressSocketFanout) return;
-    emitter.emitAboutContact(e.workspaceId, e.contact?.id, "contact:updated", {
+    emitter.emitToWorkspaceMeta(e.workspaceId, "contact:updated", {
       workspaceId: e.workspaceId,
       contact: e.contact,
     });
@@ -478,7 +498,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
     // import doesn't storm every connected tab with 500 `contact:updated`
     // frames.
     if (e.suppressSocketFanout) return;
-    emitter.emitAboutContact(e.workspaceId, e.contact?.id, "contact:updated", {
+    emitter.emitToWorkspaceMeta(e.workspaceId, "contact:updated", {
       workspaceId: e.workspaceId,
       contact: e.contact,
     });
@@ -496,7 +516,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
   // One socket frame for an N-contact bulk mutation. Frontend invalidates
   // the affected rows in one query rather than receiving N patches.
   "contact.bulk_updated": (e, emitter) => {
-    emitter.emitToWorkspace(e.workspaceId, "contacts:bulk_updated", {
+    emitter.emitToWorkspaceMeta(e.workspaceId, "contacts:bulk_updated", {
       workspaceId: e.workspaceId,
       contactIds: e.contactIds,
       changeKind: e.changeKind,
@@ -523,7 +543,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
         conversationId: cid,
       });
     }
-    emitter.emitAboutContact(e.workspaceId, e.contactId, "contact:deleted", {
+    emitter.emitToWorkspaceMeta(e.workspaceId, "contact:deleted", {
       workspaceId: e.workspaceId,
       contactId: e.contactId,
     });
@@ -550,7 +570,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
 
   // ---- broadcasts -------------------------------------------------------
   "broadcast.status_changed": (e, emitter) => {
-    emitter.emitToWorkspace(e.workspaceId, "broadcast:status", {
+    emitter.emitToWorkspaceMeta(e.workspaceId, "broadcast:status", {
       workspaceId: e.workspaceId,
       broadcastId: e.broadcastId,
       status: e.status,
@@ -559,7 +579,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   "broadcast.progress": (e, emitter) => {
-    emitter.emitToWorkspace(e.workspaceId, "broadcast:progress", {
+    emitter.emitToWorkspaceMeta(e.workspaceId, "broadcast:progress", {
       workspaceId: e.workspaceId,
       broadcastId: e.broadcastId,
       sentCount: e.sentCount,
@@ -793,7 +813,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
     // Catalog tick so the channel list (memberCount, visibility) refreshes
     // for everyone — including the just-added users who need to start seeing
     // this channel and the just-removed users who need to stop seeing it.
-    emitter.emitToWorkspace(e.workspaceId, "team:catalog:changed", {
+    emitter.emitToWorkspaceMeta(e.workspaceId, "team:catalog:changed", {
       workspaceId: e.workspaceId,
       scope: "team-channels",
     });
@@ -818,7 +838,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
   "user.availability_changed": (e, emitter) => {
     // Per-user badge update — teammates' sidebar dots + user-menu reflect the
     // new status in the same frame.
-    emitter.emitToWorkspace(e.workspaceId, "user:availability:updated", {
+    emitter.emitToWorkspaceMeta(e.workspaceId, "user:availability:updated", {
       workspaceId: e.workspaceId,
       userId: e.userId,
       status: e.status as
@@ -887,7 +907,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
     // The members list (assignment dropdown, contact-panel "assigned to", etc.)
     // already refreshes off this `team:catalog:changed { scope: members }`
     // frame, which IS consumed — so a name/avatar change still propagates.
-    emitter.emitToWorkspace(e.workspaceId, "team:catalog:changed", {
+    emitter.emitToWorkspaceMeta(e.workspaceId, "team:catalog:changed", {
       workspaceId: e.workspaceId,
       scope: "members",
     });
@@ -895,7 +915,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
 
   // ---- team-wide --------------------------------------------------------
   "team.catalog_changed": (e, emitter) => {
-    emitter.emitToWorkspace(e.workspaceId, "team:catalog:changed", {
+    emitter.emitToWorkspaceMeta(e.workspaceId, "team:catalog:changed", {
       workspaceId: e.workspaceId,
       scope: e.scope,
     });
@@ -904,7 +924,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
   // Org name was changed by an admin. Sidebar chrome + settings header
   // listen and patch the displayed name in place — no router.refresh().
   "team.renamed": (e, emitter) => {
-    emitter.emitToWorkspace(e.workspaceId, "team:renamed", {
+    emitter.emitToWorkspaceMeta(e.workspaceId, "team:renamed", {
       workspaceId: e.workspaceId,
       name: e.name,
       renamedByUserId: e.renamedByUserId,
@@ -913,6 +933,8 @@ export const FANOUT_RULES: FanoutRuleMap = {
 
   // Outbound-webhook circuit breaker tripped → toast the settings page so an
   // admin watching the integrations panel sees the failure in real time.
+  // Deliberately `emitToWorkspace`, not Meta: consumed only by admin settings
+  // pages, and admins are always in the ws: room — don't widen it.
   "webhook.subscription_disabled": (e, emitter) => {
     emitter.emitToWorkspace(e.workspaceId, "webhook:subscription_disabled", {
       workspaceId: e.workspaceId,

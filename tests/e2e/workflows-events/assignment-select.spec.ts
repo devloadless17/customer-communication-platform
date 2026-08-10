@@ -181,14 +181,40 @@ test.describe("selectAssignee — eligibility", () => {
     expect(r.userId).toBe("b");
   });
 
-  test("online_first falls back to available, then to anyone", () => {
-    const busyOffline = [member("a", { availabilityStatus: "away" })];
+  test("online_first falls back to available when nobody is connected", () => {
     const r = selectAssignee({
       policy: policy({ eligibility: "online_first" }),
-      members: busyOffline,
+      members: [member("a"), member("b", { availabilityStatus: "away" })],
       onlineUserIds: new Set(),
     });
-    expect(r.userId).toBe("a"); // last tier: any active member
+    expect(r.userId).toBe("a"); // status-available beats nobody
+  });
+
+  test("online_first leaves it UNASSIGNED when nobody is online or available", () => {
+    // Product decision 2026-08-10: the old final tier handed a 2am inbound to
+    // whoever was asleep and made `overflow: leave_unassigned` unreachable.
+    // Nobody online + nobody available now routes through the overflow rule.
+    const r = selectAssignee({
+      policy: policy({ eligibility: "online_first" }),
+      members: [member("a", { availabilityStatus: "away" })],
+      onlineUserIds: new Set(),
+    });
+    expect(r.userId).toBeNull();
+    expect(r.reason).toBe("no_candidates");
+  });
+
+  test("online_first + fallback_user overflow routes the night inbound to the named fallback", () => {
+    const r = selectAssignee({
+      policy: policy({
+        eligibility: "online_first",
+        overflow: "fallback_user",
+        fallbackUserId: "lead",
+      }),
+      members: [member("a", { availabilityStatus: "away" }), member("lead", { availabilityStatus: "away" })],
+      onlineUserIds: new Set(),
+    });
+    expect(r.userId).toBe("lead");
+    expect(r.reason).toBe("fallback");
   });
 
   test("online_only leaves it unassigned when nobody is connected", () => {

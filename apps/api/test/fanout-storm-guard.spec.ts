@@ -46,6 +46,7 @@ function recordingEmitter(): { calls: Call[]; emitter: RealtimeEmitter } {
     };
   const emitter = {
     emitToWorkspace: rec("emitToWorkspace"),
+    emitToWorkspaceMeta: rec("emitToWorkspaceMeta"),
     emitToConversation: rec("emitToConversation"),
     emitToUser: rec("emitToUser"),
     emitToChannel: rec("emitToChannel"),
@@ -109,7 +110,9 @@ describe("broadcast fanout — the 10k-recipient storm guard", () => {
     it(`${type} never reaches the workspace room`, () => {
       const calls = runRule(type, broadcastEvent());
       expect(calls.length, `${type} should emit something`).toBeGreaterThan(0);
-      const teamWide = calls.filter((c) => c.method === "emitToWorkspace");
+      const teamWide = calls.filter(
+        (c) => c.method === "emitToWorkspace" || c.method === "emitToWorkspaceMeta",
+      );
       expect(
         teamWide,
         `${type} fires ONCE PER RECIPIENT — a workspace-scoped emit puts one frame ` +
@@ -127,12 +130,15 @@ describe("broadcast fanout — the 10k-recipient storm guard", () => {
   }
 
   for (const type of PER_CAMPAIGN) {
-    it(`${type} stays team-wide (one frame per campaign, not per recipient)`, () => {
+    it(`${type} stays workspace-wide (one frame per campaign, not per recipient)`, () => {
       const calls = runRule(type, broadcastEvent());
       expect(
-        calls.some((c) => c.method === "emitToWorkspace"),
+        calls.some(
+          (c) => c.method === "emitToWorkspace" || c.method === "emitToWorkspaceMeta",
+        ),
         `${type} is a per-CAMPAIGN signal every agent watches — narrowing it to the ` +
-          `conversation room would hide campaign progress from the team.`,
+          `conversation room would hide campaign progress from the team. (Meta room ` +
+          `since 2026-08-10 — content-free progress counters.)`,
       ).toBe(true);
     });
   }
@@ -145,13 +151,13 @@ describe("broadcast fanout — the 10k-recipient storm guard", () => {
     // one per recipient.
     for (const type of ["broadcast.status_changed", ...Array(50).fill("broadcast.progress")]) {
       workspaceFrames += runRule(type, broadcastEvent()).filter(
-        (c) => c.method === "emitToWorkspace",
+        (c) => c.method === "emitToWorkspace" || c.method === "emitToWorkspaceMeta",
       ).length;
     }
     // Per-recipient frames: the actual send fanout, once per recipient.
     for (let i = 0; i < 200; i++) {
       workspaceFrames += runRule("broadcast.recipient_message_sent", broadcastEvent()).filter(
-        (c) => c.method === "emitToWorkspace",
+        (c) => c.method === "emitToWorkspace" || c.method === "emitToWorkspaceMeta",
       ).length;
     }
     // 200 sampled recipients contributed ZERO workspace frames, so the full

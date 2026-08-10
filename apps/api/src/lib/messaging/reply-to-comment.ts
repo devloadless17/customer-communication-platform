@@ -1,3 +1,7 @@
+import {
+  conversationRelationWhere,
+  type ConversationViewer,
+} from "@/lib/conversations/visibility";
 import { db } from "@/lib/db";
 import { getProviderBinding } from "@/lib/providers";
 import { recordConversationEvent } from "@/lib/inbox/events";
@@ -49,6 +53,14 @@ export async function replyToCommentPublicly(args: {
   body: string;
   userId: string | null;
   apiKeyId?: string | null;
+  /**
+   * The session, when a person (not an API key) is replying. The route is
+   * keyed on a bare message id, so the controller's conversation-visibility
+   * guard never fires — without this filter a restricted agent could post a
+   * PUBLIC reply on a colleague's comment thread (and confirm the message
+   * exists). Same shape as `forward`/`dismissReaction`.
+   */
+  viewer?: ConversationViewer | null;
 }): Promise<{ commentId: string }> {
   const { workspaceId, messageId } = args;
   const body = args.body.trim();
@@ -57,7 +69,11 @@ export async function replyToCommentPublicly(args: {
   }
 
   const message = await db.message.findFirst({
-    where: { id: messageId, workspaceId },
+    where: {
+      id: messageId,
+      workspaceId,
+      ...(args.viewer ? conversationRelationWhere(args.viewer) : {}),
+    },
     select: {
       id: true,
       structured: true,

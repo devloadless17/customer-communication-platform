@@ -117,7 +117,7 @@ export class AiInboxController {
 
   @Get("customers/:id/memory")
   async listMemory(@CurrentSession() session: ApiSession, @Param("id") id: string) {
-    const memory = await this.svc.listMemory(session.workspaceId, id);
+    const memory = await this.svc.listMemory(session.workspaceId, id, session);
     return { memory };
   }
 
@@ -127,13 +127,13 @@ export class AiInboxController {
     @Param("id") id: string,
     @Body(zBody(PatchMemorySchema)) body: PatchMemoryInput,
   ) {
-    const memory = await this.svc.patchMemory(session.workspaceId, session.userId, id, body);
+    const memory = await this.svc.patchMemory(session.workspaceId, session.userId, id, body, session);
     return { memory };
   }
 
   @Delete("memory/:id")
   async deleteMemory(@CurrentSession() session: ApiSession, @Param("id") id: string) {
-    return this.svc.deleteMemory(session.workspaceId, id);
+    return this.svc.deleteMemory(session.workspaceId, id, session);
   }
 
   /** Whether a given (AI-authored) message was flagged as a hallucination risk. */

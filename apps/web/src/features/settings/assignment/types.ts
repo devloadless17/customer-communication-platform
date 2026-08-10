@@ -111,7 +111,7 @@ export const STRATEGY_HINTS: Record<AssignmentStrategy, string> = {
 };
 
 export const ELIGIBILITY_LABELS: Record<AssignmentEligibility, string> = {
-  online_first: "Online first, then available, then anyone",
+  online_first: "Online first, then available",
   online_only: "Only agents online right now",
   available_only: "Only agents marked available",
   any_active: "Anyone on the team",
@@ -119,7 +119,7 @@ export const ELIGIBILITY_LABELS: Record<AssignmentEligibility, string> = {
 
 export const ELIGIBILITY_HINTS: Record<AssignmentEligibility, string> = {
   online_first:
-    "Prefers agents with the app actually open. Falls back to whoever is marked available, then to anyone — so a conversation is never left unowned.",
+    "Prefers agents with the app actually open, then whoever is marked available. When nobody is either — the whole team is off working hours — the overflow rule below decides, so a night message parks in Unassigned instead of landing on someone asleep.",
   online_only:
     "Strict. If nobody is connected, the conversation goes to the Unassigned queue instead of an agent who has gone home.",
   available_only:

@@ -81,7 +81,7 @@ export class ContactsController {
     @CurrentSession() session: ApiSession,
     @Query(zQuery(ListContactsQuerySchema)) query: ListContactsQueryInput,
   ) {
-    return this.contacts.list(session.workspaceId, query);
+    return this.contacts.list(session.workspaceId, query, session);
   }
 
   @Post()

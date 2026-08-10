@@ -12,6 +12,7 @@ import {
 import { Prisma } from "@prisma/client";
 
 import {
+  isRestrictedViewer,
   visibilityScopeKey,
   visibilityWhere,
   type ConversationViewer,
@@ -895,6 +896,8 @@ export class ConversationsService {
     /** Null when an API key started it — an integration is not a person. */
     actorUserId: string | null,
     input: StartConversationInput,
+    /** The session when a person started it — restricted-viewer gate below. */
+    viewer?: ConversationViewer,
   ): Promise<{ conversationId: string; created: boolean; reopened: boolean }> {
     // Resolve the target contact id — either given directly, or found/created
     // from a phone number (the shared-contact card's "Message" action passes a
@@ -969,6 +972,23 @@ export class ConversationsService {
     });
 
     if (existing) {
+      // Restricted viewers must not learn about — let alone reopen — a thread
+      // that belongs to someone else. Without this, "Start conversation" from
+      // the (deliberately unrestricted) contacts directory returned the
+      // existing conversationId, confirming a thread they can't open exists.
+      // 409, not 404: the actionable truth is "a teammate already has this".
+      if (viewer && isRestrictedViewer(viewer)) {
+        const visible = await this.db.conversation.findFirst({
+          where: { id: existing.id, workspaceId, ...visibilityWhere(viewer) },
+          select: { id: true },
+        });
+        if (!visible) {
+          throw new ConflictException({
+            error: "conversation_assigned_elsewhere",
+            detail: "A teammate is already handling this contact's conversation.",
+          });
+        }
+      }
       if (existing.status === "closed") {
         // Reopen through setStatus so the reopen is audited + fans out exactly
         // like any other status change (and clears nothing it shouldn't).

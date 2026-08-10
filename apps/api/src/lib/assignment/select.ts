@@ -146,10 +146,13 @@ function buildPool(
 /**
  * Stage 3 — presence / availability tier.
  *
- * `online_first` is the historical tiered behavior and the one that can never
- * land nowhere: online+available → available → anyone active. The strict tiers
- * deliberately CAN return empty, which is what makes `online_only` meaningful
- * (it hands the thread to the triage queue instead of an agent who's gone home).
+ * `online_first` is the tiered default: online+available → available → the
+ * policy's OVERFLOW rule. It used to degrade to the whole active pool as a
+ * final tier ("never lands nowhere"), which assigned a 2am inbound to an
+ * off-shift agent and made `overflow: leave_unassigned` unreachable — removed
+ * 2026-08-10; an empty tier now parks the thread in the Unassigned queue like
+ * the strict tiers do (or routes to the fallback user when the policy names
+ * one).
  *
  * When `onlineUserIds` is null this process has no socket visibility at all
  * (a standalone worker — in the api process the resolver is wired at boot and
@@ -180,7 +183,14 @@ function tierFor(
     default:
       if (online && online.length > 0) return online;
       if (available.length > 0) return available;
-      return pool;
+      // Nobody online AND nobody available (2am, whole team off-shift): let
+      // the policy's OVERFLOW rule decide instead of degrading to the whole
+      // active pool. The old `return pool` here meant a night inbound was
+      // assigned to whoever was asleep and `overflow: leave_unassigned` was
+      // unreachable — the thread now parks in the visible Unassigned queue
+      // (or goes to the fallback user if the policy names one). Product
+      // decision 2026-08-10.
+      return [];
   }
 }
 

@@ -886,6 +886,34 @@ export function InboxShell({
       cache.delete(payload.conversationId);
     };
 
+    // Restricted agent, active thread reassigned AWAY: the list row is
+    // dropped by useTeamEvents, but the OPEN pane used to keep rendering a
+    // thread whose every endpoint now 404s (send, note, call — all dead) and
+    // whose socket room the server just evicted us from. Same "navigation
+    // side-effect" class as conversation:deleted: clear the pane, evict the
+    // snapshot, say why. Skipped for optimistic local dispatches — a
+    // restricted agent assigning AWAY from themselves is already a deliberate
+    // act in this pane; the server frame confirms it either way.
+    const onAssignedAwayFromViewer = (payload: {
+      conversationId?: string;
+      assignedUser?: { id: string } | null;
+    }) => {
+      if (!restrictedToOwnConversations) return;
+      if (!payload?.conversationId) return;
+      if (payload.conversationId !== displayedIdRef.current) return;
+      const nextAssignee = payload.assignedUser?.id ?? null;
+      if (nextAssignee === currentUser.id) return;
+      cache.delete(payload.conversationId);
+      setActiveId(null);
+      setDisplayedId(null);
+      setPendingId(null);
+      setErrorId(null);
+      if (typeof window !== "undefined" && window.location.search) {
+        window.history.replaceState(null, "", "/inbox");
+      }
+      toast.info("This conversation was reassigned to a teammate.");
+    };
+
     // Patches below keep the cached snapshot in sync with what
     // useConversationEvents applies to the LIVE displayed thread, so a
     // chat-switch round-trip doesn't revert to stale data. Both consumers
@@ -992,6 +1020,10 @@ export function InboxShell({
     // its payload only carries ids, not contact bodies.
     socket.on("contacts:bulk_updated", onContactsBulkUpdated);
     socket.on("conversation:deleted", onConversationDeleted);
+    // conversation:assigned is already reducer-covered (patches assignedUserId
+    // everywhere); this extra listener only handles the restricted-viewer
+    // navigation side-effect above.
+    socket.on("conversation:assigned", onAssignedAwayFromViewer);
 
     return () => {
       socket.off("connect", onConnect);
@@ -1000,12 +1032,13 @@ export function InboxShell({
       socket.off("message:failed", evictIfBackground);
       socket.off("contacts:bulk_updated", onContactsBulkUpdated);
       socket.off("conversation:deleted", onConversationDeleted);
+      socket.off("conversation:assigned", onAssignedAwayFromViewer);
       for (const { event, handler } of reducerHandlers) {
 
         socket.off(event as any, handler as any);
       }
     };
-  }, [cache, currentUser.id, refreshDisplayedSnapshot]);
+  }, [cache, currentUser.id, refreshDisplayedSnapshot, restrictedToOwnConversations]);
 
   // ---------------------------------------------------------------
   // Mark-read local convergence — T2.1.

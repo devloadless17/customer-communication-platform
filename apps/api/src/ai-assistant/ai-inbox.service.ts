@@ -27,6 +27,7 @@ import { publish } from "@/lib/events/bus";
 
 import {
   conversationRelationWhere,
+  isRestrictedViewer,
   visibilityWhere,
   type ConversationViewer,
 } from "@/lib/conversations/visibility";
@@ -381,12 +382,35 @@ export class AiInboxService {
     return suggestion;
   }
 
-  async listMemory(workspaceId: string, customerId: string) {
+  /**
+   * Visibility boundary for the memory routes: AI memory is DISTILLED
+   * conversation content (facts extracted from threads), so a restricted
+   * agent may only touch a customer's memory when at least one of that
+   * customer's conversations is visible to them. Without this, the contacts
+   * directory (deliberately unrestricted) plus `by-contact` gave a restricted
+   * agent a customerId, and these routes handed back — or let them tamper
+   * with — facts from threads they cannot open.
+   */
+  private async assertCustomerVisible(
+    workspaceId: string,
+    customerId: string,
+    viewer?: ConversationViewer,
+  ): Promise<void> {
     const customer = await this.db.customer.findFirst({
-      where: { id: customerId, workspaceId },
+      where: {
+        id: customerId,
+        workspaceId,
+        ...(viewer && isRestrictedViewer(viewer)
+          ? { contacts: { some: { conversations: { some: visibilityWhere(viewer) } } } }
+          : {}),
+      },
       select: { id: true },
     });
     if (!customer) throw new NotFoundException({ error: "customer_not_found" });
+  }
+
+  async listMemory(workspaceId: string, customerId: string, viewer?: ConversationViewer) {
+    await this.assertCustomerVisible(workspaceId, customerId, viewer);
     return this.db.aiCustomerMemory.findMany({
       where: { workspaceId, customerId },
       orderBy: [{ status: "asc" }, { confidence: "desc" }],
@@ -398,9 +422,11 @@ export class AiInboxService {
     userId: string,
     id: string,
     patch: { status?: "confirmed" | "rejected" | "candidate"; value?: string },
+    viewer?: ConversationViewer,
   ) {
     const row = await this.db.aiCustomerMemory.findFirst({ where: { id, workspaceId } });
     if (!row) throw new NotFoundException({ error: "memory_not_found" });
+    await this.assertCustomerVisible(workspaceId, row.customerId, viewer);
     return this.db.aiCustomerMemory.update({
       where: { id },
       data: {
@@ -412,9 +438,10 @@ export class AiInboxService {
     });
   }
 
-  async deleteMemory(workspaceId: string, id: string) {
+  async deleteMemory(workspaceId: string, id: string, viewer?: ConversationViewer) {
     const row = await this.db.aiCustomerMemory.findFirst({ where: { id, workspaceId } });
     if (!row) throw new NotFoundException({ error: "memory_not_found" });
+    await this.assertCustomerVisible(workspaceId, row.customerId, viewer);
     await this.db.aiCustomerMemory.delete({ where: { id } });
     return { ok: true };
   }

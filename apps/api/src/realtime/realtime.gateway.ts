@@ -18,6 +18,7 @@ import type {
 import type { Role } from "@ccp/shared/types";
 import type { AvailabilitySource } from "@ccp/shared/work-hours";
 
+import { invalidateWorkspaceSessionCache } from "../auth/session.guard";
 import { DbService } from "../db/db.service";
 import { getOnlineUserIds } from "@/lib/conversations/presence-bridge";
 import {
@@ -27,7 +28,13 @@ import {
 } from "@/lib/conversations/visibility";
 import { PresenceService } from "./presence.service";
 import { RealtimeEmitter, type TypedIO } from "./emitter.service";
-import { channelRoom, conversationRoom, workspaceRoom, userRoom } from "./rooms";
+import {
+  channelRoom,
+  conversationRoom,
+  workspaceMetaRoom,
+  workspaceRoom,
+  userRoom,
+} from "./rooms";
 import { SocketAuthService } from "./socket-auth.service";
 import { TypingService } from "./typing.service";
 
@@ -285,27 +292,39 @@ export class RealtimeGateway
         });
         return conv?.assignedUserId ?? null;
       },
-      async (contactId) => {
-        const conv = await this.db.conversation.findFirst({
-          where: { contactId },
-          select: { assignedUserId: true },
-        });
-        return conv?.assignedUserId ?? null;
-      },
     );
 
-    // When an admin flips the org's agent-visibility setting, bust the
-    // emitter's per-team scope cache so fanout switches audience on the next
-    // frame — AND disconnect the workspace's live sockets. Room membership and
-    // `socket.data.agentConversationVisibility` are fixed at handshake, so
-    // without the disconnect every already-connected agent kept the team-room
-    // firehose (and could still join arbitrary conv rooms) until their next
-    // organic reconnect — potentially days for a parked tab. The forced
-    // re-handshake re-derives both under the new setting; reconnect is
-    // automatic and converges via the standard recovery paths.
+    // When an admin flips the workspace's agent-visibility setting, revoke in
+    // strict order — each step exists to make the NEXT one safe:
+    //  1. Bust the HTTP/handshake session caches for the whole workspace.
+    //     Room membership and `socket.data.agentConversationVisibility` are
+    //     fixed at handshake, and the forced re-handshake below reads the
+    //     session-cache fast paths — a stale entry would hand the reconnected
+    //     socket its PRE-flip visibility (rejoining the ws: firehose) for the
+    //     socket's whole lifetime.
+    //  2. Bust the emitter's per-team scope cache so fanout switches audience
+    //     on the next frame.
+    //  3. Queue the catalog tick BEFORE the disconnect packet: both ride the
+    //     same ordered transport, so every tab receives the tick (a
+    //     router.refresh() that re-derives the RSC's restricted flag against
+    //     the now-busted cache), then the drop. wsmeta so restricted agents
+    //     get it too.
+    //  4. Disconnect LAST. All four steps are synchronous, so a re-handshake
+    //     can only ever read post-bust state.
     registerVisibilityInvalidator((workspaceId) => {
+      invalidateWorkspaceSessionCache(workspaceId);
       this.emitter.invalidateWorkspaceScope(workspaceId);
+      this.emitter.emitToWorkspaceMeta(workspaceId, "team:catalog:changed", {
+        workspaceId,
+        scope: "members",
+      });
       this.disconnectWorkspaceSockets(workspaceId);
+      // A handshake that read the cache pre-bust but registered after the
+      // disconnect loop survives with stale identity (sub-millisecond race —
+      // same one SessionInvalidationService.revoke documents). One delayed
+      // second sweep closes it; post-bust reconnects get bounced once more,
+      // which is harmless (they re-handshake against fresh caches).
+      setTimeout(() => this.disconnectWorkspaceSockets(workspaceId), 1_000).unref?.();
     });
 
     // realtime-added-1: start the outbound write-buffer reaper. Disconnects a
@@ -531,7 +550,19 @@ export class RealtimeGateway
     });
     if (!restrictedViewer) {
       client.join(workspaceRoom(identity.workspaceId));
+    } else {
+      // connectionStateRecovery restores a socket's previous rooms with no
+      // handler run. If the workspace flipped to "assigned" while this agent
+      // was inside the recovery window, the restored `ws:` membership must be
+      // revoked here — auth re-ran (middlewares are not skipped) and read the
+      // post-flip setting, but the adapter silently re-added the old room.
+      // No-op on a fresh connect.
+      client.leave(workspaceRoom(identity.workspaceId));
     }
+    // Workspace-METADATA room: unconditional — restricted agents included.
+    // Carries content-free workspace signals (catalog ticks, presence,
+    // availability, directory updates, broadcast progress); see rooms.ts.
+    client.join(workspaceMetaRoom(identity.workspaceId));
     // Per-user room (RT-1) — lets the server target this user across all their
     // tabs for membership-scoped fanout (private-channel activity badges)
     // without a team-wide broadcast that leaks metadata to non-members.
@@ -845,7 +876,9 @@ export class RealtimeGateway
   ): void {
     if (seq < (this.presenceEmittedSeq.get(workspaceId) ?? 0)) return;
     this.presenceEmittedSeq.set(workspaceId, seq);
-    this.server.to(workspaceRoom(workspaceId)).emit("presence:update", {
+    // Meta room, not ws: — presence dots are directory metadata every member
+    // (restricted agents included) renders in the sidebar.
+    this.server.to(workspaceMetaRoom(workspaceId)).emit("presence:update", {
       workspaceId,
       onlineUserIds,
     });

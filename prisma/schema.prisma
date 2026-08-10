@@ -5947,8 +5947,9 @@ enum AssignmentStrategy {
 
 // Which members are considered candidates at pick time.
 enum AssignmentEligibility {
-  // Tiered (historical): online+available → available → any active member.
-  // Never lands nowhere as long as ONE member exists.
+  // Tiered (default): online+available → available → the policy's overflow
+  // rule. (Used to degrade to "any active member" — removed 2026-08-10 so a
+  // night inbound parks in Unassigned instead of landing on someone asleep.)
   online_first
   // Only agents with a live socket AND availability "available". May yield
   // nobody (→ overflow rule) — correct for teams that want strict presence.

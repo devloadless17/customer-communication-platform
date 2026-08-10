@@ -15,6 +15,7 @@ import {
 
 import { RequireCapability } from "../auth/capability.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
+import { DenyRestrictedViewer } from "../auth/restricted-viewer.guard";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
 import { zBody, zQuery } from "../common/zod-validation.pipe";
@@ -53,6 +54,11 @@ import { BroadcastsService } from "./broadcasts.service";
  */
 @Controller("api/broadcasts")
 @UseGuards(SessionGuard)
+// Whole-controller deny for assigned-only agents: recipient rows carry every
+// contact's name/phone + delivery outcome — the bulk-PII class the visibility
+// boundary exists to contain. The web rail hides Broadcasts for restricted
+// sessions to match. Product decision 2026-08-10.
+@DenyRestrictedViewer()
 export class BroadcastsController {
   constructor(private readonly broadcasts: BroadcastsService) {}
 

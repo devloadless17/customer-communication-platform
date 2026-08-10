@@ -135,6 +135,9 @@ export default async function AppShellLayout({
               organizationName={organizationName}
               canManageAvailability={permissions["availability:manage"]}
               canViewReports={permissions["teamActivity:view"]}
+              restrictedViewer={
+                user.role === "agent" && team.agentConversationVisibility === "assigned"
+              }
               initialCollapsed={railCollapsed}
             />
             <div className="flex min-w-0 flex-1 flex-col md:flex-row">{children}</div>

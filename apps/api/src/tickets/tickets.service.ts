@@ -675,7 +675,12 @@ export class TicketsService {
     ticketId: string,
     files: UploadedFile[],
     messageId?: string | null,
+    viewer?: ConversationViewer,
   ): Promise<TicketAttachmentView[]> {
+    // The direct upload route was the one ticket WRITE without this gate — a
+    // restricted agent could attach files to any ticket in the workspace. The
+    // thread path passes no viewer because postThreadMessage already asserted.
+    if (viewer) await this.assertVisible(viewer, ticketId);
     const out: TicketAttachmentView[] = [];
     for (const file of files) {
       const outcome = await addTicketAttachment(this.db, {

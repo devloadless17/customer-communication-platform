@@ -305,6 +305,7 @@ export function AppRail({
   onlineUserIds,
   canManageAvailability,
   canViewReports,
+  restrictedViewer = false,
   initialCollapsed,
 }: {
   currentUser: User;
@@ -324,6 +325,10 @@ export function AppRail({
    *  The /reports page + endpoint enforce it too; hiding the icon just spares
    *  a bounce. */
   canViewReports: boolean;
+  /** Agent limited to assigned conversations. The Broadcasts API denies them
+   *  wholesale (recipient lists are bulk contact PII), so the rail entry
+   *  would only resolve to a 403 error surface — hide it. */
+  restrictedViewer?: boolean;
   /** Server-read cookie value so SSR renders the persisted state (no flash). */
   initialCollapsed: boolean;
 }) {
@@ -410,7 +415,11 @@ export function AppRail({
 
   const canManageWorkflows = canManageUsers(currentUser.role);
   const items = useMemo<RailItem[]>(() => {
-    const out = [...PRIMARY_ITEMS];
+    // Restricted viewers: the Broadcasts controller denies them entirely (see
+    // its @DenyRestrictedViewer), so the entry would be a guaranteed 403.
+    const out = restrictedViewer
+      ? PRIMARY_ITEMS.filter((i) => i.href !== "/broadcasts")
+      : [...PRIMARY_ITEMS];
     // Reports sits with the analytics-adjacent surfaces (after Broadcasts),
     // before the admin-only Workflows entry.
     if (canViewReports) out.push(REPORTS_ITEM);
@@ -426,7 +435,7 @@ export function AppRail({
     // No platform-admin entry here: super-admins are redirected out of the
     // (app) shell entirely (→ /platform), so they never render this rail.
     return out;
-  }, [canManageWorkflows, canViewReports]);
+  }, [canManageWorkflows, canViewReports, restrictedViewer]);
 
   const railStyle: React.CSSProperties = {
     width: collapsed ? COLLAPSED_WIDTH : EXPANDED_WIDTH,

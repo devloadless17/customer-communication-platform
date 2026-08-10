@@ -294,6 +294,7 @@ export class MessagesController {
         messageId: id,
         body: body.body,
         userId: session.userId,
+        viewer: session,
       });
       return { ok: true, commentId: res.commentId };
     } catch (err) {

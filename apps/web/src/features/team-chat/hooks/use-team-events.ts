@@ -105,7 +105,14 @@ export function rowMatchesFilterFor(
       assignedUserId: row.conversation.assignedUserId,
       unreadCount: row.conversation.unreadCount,
       openFlagCount: row.conversation.openFlagCount,
-      contact: { stageId: row.contact.stageId, tagIds: row.contact.tagIds },
+      contact: {
+        stageId: row.contact.stageId,
+        tagIds: row.contact.tagIds,
+        // Real values on inbox-list rows (the list select opts in); other
+        // construction sites may carry `{}`, which the matcher reads as "no
+        // value" — same exclude direction as an absent tag JOIN.
+        customFields: row.contact.customFields,
+      },
     });
   }
   if (filter.kind === "stage") {
@@ -270,6 +277,15 @@ export function useTeamEvents(
   // change effect later in this file owns the actual refetch.
   const filterRef = useRef<Filter | undefined>(filter);
   filterRef.current = filter;
+  // Render-synced (same invariant as filterRef): the restriction can now
+  // change MID-SESSION — an admin's visibility flip busts the caches, pushes a
+  // catalog tick (router.refresh → this prop re-derives) and force-reconnects
+  // the socket — so handlers must read the live value, not the mount closure.
+  const restrictedToOwnRef = useRef(restrictedToOwn);
+  restrictedToOwnRef.current = restrictedToOwn;
+  // Bridge into the socket effect's closure: set there to a REPLACE-mode
+  // resync, called by the flip effect below.
+  const visibilityFlipResyncRef = useRef<(() => void) | null>(null);
   // Same sync-assign-during-render pattern as `filterRef`: a socket callback
   // firing between renders must read the CURRENT narrow, not a stale closure.
   const accountIdRef = useRef<string | null | undefined>(accountId);
@@ -731,7 +747,7 @@ export function useTeamEvents(
     let lastResyncCompletedAt = 0;
     const RESYNC_SKIP_WINDOW_MS = 5000;
 
-    async function resyncOnce(dropStaleTail = false): Promise<boolean> {
+    async function resyncOnce(dropStaleTail = false, replaceAll = false): Promise<boolean> {
       try {
         // Filter-aware resync: a reconnect under filter=Mine must come back
         // with only my threads, not the whole team. Tail-merge with the
@@ -773,6 +789,20 @@ export function useTeamEvents(
         setConversations((prev) => {
           const freshIds = new Set(page.items.map((c) => c.conversation.id));
           const overlay = latestContactRef.current.map;
+
+          // REPLACE mode (visibility flip): the server's answer IS the list.
+          // The tail-merge below deliberately keeps local rows newer than the
+          // fresh page's oldest — correct for an offline gap, WRONG after the
+          // agent's visibility was revoked: a just-active foreign thread is
+          // exactly such a "newer" row and would survive the prune forever.
+          if (replaceAll) {
+            return page.items
+              .map((row) => {
+                const latest = overlay.get(row.contact.id);
+                return latest ? { ...row, contact: latest } : row;
+              })
+              .filter(rowMatchesFilter);
+          }
 
           // The HTTP resync can be STALE — it may have started before a
           // stage/assign/status change committed server-side, so its rows can
@@ -836,18 +866,20 @@ export function useTeamEvents(
         return false;
       }
     }
-    async function resyncWithBackoff(): Promise<void> {
+    async function resyncWithBackoff(replaceAll = false): Promise<void> {
       const delays = [0, 500, 1500, 4000]; // ~6s total
       for (const ms of delays) {
         if (ms > 0) await new Promise((r) => window.setTimeout(r, ms));
         // Reconnect path → drop stale tail rows so deep-paged rows recover
         // their status/assignment, not just their contact.
-        if (await resyncOnce(true)) return;
+        if (await resyncOnce(true, replaceAll)) return;
       }
       // Bounded — if all retries fail the list is stale until the user
       // triggers another reconnect or navigates. A nuclear `router.refresh()`
       // here would also work but feels heavier than warranted.
     }
+    // Visibility flip (see restrictedToOwnRef): replace, never merge.
+    visibilityFlipResyncRef.current = () => void resyncWithBackoff(true);
 
     // Tight-debounced + coalesced resync trigger for filter-eligibility-
     // changing events. Per-event mutations below handle the in-list rows
@@ -1228,7 +1260,7 @@ export function useTeamEvents(
       // Restricted agent, handover TO me: the row can't be in my slice (the
       // server never sent it), so fetch it rather than trying to synthesize.
       // recoverConversation dedupes and filter-checks before splicing.
-      if (restrictedToOwn && nextAssignedUserId === currentUserId) {
+      if (restrictedToOwnRef.current && nextAssignedUserId === currentUserId) {
         recoverConversation(conversationId);
       }
       setConversations((prev) => {
@@ -1260,7 +1292,7 @@ export function useTeamEvents(
         // Restricted agent, handover AWAY from me: drop it now, regardless of
         // the active filter. I can no longer open it, so leaving it visible
         // would only produce a row that 404s on click.
-        if (restrictedToOwn && nextAssignedUserId !== currentUserId) {
+        if (restrictedToOwnRef.current && nextAssignedUserId !== currentUserId) {
           return prev.filter((c) => c.conversation.id !== conversationId);
         }
         // With server-side filtering, an assignment change can knock the
@@ -1660,6 +1692,7 @@ export function useTeamEvents(
       socket.off("contacts:bulk_updated", onContactsBulkUpdated);
       socket.off("call:incoming", onCallIncoming);
       socket.off("call:ended", onCallEnded);
+      visibilityFlipResyncRef.current = null;
     };
     // INVARIANT: this effect re-binds handlers ONLY on [workspaceId, currentUserId].
     // Every other value the handlers read (filter, activeThread, activeId, …) is
@@ -1668,6 +1701,20 @@ export function useTeamEvents(
     // already sees the fresh value. If you add a new handler dependency, mirror it
     // the SAME way; a useEffect-synced ref reintroduces the stale-first-event bug.
   }, [workspaceId, currentUserId]);
+
+  // The visibility FLIP, client side. When an admin toggles the workspace's
+  // agent restriction: caches bust → catalog tick (router.refresh re-derives
+  // this prop from the fresh session) → forced socket reconnect. The reconnect
+  // resync alone is NOT enough — its tail-merge keeps local rows newer than
+  // the fresh page's oldest, which is precisely where a just-active forbidden
+  // thread sits. On the prop transition, replace the list with the server's
+  // answer under the NEW rule (both directions: revoke prunes, grant refills).
+  const restrictedAppliedRef = useRef(restrictedToOwn);
+  useEffect(() => {
+    if (restrictedAppliedRef.current === restrictedToOwn) return;
+    restrictedAppliedRef.current = restrictedToOwn;
+    visibilityFlipResyncRef.current?.();
+  }, [restrictedToOwn]);
 
   return { conversations, hasMore: nextCursor !== null, loadingMore, loadMore, refetching };
 }

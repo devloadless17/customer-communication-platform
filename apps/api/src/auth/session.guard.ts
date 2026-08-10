@@ -355,6 +355,31 @@ export function invalidateSessionCache(userId: string): void {
 }
 
 /**
+ * Workspace-scoped sibling of `invalidateSessionCache`, for settings that
+ * change EVERY member's effective session at once — today that is
+ * `Workspace.agentConversationVisibility`. The flip's socket revocation
+ * (force-disconnect + re-handshake) is only as good as these caches: the
+ * re-handshake's fast paths serve the cached `agentConversationVisibility`,
+ * so a stale entry here would let a just-restricted agent's socket rejoin
+ * the workspace room with pre-flip visibility for the socket's lifetime.
+ * Must run synchronously BEFORE the disconnect (see the visibility
+ * invalidator in `realtime.gateway.ts`).
+ *
+ * Both caches are enumerable by workspace: snapshot keys end in
+ * `:${workspaceId}` (cuids contain no colons), and cookie entries carry the
+ * workspaceId they resolved to.
+ */
+export function invalidateWorkspaceSessionCache(workspaceId: string): void {
+  const suffix = `:${workspaceId}`;
+  for (const key of sessionCache.keys()) {
+    if (key.endsWith(suffix)) sessionCache.delete(key);
+  }
+  for (const [key, entry] of cookieCache) {
+    if (entry.workspaceId === workspaceId) cookieCache.delete(key);
+  }
+}
+
+/**
  * Shared resolver: cookie → Better Auth → active-user recheck. Exported so
  * the Socket.io handshake can reuse the exact same logic without re-implementing
  * any of the auth flow.

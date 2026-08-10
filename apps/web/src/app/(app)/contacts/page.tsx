@@ -1,4 +1,5 @@
 import { getSession } from "@/lib/auth/current-user";
+import { getCurrentTeam } from "@/lib/api/queries/team";
 import {
   listContactFieldsWithBuiltins,
   listContactStages,
@@ -26,7 +27,12 @@ export default async function ContactsPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const { permissions } = await getSession();
+  const { user, permissions } = await getSession();
+  const team = await getCurrentTeam();
+  // The export routes deny assigned-only agents (bulk PII) — hide the button
+  // rather than let it resolve to a 403 toast.
+  const restrictedViewer =
+    user.role === "agent" && team.agentConversationVisibility === "assigned";
   const params = await searchParams;
   const stageParam = typeof params.stage === "string" ? params.stage : undefined;
 
@@ -73,7 +79,7 @@ export default async function ContactsPage({
       canManageFields={permissions["contactFields:manage"]}
       canManageStages={permissions["stages:manage"]}
       canDeleteContacts={permissions["contacts:delete"]}
-      canExportContacts={permissions["contacts:export"]}
+      canExportContacts={permissions["contacts:export"] && !restrictedViewer}
     />
   );
 }

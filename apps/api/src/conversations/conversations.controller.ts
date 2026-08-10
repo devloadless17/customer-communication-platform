@@ -156,7 +156,7 @@ export class ConversationsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(StartConversationSchema)) body: StartConversationInput,
   ) {
-    return this.conversations.startConversation(session.workspaceId, session.userId, body);
+    return this.conversations.startConversation(session.workspaceId, session.userId, body, session);
   }
 
   @Post("bulk")

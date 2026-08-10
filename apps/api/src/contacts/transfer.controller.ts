@@ -28,6 +28,7 @@ import {
 
 import { RequireCapability } from "../auth/capability.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
+import { DenyRestrictedViewer } from "../auth/restricted-viewer.guard";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
 import { zBody, zQuery } from "../common/zod-validation.pipe";
@@ -114,6 +115,10 @@ export class ContactTransferController {
 
   @Post("export")
   @RequireCapability("contacts:export")
+  // Browsing the directory is open to restricted agents; EXPORTING the whole
+  // book is not — the capability defaults true for agents, so the visibility
+  // boundary needs its own gate here. Product decision 2026-08-10.
+  @DenyRestrictedViewer()
   async startExport(
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateExportSchema)) body: CreateExportInput,
@@ -146,6 +151,8 @@ export class ContactTransferController {
    */
   @Get("transfers/:id/download")
   @RequireCapability("contacts:export")
+  // Same boundary as startExport: the bytes are the whole book.
+  @DenyRestrictedViewer()
   async download(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,

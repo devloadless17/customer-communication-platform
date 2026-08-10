@@ -126,10 +126,14 @@ export function visibilityScopeKey(viewer: ConversationViewer): string {
 /**
  * Hooks called when an admin flips `Team.agentConversationVisibility`.
  *
- * Three caches hold the old value: the 15s HTTP session cache, the socket
- * session cache, and the realtime emitter's per-team scope cache. Bound on
- * boot rather than imported so this file stays free of NestJS and Prisma —
- * the same seam `presence-bridge.ts` uses for the online-user resolver.
+ * The ONE registered invalidator (realtime.gateway.ts) performs the whole
+ * revocation in strict order: workspace-scoped session-cache bust (HTTP +
+ * socket handshake fast paths), emitter scope-cache bust, a catalog tick so
+ * clients re-derive their restricted flag, then a forced disconnect of the
+ * workspace's sockets. The ORDER is the security property — the re-handshake
+ * must not be able to read a pre-flip cached visibility. Bound on boot rather
+ * than imported so this file stays free of NestJS and Prisma — the same seam
+ * `presence-bridge.ts` uses for the online-user resolver.
  */
 type VisibilityInvalidator = (workspaceId: string) => void;
 

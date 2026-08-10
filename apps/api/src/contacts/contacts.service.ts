@@ -27,6 +27,11 @@ import type { Contact } from "@ccp/shared/types";
 import { isPhoneChannel } from "@ccp/shared/providers/capabilities";
 import { enrichSocialContactNames } from "@/lib/providers/ingest";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
+import {
+  isRestrictedViewer,
+  visibilityWhere,
+  type ConversationViewer,
+} from "@/lib/conversations/visibility";
 
 import { EventBus } from "../events/event-bus.module";
 import { DbService } from "../db/db.service";
@@ -96,7 +101,11 @@ export class ContactsService {
    * Next.js route exactly: search, fieldKey+fieldValue, source, tagIds,
    * window, stageId, cursor. Empty / unknown values are dropped silently.
    */
-  list(workspaceId: string, query: ListContactsQueryInput) {
+  async list(
+    workspaceId: string,
+    query: ListContactsQueryInput,
+    viewer?: ConversationViewer,
+  ) {
     const tagIds = query.tagIds
       ? query.tagIds.split(",").map((s) => s.trim()).filter((s) => s.length > 0)
       : undefined;
@@ -119,7 +128,33 @@ export class ContactsService {
     };
     // "Group by person" rolls the list up to one row per unified Customer;
     // otherwise the default per-channel-contact list.
-    return query.groupByPerson ? listPeople(workspaceId, opts) : listContacts(workspaceId, opts);
+    const page = query.groupByPerson
+      ? await listPeople(workspaceId, opts)
+      : await listContacts(workspaceId, opts);
+
+    // The directory itself is deliberately readable by restricted agents ("a
+    // directory is not a secret"), but each row also carried the contact's
+    // active CONVERSATION id + last-message time — thread metadata for threads
+    // they can't open, and a ready-made id list to probe with. Keep those
+    // fields only where the thread is actually theirs; null them elsewhere.
+    if (viewer && isRestrictedViewer(viewer)) {
+      const convIds = page.items
+        .map((i) => i.activeConversationId)
+        .filter((id): id is string => id != null);
+      const visible = convIds.length
+        ? await this.db.conversation.findMany({
+            where: { id: { in: convIds }, workspaceId, ...visibilityWhere(viewer) },
+            select: { id: true },
+          })
+        : [];
+      const keep = new Set(visible.map((v) => v.id));
+      page.items = page.items.map((i) =>
+        i.activeConversationId && keep.has(i.activeConversationId)
+          ? i
+          : { ...i, activeConversationId: null, lastMessageAt: null },
+      );
+    }
+    return page;
   }
 
   /**
@@ -896,6 +931,7 @@ export class ContactsService {
       {
         tagIds: input.tagIds,
         contactIds: input.contactIds,
+        fieldFilters: input.fieldFilters,
         all: input.all,
         accountId: input.accountId ?? null,
         includeOtherAccounts: input.includeOtherAccounts,

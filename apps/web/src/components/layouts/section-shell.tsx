@@ -64,6 +64,9 @@ export async function SectionShell({
         canManageAvailability={permissions["availability:manage"]}
         canManageWorkflows={canManageUsers(user.role)}
         canViewReports={permissions["teamActivity:view"]}
+        restrictedViewer={
+          user.role === "agent" && team.agentConversationVisibility === "assigned"
+        }
         subSidebar={subSidebar}
       />
       {subSidebar}

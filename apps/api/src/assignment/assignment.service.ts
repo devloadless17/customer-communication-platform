@@ -545,10 +545,11 @@ export class AssignmentService {
         where: { id: workspaceId },
         data: { agentConversationVisibility },
       });
-      // Sessions cache the flag for 15s and sockets decide room membership
-      // from it at CONNECT time. Existing sockets therefore keep their current
-      // audience until they reconnect — acceptable for a setting changed a
-      // handful of times in an org's life, and called out in the UI copy.
+      // Full revocation, immediately: the registered invalidator (see
+      // realtime.gateway.ts) busts the workspace's HTTP/handshake session
+      // caches, busts the emitter scope cache, pushes a catalog tick so every
+      // tab re-derives its restricted flag, then force-disconnects the
+      // workspace's sockets — whose re-handshake now reads post-flip state.
       invalidateTeamVisibilityCaches(workspaceId);
     }
     const data = Object.fromEntries(

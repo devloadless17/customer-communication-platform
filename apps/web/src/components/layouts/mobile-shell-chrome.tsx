@@ -119,6 +119,7 @@ export function MobileShellChrome({
   canManageAvailability,
   canManageWorkflows,
   canViewReports,
+  restrictedViewer = false,
   subSidebar,
   /** Override the auto-derived section title (rare). */
   title,
@@ -138,6 +139,9 @@ export function MobileShellChrome({
   /** Resolved `teamActivity:view` capability — surfaces the Reports item,
    *  mirroring the desktop AppRail gate. */
   canViewReports: boolean;
+  /** Agent limited to assigned conversations — hides Broadcasts, mirroring
+   *  the desktop AppRail (the API denies them wholesale). */
+  restrictedViewer?: boolean;
   subSidebar?: ReactNode;
   title?: string;
   rightSlot?: ReactNode;
@@ -197,7 +201,11 @@ export function MobileShellChrome({
   }, []);
 
   const items = useMemo<NavItem[]>(() => {
-    const out = [...PRIMARY_ITEMS];
+    // Same gate as the desktop rail: the Broadcasts API denies restricted
+    // viewers wholesale, so the entry would be a guaranteed 403.
+    const out = restrictedViewer
+      ? PRIMARY_ITEMS.filter((i) => i.href !== "/broadcasts")
+      : [...PRIMARY_ITEMS];
     // Same order as the desktop rail: Reports beside the analytics surfaces.
     if (canViewReports) out.push(REPORTS_ITEM);
     // Workflows is admin-only — appended after the primary items (its prior
@@ -213,7 +221,7 @@ export function MobileShellChrome({
     // shell entirely (→ /platform in the (app) layout), so they never render
     // this chrome. The old `/admin` push here was dead + unreachable.
     return out;
-  }, [canManageWorkflows, canViewReports]);
+  }, [canManageWorkflows, canViewReports, restrictedViewer]);
 
   const resolvedTitle = title ?? sectionTitle(pathname);
 

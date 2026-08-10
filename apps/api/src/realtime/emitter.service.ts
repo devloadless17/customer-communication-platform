@@ -8,7 +8,13 @@ import type {
   SocketData,
 } from "@ccp/shared/socket/events";
 
-import { channelRoom, conversationRoom, workspaceRoom, userRoom } from "./rooms";
+import {
+  channelRoom,
+  conversationRoom,
+  workspaceMetaRoom,
+  workspaceRoom,
+  userRoom,
+} from "./rooms";
 
 export type TypedIO = Server<
   ClientToServerEvents,
@@ -41,9 +47,6 @@ export class RealtimeEmitter {
         const cutoff = Date.now() - RealtimeEmitter.SCOPE_TTL_MS;
         for (const [k, v] of this.assigneeCache) {
           if (v.at < cutoff) this.assigneeCache.delete(k);
-        }
-        for (const [k, v] of this.contactAssigneeCache) {
-          if (v.at < cutoff) this.contactAssigneeCache.delete(k);
         }
       }, 60_000);
       this.cacheSweep.unref?.();
@@ -151,102 +154,24 @@ export class RealtimeEmitter {
   private assigneeResolver:
     | ((conversationId: string) => Promise<string | null>)
     | null = null;
-  private contactAssigneeResolver:
-    | ((contactId: string) => Promise<string | null>)
-    | null = null;
-  /** contactId → assignee of that contact's conversation. */
-  private readonly contactAssigneeCache = new Map<
-    string,
-    { at: number; value: string | null }
-  >();
-
   /** Bound on boot by RealtimeModule — keeps this service free of a Prisma
    *  import and mirrors how `channelActivityResolver` is wired. */
   bindVisibilityResolvers(
     isTeamRestricted: (workspaceId: string) => Promise<boolean>,
     assigneeOf: (conversationId: string) => Promise<string | null>,
-    assigneeOfContact: (contactId: string) => Promise<string | null>,
   ): void {
     this.scopeResolver = isTeamRestricted;
     this.assigneeResolver = assigneeOf;
-    this.contactAssigneeResolver = assigneeOfContact;
   }
 
-  /**
-   * Emit a frame that is ABOUT one contact (contact:updated / :created).
-   *
-   * These carry the contact's name, phone, email and custom fields, so they get
-   * the same boundary as the conversation frames — routed to staff plus the
-   * agent who owns that contact's conversation, so a restricted agent's contact
-   * panel still updates live for their own customers.
-   */
-  emitAboutContact<E extends keyof ServerToClientEvents>(
-    workspaceId: string,
-    contactId: string | null | undefined,
-    event: E,
-    ...args: Parameters<ServerToClientEvents[E]>
-  ): void {
-    const io = this.server;
-    if (!io) {
-      this.logger.warn(`emitAboutContact("${String(event)}") dropped — IO not ready yet`);
-      return;
-    }
-    const cachedScope = this.restrictedTeams.get(workspaceId);
-    const scopeFresh =
-      cachedScope && Date.now() - cachedScope.at < RealtimeEmitter.SCOPE_TTL_MS;
-    if (scopeFresh && !cachedScope.value) {
-      io.to(workspaceRoom(workspaceId)).emit(event, ...args);
-      return;
-    }
-    if (scopeFresh && cachedScope.value && contactId) {
-      const hit = this.contactAssigneeCache.get(contactId);
-      if (hit && Date.now() - hit.at < RealtimeEmitter.SCOPE_TTL_MS) {
-        this.emitToRooms(io, workspaceId, hit.value, event, args);
-        return;
-      }
-    }
-    void this.emitAboutContactSlow(workspaceId, contactId, event, args);
-  }
-
-  private async emitAboutContactSlow<E extends keyof ServerToClientEvents>(
-    workspaceId: string,
-    contactId: string | null | undefined,
-    event: E,
-    args: Parameters<ServerToClientEvents[E]>,
-  ): Promise<void> {
-    const io = this.server;
-    if (!io) return;
-    try {
-      let restricted = false;
-      if (this.scopeResolver) {
-        const hit = this.restrictedTeams.get(workspaceId);
-        restricted =
-          hit && Date.now() - hit.at < RealtimeEmitter.SCOPE_TTL_MS
-            ? hit.value
-            : await this.scopeResolver(workspaceId).then((v) => {
-                this.restrictedTeams.set(workspaceId, { at: Date.now(), value: v });
-                return v;
-              });
-      }
-      if (!restricted) {
-        io.to(workspaceRoom(workspaceId)).emit(event, ...args);
-        return;
-      }
-      let assignee: string | null = null;
-      if (contactId && this.contactAssigneeResolver) {
-        assignee = await this.contactAssigneeResolver(contactId);
-        this.contactAssigneeCache.set(contactId, { at: Date.now(), value: assignee });
-      }
-      this.emitToRooms(io, workspaceId, assignee, event, args);
-    } catch (err) {
-      this.logger.warn(
-        `emitAboutContact("${String(event)}") degraded to staff-only: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-      io.to(workspaceRoom(workspaceId)).emit(event, ...args);
-    }
-  }
+  // Contact frames (contact:updated / :created / :deleted) used to route
+  // through an `emitAboutContact` sibling of the conversation-scoped path,
+  // targeting staff plus "the contact's conversation's assignee". That was
+  // both stricter than the HTTP surface it mirrors (the contacts DIRECTORY is
+  // deliberately readable by restricted agents — see contacts.service) and
+  // wrong for multi-conversation contacts (findFirst picked an arbitrary
+  // assignee). Directory frames now go to the wsmeta room like every other
+  // workspace-metadata signal.
 
   /** Called when an assignment changes so the next frame targets the new
    *  owner immediately rather than up to a TTL later. */
@@ -426,6 +351,28 @@ export class RealtimeEmitter {
   }
 
   /**
+   * Emit a workspace-METADATA frame — the room EVERY member joins, including
+   * restricted agents (see `workspaceMetaRoom` in rooms.ts for the boundary
+   * rules). Use for content-free workspace-level signals: catalog ticks,
+   * presence/availability, contact-directory updates, broadcast progress, the
+   * default channel's badge. Anything naming a conversation or carrying
+   * message/note text stays on `emitToWorkspace` / the conversation-scoped
+   * emitters.
+   */
+  emitToWorkspaceMeta<E extends keyof ServerToClientEvents>(
+    workspaceId: string,
+    event: E,
+    ...args: Parameters<ServerToClientEvents[E]>
+  ): void {
+    const io = this.server;
+    if (!io) {
+      this.logger.warn(`emitToWorkspaceMeta("${String(event)}") dropped — IO not ready yet`);
+      return;
+    }
+    io.to(workspaceMetaRoom(workspaceId)).emit(event, ...args);
+  }
+
+  /**
    * Emit to every socket belonging to one user (all their tabs/devices).
    *
    * Use this when the audience is a KNOWN, explicit set of users — e.g. the
@@ -535,7 +482,10 @@ export class RealtimeEmitter {
       return;
     }
     if (audience.isDefault) {
-      io.to(workspaceRoom(workspaceId)).emit(event, ...args);
+      // Meta room, not `ws:` — restricted agents ARE members of the default
+      // channel (everyone is), so its badge/read/roster frames must reach
+      // them; these frames carry channel metadata, never thread content.
+      io.to(workspaceMetaRoom(workspaceId)).emit(event, ...args);
       return;
     }
     for (const uid of audience.memberUserIds) {
@@ -609,7 +559,9 @@ export class RealtimeEmitter {
       return;
     }
     const onlineUserIds = await snapshot(workspaceId);
-    io.to(workspaceRoom(workspaceId)).emit("presence:update", { workspaceId, onlineUserIds });
+    // Meta room: teammate green dots are directory metadata every member
+    // renders — restricted agents included (they see the member sidebar too).
+    io.to(workspaceMetaRoom(workspaceId)).emit("presence:update", { workspaceId, onlineUserIds });
   }
 
   // Snapshotters wired by the gateway so the "also viewing" pill can be

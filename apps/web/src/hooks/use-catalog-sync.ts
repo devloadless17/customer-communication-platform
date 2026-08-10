@@ -114,9 +114,23 @@ export function useCatalogSync(): void {
       }, REFRESH_COALESCE_MS);
     };
 
+    // A SERVER-FORCED disconnect is itself a catalog-class signal: the server
+    // only calls `disconnect(true)` on a socket when the session's shape
+    // changed under it (agent-visibility flip, role change, workspace
+    // revocation), and the caches are always busted BEFORE the disconnect —
+    // so an RSC re-derive here reads the new truth. This is the reliable
+    // path: the flip's own `team:catalog:changed` frame is emitted before the
+    // disconnect but can be lost in the closing transport's write buffer.
+    const onDisconnect = (reason: string) => {
+      if (reason !== "io server disconnect") return;
+      startTransition(() => router.refresh());
+    };
+
     socket.on("team:catalog:changed", onChanged);
+    socket.on("disconnect", onDisconnect);
     return () => {
       socket.off("team:catalog:changed", onChanged);
+      socket.off("disconnect", onDisconnect);
       if (pending.current !== null) {
         window.clearTimeout(pending.current);
         pending.current = null;

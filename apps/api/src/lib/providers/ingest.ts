@@ -3228,6 +3228,15 @@ async function ingestOutboundEcho(
       // CAS so a racing inbound reopen doesn't double-flip; only the winner
       // publishes. Closed threads already cleared the assignee on close, so
       // null is the correct post-reopen value.
+      //
+      // INVARIANT this write leans on: `assignedUserId` here goes null→null,
+      // never person→null. Any path that changes a REAL assignee without
+      // publishing `conversation.assigned` skips the emitter's assignee-cache
+      // invalidation AND `evictStaleFromConversationRoom`, so conversation
+      // frames keep co-targeting the ex-owner's user room for up to 30s. Safe
+      // here only because close (mutations.ts) already nulled the assignee
+      // and published the assignment change. If reopen ever preserves or
+      // re-routes an assignee, publish `conversation.assigned` alongside.
       const flip = await tx.conversation.updateMany({
         where: { id: conversation.id, status: "closed" },
         data: { status: "pending", assignedUserId: null },

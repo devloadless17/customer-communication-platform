@@ -266,6 +266,8 @@ export class TicketsController {
       { userId: session.userId },
       id,
       files ?? [],
+      null,
+      session,
     );
     return { attachments };
   }
