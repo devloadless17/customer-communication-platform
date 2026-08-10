@@ -184,6 +184,185 @@ fail + wedge watchdog), local-driver prod refusal.
   Both are one free account away (healthchecks.io / UptimeRobot; R2 bucket + rclone for
   offsite). Surfaced at Phase A exit.
 
+---
+
+# Phase B (started 2026-08-10, after Phase A deployed green at 43dc309e)
+
+## B8 — Workflow engine
+
+Sweep (all 23 step handlers, runner, dispatcher, queue, sweepers): **no P0/P1**. Every
+loop guard verified real (step ceiling, publish cap + cycle detection, jump caps,
+trigger_workflow depth 8 with manual-only targets, X-CCP-Depth fail-closed, seq-keyed
+resumes, triple-guarded ask_question races); snapshot immutability holds (deliberate
+live reads each documented); per-step progress persistence prevents crash-retry double
+sends; `triggerOncePerContact` release-vs-burn semantics deliberate.
+
+**B8-1 (P2, FIXED in `audit(b8)`):** three doc claims said the OPPOSITE of the code
+(queue docblock + README state table claimed live per-step config reads; README listed a
+nonexistent dispatcher service file). **B8-2 (P2, FIXED):** `resolveStepTarget`'s
+event-less auto-creates now documented as deliberate re-trigger-surface avoidance.
+**Accepted:** legacy null-`graphSnapshot` fallback (self-draining, 90-day wait horizon);
+`occurredAt` regenerated per pickup (cosmetic — X-CCP-Delivery is the dedupe key);
+workflow sends bypass OutboundSendAttempt (README-documented residual at-least-once).
+
+## B7 — Tickets & escalation (commit `audit(b7)`)
+
+**B7-1 (P1, FIXED):** create/update passed a bare actor → `actorWorkspaceId = NULL` on the
+highest-traffic events; a guest department's status/priority/assign writes rendered
+unattributed on shared tickets. **B7-2 (P2, FIXED):** write-once cause was JS-pre-check
+only; emptiness now pinned in both fill CASes (update + escalate) — concurrent fills
+conflict instead of silently rewriting the founding context. **B7-3 (P2, FIXED):** six
+TicketEvent writers stamped `lastActivityAt` ms-skewed from (or never with) their events;
+all now align to the event's own createdAt, so the drift sweeper's corrected-count stops
+being permanent noise. **B7-4 (P2, FIXED):** four stale twin-pair-era comments.
+**B7-5 (P3, FIXED):** guest `assignedTeamId` refused (`teams_owner_only`) instead of
+silently dropped; UI hides the control on the guest side.
+Clean: numbering race-safety, state machine + SLA stamps, no auto-open/reopen anywhere,
+share idempotency + revocation atomicity, counters, thread separation, /v1 parity.
+
+## B9 — Broadcasts & audiences (commit `audit(b9)`)
+
+**B9-1 (P1, FIXED):** `clickedAt` rode the first-reply CAS — day-2 button taps after a
+day-1 reply were never counted; own first-click CAS now (mirrors the optedOutAt fix).
+**B9-2 (P1, FIXED):** boot cancel-race recovery seeded no `deliveryState` — billed sends
+invisible in the funnel forever. **B9-3 (P1, FIXED):** composer group-mode count dropped
+the group's stored `fieldFilters` (~6× wrong confirm number). **B9-4/5 (P2, FIXED):**
+recipient paging id-ordered in both modes (status mutates mid-send — keyset skipped/
+repeated rows); audience-count accepts broadcastable channels only. **B9-6 (P2, FIXED):**
+stale boot comment + CLAUDE.md's removed `targetMode:'customer'` claim corrected.
+**Accepted:** canceled recipients read funnel-"pending" (deliberate canceled≠failed);
+drift-sweeper backfills deliveredAt/readAt at send-time bucket; sweeper-recovered
+`undelivered` rows lack normalized errorCode (raw SQL can't classify — report gap only).
+**Test debt:** no e2e pins create-time opt-out suppression counts.
+Clean: full status machine CAS (no zombie-send path), recipient exactly-once ledger,
+crash/schedule/materialize recovery, budget-pause behavior, audience suppression scope,
+ticket-bypass boundaries exactly as designed.
+
+## B10 — Contacts, identity & customers (commit `audit(b10)`)
+
+**B10-1 (P1, FIXED):** workflow phone targets weren't channel-scoped — a stranger typing
+a customer's number into the public pre-chat box could capture the automation into their
+unverified widget thread; both lookups now pin `identityChannel: "whatsapp"` (the import
+runner's documented "borrowed phone" hazard, same fix). **B10-2 (P1, FIXED):** every
+Customer reap orphaned `AiCustomerMemory` rows — a routine merge silently erased
+"permanent" person-level memory; one dedup-aware helper (`lib/ai/customer-memory-adopt`)
+now carries memories to the absorbing person (or purges with the person) at all 6 reap
+sites. **B10-3 (P2, FIXED):** version-CAS discipline extended to contact-share (×2),
+prechat (full CAS — racing agent PATCH no longer clobbered), ingest revive, and
+removeOption's raw UPDATEs (ghost-option resurrection race). **B10-4 (P2, FIXED):**
+prechat labels slugifying to reserved keys dropped instead of shadowing built-ins.
+**B10-5 (P2, FIXED):** transfer retry contract was dead code (`failed` written on every
+attempt made the row unclaimable); terminal-only now, transient failures resume from the
+cursor. **B10-6 (P2, FIXED):** widget-view exports count/select through the same
+directory gate hydrate applies.
+Clean: strong-key discipline all 8 callers, merge/split reversibility (+ the audit-record
+gap from §6 turns out BUILT — `CustomerIdentityEvent`), promotion predicate on every
+directory surface, soft-delete + revive paths, import/export normalization + injection
+escaping, select-field validation on every write path, lastInboundAt writers complete.
+
+## B13 — Calls, system-side (light pass, by design)
+
+Audited in depth 2026-08-10 (crosstalk fall-through, answered-frame race, recovery
+sweeper, transcriptPending — see the call-transcription memory) and re-verified this
+audit: call CAS writes hardened with workspaceId (A1 commit), tenancy sweep clean
+(`{id, workspaceId}` gate + `conversationRelationWhere` on recording/transcript
+streams), artifacts in the blob-orphan cross-check, `lastInboundAt` written at
+ringing/answer with the drift sweeper recompute matched, CSW window specs green in
+Phase 0 quiet runs (call-csw-window, call-inapp-recovery, call-transcript-pipeline,
+call-artifacts, inapp-recording — 24+ tests). No new findings.
+
+## B16 — Event bus / queues / sweepers inventory
+
+Assembled across A3+A5 sweeps rather than as a separate pass: all **35 sweepers**
+wired to schedulers (A3); all **8 BullMQ queues** bounded (attempts, backoff,
+retention, stable jobIds — table in the A5 section); bus tier registrations verified
+at their real priorities with no audit/analytics/workflow subscriber on `broadcast.*`
+(A5); outbox poison-row + wedge-watchdog policy (A5); FANOUT_RULES is a compile-total
+map (A4). Diff vs CLAUDE.md claims produced two doc fixes (a4: events contract; b9:
+targetMode) — everything else matches.
+
+## B11 — Team chat & DMs (commit `audit(b11)`)
+
+**B11-1 (P2, FIXED):** the DM "peer left → read-only" rule fired only for deactivation;
+REMOVAL deletes the member row, so the guard's peer lookup returned null and passed — a
+direct POST kept writing into a readerless room whose backlog surfaced on re-invite. The
+dmKey (mapDmPeer's own removed-vs-self rule) closes the branch (`dm_peer_removed`).
+**B11-2 (P2, FIXED):** clientTempId capped at 128 (uncapped → btree ceiling → 500).
+**B11-3 (P3, FIXED):** `X-Content-Type-Options: nosniff` on blob streams.
+Clean: DM dedup race, exactly-two membership locks, per-request membership gates on all
+17 handlers, all 5 satellite tables parent-scoped, clientTempId never ownership, §10
+unread discipline + reconnect convergence, mention audience closed, media gates shared
+with inbox.
+
+## B12 — Notifications (commit `audit(b12)`)
+
+**B12-1 (P2/MEDIUM, FIXED):** the schema promised a retention sweep that never existed —
+rows were append-only forever. Built `notification-retention` (daily, read >30d /
+unread >120d, tunable, mutex-registered). **B12-2 (P2, FIXED):** /v1 no-op re-assign
+wrote a fresh "assigned to you" bell row + spurious `assigned` audit event per sync;
+both now require an actual change. **B12-3 (P2, FIXED):** share revoke deletes the guest
+workspace's bell rows (mark-read left a list of links that 404). **B12-4 (P3, FIXED):**
+toast/list persona unified ("Automation").
+**Accepted:** reassignment doesn't notify the raiser (documented — `ticket_assigned` is
+the specific signal); `markThreadRead` clears across workspaces by design.
+**Product decisions to consider later:** SLA breach and share-revoke notify nobody;
+webhook auto-disable has no durable notification (socket toast only).
+Clean: single write site, audience arms + dedupe, read-state scope, cascade, fanout
+per-user only, all 5 kinds rendered.
+
+## B14 — /v1 API + outbound webhooks (commit `audit(b14)`)
+
+**B14-1 (P1/MEDIUM, FIXED):** /v1 contact create/revive published a NON-silent
+`contact.updated` with every field/tag as a change — "On Contact Tag updated" workflows
+(billed sends possible) and update-webhooks fired for creations the identical UI create
+never fired. Now silent; trigger surface = `contact.created`, matching internal.
+**B14-2 (P2, FIXED):** broadcast Idempotency-Key fingerprinted only {templateId,
+audience} — corrected-variables re-POSTs silently replayed the OLD response on the most
+irreversible route; whole input fingerprinted now. **B14-3 (P2, DOCUMENTED):**
+shared-ticket webhooks deliver to the ACTING workspace only — deliberate until
+per-workspace payload views are built (design sketched in public-events.ts; the naive
+fix leaks the owner's contact into a guest's partner system). **B14-4 (P2, FIXED):**
+stale retry-ladder (4→7 attempts) and /v1-echo-default comments corrected.
+**Ledger-only:** contact create/delete take no Idempotency-Key (upsert is the idempotent
+path; retry worst case is a clean 409).
+Clean: parity delegation across all six write families, idempotency claim/replay/
+conflict semantics (ambiguity-refusal + 24h verdict retention), delivery signing
+(t=…,v1=…), SSRF posture incl. redirect refusal, breaker mechanics, event selection +
+enrichment tenancy, error semantics, pagination bounds.
+
+## B15 — Web app-wide sweep (commit `audit(b15)`)
+
+**B15-1 (P2, FIXED):** account menu offered `/organization` in operator mode — the
+wrong-org-edit invitation the switcher's unlinked name prevents; hidden now.
+**B15-2 (P2, FIXED):** restricted viewers reaching /broadcasts by URL hit the error
+boundary via a guaranteed 403; the three pages redirect like /workflows.
+**B15-3 (P3, FIXED):** settings "Team activity" card linked the redirect stub.
+**Ledger-only (cosmetic/deferred):** mobile chrome shows no operator banner and no
+switcher (desktop-only rail — real gap if the operator works from a phone);
+`loading.tsx` sparse outside the main sections (error coverage is total); /templates
+reachable-but-unlinked for restricted viewers.
+Clean: all 69 routes reachable, no dead nav, role gating server-redirected on every
+sensitive page, RSC fetching uniform, zero TODOs in web src.
+
+## B17 — Completeness & final adversarial pass (commit `audit(b17)`)
+
+**B17-1 (HIGH, FIXED):** `customer-memory-adopt.ts` (written earlier IN THIS AUDIT)
+carried a raw NUL byte — git saw the file as binary, every grep-based sweep skipped it,
+and `check-binary-sources` was red, which would have FAILED the next deploy. ` `
+escape now; checker green. Lesson recorded in memory: run the checker suite after
+writing new files, and never put control bytes in source.
+**B17-2 (P2, FIXED):** shared inbox views had no realtime propagation (the one catalog
+without it) — now publish `team.catalog_changed {scope:"inbox-views"}`.
+**B17-3 (P3, FIXED):** optional env vars documented; two dead exports removed.
+**Refuted by verification:** "AI deleteMemory misses the viewer" (controller passes
+session); "call-recordings sweeper never sweeps" (the tick runs `selectRetriable`; only
+the test-hook export is dead).
+**Cleanup backlog (P3, no action now):** ~13 more zero-reference exports (list in the
+B17 agent transcript); `zod` declared-unused in apps/web (left — removing it churns the
+frozen lockfile for nothing); three sweeper `*Once` test hooks with no test consumer.
+Clean: zero TODO/FIXME anywhere, all dangerous env flags refuse prod boot, migration
+hygiene, no missing runtime deps, 5-feature wiring spot-checks coherent.
+
 ## Fix commits (local, NOT pushed — push = deploy)
 
 | Commit | Section | Content |
