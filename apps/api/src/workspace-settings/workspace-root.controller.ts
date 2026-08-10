@@ -199,6 +199,23 @@ export class WorkspaceRootController {
         detail: "only the organization owner can delete the organization",
       });
     }
+    // The PLATFORM ANCHOR is not deletable here — same belt every
+    // admin-organizations surface wears (audit 2026-08-10). The operator's
+    // session keeps `organizationId` pointed at their own anchor even while
+    // acting inside a client's workspace (deliberate — see
+    // WorkspacesService.organization), so this route reached from operator
+    // mode would cascade the platform org, the operator's own user row and
+    // the console with it. Refuse it outright; there is no legitimate caller.
+    const org = await this.db.organization.findUnique({
+      where: { id: session.organizationId },
+      select: { isPlatform: true },
+    });
+    if (org?.isPlatform) {
+      throw new ForbiddenException({
+        error: "platform_org_not_deletable",
+        detail: "the platform organization cannot be deleted from the app",
+      });
+    }
     await this.teamRoot.destroyOrganization(session.organizationId, "api/workspace");
     return { ok: true };
   }
