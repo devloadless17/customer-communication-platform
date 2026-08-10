@@ -104,7 +104,7 @@ export type CreateDmInput = z.infer<typeof CreateDmSchema>;
 
 export const PostChannelMessageSchema = z.object({
   body: z.string().trim().min(1).max(MAX_BODY_LENGTH),
-  clientTempId: z.string().min(1).optional(),
+  clientTempId: z.string().min(1).max(128).optional(),
 });
 export type PostChannelMessageInput = z.infer<typeof PostChannelMessageSchema>;
 

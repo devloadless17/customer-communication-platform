@@ -53,6 +53,11 @@ export async function streamBlob(
   if (obj.contentRange) res.set("Content-Range", obj.contentRange);
   res.set("Cache-Control", `private, max-age=${opts?.cacheSeconds ?? 31_536_000}, immutable`);
   res.set("Vary", "Cookie");
+  // Defense-in-depth: the upload allowlist already refuses every scriptable
+  // type (mime-guard), so this only closes legacy content-sniffing on inline
+  // renders (e.g. a text/plain body containing markup). One line, no
+  // legitimate consumer sniffs (audit 2026-08-10).
+  res.set("X-Content-Type-Options", "nosniff");
   // Default: NO Content-Disposition → the browser renders inline (PDFs open in
   // the built-in viewer, images/video/audio play in-tab). Only force a download
   // (attachment) when a downloadFilename is passed — the explicit "Download"

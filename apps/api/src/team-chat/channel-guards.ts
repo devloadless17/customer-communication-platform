@@ -87,7 +87,7 @@ export async function assertChannelWritable(
 ): Promise<void> {
   const channel = await db.teamChannel.findFirst({
     where: { id: channelId, workspaceId },
-    select: { kind: true },
+    select: { kind: true, dmKey: true },
   });
   if (channel?.kind !== "dm") return;
   const peer = await db.teamChannelMember.findFirst({
@@ -98,6 +98,24 @@ export async function assertChannelWritable(
     throw new UnprocessableEntityException({
       error: "dm_peer_deactivated",
       detail: `${peer.user.name ?? "That teammate"} no longer has an account on this team.`,
+    });
+  }
+  // REMOVED peer — the other branch of "peer left the team". Removal deletes
+  // the peer's member row (remove-member.ts, clearGrants), so the lookup
+  // above returns null and the deactivation check never fires; only the
+  // dmKey can tell a removed-peer DM from a real self-DM (same rule as
+  // mapDmPeer: a key naming ONE distinct participant is notes-to-self).
+  // Without this a direct POST kept writing into a room with no other
+  // reader, and the backlog surfaced if the peer was ever re-invited
+  // (audit 2026-08-10).
+  if (
+    !peer &&
+    channel.dmKey !== null &&
+    new Set(channel.dmKey.split(":")).size > 1
+  ) {
+    throw new UnprocessableEntityException({
+      error: "dm_peer_removed",
+      detail: "That teammate is no longer a member of this workspace.",
     });
   }
 }
