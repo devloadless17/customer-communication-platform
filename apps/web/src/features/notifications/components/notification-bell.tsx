@@ -95,11 +95,18 @@ export function NotificationBell() {
       toast.info(payload.ticketNumber ? `${who} ${what} · #${payload.ticketNumber}` : `${who} ${what}`);
     };
     socket.on("notification:new", onNew);
+    // Opening a ticket clears its bell rows server-side (one read-state rule:
+    // seeing the ticket = seeing everything about it), and the reading tab
+    // announces that with a LOCAL ticket:thread:read dispatch — refetch so the
+    // badge drops in step with the rail dot instead of waiting for the next
+    // notification.
+    socket.on("ticket:thread:read", debounced);
     // Re-seed after an offline gap longer than the socket recovery window.
     socket.on("connect", debounced);
     return () => {
       if (timer) clearTimeout(timer);
       socket.off("notification:new", onNew);
+      socket.off("ticket:thread:read", debounced);
       socket.off("connect", debounced);
     };
   }, [loadCount]);

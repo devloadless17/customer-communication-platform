@@ -25,7 +25,14 @@ import { ATTACHMENT_SELECT_FIELDS, mapAttachment } from "./queries";
 
 type Db = Pick<
   PrismaClient,
-  "ticket" | "ticketMessage" | "ticketThreadUnread" | "ticketShare" | "$transaction"
+  | "ticket"
+  | "ticketMessage"
+  | "ticketThreadUnread"
+  | "ticketShare"
+  | "notification"
+  | "user"
+  | "workspaceMember"
+  | "$transaction"
 >;
 
 /**
@@ -91,49 +98,17 @@ export async function listTicketThread(
 /**
  * WHO should be told about a reply.
  *
- * Five arms, all deliberate:
- *  1. whoever RAISED the ticket. They asked the question and are waiting on the
- *     answer, and they are frequently neither the assignee nor anyone who has
- *     spoken. Missing this arm was a real gap: a reply badged the assignee and
- *     left the person who actually needed it silent.
- *  2. the ticket's assignee — the owner side's accountable person;
- *  3. every share's assignee — each guest department's accountable person;
- *  4. every share's CREATOR — the person who escalated. Same reasoning as (1),
- *     one department over;
- *  5. everyone who has already spoken in the thread.
- *
- * Deliberately NOT every member of a participating workspace: that badges a
- * whole department for a two-person conversation, which is the noise this is
- * supposed to end. A non-participant who replies joins via arm 4.
+ * Delegates to `ticketAudience` — ONE resolver for "who is involved in this
+ * ticket" (raiser, each side's assignee, each escalator, everyone who has
+ * spoken, minus anyone whose workspace lost access), so the in-thread unread
+ * markers and the bell can never disagree about who the participants are.
+ * Two lists that both meant "the people on this ticket" drifted once already:
+ * the thread had the raiser arm before the bell did, so a reply badged the
+ * board and left the bell silent for the same person.
  */
-export async function resolveThreadParticipants(
-  db: Db,
-  ticketId: string,
-): Promise<string[]> {
-  const [ticket, shares, authors] = await Promise.all([
-    db.ticket.findUnique({
-      where: { id: ticketId },
-      select: { assignedUserId: true, createdById: true },
-    }),
-    db.ticketShare.findMany({
-      where: { ticketId },
-      select: { assignedUserId: true, createdById: true },
-    }),
-    db.ticketMessage.findMany({
-      where: { ticketId },
-      select: { authorUserId: true },
-      distinct: ["authorUserId"],
-    }),
-  ]);
-  const ids = new Set<string>();
-  if (ticket?.createdById) ids.add(ticket.createdById);
-  if (ticket?.assignedUserId) ids.add(ticket.assignedUserId);
-  for (const s of shares) {
-    if (s.assignedUserId) ids.add(s.assignedUserId);
-    if (s.createdById) ids.add(s.createdById);
-  }
-  for (const a of authors) if (a.authorUserId) ids.add(a.authorUserId);
-  return [...ids];
+export async function resolveThreadParticipants(db: Db, ticketId: string): Promise<string[]> {
+  const audience = await ticketAudience(db, ticketId);
+  return audience ? audience.recipients.map((r) => r.userId) : [];
 }
 
 export type AddThreadMessageOutcome =
@@ -356,6 +331,18 @@ export async function markThreadRead(
   const { count } = await db.ticketThreadUnread.deleteMany({
     where: { ticketId: args.ticketId, userId: args.userId },
   });
+  // ONE rule for read state: opening the ticket means you have seen everything
+  // about it. The bell rows for this ticket clear WITH the thread marker —
+  // before this, the marker cleared on open while the bell cleared only on
+  // "Mark all read", so the rail's dot and the bell's badge diverged forever,
+  // by construction. Same person-scoping as the marker; best-effort, because a
+  // failed courtesy must not fail the read.
+  await db.notification
+    .updateMany({
+      where: { userId: args.userId, ticketId: args.ticketId, readAt: null },
+      data: { readAt: new Date() },
+    })
+    .catch(() => undefined);
   return { ok: true, cleared: count > 0 };
 }
 

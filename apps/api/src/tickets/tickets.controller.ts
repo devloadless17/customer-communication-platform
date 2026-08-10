@@ -61,7 +61,7 @@ import { TicketsService } from "./tickets.service";
  * Session-gated only, like the inbox itself: working a ticket — claiming it,
  * changing its priority, solving it — is everyday work in the same tier as
  * replying to a message. What an ADMIN controls is the configuration (SLA
- * promises, which custom fields exist, whether tickets auto-open), and those
+ * promises, which custom fields exist, behaviour toggles), and those
  * routes carry the role guard.
  *
  *   GET    /api/tickets              — board/list, keyset-paginated

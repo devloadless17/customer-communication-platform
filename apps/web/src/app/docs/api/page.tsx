@@ -1782,11 +1782,12 @@ export default function ApiDocsPage() {
           <br />
           <br />
           Lifecycle: <code>new</code> → <code>open</code> → <code>pending</code> /{" "}
-          <code>on_hold</code> → <code>solved</code> → <code>closed</code>. Tickets open
-          by themselves — an inbound on a thread with no active ticket opens one, and a
-          follow-up inside the reopen window (default 72h) comes back to the solved one
-          instead of starting a third. <strong>Broadcasts never open tickets</strong>; a
-          customer who replies to one does.
+          <code>on_hold</code> → <code>solved</code> → <code>closed</code>.{" "}
+          <strong>Nothing opens or reopens a ticket but a person raising one</strong> —
+          an agent&apos;s &ldquo;Raise a ticket&rdquo;, this API, or a workflow&apos;s{" "}
+          <code>create_ticket</code> step. An inbound message ATTACHES to the
+          thread&apos;s live ticket or carries no ticket at all; a follow-up on a solved
+          ticket never resurrects it. Broadcasts never open tickets either.
           <br />
           <br />
           Subscribe to the <code>ticket.changed</code> webhook to be told the instant work

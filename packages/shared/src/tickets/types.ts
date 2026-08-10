@@ -13,14 +13,16 @@
 
 /**
  * Lifecycle of a ticket.
- *  - `new`     — auto-opened, nobody has picked it up. Distinct from `open` so
- *                an untriaged backlog is reportable separately from a worked one.
+ *  - `new`     — raised but unclaimed. Distinct from `open` so an untriaged
+ *                backlog is reportable separately from a worked one.
  *  - `open`    — actively being worked.
- *  - `pending` — waiting on the CUSTOMER.
+ *  - `pending` — waiting on the CUSTOMER's reply.
  *  - `on_hold` — waiting on US, deliberately parked (escalation, part on order).
- *  - `solved`  — done, but inside the reopen window: a follow-up message lands
- *                back on THIS ticket instead of opening a new one.
- *  - `closed`  — terminal. A message after this always opens a new ticket.
+ *  - `solved`  — the customer got their answer; the work is done. A person may
+ *                still reopen it deliberately — nothing reopens it on its own
+ *                (auto-reopen removed 2026-08-01).
+ *  - `closed`  — terminal. A genuinely new issue gets a NEW ticket somebody
+ *                chooses to raise; nothing opens one automatically.
  */
 export type TicketStatus = "new" | "open" | "pending" | "on_hold" | "solved" | "closed";
 
@@ -39,6 +41,20 @@ export const TICKET_STATUSES: readonly TicketStatus[] = [
  * `Conversation.openTicketCount` excludes and what the SLA sweeper skips —
  * derive from this set rather than re-listing statuses at each call site.
  */
+/**
+ * The ONE set of human labels for the statuses. Four surfaces (board, detail,
+ * sub-sidebar, workflow step editor) each hand-wrote their own copy and one had
+ * already drifted; iterate `TICKET_STATUSES` and read labels from here.
+ */
+export const TICKET_STATUS_LABELS: Record<TicketStatus, string> = {
+  new: "New",
+  open: "Open",
+  pending: "Waiting on customer's reply",
+  on_hold: "On hold",
+  solved: "Solved",
+  closed: "Closed",
+};
+
 export const TICKET_ACTIVE_STATUSES: readonly TicketStatus[] = [
   "new",
   "open",

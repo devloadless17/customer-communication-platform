@@ -298,7 +298,7 @@ test("/v1 SLA policy drives the due dates of tickets opened after it", async () 
 });
 
 test("solved means solved: an inbound attaches to a LIVE ticket, and never reopens a solved one", async () => {
-  // Auto-REOPEN was removed 2026-08-03 ("nothing opens or reopens a ticket
+  // Auto-REOPEN was removed 2026-08-01 ("nothing opens or reopens a ticket
   // but a person raising one") — this spec previously asserted the reopen
   // window and blocked deploys once the behavior was (deliberately) gone.
   // The contract now: an inbound ATTACHES to the thread's live ticket, and

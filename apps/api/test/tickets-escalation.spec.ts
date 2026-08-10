@@ -750,6 +750,115 @@ describe("the board orders by LAST ACTIVITY", () => {
   });
 });
 
+describe("what the audit pinned", () => {
+  it("createTicket WRITES assignedTeamId — the raise dialog's team queue works", async () => {
+    // Validated, then silently dropped: `createTicketInTx` never put the column
+    // in its `data`, so "Send to team" returned a 201 with the ticket in
+    // nobody's queue.
+    const team = await prisma.team.create({
+      data: { workspaceId: wsA, name: `SHR Queue ${randomUUID().slice(0, 8)}` },
+      select: { id: true },
+    });
+    const { conversationId } = await makeConversation(wsA);
+    const created = await createTicket(mdb, {
+      workspaceId: wsA,
+      conversationId,
+      actor: { userId, workspaceId: wsA },
+      source: "human",
+      subject: "queued at birth",
+      assignedTeamId: team.id,
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.ticket.assignedTeamId).toBe(team.id);
+    const row = await prisma.ticket.findUniqueOrThrow({
+      where: { id: created.ticket.id },
+      select: { assignedTeamId: true },
+    });
+    expect(row.assignedTeamId).toBe(team.id);
+  });
+
+  it("a ticket-level attachment bumps lastActivityAt and leaves ZERO sweeper drift", async () => {
+    const { ticket } = await makeTicket();
+    const before = (
+      await prisma.ticket.findUniqueOrThrow({
+        where: { id: ticket.id },
+        select: { lastActivityAt: true },
+      })
+    ).lastActivityAt;
+    await new Promise((r) => setTimeout(r, 20));
+    await addTicketAttachment(adb, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId, workspaceId: wsA },
+      bytes: Buffer.from(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a4944415478da6360000002000180fe8ecf0000000049454e44ae426082",
+        "hex",
+      ),
+      filename: "activity.png",
+      mimeType: "image/png",
+    });
+    const after = (
+      await prisma.ticket.findUniqueOrThrow({
+        where: { id: ticket.id },
+        select: { lastActivityAt: true },
+      })
+    ).lastActivityAt;
+    // The file IS activity — and the stamp comes from the row/event itself, so
+    // the nightly reconciler finds NOTHING to "correct" (phantom drift was
+    // burying real corrections in noise).
+    expect(after.getTime()).toBeGreaterThan(before.getTime());
+    const { sweepTicketLastActivityOnce } = await import("@/lib/sweepers/ticket-last-activity-drift");
+    // Scoped assertion: the sweep may correct OTHER workspaces' tickets (this
+    // is a shared dev DB); ours must already be exact.
+    await sweepTicketLastActivityOnce();
+    const swept = (
+      await prisma.ticket.findUniqueOrThrow({
+        where: { id: ticket.id },
+        select: { lastActivityAt: true },
+      })
+    ).lastActivityAt;
+    expect(swept.getTime()).toBe(after.getTime());
+  });
+
+  it("a RESTRICTED agent always sees a ticket they RAISED", async () => {
+    // visibility="assigned" scoped the board to conversations/tickets assigned
+    // to you — so a restricted agent lost sight of their own raised ticket the
+    // moment the conversation was reassigned, while still being notified about
+    // it, and every notification opened a 404.
+    const restricted = await prisma.user.create({
+      data: {
+        name: "SHR Restricted",
+        email: `shr-restricted-${randomUUID()}@example.test`,
+        organizationId: orgId,
+      },
+      select: { id: true },
+    });
+    await prisma.workspaceMember.create({
+      data: { userId: restricted.id, workspaceId: wsA, role: "agent" },
+    });
+    const { conversationId } = await makeConversation(wsA);
+    const created = await createTicket(mdb, {
+      workspaceId: wsA,
+      conversationId,
+      actor: { userId: restricted.id, workspaceId: wsA },
+      source: "human",
+      subject: "raised by a restricted agent",
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    // The conversation belongs to nobody (or someone else) — the raiser arm is
+    // what makes this visible.
+    const visible = await listTickets(qdb, wsA, {
+      restrictToConversationsAssignedTo: restricted.id,
+    });
+    expect(visible.tickets.map((t) => t.id)).toContain(created.ticket.id);
+    const counts = await getTicketCounts(qdb, wsA, restricted.id, restricted.id);
+    expect(counts.totalActive).toBeGreaterThan(0);
+  });
+});
+
 describe("internal notes stay internal", () => {
   it("a note is private to the workspace that wrote it", async () => {
     const { ticket } = await makeTicket();

@@ -209,10 +209,16 @@ export const FANOUT_RULES: FanoutRuleMap = {
       ...(e.breachedLeg ? { breachedLeg: e.breachedLeg } : {}),
       openTicketCount: e.openTicketCount,
     };
-    emitter.emitToWorkspace(e.workspaceId, "ticket:changed", frame);
+    // Workspace room PLUS each co-target's user room, in one de-duped emit.
+    // Restricted agents never join the workspace room, so without the user
+    // rooms an agent assigned a ticket had to refresh to see it — the reported
+    // bug. `notifyUserIds` mirrors the visibility arms; a uid with no room in
+    // this workspace is a no-op.
+    const notifyUserIds = e.notifyUserIds ?? [];
+    emitter.emitToWorkspaceAndUsers(e.workspaceId, notifyUserIds, "ticket:changed", frame);
     for (const guestWorkspaceId of new Set(e.sharedWithWorkspaceIds ?? [])) {
       if (guestWorkspaceId === e.workspaceId) continue;
-      emitter.emitToWorkspace(guestWorkspaceId, "ticket:changed", {
+      emitter.emitToWorkspaceAndUsers(guestWorkspaceId, notifyUserIds, "ticket:changed", {
         ...frame,
         // Named for the RECEIVING workspace: the client filters frames by its
         // own active workspace, and the board it patches is theirs.
@@ -261,10 +267,13 @@ export const FANOUT_RULES: FanoutRuleMap = {
       notifiedUserIds: e.notifiedUserIds,
       ...(e.message.clientTempId ? { clientTempId: e.message.clientTempId } : {}),
     };
-    emitter.emitToWorkspace(e.workspaceId, "ticket:thread:message", frame);
+    // Same co-targeting as `ticket.changed`, for the same reason: a restricted
+    // agent must see a reply on their own ticket without refreshing. The event
+    // already names its audience (`notifiedUserIds`).
+    emitter.emitToWorkspaceAndUsers(e.workspaceId, e.notifiedUserIds, "ticket:thread:message", frame);
     for (const guestWorkspaceId of new Set(e.sharedWithWorkspaceIds ?? [])) {
       if (guestWorkspaceId === e.workspaceId) continue;
-      emitter.emitToWorkspace(guestWorkspaceId, "ticket:thread:message", {
+      emitter.emitToWorkspaceAndUsers(guestWorkspaceId, e.notifiedUserIds, "ticket:thread:message", {
         ...frame,
         // Named for the RECEIVING workspace: the client filters frames by its
         // own active workspace, same rule as `ticket:changed`.

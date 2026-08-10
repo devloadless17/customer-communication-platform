@@ -16,6 +16,7 @@ import { ConditionGroupEditor, ensureConditionIds } from "./condition-group";
 import type { AskOptionEdgeOp } from "./graph-mutations";
 import { OpenWindowContactCombobox } from "./open-window-contact-combobox";
 import { type BuilderCatalogs, type Trigger, type WorkflowGraph, toGroup } from "./types";
+import { TICKET_STATUS_LABELS, TICKET_STATUSES } from "@ccp/shared/tickets/types";
 
 /**
  * Body editor wrapper: token-highlight textarea + insert-variable picker.
@@ -2132,12 +2133,11 @@ export function SetTicketStatusEditor({
         hint="Applies to the conversation's active ticket. If there is none, the step is skipped and the workflow continues."
       >
         <Select value={status} onChange={(e) => onChange({ ...config, status: e.target.value })}>
-          <option value="new">New</option>
-          <option value="open">Open</option>
-          <option value="pending">Waiting on customer</option>
-          <option value="on_hold">On hold</option>
-          <option value="solved">Solved</option>
-          <option value="closed">Closed</option>
+          {TICKET_STATUSES.map((st) => (
+            <option key={st} value={st}>
+              {TICKET_STATUS_LABELS[st]}
+            </option>
+          ))}
         </Select>
       </Field>
       {(status === "solved" || status === "closed") && (

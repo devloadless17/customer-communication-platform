@@ -414,6 +414,14 @@ export function ticketVisibilityWhere(viewerUserId: string): Prisma.TicketWhereI
       { assignedUserId: viewerUserId },
       // ...or assigned it on your department's side of a shared ticket.
       { shares: { some: { assignedUserId: viewerUserId } } },
+      // ...or you RAISED it, or you ESCALATED it here. The raiser must be able
+      // to follow their own ticket — that is the whole model ("agent X raises a
+      // ticket so it gets a solution") — and without these arms a restricted
+      // agent lost sight of their ticket the moment the conversation was
+      // reassigned, while still receiving its notifications, each of which
+      // opened a 404.
+      { createdById: viewerUserId },
+      { shares: { some: { createdById: viewerUserId } } },
     ],
   };
 }

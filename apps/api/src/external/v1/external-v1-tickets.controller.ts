@@ -285,7 +285,7 @@ export class ExternalV1TicketsController {
   }
 
   /** Remove one attachment from a ticket. (Uploads stay in-app — see the
-   *  comment on the /v1 comment route.) */
+   *  comment on the /v1 thread route.) */
   @Delete("tickets/:id/attachments/:attachmentId")
   @RequireScope("write:tickets")
   async removeTicketAttachmentV1(
@@ -328,7 +328,7 @@ export class ExternalV1TicketsController {
 
   // Ticketing configuration. Read is deliberately under `read:tickets` (a BI
   // system needs the SLA promise to report against it); every write changes
-  // what FUTURE tickets promise, so it needs `write:tickets`.
+  // what FUTURE tickets promise, so config writes carry `admin:settings`.
 
   @Get("tickets-settings")
   @RequireScope("read:tickets")

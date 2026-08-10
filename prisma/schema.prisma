@@ -679,14 +679,6 @@ model Workspace {
   // thread), filling the board with work nobody raised. The toggle that used to
   // live here (`ticketAutoOpen`) was removed 2026-07-25.
   //
-  // How long after a ticket is SOLVED a follow-up message reopens it instead of
-  // opening a new one. This is the single most-debatable rule in ticketing —
-  // RETIRED 2026-08-01 — READ BY NOTHING. Auto-reopen is gone: a customer's
-  // follow-up on a solved ticket no longer drags it back to `open`, because
-  // NOTHING opens or reopens a ticket except a person raising one (an agent's
-  // "Raise a ticket", or a workflow's `create_ticket`). Solved means the
-  // customer got their answer; a later message is small talk or a NEW issue,
-  // and a new issue deserves its own cause and its own number.
   //
   // The column stays rather than taking a migration to drop: it holds values
   // workspaces once chose, dropping a column silently destroys any raw index
@@ -3551,10 +3543,10 @@ enum TicketStatus {
   pending
   // Waiting on US but deliberately parked (escalation, a part on order).
   on_hold
-  // Work is done; the reopen window is still running, so a follow-up message
-  // lands back on THIS ticket rather than opening a new one.
+  // The customer got their answer; the work is done. Only a PERSON may reopen
+  // it — nothing automatic does (auto-reopen removed 2026-08-01).
   solved
-  // Terminal. A message after this always opens a new ticket.
+  // Terminal. A genuinely new issue gets a NEW ticket somebody raises.
   closed
 }
 
@@ -5313,7 +5305,8 @@ model Call {
 
   // Call transcription (opt-in per call, independent of recording). Same
   // 7-day provider retention + download-to-R2 lifecycle as the recording
-  // columns above; the artifact is a JSON document (segments + word timings).
+  // columns above; the artifact is a JSON document (flat text + one turn per
+  // speaker for in-app calls — no word timings; see call-recording-download).
   // transcriptLanguage is the AUTO-DETECTED spoken language (ISO 639, e.g.
   // "ar") from the transcript body — denormalized for list display/filtering.
   transcriptMediaId  String?

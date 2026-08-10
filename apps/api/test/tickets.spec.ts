@@ -229,7 +229,7 @@ describe("message → ticket routing", () => {
   it("does NOT open a ticket on an inbound — tickets are raised deliberately", async () => {
     const conversationId = await makeConversation();
     const routed = await prisma.$transaction((tx) =>
-      routeMessageToTicket(tx, { workspaceId, conversationId, direction: "in" }),
+      routeMessageToTicket(tx, { workspaceId, conversationId }),
     );
     expect(routed.ticketId).toBeNull();
 
@@ -244,7 +244,7 @@ describe("message → ticket routing", () => {
     const ticketId = opened.ok ? opened.ticket.id : "";
 
     const routed = await prisma.$transaction((tx) =>
-      routeMessageToTicket(tx, { workspaceId, conversationId, direction: "in" }),
+      routeMessageToTicket(tx, { workspaceId, conversationId }),
     );
     expect(routed.ticketId).toBe(ticketId);
     expect((await conversationState(conversationId)).openTicketCount).toBe(1);
@@ -273,7 +273,7 @@ describe("message → ticket routing", () => {
     // A follow-up ARRIVES ONE SECOND LATER — well inside what used to be the
     // 72h reopen window, which is precisely the case that used to resurrect it.
     const followUp = await prisma.$transaction((tx) =>
-      routeMessageToTicket(tx, { workspaceId, conversationId, direction: "in" }),
+      routeMessageToTicket(tx, { workspaceId, conversationId }),
     );
     expect(followUp.ticketId).toBeNull();
 
@@ -331,7 +331,7 @@ describe("message → ticket routing", () => {
     const ticketId = opened.ok ? opened.ticket.id : "";
     await updateTicket(db, { workspaceId, ticketId, actor: { userId }, status: "solved" });
     const routed = await prisma.$transaction((tx) =>
-      routeMessageToTicket(tx, { workspaceId, conversationId, direction: "out" }),
+      routeMessageToTicket(tx, { workspaceId, conversationId }),
     );
     // Outbound never reopens, and nothing auto-opens.
     expect(routed.ticketId).toBeNull();
@@ -353,7 +353,7 @@ describe("message → ticket routing", () => {
     });
     // The tenant boundary: a real conversation id, but not THIS workspace's.
     const routed = await prisma.$transaction((tx) =>
-      routeMessageToTicket(tx, { workspaceId: otherWs.id, conversationId, direction: "in" }),
+      routeMessageToTicket(tx, { workspaceId: otherWs.id, conversationId }),
     );
     expect(routed.ticketId).toBeNull();
     const created = await createTicket(db, {

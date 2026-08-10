@@ -49,6 +49,9 @@ type Db = Pick<
   | "contact"
   | "contactFieldDefinition"
   | "user"
+  | "workspaceMember"
+  | "ticketThreadUnread"
+  | "notification"
   | "$transaction"
 >;
 
@@ -326,6 +329,61 @@ export async function revokeTicketShare(
     });
   });
   kickOutbox();
+
+  // Clean up the revoked department's SIGNALS, detached and best-effort: their
+  // access is gone, so a lingering unread marker would keep a rail dot lit over
+  // a ticket they can no longer open, and an unread bell row would be a toast
+  // whose link 404s. Scoped to people whose only remaining access came through
+  // the revoked workspace — a member of BOTH departments keeps everything.
+  void (async () => {
+    const remaining = await db.ticket.findUnique({
+      where: { id: ticket.id },
+      select: {
+        workspaceId: true,
+        createdById: true,
+        assignedUserId: true,
+        shares: { select: { guestWorkspaceId: true, assignedUserId: true, createdById: true } },
+      },
+    });
+    if (!remaining) return;
+    const stillParticipating = new Set(
+      [remaining.workspaceId, ...remaining.shares.map((sh) => sh.guestWorkspaceId)].filter(Boolean),
+    );
+    const stillNamed = new Set(
+      [
+        remaining.createdById,
+        remaining.assignedUserId,
+        ...remaining.shares.flatMap((sh) => [sh.assignedUserId, sh.createdById]),
+      ].filter((id): id is string => Boolean(id)),
+    );
+    const markers = await db.ticketThreadUnread.findMany({
+      where: { ticketId: ticket.id },
+      select: { userId: true },
+    });
+    if (markers.length > 0) {
+      const memberships = await db.workspaceMember.findMany({
+        where: {
+          userId: { in: markers.map((m) => m.userId) },
+          workspaceId: { in: [...stillParticipating] },
+        },
+        select: { userId: true },
+      });
+      const keeps = new Set([...memberships.map((m) => m.userId), ...stillNamed]);
+      const gone = markers.map((m) => m.userId).filter((uid) => !keeps.has(uid));
+      if (gone.length > 0) {
+        await db.ticketThreadUnread.deleteMany({
+          where: { ticketId: ticket.id, userId: { in: gone } },
+        });
+      }
+    }
+    // Bell rows addressed to the revoked workspace: mark read rather than
+    // delete — the history stays, the badge and the dead link go.
+    await db.notification.updateMany({
+      where: { ticketId: ticket.id, workspaceId: args.guestWorkspaceId, readAt: null },
+      data: { readAt: new Date() },
+    });
+  })().catch(() => undefined);
+
   return { ok: true };
 }
 

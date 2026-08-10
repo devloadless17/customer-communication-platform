@@ -26,7 +26,7 @@ import { publish } from "@/lib/events/bus";
 
 type Db = Pick<
   PrismaClient,
-  "notification" | "ticket" | "ticketShare" | "user" | "workspaceMember"
+  "notification" | "ticket" | "ticketShare" | "ticketMessage" | "user" | "workspaceMember"
 >;
 
 /** Newest-first page size for the bell. A centre, not an archive. */
@@ -229,6 +229,9 @@ export async function ticketAudience(
   });
   if (!ticket) return null;
 
+  const participating = [ticket.workspaceId, ...ticket.shares.map((s) => s.guestWorkspaceId)];
+  const participatingSet = new Set(participating);
+
   // Each side's people are paired with THEIR OWN workspace: the owner's with
   // the ticket's, each guest's with that share's.
   //
@@ -257,10 +260,29 @@ export async function ticketAudience(
         { userId: s.createdById, workspaceId: s.guestWorkspaceId },
       );
   }
+
+  // Fifth arm: everyone who has SPOKEN in the thread, placed by the workspace
+  // they wrote from. This is what makes "when solved, we're done" reach the
+  // person who actually supplied the answer — a guest-side member who replied
+  // but is not their share's assignee heard nothing about the outcome before
+  // this. Authors whose workspace is NO LONGER participating (a revoked share)
+  // are dropped: their access is gone, and a notification whose link 404s is
+  // worse than silence.
+  const authors = await db.ticketMessage.findMany({
+    where: { ticketId },
+    select: { authorUserId: true, authorWorkspaceId: true },
+    distinct: ["authorUserId"],
+  });
+  for (const a of authors) {
+    if (!a.authorUserId) continue;
+    const authorWs = a.authorWorkspaceId ?? ticket.workspaceId;
+    if (!participatingSet.has(authorWs)) continue;
+    preferred.push({ userId: a.authorUserId, workspaceId: authorWs });
+  }
+
   if (preferred.length === 0)
     return { recipients: [], number: ticket.number, subject: ticket.subject };
 
-  const participating = [ticket.workspaceId, ...ticket.shares.map((s) => s.guestWorkspaceId)];
   const memberships = await db.workspaceMember.findMany({
     where: {
       userId: { in: [...new Set(preferred.map((p) => p.userId))] },

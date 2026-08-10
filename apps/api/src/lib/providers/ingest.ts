@@ -2526,11 +2526,12 @@ async function ingestInboundMessage(
       }
 
       // Attach the message to a ticket — the unit of WORK this thread is doing
-      // right now. Inside THIS transaction on purpose: a message that exists
-      // with no ticket (or a reopened ticket for a message that rolled back)
-      // is exactly the inconsistency the explicit `Message.ticketId` column
-      // exists to rule out. Runs AFTER the reopen flip so a returning customer
-      // routes against the post-reopen thread state.
+      // right now. Inside THIS transaction on purpose: a message stamped with a
+      // ticket that rolled back is exactly the inconsistency the explicit
+      // `Message.ticketId` column exists to rule out. Routing only ATTACHES to
+      // a live ticket or returns null — nothing here opens or reopens one
+      // (auto-reopen removed 2026-08-01). Runs after the CONVERSATION's
+      // closed→pending flip so the routed state is the post-inbound one.
       //
       // NOT wrapped in a try/catch, deliberately. A caught error here would be
       // false safety: a failed statement has already poisoned the surrounding
@@ -2542,7 +2543,6 @@ async function ingestInboundMessage(
       const routed = await routeMessageToTicket(tx, {
         workspaceId,
         conversationId: conversation.id,
-        direction: "in",
       });
       if (routed.ticketId) {
         await tx.message.update({

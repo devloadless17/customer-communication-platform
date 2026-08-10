@@ -74,7 +74,6 @@ export async function commitOutboundSend(args: {
     const routed = await routeMessageToTicket(tx, {
       workspaceId: args.event.workspaceId,
       conversationId: args.conversationId,
-      direction: "out",
     });
     if (routed.ticketId) {
       await tx.message.update({

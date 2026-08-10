@@ -55,7 +55,7 @@ export function TicketSettingsClient({
     <div className="flex flex-col gap-6">
       <PageHeader
         title="Tickets"
-        description="When work opens by itself, how long it stays reopenable, and what each priority promises."
+        description="How a solved ticket affects its conversation, and what each priority promises."
         action={saving ? <Loader2 aria-hidden className="size-4 animate-spin" /> : undefined}
       />
 
@@ -81,11 +81,9 @@ function Behaviour({ settings, onSave }: { settings: TicketSettingsView; onSave:
         open one on their own; the inbox already tracks every conversation.
       </p>
       <p className="mb-3 text-2xs text-muted-foreground">
-        If the customer writes back within <strong className="font-medium">72 hours</strong>{" "}
-        of a ticket being solved, that message joins the same ticket instead of
-        stranding the issue across two — one number, one history. This used to be a
-        setting; it was a dial nobody turned, and an unexplained number on a settings
-        page is a question you have to answer twice a year.
+        A customer&apos;s follow-up never reopens a solved ticket — solved means the
+        customer got their answer. A genuinely new issue gets a new ticket somebody
+        chooses to raise; a person may still reopen one deliberately.
       </p>
 
       <Row

@@ -18,7 +18,8 @@ import { TICKET_PRIORITIES, type TicketPriority } from "@ccp/shared/tickets/type
  * This is the DELIBERATE-creation surface the product is built around (CLAUDE.md
  * §2): an agent reads a message, decides it needs work, and files a ticket with
  * a subject, a cause and — optionally — hands it straight to a team. Distinct
- * from auto-open (off by default) and from a workflow raising one.
+ * from a workflow raising one — and those two are the ONLY doors: nothing
+ * opens or reopens a ticket but a person (or a workflow a person built).
  *
  * The teams list is fetched lazily when the dialog opens, so the (heavy) contact
  * panel doesn't have to thread the assignment-policy catalog through just for a
@@ -91,6 +92,12 @@ function RaiseTicketDialog({
   const [priority, setPriority] = useState<TicketPriority>("normal");
   // A team id, or `ws:<workspaceId>` for a cross-workspace escalation.
   const [sendTo, setSendTo] = useState("");
+  /** Hand it straight to a person. Optional — most tickets start unclaimed. */
+  const [assigneeId, setAssigneeId] = useState("");
+  const [members, setMembers] = useState<Array<{ id: string; name: string }> | null>(null);
+  /** Live tickets already on THIS thread — shown before the form so an agent
+   *  doesn't mint #13 while #12 is still being worked. */
+  const [existing, setExisting] = useState<Array<{ id: string; number: number }> | null>(null);
   const [teams, setTeams] = useState<Team[] | null>(null);
   const [workspaces, setWorkspaces] = useState<EscalationTarget[] | null>(null);
   const [files, setFiles] = useState<File[]>([]);
@@ -114,6 +121,26 @@ function RaiseTicketDialog({
       .catch(() => {
         if (alive) setTeams([]);
       });
+    void apiFetch(
+      `/api/tickets?conversationId=${encodeURIComponent(conversationId)}&status=new,open,pending,on_hold`,
+    )
+      .then(async (res) => {
+        if (!res.ok) throw new Error("existing");
+        const body = (await res.json()) as { tickets: Array<{ id: string; number: number }> };
+        if (alive) setExisting(body.tickets ?? []);
+      })
+      .catch(() => {
+        if (alive) setExisting([]);
+      });
+    void apiFetch("/api/users")
+      .then(async (res) => {
+        if (!res.ok) throw new Error("users");
+        const body = (await res.json()) as { users: Array<{ id: string; name: string }> };
+        if (alive) setMembers(body.users ?? []);
+      })
+      .catch(() => {
+        if (alive) setMembers([]);
+      });
     void apiFetch("/api/tickets/escalation-targets")
       .then(async (res) => {
         if (!res.ok) throw new Error("targets");
@@ -126,7 +153,8 @@ function RaiseTicketDialog({
     return () => {
       alive = false;
     };
-  }, []);
+    // conversationId is stable for a mounted dialog; listed for correctness.
+  }, [conversationId]);
 
   async function submit() {
     // Escalating without a cause would hand the other workspace a ticket that
@@ -146,6 +174,7 @@ function RaiseTicketDialog({
           description: cause.trim() || null,
           priority,
           ...(sendTo && !toWorkspaceId ? { assignedTeamId: sendTo } : {}),
+          ...(assigneeId ? { assignedUserId: assigneeId } : {}),
         }),
       });
       if (!res.ok) {
@@ -157,11 +186,15 @@ function RaiseTicketDialog({
 
       // Files go up AFTER the ticket exists — a second request rather than one
       // multipart create, so a rejected file can never cost the agent the whole
-      // form (the ticket is already raised, and the error names the file).
+      // form. They land as the ticket's FIRST THREAD MESSAGE, not as bare
+      // ticket-level attachments: the thread is the one way files arrive (a
+      // file belongs with the sentence that explains it), and the raise-time
+      // evidence is exactly the file whose sentence is the cause.
       if (files.length > 0) {
         const form = new FormData();
+        form.append("body", "");
         for (const f of files) form.append("files", f);
-        const up = await apiFetch(`/api/tickets/${body.ticket.id}/attachments`, {
+        const up = await apiFetch(`/api/tickets/${body.ticket.id}/thread`, {
           method: "POST",
           body: form,
         });
@@ -229,8 +262,10 @@ function RaiseTicketDialog({
             <div className="flex items-center gap-2.5 rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2.5 text-xs text-emerald-700 dark:text-emerald-400">
               <Check aria-hidden className="size-4 shrink-0" />
               {toWorkspaceId
-                ? `The ticket is open on this thread and ${toWorkspaceName} now has access — their replies land on its history.`
-                : "The ticket is open on this thread."}
+                ? `The ticket is on this thread and ${toWorkspaceName} now has access — their replies land in its thread.`
+                : assigneeId
+                  ? "The ticket is on this thread and its assignee has been notified."
+                  : "The ticket is on this thread — nobody has picked it up yet."}
             </div>
             <div className="flex justify-end gap-2">
               <Button variant="outline" size="sm" onClick={onClose}>
@@ -249,6 +284,28 @@ function RaiseTicketDialog({
             }}
           >
             <div className="flex flex-col gap-4 px-5 py-5">
+              {/* Live work already on this thread. Shown, not blocking: a second
+                  ticket can be legitimate (a second issue in the same breath) —
+                  but minting #13 because nobody noticed #12 is the common case,
+                  and this is the moment to notice. */}
+              {existing && existing.length > 0 ? (
+                <div className="rounded-md border border-amber-500/40 bg-amber-500/[0.06] px-3 py-2 text-2xs leading-relaxed">
+                  {existing.length === 1 ? "A ticket is" : `${existing.length} tickets are`} already
+                  open on this thread:{" "}
+                  {existing.map((t, i) => (
+                    <span key={t.id}>
+                      {i > 0 ? ", " : ""}
+                      <Link
+                        href={`/tickets/${t.id}`}
+                        className="font-medium underline underline-offset-2"
+                      >
+                        #{t.number}
+                      </Link>
+                    </span>
+                  ))}
+                  {" — "}open it to add to that work, or raise another for a separate issue.
+                </div>
+              ) : null}
               <div className="flex flex-col gap-1.5">
                 <label htmlFor="rt-subject" className="text-xs font-medium text-foreground">
                   Subject
@@ -330,6 +387,31 @@ function RaiseTicketDialog({
                         ))}
                       </optgroup>
                     )}
+                  </select>
+                </div>
+
+                <div className="flex flex-col gap-1.5">
+                  <label htmlFor="rt-assignee" className="text-xs font-medium text-foreground">
+                    Assign to{" "}
+                    <span className="font-normal text-muted-foreground">(optional)</span>
+                  </label>
+                  {/* A PERSON, alongside the team queue: "Sara handles refunds"
+                      is how small teams actually route, and the assignee gets a
+                      bell the moment the ticket lands. Empty = unclaimed, which
+                      is what makes the untriaged backlog reportable. */}
+                  <select
+                    id="rt-assignee"
+                    value={assigneeId}
+                    disabled={!members || members.length === 0}
+                    onChange={(e) => setAssigneeId(e.target.value)}
+                    className={selectClass}
+                  >
+                    <option value="">Nobody yet</option>
+                    {(members ?? []).map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name}
+                      </option>
+                    ))}
                   </select>
                 </div>
               </div>

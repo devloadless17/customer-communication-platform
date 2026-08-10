@@ -171,6 +171,37 @@ export async function createTicket(db: Db, args: CreateTicketArgs): Promise<Tick
         createTicketInTx(tx, args, conversation, number),
       );
       kickOutbox();
+
+      // The BELL for an assigned-at-birth ticket. `updateTicket` already tells
+      // a NEW assignee they own something; a ticket RAISED onto someone (an
+      // explicit pick, or inheriting the conversation's owner — the default)
+      // was handed over in silence, and they found out by going to look, which
+      // is precisely what the bell exists to end. After the transaction,
+      // best-effort, never the actor — the same three rules as every other
+      // notification here.
+      const assignee = created.ok ? created.ticket.assignedUserId : null;
+      if (created.ok && assignee && assignee !== (args.actor.userId ?? null)) {
+        void (async () => {
+          const actorName = args.actor.userId
+            ? ((
+                await sharedDb.user.findUnique({
+                  where: { id: args.actor.userId },
+                  select: { name: true },
+                })
+              )?.name ?? null)
+            : null;
+          await notifyUsers(sharedDb, {
+            kind: "ticket_assigned",
+            recipients: [{ userId: assignee, workspaceId: args.workspaceId }],
+            actorUserId: args.actor.userId ?? null,
+            actorName,
+            ticketId: created.ticket.id,
+            ticketNumber: created.ticket.number,
+            ticketSubject: created.ticket.subject,
+            summary: "assigned this ticket to you",
+          });
+        })().catch(() => undefined);
+      }
       return created;
     });
   } catch (err) {
@@ -210,8 +241,8 @@ interface ConversationRef {
  *
  * (This used to say it was split out "because the ingest path opens a ticket in
  * the same transaction as the message write". That has not been true since
- * auto-open was removed on 2026-07-25: ingest only ATTACHES or REOPENS, and
- * `createTicket` is now the sole caller.)
+ * auto-open was removed on 2026-07-25 (and auto-reopen on 2026-08-01): ingest
+ * only ATTACHES, and `createTicket` is now the sole caller.)
  */
 async function createTicketInTx(
   tx: TxClient,
@@ -252,6 +283,10 @@ async function createTicketInTx(
       status: assignedUserId ? "open" : "new",
       assignedUserId,
       lastAssignedUserId: assignedUserId,
+      // Validated above and then silently DROPPED until 2026-08-02 — the raise
+      // dialog's "Send to team" returned a 201 with the ticket in nobody's
+      // queue. The one column the whole team-queue feature hangs on.
+      assignedTeamId: args.assignedTeamId ?? null,
       slaPolicyId: policy?.id ?? null,
       firstResponseDueAt: due.firstResponseDueAt,
       resolutionDueAt: due.resolutionDueAt,
@@ -307,35 +342,25 @@ async function createTicketInTx(
 export interface RouteMessageArgs {
   workspaceId: string;
   conversationId: string;
-  /** Inbound messages can reopen a solved ticket; outbound ones never do — an
-   *  agent replying to close the loop must not resurrect the work item. */
-  direction: "in" | "out";
-  /** Injected for testability; the sweeper and the tests pass a fixed clock. */
-  nowMs?: number;
 }
 
 export interface RouteMessageResult {
   ticketId: string | null;
-  /** Set when the routing itself changed a ticket, so the caller can publish
-   *  after its own transaction commits. Null when it simply attached. */
-  opened: Extract<TicketOutcome, { ok: true }> | null;
 }
 
 /**
  * Decide which ticket a newly-arrived message belongs to, INSIDE the caller's
  * transaction.
  *
- * The rule, in order:
+ * The rule, whole:
  *   1. An active (non-terminal) ticket on the thread → attach to it.
- *   2. Otherwise, a ticket SOLVED inside the workspace's reopen window → reopen
- *      it. This is the single most-debatable rule in ticketing (too short and
- *      one issue becomes three tickets; too long and a genuinely new question
- *      gets buried in resolved work), which is exactly why the window is a
- *      per-workspace setting rather than a constant.
- *   3. Otherwise, the message carries no ticketId. There is NO auto-open
- *      (removed 2026-07-25): a ticket is a deliberate act — raised by an agent
- *      or a workflow's `create_ticket` step, never minted just because a
- *      customer messaged.
+ *   2. Otherwise, the message carries no ticketId.
+ *
+ * NOTHING here opens a ticket, and nothing here reopens one. Auto-open went on
+ * 2026-07-25; auto-REOPEN went on 2026-08-01 — a customer's follow-up used to
+ * drag a solved ticket back to `open` with a "System reopened #10" line nobody
+ * asked for. A ticket is a deliberate act: an agent pressing "Raise a ticket",
+ * or a workflow's `create_ticket` step. Those are the only two doors.
  *
  * Returns the ticket id to stamp on the message. Never throws for a
  * missing conversation: ingest must not fail because ticketing had a bad day.
@@ -351,11 +376,9 @@ export async function routeMessageToTicket(
       contactId: true,
       channel: true,
       activeTicketId: true,
-      // (assignedUserId was selected here for the auto-open owner-inheritance
-      // path; auto-open was removed 2026-07-25 and nothing read it since.)
     },
   });
-  if (!conversation) return { ticketId: null, opened: null };
+  if (!conversation) return { ticketId: null };
 
   if (conversation.activeTicketId) {
     const active = await tx.ticket.findFirst({
@@ -364,7 +387,7 @@ export async function routeMessageToTicket(
     });
     // The pointer is only trusted while it points at live work.
     if (active && isTicketActive(active.status)) {
-      return { ticketId: active.id, opened: null };
+      return { ticketId: active.id };
     }
   }
 
@@ -389,7 +412,7 @@ export async function routeMessageToTicket(
       where: { id: conversation.id },
       data: { activeTicketId: fallbackActive.id },
     });
-    return { ticketId: fallbackActive.id, opened: null };
+    return { ticketId: fallbackActive.id };
   }
 
   // NOTHING opens a ticket but a person raising one.
@@ -409,7 +432,7 @@ export async function routeMessageToTicket(
   // So an inbound either ATTACHES to the thread's live ticket, or leaves the
   // thread ticket-free. The inbox already tracks every conversation; nothing is
   // lost by not having a ticket on it.
-  return { ticketId: null, opened: null };
+  return { ticketId: null };
 }
 
 /**
@@ -559,6 +582,9 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
       conversationId: true,
       // The cause's write-once gate reads the current value.
       description: true,
+      // The PREVIOUS assignee: on a reassignment their board must drop the
+      // card live, so their user room is co-targeted on the frame.
+      assignedUserId: true,
       // Snapshotted onto the team_changed event so the timeline reads
       // "Support → Sales" even after a rename.
       assignedTeamId: true,
@@ -722,11 +748,11 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
       data.status = nextStatus;
       if (nextStatus === "solved") {
         data.resolvedAt = new Date(now);
-        data.lastSolvedAt = new Date(now);
+        // (`lastSolvedAt` is no longer written — it existed solely to drive the
+        // auto-reopen window query, removed 2026-08-01. Column kept per §18.)
         data.resolvedById = args.actor.userId ?? null;
         // closed → solved is a correction, not a second life: without this the
-        // ticket reported as BOTH closed and solved (closedAt kept) while
-        // becoming ingest-reopenable via the fresh lastSolvedAt.
+        // ticket reported as BOTH closed and solved (closedAt kept).
         if (existing.status === "closed") data.closedAt = null;
       } else if (nextStatus === "closed") {
         data.closedAt = new Date(now);
@@ -922,6 +948,12 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
       openTicketCount,
       action,
       previousStatus: existing.status,
+      // A reassignment must reach the PREVIOUS assignee too — a restricted
+      // agent's board only hears through their user room, and the audience
+      // computed from the post-write row no longer contains them.
+      ...(existing.assignedUserId && existing.assignedUserId !== ticket.assignedUserId
+        ? { alsoNotifyUserIds: [existing.assignedUserId] }
+        : {}),
     });
     // NOTHING to mirror: a shared ticket IS one row, so every workspace with
     // access just read the change that landed above. (This replaced the
@@ -1090,9 +1122,30 @@ export async function markSlaBreached(
           select: { openTicketCount: true },
         })
       : null;
-    await writeTicketEvent(tx, args.workspaceId, args.ticketId, "sla_breached", {}, null, {
-      leg: args.leg,
+    const breachEventId = await writeTicketEvent(
+      tx,
+      args.workspaceId,
+      args.ticketId,
+      "sla_breached",
+      {},
+      null,
+      { leg: args.leg },
+    );
+    // Align `lastActivityAt` with the event's OWN timestamp. The updateMany
+    // above stamped `new Date()` a few ms before the event row's DB-default
+    // `createdAt`, and the drift sweeper's truth is GREATEST(events, …) — so
+    // every breached ticket "drifted" by milliseconds and was silently
+    // corrected nightly, which buries real corrections in noise.
+    const breachEvent = await tx.ticketEvent.findUnique({
+      where: { id: breachEventId },
+      select: { createdAt: true },
     });
+    if (breachEvent) {
+      await tx.ticket.updateMany({
+        where: { id: args.ticketId },
+        data: { lastActivityAt: breachEvent.createdAt },
+      });
+    }
     await publishInTx(tx, {
       type: "ticket.changed",
       workspaceId: args.workspaceId,
@@ -1562,9 +1615,50 @@ export async function publishTicketEvent(
      * so the fanout rule can no longer derive it.
      */
     alsoNotifyWorkspaceIds?: string[];
+    /** Extra per-user co-targets the caller knows and this function cannot
+     *  derive — today: the PREVIOUS assignee on a reassignment, so their board
+     *  drops the card live. */
+    alsoNotifyUserIds?: string[];
   },
 ): Promise<void> {
   const { args, ticket, openTicketCount, action, previousStatus } = params;
+
+  /**
+   * The per-user co-target list for the realtime fanout.
+   *
+   * Restricted agents (visibility "assigned") deliberately never join the
+   * workspace room, so a workspace-only emit never reached them: an agent
+   * ASSIGNED a ticket had to refresh the page to see it — the exact reported
+   * bug. The list mirrors `ticketVisibilityWhere`'s arms (assignee, share
+   * assignees, raiser/escalators, conversation assignee), so everyone the query
+   * layer would show the ticket to also receives its frames.
+   *
+   * The raiser and conversation assignee are not on the DTO, so one indexed
+   * read fetches them. Tolerates a missing row (the DELETE action publishes
+   * after the row is gone) by degrading to the DTO-derived arms.
+   */
+  const row = await tx.ticket
+    .findUnique({
+      where: { id: ticket.id },
+      select: {
+        createdById: true,
+        conversation: { select: { assignedUserId: true } },
+        shares: { select: { createdById: true } },
+      },
+    })
+    .catch(() => null);
+  const notifyUserIds = [
+    ...new Set(
+      [
+        ticket.assignedUserId,
+        ...(ticket.sharing?.guests.map((g) => g.assignedUserId) ?? []),
+        row?.createdById,
+        row?.conversation?.assignedUserId,
+        ...(row?.shares.map((sh) => sh.createdById) ?? []),
+        ...(params.alsoNotifyUserIds ?? []),
+      ].filter((id): id is string => Boolean(id)),
+    ),
+  ];
   const otherWorkspaceIds = [
     ...(ticket.sharing?.guests.map((g) => g.workspaceId) ?? []),
     ...(params.alsoNotifyWorkspaceIds ?? []),
@@ -1593,6 +1687,7 @@ export async function publishTicketEvent(
       ...(params.alsoNotifyWorkspaceIds ?? []),
     ],
     ticketByWorkspace,
+    notifyUserIds,
     ...(args.silent !== undefined ? { silent: args.silent } : {}),
     ...(args.skipOutboundWebhook !== undefined
       ? { skipOutboundWebhook: args.skipOutboundWebhook }
@@ -1684,9 +1779,10 @@ export { TICKET_ACTIVE_STATUSES };
  * when it has none.
  *
  * Exists because of an ordering fact, not a preference: auto-assignment runs
- * DETACHED in the background tier, after ingest has already opened the ticket.
- * Without this, every auto-opened ticket on an auto-assigned thread would sit
- * unassigned forever and the board's "Mine" filter would be empty for everyone.
+ * DETACHED in the background tier, so a ticket raised before the routing
+ * settles can miss the thread's owner. Without this, such a ticket on an
+ * auto-assigned thread would sit unassigned forever and the board's "Mine"
+ * filter would be empty for everyone.
  *
  * FILL-EMPTY-ONLY, never a reassignment: a ticket can legitimately belong to
  * someone other than whoever owns the thread (an escalation handed to a

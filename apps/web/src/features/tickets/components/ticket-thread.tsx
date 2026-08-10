@@ -102,6 +102,23 @@ export function TicketThread({
     endRef.current?.scrollIntoView({ block: "end" });
   }, [messages.length]);
 
+  /**
+   * Where the "New replies" divider actually renders.
+   *
+   * The marker keeps the FIRST unread message forever, but the thread read is
+   * capped at the newest 200 — so on a thread that grew past the cap while
+   * someone was away, the anchor id is not in `messages` and the divider
+   * silently vanished while the pill, dot and bell all said unread. Fall back
+   * to the first loaded message: "everything you can see is new" is the honest
+   * rendering of that state.
+   */
+  const effectiveAnchorId = useMemo(() => {
+    if (!unreadSinceMessageId) return null;
+    return messages.some((m) => m.id === unreadSinceMessageId)
+      ? unreadSinceMessageId
+      : (messages[0]?.id ?? null);
+  }, [messages, unreadSinceMessageId]);
+
   if (messages.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-1.5 py-10 text-center">
@@ -130,7 +147,7 @@ export function TicketThread({
             </div>
           ) : null}
 
-          {m.id === unreadSinceMessageId ? (
+          {m.id === effectiveAnchorId ? (
             <div className="flex items-center gap-2 py-1.5">
               <span className="h-px flex-1 bg-primary/40" />
               <span className="rounded-full bg-primary/10 px-2 py-0.5 text-3xs font-medium text-primary">

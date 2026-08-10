@@ -24,7 +24,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createTicket, deleteTicket, updateTicket } from "@/lib/tickets/mutations";
 import { shareTicket } from "@/lib/tickets/shares";
-import { addTicketMessage } from "@/lib/tickets/thread";
+import { addTicketMessage, markThreadRead } from "@/lib/tickets/thread";
 import { addTicketAttachment } from "@/lib/tickets/attachments";
 import {
   countUnreadNotifications,
@@ -252,6 +252,101 @@ describe("every other change tells whoever RAISED it", () => {
     const mine = (await bell(raiser)).filter((n) => n.ticketId === ticket.id);
     expect(mine.map((n) => n.kind)).toContain("ticket_escalated");
     expect(mine[0]?.summary).toContain(`NTF B ${S}`);
+  });
+});
+
+describe("create-with-assignee rings the bell", () => {
+  it("notifies a person handed a ticket AT BIRTH, and never the raiser-actor", async () => {
+    // `updateTicket` told a NEW assignee they own something; a ticket RAISED
+    // onto someone (explicit pick, or inheriting the conversation's owner) was
+    // handed over in silence — they found out by going to look.
+    const assignee = await makeUser("NTF Birth Assignee", [wsA]);
+    const contact = await prisma.contact.create({
+      data: {
+        workspaceId: wsA,
+        name: `NTF birth ${seq}`,
+        phoneNumber: `+9864${S.slice(3)}${String(seq++).padStart(3, "0")}`,
+        identityChannel: "whatsapp",
+      },
+      select: { id: true },
+    });
+    const convo = await prisma.conversation.create({
+      data: { workspaceId: wsA, contactId: contact.id, channel: "whatsapp" },
+      select: { id: true },
+    });
+    const created = await createTicket(mdb, {
+      workspaceId: wsA,
+      conversationId: convo.id,
+      actor: { userId: raiser, workspaceId: wsA },
+      source: "human",
+      subject: "Born assigned",
+      assignedUserId: assignee,
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    await settle();
+
+    const theirs = (await bell(assignee)).filter((n) => n.ticketId === created.ticket.id);
+    expect(theirs.map((n) => n.kind)).toContain("ticket_assigned");
+    expect(theirs[0]?.actorName).toBe("NTF Raiser");
+    // The raiser DID the assigning — never the actor.
+    expect((await bell(raiser)).filter((n) => n.ticketId === created.ticket.id)).toHaveLength(0);
+  });
+});
+
+describe("the outcome reaches whoever supplied the answer", () => {
+  it("solving notifies a thread AUTHOR who is neither raiser nor assignee", async () => {
+    // The audience and the thread's participant list are ONE resolver now —
+    // before, `ticketAudience` had four arms and the person who actually wrote
+    // the answer in the thread never heard the ticket was solved.
+    const answerer = await makeUser("NTF Answerer", [wsA]);
+    const ticket = await makeTicket();
+    await addTicketMessage(tdb, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId: answerer, workspaceId: wsA },
+      body: "the fix is to re-issue the invoice",
+    });
+    await settle();
+
+    await updateTicket(mdb, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId: raiser, workspaceId: wsA },
+      status: "solved",
+    });
+    await settle();
+
+    const theirs = (await bell(answerer)).filter((n) => n.ticketId === ticket.id);
+    expect(theirs.map((n) => n.kind)).toContain("ticket_changed");
+    expect(theirs.find((n) => n.kind === "ticket_changed")?.summary).toContain("solved");
+  });
+});
+
+describe("opening the ticket clears EVERYTHING about it", () => {
+  it("markThreadRead clears the bell rows for that ticket too", async () => {
+    // One read-state rule. Before: the thread marker cleared on open while the
+    // bell cleared only on "Mark all read" — the rail dot and the bell badge
+    // diverged forever, by construction.
+    const ticket = await makeTicket();
+    await addTicketMessage(tdb, {
+      workspaceId: wsA,
+      ticketId: ticket.id,
+      actor: { userId: worker, workspaceId: wsA },
+      body: "have a look",
+    });
+    await settle();
+    expect(await countUnreadNotifications(ndb, wsA, raiser)).toBeGreaterThan(0);
+
+    const before = await countUnreadNotifications(ndb, wsA, raiser);
+    const otherTicketUnread = (await bell(raiser)).filter(
+      (n) => !n.readAt && n.ticketId !== ticket.id,
+    ).length;
+    await markThreadRead(tdb, { workspaceId: wsA, ticketId: ticket.id, userId: raiser });
+    const after = await countUnreadNotifications(ndb, wsA, raiser);
+    // THIS ticket's rows cleared; every other ticket's unread untouched.
+    expect(after).toBe(otherTicketUnread);
+    expect(after).toBeLessThan(before);
   });
 });
 

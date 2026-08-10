@@ -179,15 +179,16 @@ export const UpdateTicketFieldSchema = z.object({
 });
 export type UpdateTicketFieldInput = z.infer<typeof UpdateTicketFieldSchema>;
 
+/**
+ * `ticketReopenWindowHours` is RETIRED (2026-08-01): nothing opens or reopens a
+ * ticket but a person raising one. Zod strips unknown keys, so an integration
+ * still sending it gets a successful no-op rather than a 400; the column stays
+ * unread for the same reason.
+ */
 export const TicketSettingsSchema = z.object({
-  // 0 disables reopening entirely. Capped at 30 days — beyond that a follow-up
-  // is a new question, not the same one.
-  /**
-   * RETIRED 2026-08-01. Auto-reopen is gone: nothing opens or reopens a ticket
-   * but a person raising one. Zod strips unknown keys, so an integration still
-   * sending this gets a successful no-op rather than a 400 — the column stays
-   * for the same reason, and neither is read.
-   */
+  /** Solving the LAST active ticket on a thread closes the conversation.
+   *  Off by default — conversation status and ticket status are deliberately
+   *  independent. */
   ticketCloseConversationOnLastSolved: z.boolean().optional(),
 });
 export type TicketSettingsInput = z.infer<typeof TicketSettingsSchema>;

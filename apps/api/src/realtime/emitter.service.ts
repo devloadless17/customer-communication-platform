@@ -387,6 +387,31 @@ export class RealtimeEmitter {
     }
   }
 
+  /**
+   * Emit to a workspace room AND a set of per-user rooms, in ONE emit.
+   *
+   * The single-emit part is load-bearing twice over. Restricted agents
+   * (role=agent, visibility="assigned") deliberately never join the workspace
+   * room, so a workspace-only emit never reaches them — the board, sub-sidebar,
+   * rail and open detail page all sat stale until a refresh, which is the bug
+   * this method exists to end. And two SEPARATE emits (workspace + user) would
+   * deliver the frame twice to everyone in both rooms — socket.io de-duplicates
+   * rooms within one emit, not across emits.
+   */
+  emitToWorkspaceAndUsers<E extends keyof ServerToClientEvents>(
+    workspaceId: string,
+    userIds: readonly string[],
+    event: E,
+    ...args: Parameters<ServerToClientEvents[E]>
+  ): void {
+    const io = this.server;
+    if (!io) {
+      this.logger.warn(`emitToWorkspaceAndUsers("${String(event)}") dropped — IO not ready yet`);
+      return;
+    }
+    this.emitToRooms(io, workspaceId, null, event, args, userIds);
+  }
+
   emitToWorkspace<E extends keyof ServerToClientEvents>(
     workspaceId: string,
     event: E,

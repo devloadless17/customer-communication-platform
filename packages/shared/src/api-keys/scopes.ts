@@ -57,7 +57,7 @@ export const API_KEY_SCOPES = [
   // Tickets — the unit of WORK on a conversation. Their own scope for the same
   // reason flags have one: a helpdesk or BI system that should read and resolve
   // work items must not thereby gain the ability to send billed messages.
-  // (Ticket CONFIGURATION — SLA promises, custom fields, the reopen window —
+  // (Ticket CONFIGURATION — SLA promises, custom fields, behaviour toggles —
   // moved to `admin:settings` 2026-07-27: editing an SLA changes what every
   // future ticket promises, which is admin authority, not work-item authority.)
   "read:tickets",

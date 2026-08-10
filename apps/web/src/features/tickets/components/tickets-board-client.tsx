@@ -27,6 +27,7 @@ import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
 import type { Channel, User } from "@ccp/shared/types";
 import {
   TICKET_PRIORITIES,
+  TICKET_STATUS_LABELS,
   TICKET_STATUSES,
   type Ticket,
   type TicketCounts,
@@ -44,15 +45,6 @@ import {
  * cards belong under the current filter triggers a reload — and that reload is
  * coalesced, because one person bulk-triaging fires a burst of frames.
  */
-
-const STATUS_LABELS: Record<TicketStatus, string> = {
-  new: "New",
-  open: "Open",
-  pending: "Waiting on customer",
-  on_hold: "On hold",
-  solved: "Solved",
-  closed: "Closed",
-};
 
 /** Board columns. `closed` is deliberately absent — it's terminal history, and
  *  a permanently-growing sixth column would dominate the board. It stays
@@ -116,9 +108,18 @@ export function TicketsBoardClient({
    *  a server-side filter rather than something the board can derive. */
   const unreadOnly = view === "unread";
   // A single-status view shows just that column; otherwise the whole board.
+  // The UNREAD view is the exception: it must show every status including
+  // `closed`, because `counts.unreadReplies` has no status filter — a reply on
+  // a since-closed ticket kept the rail dot lit over a view that could never
+  // show the ticket, so the dot was unclearable. Count == view contents, always.
   const columns = useMemo(
-    () => (statusParam && TICKET_STATUSES.includes(statusParam) ? [statusParam] : BOARD_COLUMNS),
-    [statusParam],
+    () =>
+      unreadOnly
+        ? [...TICKET_STATUSES]
+        : statusParam && TICKET_STATUSES.includes(statusParam)
+          ? [statusParam]
+          : BOARD_COLUMNS,
+    [statusParam, unreadOnly],
   );
 
   /** Ids on the board with a thread reply this viewer hasn't read. */
@@ -284,9 +285,9 @@ export function TicketsBoardClient({
         return next;
       });
       void loadCounts();
-      // Named, and clickable — a badge tells you something happened; this tells
-      // you WHERE, which is what you actually need to act on it.
-      toast.info(`New reply on #${payload.ticketNumber}`);
+      // No toast here. The BELL (always mounted in the rail) is the single
+      // toast authority — with both firing, a reply while on /tickets showed
+      // two toasts for one event, in two different wordings.
       // A card we don't hold (the reply is on a ticket outside this filter, or
       // one that just arrived) needs the server's answer.
       setTickets((prev) => {
@@ -304,15 +305,23 @@ export function TicketsBoardClient({
         return next;
       });
       void loadCounts();
+      // On the UNREAD view, membership itself just changed — the card must
+      // LEAVE, not merely lose its highlight.
+      if (unreadOnly) scheduleReload();
     };
     socket.on("ticket:changed", onTicket);
     socket.on("ticket:thread:message", onReply);
     socket.on("ticket:thread:read", onRead);
+    // Reconnect convergence: frames missed during an offline gap longer than
+    // the 30s socket-recovery window are gone, so re-seed from the server —
+    // the same rule the rail and the bell already follow (§10).
+    socket.on("connect", scheduleReload);
     return () => {
       if (timer) clearTimeout(timer);
       socket.off("ticket:changed", onTicket);
       socket.off("ticket:thread:message", onReply);
       socket.off("ticket:thread:read", onRead);
+      socket.off("connect", scheduleReload);
     };
   }, [load, loadCounts, columns, viewerUserId]);
 
@@ -550,7 +559,7 @@ export function TicketsBoardClient({
             <option value="">Set status…</option>
             {TICKET_STATUSES.map((st) => (
               <option key={st} value={st}>
-                {STATUS_LABELS[st]}
+                {TICKET_STATUS_LABELS[st]}
               </option>
             ))}
           </select>
@@ -790,7 +799,7 @@ function Column({
     >
       <header className="flex items-center justify-between px-3 py-2">
         <h2 className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
-          {STATUS_LABELS[status]}
+          {TICKET_STATUS_LABELS[status]}
         </h2>
         <span className="text-2xs tabular-nums text-muted-foreground">{tickets.length}</span>
       </header>
@@ -943,7 +952,7 @@ function Card({
                 className="h-6 px-1.5 text-3xs"
                 onClick={() => onMove(ticket, next)}
               >
-                {STATUS_LABELS[next]}
+                {stepLabel(ticket.status, next)}
               </Button>
             ))}
           </div>
@@ -968,10 +977,21 @@ function nextSteps(status: TicketStatus): TicketStatus[] {
     case "on_hold":
       return ["open", "solved"];
     case "solved":
-      return ["closed"];
+      // Reopen is here because it is the ONLY reopen: nothing automatic brings
+      // a solved ticket back (2026-08-01), and the board is where queues are
+      // worked — burying the one deliberate path in the detail page's status
+      // select made "the customer wasn't actually done" a two-page trip.
+      return ["open", "closed"];
     default:
       return [];
   }
+}
+
+/** Button labels for the quick transitions — "Reopen" reads as the ACTION where
+ *  the status name "Open" would read as a state. */
+function stepLabel(from: TicketStatus, to: TicketStatus): string {
+  if (from === "solved" && to === "open") return "Reopen";
+  return TICKET_STATUS_LABELS[to];
 }
 
 /**
@@ -1032,4 +1052,3 @@ function SlaLine({ ticket }: { ticket: Ticket }) {
   );
 }
 
-export { STATUS_LABELS, TICKET_STATUSES };

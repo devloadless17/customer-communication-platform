@@ -31,6 +31,7 @@ import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
 import type { Channel, Tag, User } from "@ccp/shared/types";
 import {
   TICKET_PRIORITIES,
+  TICKET_STATUS_LABELS,
   TICKET_STATUSES,
   type Ticket,
   type TicketAttachment,
@@ -56,15 +57,6 @@ import { TicketThreadComposer } from "./ticket-thread-composer";
  * workspace-wide, so an unfiltered handler would re-render this page every time
  * anyone touched anything.
  */
-
-const STATUS_LABELS: Record<TicketStatus, string> = {
-  new: "New",
-  open: "Open",
-  pending: "Waiting on customer",
-  on_hold: "On hold",
-  solved: "Solved",
-  closed: "Closed",
-};
 
 /** Resolve a team id from a snapshotted event to a readable name. */
 function teamName(
@@ -271,9 +263,18 @@ export function TicketDetailClient({
       // visibility flip on a quiet ticket is pure noise.
       if (cleared) return;
       cleared = true;
-      await apiFetch(`/api/tickets/${seed.id}/thread/read`, { method: "POST" }).catch(
-        () => undefined,
-      );
+      try {
+        const res = await apiFetch(`/api/tickets/${seed.id}/thread/read`, { method: "POST" });
+        if (!res.ok) throw new Error(String(res.status));
+      } catch {
+        // The server still counts this unread, so the LOCAL surfaces must not
+        // pretend otherwise: dispatching the read frame on a failed POST made
+        // the board drop its pill while the rail's refetch kept the dot — two
+        // surfaces in one tab, opposite answers. Reset so the next visibility
+        // flip (or reply) retries.
+        cleared = false;
+        return;
+      }
       // Dispatched at ourselves so the rail badge and the board drop it now.
       // The server never emits this frame: read state is per-user, and one
       // reader's clear is nobody else's business.
@@ -305,14 +306,20 @@ export function TicketDetailClient({
     };
 
     const onVisible = () => void markRead();
+    // A reply that landed during a disconnect is otherwise lost until a manual
+    // refresh: the thread has no other convergence path (§10 — every recovery
+    // path converges to server state).
+    const onReconnect = () => void reload();
     socket.on("ticket:thread:message", onMessage);
+    socket.on("connect", onReconnect);
     document.addEventListener("visibilitychange", onVisible);
     if (seedUnread) void markRead();
     return () => {
       socket.off("ticket:thread:message", onMessage);
+      socket.off("connect", onReconnect);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [seed.id, viewerWorkspaceId, seedUnread, viewerUserId]);
+  }, [seed.id, viewerWorkspaceId, seedUnread, viewerUserId, reload]);
 
   const patch = async (body: Record<string, unknown>) => {
     setBusy(true);
@@ -721,7 +728,7 @@ export function TicketDetailClient({
           >
             {TICKET_STATUSES.map((s) => (
               <option key={s} value={s}>
-                {STATUS_LABELS[s]}
+                {TICKET_STATUS_LABELS[s]}
               </option>
             ))}
           </select>
@@ -1256,7 +1263,7 @@ export function TicketDetailClient({
                 <strong className="font-medium">{e.actorName ?? "Automation"}</strong>{" "}
                 {EVENT_LABELS[e.kind] ?? e.kind}
                 {e.kind === "status_changed" && e.after?.status ? (
-                  <> to {STATUS_LABELS[e.after.status as TicketStatus] ?? String(e.after.status)}</>
+                  <> to {TICKET_STATUS_LABELS[e.after.status as TicketStatus] ?? String(e.after.status)}</>
                 ) : null}
                 {e.kind === "team_changed" ? (
                   <>

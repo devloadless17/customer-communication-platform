@@ -11,6 +11,7 @@ import {
   bumpOpenTicketCount,
   publishTicketEvent,
   readTicket,
+  touchTicketActivity,
   writeTicketEvent,
   type TicketActor,
 } from "./mutations";
@@ -135,13 +136,24 @@ export async function addTicketAttachment(
     // exists to avoid, and it would show up in the wrong place besides. Only a
     // ticket-LEVEL file earns an entry.
     if (!args.messageId) {
-      await writeTicketEvent(tx, ticket.workspaceId, ticket.id, "attachment_added", args.actor, null, {
+      const eventId = await writeTicketEvent(tx, ticket.workspaceId, ticket.id, "attachment_added", args.actor, null, {
         attachmentId: row.id,
         // Snapshotted so the log still reads after the file is deleted.
         filename: row.filename,
         sizeBytes: row.sizeBytes,
         kind: row.kind,
       });
+      // A file landing IS activity — without this the board left the ticket
+      // buried, and the nightly drift sweeper "corrected" it every time.
+      // Stamped from the EVENT row (not the attachment row, written a few ms
+      // earlier) because the sweeper's truth is GREATEST over the events — the
+      // column and the evidence must agree to the millisecond or every upload
+      // "drifts" once, and phantom corrections bury real ones.
+      const evt = await tx.ticketEvent.findUnique({
+        where: { id: eventId },
+        select: { createdAt: true },
+      });
+      await touchTicketActivity(tx, ticket.id, evt?.createdAt ?? row.createdAt);
       const mapped = await readTicket(tx, ticket.id);
       const openTicketCount = ticket.conversationId
         ? await bumpOpenTicketCount(tx, ticket.conversationId, 0)
@@ -259,7 +271,7 @@ export async function removeTicketAttachment(
 
   await db.$transaction(async (tx) => {
     await tx.ticketAttachment.delete({ where: { id: row.id } });
-    await writeTicketEvent(
+    const removedEventId = await writeTicketEvent(
       tx,
       row.ticket.workspaceId,
       row.ticket.id,
@@ -268,6 +280,15 @@ export async function removeTicketAttachment(
       null,
       { attachmentId: row.id, filename: row.filename },
     );
+    // Removing evidence is activity too. Stamped FROM the event row so the
+    // column and the sweeper's GREATEST(evidence) agree exactly — a plain
+    // `new Date()` here sat a few ms behind the event and every removal
+    // "drifted" once, nightly.
+    const removedEvent = await tx.ticketEvent.findUnique({
+      where: { id: removedEventId },
+      select: { createdAt: true },
+    });
+    await touchTicketActivity(tx, row.ticket.id, removedEvent?.createdAt ?? new Date());
     const mapped = await readTicket(tx, row.ticket.id);
     const openTicketCount = row.ticket.conversationId
       ? await bumpOpenTicketCount(tx, row.ticket.conversationId, 0)

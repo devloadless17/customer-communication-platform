@@ -1281,9 +1281,9 @@ function ContactPanelImpl({
           </div>
         )}
 
-        {/* Raise a ticket on this conversation — the deliberate-creation surface
-            (auto-open is off by default). Files a subject + cause and can hand it
-            straight to a team. */}
+        {/* Raise a ticket on this conversation — the ONLY way one opens.
+            Files a subject + cause, can hand it to a team or a person, and the
+            dialog warns when live work already exists on this thread. */}
         <div className="px-5 pb-4">
           <RaiseTicketButton
             conversationId={conversation.id}

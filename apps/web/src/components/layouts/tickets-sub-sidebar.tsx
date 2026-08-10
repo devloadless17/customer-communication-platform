@@ -22,7 +22,7 @@ import {
 } from "@/components/layouts/sub-sidebar";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { getClientSocket } from "@/lib/socket-client";
-import type { TicketCounts, TicketStatus } from "@ccp/shared/tickets/types";
+import { TICKET_STATUS_LABELS, type TicketCounts, type TicketStatus } from "@ccp/shared/tickets/types";
 
 /**
  * Ticket views.
@@ -38,13 +38,14 @@ import type { TicketCounts, TicketStatus } from "@ccp/shared/tickets/types";
  * groupBy over every ticket in the workspace.
  */
 
+// Labels come from the ONE shared map — this list only adds each view's icon.
 const STATUS_VIEWS: Array<{ status: TicketStatus; label: string; icon: typeof CircleDot }> = [
-  { status: "new", label: "New", icon: CircleDot },
-  { status: "open", label: "Open", icon: Inbox },
-  { status: "pending", label: "Waiting on customer", icon: PauseCircle },
-  { status: "on_hold", label: "On hold", icon: PauseCircle },
-  { status: "solved", label: "Solved", icon: CircleDot },
-  { status: "closed", label: "Closed", icon: CircleDot },
+  { status: "new", label: TICKET_STATUS_LABELS.new, icon: CircleDot },
+  { status: "open", label: TICKET_STATUS_LABELS.open, icon: Inbox },
+  { status: "pending", label: TICKET_STATUS_LABELS.pending, icon: PauseCircle },
+  { status: "on_hold", label: TICKET_STATUS_LABELS.on_hold, icon: PauseCircle },
+  { status: "solved", label: TICKET_STATUS_LABELS.solved, icon: CircleDot },
+  { status: "closed", label: TICKET_STATUS_LABELS.closed, icon: CircleDot },
 ];
 
 export function TicketsSubSidebar({
@@ -120,12 +121,15 @@ export function TicketsSubSidebar({
     socket.on("ticket:thread:message", onReply);
     // Already per-viewer — this user clearing their own marker.
     socket.on("ticket:thread:read", onChange);
+    // Re-seed after an offline gap — same §10 rule as the rail badge.
+    socket.on("connect", onChange);
     return () => {
       alive = false;
       if (timer) clearTimeout(timer);
       socket.off("ticket:changed", onChange);
       socket.off("ticket:thread:message", onReply);
       socket.off("ticket:thread:read", onChange);
+      socket.off("connect", onChange);
     };
   }, [viewerUserId]);
 

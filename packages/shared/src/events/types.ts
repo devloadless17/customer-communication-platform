@@ -773,6 +773,15 @@ export interface TicketChangedEvent {
    * inside the transaction and the fanout rule stays a pure lookup.
    */
   ticketByWorkspace?: Record<string, Ticket>;
+  /**
+   * Users whose PER-USER rooms the fanout co-targets alongside each workspace
+   * room: the assignee, the PREVIOUS assignee (a reassignment-away must remove
+   * the card live), each share's assignee, the raiser, and the conversation's
+   * assignee. Restricted agents never join the workspace room — this list is
+   * how a ticket frame reaches them at all. Carried ON the event, never re-read
+   * in the fanout rule (same rule as `sharedWithWorkspaceIds`).
+   */
+  notifyUserIds?: string[];
   /** Who made the change. null for automation / SLA sweeper actions. */
   changedByUserId: string | null;
   /** Set on /v1 mutations for audit attribution. */
