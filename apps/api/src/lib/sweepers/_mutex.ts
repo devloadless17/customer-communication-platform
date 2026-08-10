@@ -35,6 +35,7 @@ type SweeperName =
   | "outbound-event-retention"
   | "outbound-send-attempt-retention"
   | "conversation-event-retention"
+  | "notification-retention"
   | "workflow-run-retention"
   | "auth-cleanup"
   | "api-idempotency"
@@ -77,6 +78,7 @@ const STALE_THRESHOLD_MS: Record<SweeperName, number> = {
   "outbound-event-retention": 25 * 60 * 60 * 1000,
   "outbound-send-attempt-retention": 25 * 60 * 60 * 1000,
   "conversation-event-retention": 25 * 60 * 60 * 1000,
+  "notification-retention": 25 * 60 * 60 * 1000,
   "workflow-run-retention": 25 * 60 * 60 * 1000,
   "auth-cleanup": 25 * 60 * 60 * 1000,
   "api-idempotency": 75 * 60 * 1000, // hourly

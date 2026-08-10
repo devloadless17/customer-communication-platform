@@ -146,6 +146,10 @@ import {
   stopConversationEventRetentionSweeper,
 } from "@/lib/sweepers/conversation-event-retention";
 import {
+  startNotificationRetentionSweeper,
+  stopNotificationRetentionSweeper,
+} from "@/lib/sweepers/notification-retention";
+import {
   startAgentPresenceSampler,
   stopAgentPresenceSampler,
 } from "@/lib/sweepers/agent-presence-sample";
@@ -454,6 +458,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       // via CONVERSATION_EVENT_RETENTION_DAYS). N2 in
       // tests/VERIFICATION-2026-07-29.md.
       startConversationEventRetentionSweeper();
+      startNotificationRetentionSweeper();
       this.conversationEventRetentionStarted = true;
       this.logger.log("Conversation event retention sweeper started");
     } catch (err) {
@@ -647,6 +652,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     try {
       if (this.conversationEventRetentionStarted)
         stopConversationEventRetentionSweeper();
+        stopNotificationRetentionSweeper();
       if (this.agentPresenceSamplerStarted) stopAgentPresenceSampler();
       if (this.webchatVisitorRetentionStarted) stopWebchatVisitorRetentionSweeper();
       if (this.messageRawPayloadRetentionStarted)

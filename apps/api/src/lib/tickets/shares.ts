@@ -394,10 +394,14 @@ export async function revokeTicketShare(
       }
     }
     // Bell rows addressed to the revoked workspace: mark read rather than
-    // delete — the history stays, the badge and the dead link go.
-    await db.notification.updateMany({
-      where: { ticketId: ticket.id, workspaceId: args.guestWorkspaceId, readAt: null },
-      data: { readAt: new Date() },
+    // DELETE, not mark-read: the bell lists read rows too, and every row
+    // links to the ticket — a mark-read only killed the badge while the
+    // revoked side kept a list of links that 404 (the exact "notification
+    // whose link opens nothing" the audience resolver's docblock calls worse
+    // than silence). The revoked workspace's access to the record is gone;
+    // bell entries about it go with it (audit 2026-08-10).
+    await db.notification.deleteMany({
+      where: { ticketId: ticket.id, workspaceId: args.guestWorkspaceId },
     });
   })().catch(() => undefined);
 

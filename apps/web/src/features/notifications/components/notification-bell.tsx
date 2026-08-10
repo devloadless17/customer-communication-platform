@@ -90,7 +90,10 @@ export function NotificationBell() {
       // The frame reaches this user's room ONLY, so anything arriving here is
       // genuinely theirs — no recipient check needed, unlike the workspace-wide
       // ticket frames.
-      const who = payload.actorName ?? "Someone";
+      // Same persona as the list row below — one row must not read "Someone"
+      // in the toast and "Automation" in the bell (audit 2026-08-10). A null
+      // actorName here means no human actor, i.e. automation.
+      const who = payload.actorName ?? "Automation";
       const what = payload.summary ?? "sent you a notification";
       toast.info(payload.ticketNumber ? `${who} ${what} · #${payload.ticketNumber}` : `${who} ${what}`);
     };

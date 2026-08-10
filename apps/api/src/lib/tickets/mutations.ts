@@ -902,7 +902,7 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
     }
 
     const ticket = await readTicket(tx, existing.id);
-    const action = deriveAction(existing.status, statusMoves ? finalStatus : null, args);
+    const action = deriveAction(existing.status, statusMoves ? finalStatus : null, args, existing.assignedUserId);
 
     // Tag edits earn their own timeline verbs — the generic `field_changed`
     // used to swallow them, leaving "something changed" where the reader needs
@@ -1029,7 +1029,12 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
       ticketSubject: audience.subject,
     };
 
-    if (args.assignedUserId) {
+    // Only a CHANGED assignee is news. A /v1 partner syncing full state
+    // re-asserts the current assignee routinely; without the comparison every
+    // hourly sync wrote another identical "assigned this ticket to you" row
+    // (audit 2026-08-10). The UI and workflow steps already no-op'd on their
+    // side; this closes the API path at the write site.
+    if (args.assignedUserId && args.assignedUserId !== existing.assignedUserId) {
       // The assignee is on the OWNER's roster (a guest's person is their
       // share's `assignedUserId`), so take their placement from the audience —
       // it is the one thing that knows which bell each person reads.
@@ -1453,6 +1458,7 @@ function deriveAction(
   previous: TicketStatus,
   next: TicketStatus | null,
   args: UpdateTicketArgs,
+  prevAssignedUserId: string | null,
 ): TicketAction {
   if (next) {
     if (next === "solved") return "solved";
@@ -1464,7 +1470,11 @@ function deriveAction(
   // the same write, and filing that as "unassigned" would hide the thing that
   // actually happened.
   if (args.assignedTeamId !== undefined) return "team_changed";
-  if (args.assignedUserId !== undefined) return "assigned";
+  // A re-assert of the CURRENT assignee is not an assignment — without the
+  // comparison a /v1 full-state sync wrote a spurious `assigned` event per
+  // sync (audit 2026-08-10). Falls through to priority/updated.
+  if (args.assignedUserId !== undefined && args.assignedUserId !== prevAssignedUserId)
+    return "assigned";
   if (args.priority !== undefined) return "priority_changed";
   return "updated";
 }
