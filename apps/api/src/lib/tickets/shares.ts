@@ -5,6 +5,7 @@ import { isTicketActive } from "@ccp/shared/tickets/types";
 import { kickOutbox, publishInTx } from "@/lib/events/outbox";
 
 import { ticketByIdWhere } from "./access";
+import { resolveActorDisplayName } from "@/lib/workspaces/operator-mask";
 import {
   bumpOpenTicketCount,
   publishTicketEvent,
@@ -242,13 +243,10 @@ export async function shareTicket(db: Db, args: ShareTicketArgs): Promise<ShareO
   void (async () => {
     const audience = await ticketAudience(db as never, ticket.id);
     if (!audience) return;
+    // OPERATOR MASK: append-only bell rows — masked at write time
+    // (lib/workspaces/operator-mask.ts).
     const actorName = args.actor.userId
-      ? (
-          await db.user.findUnique({
-            where: { id: args.actor.userId },
-            select: { name: true },
-          })
-        )?.name ?? null
+      ? await resolveActorDisplayName(db, args.actor.userId, [args.workspaceId])
       : null;
     await notifyUsers(db as never, {
       kind: "ticket_escalated",

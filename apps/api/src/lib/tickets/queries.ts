@@ -1,6 +1,7 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 
 import { ticketAccessWhere, ticketByIdWhere } from "./access";
+import { OPERATOR_DISPLAY_NAME, operatorActorIds } from "@/lib/workspaces/operator-mask";
 
 import type {
   ContactSnapshot,
@@ -24,7 +25,68 @@ import { TICKET_ACTIVE_STATUSES, TICKET_SOURCES } from "@ccp/shared/tickets/type
  * shape. Same contract as lib/message-flags/queries.ts.
  */
 
-type Db = Pick<PrismaClient, "ticket" | "ticketEvent" | "ticketThreadUnread">;
+type Db = Pick<PrismaClient, "ticket" | "ticketEvent" | "ticketThreadUnread" | "user">;
+
+/**
+ * OPERATOR MASK (see lib/workspaces/operator-mask.ts). Ticket DTOs join actor
+ * names server-side — deliberately, because a guest workspace cannot resolve an
+ * owner-workspace author from its own roster — which is exactly why the web's
+ * member-map "Support" fallback never gets a chance to apply here. Mask at
+ * mapping time, relative to the READER's workspace: a superAdmin acting where
+ * they hold no membership renders as "Support"; in their own anchor workspace
+ * they are a member and their name is real.
+ *
+ * Applied to every user-name field an operator can occupy: event `actorName`,
+ * attachment `uploadedByName`, and the ticket's `resolvedByName`
+ * (`assignedUserName` is unreachable — assignment is membership-validated).
+ */
+async function maskTicketEventNames(
+  db: Db,
+  workspaceId: string,
+  events: TicketEvent[],
+): Promise<TicketEvent[]> {
+  const masked = await operatorActorIds(
+    db,
+    events.flatMap((e) => [
+      e.actorUserId,
+      ...(e.attachments ?? []).map((a) => a.uploadedById),
+    ]),
+    [workspaceId],
+  );
+  if (masked.size === 0) return events;
+  return events.map((e) => ({
+    ...e,
+    actorName: e.actorUserId && masked.has(e.actorUserId) ? OPERATOR_DISPLAY_NAME : e.actorName,
+    attachments: (e.attachments ?? []).map((a) =>
+      a.uploadedById && masked.has(a.uploadedById)
+        ? { ...a, uploadedByName: OPERATOR_DISPLAY_NAME }
+        : a,
+    ),
+  }));
+}
+
+async function maskTicketNames(
+  db: Db,
+  workspaceId: string,
+  tickets: Ticket[],
+): Promise<Ticket[]> {
+  const masked = await operatorActorIds(
+    db,
+    tickets.flatMap((t) => [t.resolvedById, ...t.attachments.map((a) => a.uploadedById)]),
+    [workspaceId],
+  );
+  if (masked.size === 0) return tickets;
+  return tickets.map((t) => ({
+    ...t,
+    resolvedByName:
+      t.resolvedById && masked.has(t.resolvedById) ? OPERATOR_DISPLAY_NAME : t.resolvedByName,
+    attachments: t.attachments.map((a) =>
+      a.uploadedById && masked.has(a.uploadedById)
+        ? { ...a, uploadedByName: OPERATOR_DISPLAY_NAME }
+        : a,
+    ),
+  }));
+}
 
 /** Board/list page size. Keyset-paginated, so this is a hard per-request bound. */
 export const TICKET_PAGE = 50;
@@ -644,7 +706,11 @@ export async function listTickets(
   }
 
   return {
-    tickets: page.map((row) => mapTicket(row, workspaceId)),
+    tickets: await maskTicketNames(
+      db,
+      workspaceId,
+      page.map((row) => mapTicket(row, workspaceId)),
+    ),
     nextCursor: last ? { activityAt: last.lastActivityAt.toISOString(), id: last.id } : null,
     unreadTicketIds,
   };
@@ -659,7 +725,9 @@ export async function getTicket(
     where: ticketByIdWhere(workspaceId, id),
     select: TICKET_SELECT,
   });
-  return row ? mapTicket(row, workspaceId) : null;
+  if (!row) return null;
+  const [masked] = await maskTicketNames(db, workspaceId, [mapTicket(row, workspaceId)]);
+  return masked ?? null;
 }
 
 /**
@@ -687,7 +755,11 @@ export async function listTicketNotes(
     take: 200,
     select: TICKET_EVENT_SELECT,
   });
-  return rows.reverse().map((e) => mapTicketEvent(e, ticketId));
+  return maskTicketEventNames(
+    db,
+    workspaceId,
+    rows.reverse().map((e) => mapTicketEvent(e, ticketId)),
+  );
 }
 
 /** A ticket's own timeline, oldest first (served by `(ticketId, createdAt)`). */
@@ -720,7 +792,11 @@ export async function listTicketEvents(
     take: 500,
     select: TICKET_EVENT_SELECT,
   });
-  return rows.reverse().map((e) => mapTicketEvent(e, ticketId));
+  return maskTicketEventNames(
+    db,
+    workspaceId,
+    rows.reverse().map((e) => mapTicketEvent(e, ticketId)),
+  );
 }
 
 /**

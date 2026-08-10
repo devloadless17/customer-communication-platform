@@ -673,9 +673,15 @@ export class ContactsService {
         ON CONFLICT DO NOTHING
       `;
     } else {
+      // SEC-4 twin (see external-v1.service.ts): ownedIds and tagId are both
+      // already workspace-validated above, so the IN-subquery backstops are
+      // defense-in-depth — the destructive DELETE can never touch a cross-team
+      // join row even if a future caller forgets the pre-filter.
       await this.db.$executeRaw`
         DELETE FROM "_ContactToTag"
         WHERE "A" = ANY(${ownedIds}::text[]) AND "B" = ${tagId}
+          AND "A" IN (SELECT id FROM "Contact" WHERE "workspaceId" = ${workspaceId})
+          AND "B" IN (SELECT id FROM "Tag" WHERE "workspaceId" = ${workspaceId})
       `;
     }
     // Bump version on every affected Contact so any in-flight per-contact

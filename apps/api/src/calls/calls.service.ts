@@ -1748,6 +1748,10 @@ export class CallsService {
     const cas = await this.db.call.updateMany({
       where: {
         id: callId,
+        // Defense-in-depth alongside the {id, workspaceId} gate above — a
+        // future refactor that drops the gate must not be one line away from a
+        // cross-tenant write (same posture as ConversationsService.remove).
+        workspaceId: session.workspaceId,
         answeredByUserId: null,
         status: CallStatus.ringing,
         // Answer is incoming-only. Without pinning direction, a scripted client
@@ -1814,7 +1818,7 @@ export class CallsService {
       try {
         const endedAt = new Date();
         await this.db.call.updateMany({
-          where: { id: callId, status: CallStatus.in_progress },
+          where: { id: callId, workspaceId: session.workspaceId, status: CallStatus.in_progress },
           data: {
             status: CallStatus.failed,
             endedAt,
@@ -2074,6 +2078,8 @@ export class CallsService {
       // termination). Mirrors markConnected's direction pin.
       where: {
         id: callId,
+        // Defense-in-depth alongside the {id, workspaceId} gate above.
+        workspaceId: session.workspaceId,
         status: CallStatus.ringing,
         direction: CallDirection.in,
       },
@@ -2225,6 +2231,8 @@ export class CallsService {
       cas = await this.db.call.updateMany({
         where: {
           id: callId,
+          // Defense-in-depth alongside the {id, workspaceId} gate above.
+          workspaceId: session.workspaceId,
           status: { in: [CallStatus.ringing, CallStatus.in_progress] },
           answeredAt: wasConnected ? { not: null } : null,
         },

@@ -38,6 +38,17 @@ import {
  * a human — `assign_ticket` in `user` and `team` mode with `overwrite: false`.
  * Everywhere else it is deliberately omitted: automation has no stale view to
  * protect, and a version conflict would fail a step for a race it can't see.
+ *
+ * OWNER-ONLY SCOPE, deliberate (audit 2026-08-10): the assignment pre-checks
+ * below read `{ id: ticketId, workspaceId: ctx.workspaceId }` rather than
+ * composing `ticketAccessWhere()`. This is the ONE sanctioned deviation from
+ * the "every ticket read composes ticketAccessWhere" rule, and it fails
+ * CLOSED: a workflow acts only on tickets its own workspace OWNS, never on
+ * tickets shared INTO it. A guest department's automation reaching into
+ * another workspace's ticket would be an automated cross-workspace write
+ * nobody raised — the same reasoning as "broadcasts never open tickets". If
+ * guest-side ticket automation is ever wanted, widen this consciously, not as
+ * a consistency cleanup.
  * Where it IS sent, a lost CAS degrades to `changed_by_someone_else` rather
  * than erroring the run — the assignment was superseded, which is the point.
  */

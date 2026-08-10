@@ -23,6 +23,7 @@ import {
   REPLY_TO_INCLUDE,
 } from "./_shared";
 import { MESSAGE_FLAG_SELECT } from "@/lib/message-flags/queries";
+import { OPERATOR_DISPLAY_NAME, operatorActorIds } from "@/lib/workspaces/operator-mask";
 import {
   encodeConvoCursor,
   encodeMessageCursor,
@@ -489,7 +490,7 @@ export async function getConversationWithRefs(
     ? row.contact.lastInboundAt.toISOString()
     : null;
 
-  const events = await mapActivityEventRows(row.events);
+  const events = await mapActivityEventRows(workspaceId, row.events);
 
   // Calls were fetched DESC; reverse to chronological so they merge into
   // the timeline alongside messages/notes the same way.
@@ -550,6 +551,7 @@ type ActivityEventRow = Parameters<typeof mapActivityEvent>[0];
  * resolve (no deletedAt filter) so "assigned to <name>" survives a departure.
  */
 async function mapActivityEventRows(
+  workspaceId: string,
   rowsDesc: ActivityEventRow[],
 ): Promise<ConversationWithRefs["events"]> {
   const assigneeIds = new Set<string>();
@@ -582,11 +584,24 @@ async function mapActivityEventRows(
     });
     for (const w of workflows) workflowNameById.set(w.id, w.name);
   }
+  // OPERATOR MASK (see lib/workspaces/operator-mask.ts): the `user` join
+  // resolves the platform operator's real name like anyone else's, and this
+  // DTO's `actorName` is rendered verbatim by the activity pills — the one
+  // timeline surface the web's member-map "Support" fallback can't reach.
+  const maskedIds = await operatorActorIds(
+    db,
+    rowsDesc.map((e) => e.userId),
+    [workspaceId],
+  );
   // Reverse the desc fetch to chronological (oldest-first) so it merges into
   // the timeline the same way messages/notes do.
-  return [...rowsDesc].reverse().map((e) =>
-    mapActivityEvent(e, assigneeNameById, workflowNameById),
-  );
+  return [...rowsDesc].reverse().map((e) => {
+    const mapped = mapActivityEvent(e, assigneeNameById, workflowNameById);
+    if (e.userId && maskedIds.has(e.userId)) {
+      return { ...mapped, actorName: OPERATOR_DISPLAY_NAME };
+    }
+    return mapped;
+  });
 }
 
 /**
@@ -633,7 +648,7 @@ export async function listConversationEvents(
       apiKey: { select: { name: true } },
     },
   });
-  return mapActivityEventRows(rows);
+  return mapActivityEventRows(workspaceId, rows);
 }
 
 /**

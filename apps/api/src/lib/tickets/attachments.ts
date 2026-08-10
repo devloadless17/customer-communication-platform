@@ -7,6 +7,7 @@ import { notifyUsers, ticketAudience } from "@/lib/notifications/notifications";
 import { kindFromMime, normalizeMimeType } from "@/lib/media-storage";
 
 import { ticketByIdWhere } from "./access";
+import { resolveActorDisplayName } from "@/lib/workspaces/operator-mask";
 import {
   bumpOpenTicketCount,
   publishTicketEvent,
@@ -183,13 +184,10 @@ export async function addTicketAttachment(
     void (async () => {
       const audience = await ticketAudience(db as never, ticket.id);
       if (!audience) return;
+      // OPERATOR MASK: append-only bell rows — masked at write time
+      // (lib/workspaces/operator-mask.ts).
       const actorName = args.actor.userId
-        ? (
-            await db.user.findUnique({
-              where: { id: args.actor.userId },
-              select: { name: true },
-            })
-          )?.name ?? null
+        ? await resolveActorDisplayName(db, args.actor.userId, [args.workspaceId])
         : null;
       await notifyUsers(db as never, {
         kind: "ticket_file_added",

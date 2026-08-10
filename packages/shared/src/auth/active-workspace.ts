@@ -221,6 +221,21 @@ export function isOperatorAccess(input: {
 }
 
 /**
+ * How the platform operator's writes are NAMED to a tenant's team.
+ *
+ * CLAUDE.md §18: "Actions the operator TAKES stay ordinary audited writes;
+ * their unresolvable id renders as 'Support' to the tenant's team." The web
+ * already renders this for member-map misses (message-thread/utils.ts
+ * UNKNOWN_ACTOR_NAME); this constant is the SERVER-side half, applied wherever
+ * a DTO resolves an actor name by joining the User row — which resolves the
+ * operator's real name just fine and would otherwise leak it past the
+ * client-side mask (conversation activity pills, ticket events/thread/
+ * attachments, persisted Notification rows). One definition so the two halves
+ * can never disagree on the word.
+ */
+export const OPERATOR_DISPLAY_NAME = "Support";
+
+/**
  * Parse the `ccp.ws` cookie out of a raw `Cookie` header.
  *
  * Lives here, next to the rule that consumes it, so the API guard, the socket

@@ -8,6 +8,7 @@ import { notifyUsers, ticketAudience } from "@/lib/notifications/notifications";
 import { db as sharedDb } from "@/lib/db";
 
 import { ticketByIdWhere } from "./access";
+import { resolveActorDisplayName } from "@/lib/workspaces/operator-mask";
 import { computeDueDates, isSlaPaused, shiftDueDates, type SlaPolicyInput } from "./sla";
 import { mapTicket, TICKET_SELECT } from "./queries";
 import type { Ticket } from "@ccp/shared/tickets/types";
@@ -182,13 +183,10 @@ export async function createTicket(db: Db, args: CreateTicketArgs): Promise<Tick
       const assignee = created.ok ? created.ticket.assignedUserId : null;
       if (created.ok && assignee && assignee !== (args.actor.userId ?? null)) {
         void (async () => {
+          // OPERATOR MASK: the bell row is append-only, so the name must be
+          // masked at WRITE time (lib/workspaces/operator-mask.ts).
           const actorName = args.actor.userId
-            ? ((
-                await sharedDb.user.findUnique({
-                  where: { id: args.actor.userId },
-                  select: { name: true },
-                })
-              )?.name ?? null)
+            ? await resolveActorDisplayName(sharedDb, args.actor.userId, [args.workspaceId])
             : null;
           await notifyUsers(sharedDb, {
             kind: "ticket_assigned",
@@ -979,11 +977,9 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
   void (async () => {
     const audience = await ticketAudience(sharedDb, existing.id);
     if (!audience) return;
+    // OPERATOR MASK: append-only bell rows — masked at write time.
     const actorName = args.actor.userId
-      ? ((await sharedDb.user.findUnique({
-          where: { id: args.actor.userId },
-          select: { name: true },
-        })) ?? null)?.name ?? null
+      ? await resolveActorDisplayName(sharedDb, args.actor.userId, [args.workspaceId])
       : null;
     const base = {
       actorUserId: args.actor.userId ?? null,

@@ -5,6 +5,7 @@ import { publish } from "@/lib/events/bus";
 import { notifyUsers, ticketAudience } from "@/lib/notifications/notifications";
 
 import { ticketByIdWhere } from "./access";
+import { OPERATOR_DISPLAY_NAME, operatorActorIds } from "@/lib/workspaces/operator-mask";
 import type { TicketActor } from "./mutations";
 import { ATTACHMENT_SELECT_FIELDS, mapAttachment } from "./queries";
 
@@ -92,7 +93,21 @@ export async function listTicketThread(
     take: TICKET_THREAD_PAGE,
     select: TICKET_MESSAGE_SELECT,
   });
-  return rows.reverse().map((m) => mapTicketMessage(m, ticketId));
+  const messages = rows.reverse().map((m) => mapTicketMessage(m, ticketId));
+  // OPERATOR MASK (lib/workspaces/operator-mask.ts): the author join resolves
+  // the platform operator's name and avatar like any member's — the join is
+  // load-bearing for cross-workspace authors, so mask at mapping time instead.
+  const masked = await operatorActorIds(
+    db,
+    messages.map((m) => m.authorUserId),
+    [workspaceId],
+  );
+  if (masked.size === 0) return messages;
+  return messages.map((m) =>
+    m.authorUserId && masked.has(m.authorUserId)
+      ? { ...m, authorName: OPERATOR_DISPLAY_NAME, authorAvatarUrl: null }
+      : m,
+  );
 }
 
 /**
@@ -248,6 +263,22 @@ export async function addTicketMessage(
   }
 
   const message = mapTicketMessage(result.row, ticket.id);
+  // OPERATOR MASK, applied BEFORE the frame and the bell write below — both
+  // read this DTO (`message` on the socket frame, `message.authorName` as the
+  // notification's persisted actorName), so masking here covers every receiver
+  // in one place. Relative to every participating workspace: the operator is a
+  // member of none of them, an ordinary guest author is a member of theirs.
+  {
+    const masked = await operatorActorIds(
+      db,
+      [message.authorUserId],
+      [ticket.workspaceId, args.workspaceId, ...ticket.shares.map((s) => s.guestWorkspaceId)],
+    );
+    if (message.authorUserId && masked.has(message.authorUserId)) {
+      message.authorName = OPERATOR_DISPLAY_NAME;
+      message.authorAvatarUrl = null;
+    }
+  }
   if (args.attach) {
     // Failing to store a file must not swallow the reply that explains it —
     // the text is the part people are waiting on.
