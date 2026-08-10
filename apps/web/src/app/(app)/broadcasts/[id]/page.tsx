@@ -1,8 +1,10 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 
 import { getBroadcast } from "@/lib/api/queries";
+import { getCurrentTeam } from "@/lib/api/queries/team";
+import { getSession } from "@/lib/auth/current-user";
 
 import { BroadcastDetail, type BroadcastDetailDto } from "@/features/broadcasts/components/broadcast-detail";
 
@@ -14,6 +16,13 @@ export default async function BroadcastDetailPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
+  // Restricted viewers: same direct-URL guard as /broadcasts (audit 2026-08-10).
+  {
+    const [s, t] = await Promise.all([getSession(), getCurrentTeam()]);
+    if (s.user.role === "agent" && t.agentConversationVisibility === "assigned") {
+      redirect("/inbox");
+    }
+  }
   const { id } = await params;
   const broadcast = await getBroadcast(id);
   if (!broadcast) notFound();

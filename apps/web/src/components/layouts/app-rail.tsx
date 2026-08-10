@@ -583,6 +583,7 @@ export function AppRail({
         <UserMenu
           currentUser={currentUser}
           collapsed={collapsed}
+          isOperatorMode={isOperatorMode}
           canManageAvailability={canManageAvailability}
           liveStatus={liveAvailability.status}
           liveMessage={liveAvailability.message}
@@ -761,6 +762,7 @@ function RailLink({
 function UserMenu({
   currentUser,
   collapsed,
+  isOperatorMode = false,
   canManageAvailability,
   liveStatus,
   liveMessage,
@@ -770,6 +772,7 @@ function UserMenu({
 }: {
   currentUser: User;
   collapsed: boolean;
+  isOperatorMode?: boolean;
   canManageAvailability: boolean;
   liveStatus: UserAvailabilityStatus;
   liveMessage: string | null;
@@ -829,12 +832,19 @@ function UserMenu({
               Workspace settings
             </Link>
           </DropdownMenuItem>
-          <DropdownMenuItem asChild>
-            <Link href="/organization">
-              <Building2 className="size-4 text-muted-foreground" />
-              Organization
-            </Link>
-          </DropdownMenuItem>
+          {/* NOT rendered in operator mode — same rule as the workspace
+              switcher's unlinked org name: /organization renders the session's
+              OWN organization (the operator's platform anchor), while all the
+              chrome around this menu names the visited tenant. Offering the
+              link is an invitation to edit the wrong org (audit 2026-08-10). */}
+          {!isOperatorMode && (
+            <DropdownMenuItem asChild>
+              <Link href="/organization">
+                <Building2 className="size-4 text-muted-foreground" />
+                Organization
+              </Link>
+            </DropdownMenuItem>
+          )}
           <DropdownMenuSeparator />
           <DropdownMenuItem
             onSelect={(e) => {

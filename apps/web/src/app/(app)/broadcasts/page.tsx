@@ -3,7 +3,10 @@ import Link from "next/link";
 import { Megaphone, Plus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { redirect } from "next/navigation";
+
 import { getSession } from "@/lib/auth/current-user";
+import { getCurrentTeam } from "@/lib/api/queries/team";
 import { listBroadcasts } from "@/lib/api/queries";
 
 import { BroadcastsBrowser } from "@/features/broadcasts/components/broadcasts-browser";
@@ -64,6 +67,19 @@ export default async function BroadcastsPage({
   const persistedView = parseBroadcastView(
     cookieStore.get(BROADCASTS_VIEW_COOKIE)?.value,
   );
+
+  // Restricted viewers can't use this section at all (@DenyRestrictedViewer
+  // on the whole controller); the rail entry is already hidden for them, so a
+  // direct URL / stale link is the only way here — redirect instead of letting
+  // listBroadcasts() 403 into the error boundary (same pattern as /workflows;
+  // audit 2026-08-10).
+  const [preSession, currentTeam] = await Promise.all([getSession(), getCurrentTeam()]);
+  if (
+    preSession.user.role === "agent" &&
+    currentTeam.agentConversationVisibility === "assigned"
+  ) {
+    redirect("/inbox");
+  }
 
   const [{ permissions }, broadcastsPage] = await Promise.all([
     getSession(),

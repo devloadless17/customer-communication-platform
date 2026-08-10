@@ -93,7 +93,7 @@ export default async function SettingsIndex() {
         ...(permissions["teamActivity:view"]
           ? [
               {
-                href: "/settings/activity",
+                href: "/reports/team",
                 icon: BarChart3,
                 title: "Team activity",
                 description:

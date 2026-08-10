@@ -2,7 +2,10 @@ import Link from "next/link";
 import { Plus, Users } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { redirect } from "next/navigation";
+
 import { getSession } from "@/lib/auth/current-user";
+import { getCurrentTeam } from "@/lib/api/queries/team";
 import { listAudienceGroups, listTags } from "@/lib/api/queries";
 
 import { GroupRow } from "@/features/broadcasts/components/group-row";
@@ -11,6 +14,13 @@ export const metadata = { title: "Audience groups" };
 export const dynamic = "force-dynamic";
 
 export default async function AudienceGroupsPage() {
+  // Restricted viewers: same direct-URL guard as /broadcasts (audit 2026-08-10).
+  {
+    const [s, t] = await Promise.all([getSession(), getCurrentTeam()]);
+    if (s.user.role === "agent" && t.agentConversationVisibility === "assigned") {
+      redirect("/inbox");
+    }
+  }
   const [{ permissions }, groups, tags] = await Promise.all([
     getSession(),
     listAudienceGroups(),
