@@ -3875,6 +3875,16 @@ model Ticket {
   // the sort key so the list is a range scan that stops after `take`, matching
   // the assignedUserId board index above.
   @@index([workspaceId, assignedTeamId, status, createdAt(sort: Desc), id(sort: Desc)])
+  // ...and the SAME two filters against the board's ACTUAL sort key. The board
+  // orders by `lastActivityAt` (and keysets on it), but the two indexes above
+  // carry `createdAt` — so an assignee- or team-filtered board matched the
+  // index prefix and then sorted that agent's whole ticket set IN MEMORY
+  // (audit 2026-08-11). `Conversation` already has the equivalent
+  // `[workspaceId, assignedUserId, lastMessageAt Desc, id Desc]`; Ticket was
+  // missing its counterpart. The createdAt pair stays — the board's secondary
+  // "newest raised" ordering still uses it.
+  @@index([workspaceId, assignedUserId, lastActivityAt(sort: Desc), id(sort: Desc)])
+  @@index([workspaceId, assignedTeamId, lastActivityAt(sort: Desc), id(sort: Desc)])
   // FK index for the SetNull relation — without it, deleting a team seq-scans
   // every ticket in the deployment to null the column.
   @@index([assignedTeamId])

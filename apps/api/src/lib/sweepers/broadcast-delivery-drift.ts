@@ -165,4 +165,49 @@ async function sweepOnce(): Promise<void> {
       `[sweeper.broadcast-delivery-drift] reconciled ${totalDrifted} recipient(s) with stale delivery state across ${broadcasts.length} campaign(s)`,
     );
   }
+
+  // ── Parent counters ───────────────────────────────────────────────────────
+  // `Broadcast.sentCount` / `failedCount` are runner-maintained increments, and
+  // until now nothing reconciled them (audit 2026-08-11): the runner's own
+  // comment warns they can end "short of totalCount forever" when a lane dies
+  // past its retries, and the campaign report + the progress bar read the
+  // COUNTERS while the exactly-countable `BroadcastRecipient` rows hold the
+  // truth. So a customer sees "847 of 1,000 sent" on a campaign that fully
+  // delivered, permanently.
+  //
+  // TERMINAL campaigns only. A running/queued campaign's counters are being
+  // written concurrently by its lanes, and recomputing under them would
+  // reintroduce exactly the lost-update race the increments avoid.
+  //
+  // The cancel marker is counted as failed deliberately — cancel() bumps
+  // `failedCount` by the rows it marked, so the recount must agree with the
+  // writer it is reconciling rather than inventing a third opinion.
+  let countersFixed = 0;
+  try {
+    countersFixed = Number(await db.$executeRaw`
+      UPDATE "Broadcast" b
+      SET "sentCount" = t.sent, "failedCount" = t.failed
+      FROM (
+        SELECT r."broadcastId" AS id,
+               COUNT(*) FILTER (WHERE r.status = 'sent')   AS sent,
+               COUNT(*) FILTER (WHERE r.status = 'failed') AS failed
+        FROM "BroadcastRecipient" r
+        GROUP BY r."broadcastId"
+      ) t
+      WHERE b.id = t.id
+        AND b.status IN ('completed','failed','canceled')
+        AND b."updatedAt" < NOW() - INTERVAL '10 minutes'
+        AND (b."sentCount" <> t.sent OR b."failedCount" <> t.failed)
+    `);
+  } catch (err) {
+    console.warn(
+      "[sweeper.broadcast-delivery-drift] parent-counter reconcile failed; continuing",
+      err instanceof Error ? err.message : err,
+    );
+  }
+  if (countersFixed > 0) {
+    console.warn(
+      `[sweeper.broadcast-delivery-drift] recomputed sent/failed counters on ${countersFixed} terminal campaign(s)`,
+    );
+  }
 }

@@ -106,9 +106,16 @@ export async function applyContactShareFromReply(
   // `identityChannel = 'whatsapp'`, so stamping a phone on a messenger/instagram
   // contact can't collide with the WhatsApp contact for the same person — which
   // is precisely the pair we want `resolveCustomerId` to fuse below.
-  // `version` bump: enrichment is a multi-field write like any PATCH, so an
-  // in-flight agent edit must 409 rather than silently interleave (the same
-  // discipline bsuid-reconcile already applies — audit 2026-08-10).
+  // `version` BUMP (not a compare-and-swap): the increment makes a concurrent
+  // agent PATCH — which DOES pin `version` in its where — 409 rather than
+  // silently interleave, the same discipline bsuid-reconcile applies. It does
+  // NOT protect this write itself; a narrow read→write window could still
+  // overwrite an agent edit that landed in between. Deliberate, and consistent
+  // with every other ingest-side enrichment: the alternative (CAS here too)
+  // would DROP a customer's self-asserted identity on a race, and losing what
+  // the customer told us is worse than overwriting a field an agent can retype.
+  // (Audit 2026-08-10 added the bump; 2026-08-11 corrected this wording, which
+  // had claimed the 409 was enforced here.)
   await db.contact.update({
     where: { id: contact.id },
     data: { ...next, version: { increment: 1 } },

@@ -1145,15 +1145,27 @@ jobs:
             : "${POSTGRES_USER:=app}"; : "${POSTGRES_DB:=ccp}"
             mkdir -p /opt/ccp/backups && chmod 700 /opt/ccp/backups
             PRE="/opt/ccp/backups/pre-deploy-${POSTGRES_DB}-$(date -u +%Y%m%dT%H%M%SZ)-${{ github.sha }}.sql.gz"
+            # `-s` (non-empty) as well as the exit status, matching the
+            # pre-reset dump's guard: a pg_dump that dies mid-stream still
+            # leaves a truncated .gz and a zero exit from gzip. Stderr is KEPT
+            # (no 2>/dev/null) so a failure says why in the deploy log.
             if docker compose --env-file .env exec -T postgres pg_dump \
                  --username="$POSTGRES_USER" --dbname="$POSTGRES_DB" \
-                 --no-owner --no-privileges --clean --if-exists 2>/dev/null \
-                 | gzip -9 > "$PRE.tmp"; then
+                 --no-owner --no-privileges --clean --if-exists \
+               | gzip -9 > "$PRE.tmp" && [ -s "$PRE.tmp" ]; then
               mv "$PRE.tmp" "$PRE"
               echo "✓ pre-migration snapshot: $PRE"
             else
               rm -f "$PRE.tmp"
-              echo "⚠ pre-migration snapshot FAILED — proceeding (nightly dump is the fallback). If this deploy's migration misbehaves, a manual restore decision is required."
+              # ABORT, do not proceed. `migrate deploy` runs next and auto-rollback
+              # swaps CODE IMAGES ONLY — it cannot revert an applied migration. So
+              # the pre-deploy dump is the only restore point a bad migration has,
+              # and running one without it bets the tenant's data on the nightly
+              # cron dump being fresh enough (up to 24h stale). A failed deploy is
+              # recoverable; an unrecoverable migration is not. (Audit 2026-08-11.)
+              echo "✖ pre-migration snapshot FAILED — refusing to run migrations without a restore point."
+              echo "  Fix the dump (disk space? postgres healthy? credentials?) and re-run the deploy."
+              exit 1
             fi
 
             # MIGRATE BEFORE THE SWAP, not during it.

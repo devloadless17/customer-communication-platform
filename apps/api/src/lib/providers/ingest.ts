@@ -922,6 +922,17 @@ async function ingestReadWatermark(
   // `message.status_changed` also feeds outbound webhooks — a partner has no
   // such guard and would record `read` for a message whose real state is
   // `failed`. One extra indexed read on a receipt path, not the send path.
+  //
+  // DURABILITY, decided (audit 2026-08-11): status events publish on the BUS,
+  // not the outbox — the one deliberate §18 exception. A crash in the detached
+  // window loses a partner's delivered/read receipt. Accepted because status is
+  // the highest-volume event in the system (3+ per outbound message, plus every
+  // broadcast recipient), so an outbox row each would roughly double write
+  // volume on the hottest path to make a RECEIPT durable — while the receipt's
+  // own value is advisory and the next status tick (or the partner's own
+  // reconciliation) supersedes it. Message CONTENT events (received/sent) and
+  // state changes (status_changed on the conversation, ticket.changed) all go
+  // through the outbox; only per-message delivery receipts do not.
   const committed = await db.message.findMany({
     where: { id: { in: msgs.map((m) => m.id) }, status: "read" },
     select: { id: true },

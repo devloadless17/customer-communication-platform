@@ -105,13 +105,25 @@ __DOMAIN__ {
 		# domain to the HSTS preload list, which is very hard to undo. Add
 		# it only after you've decided to commit and verified all
 		# subdomains can serve HTTPS.
+		#
+		# THIS is the value production serves: Caddy's `header` replaces the
+		# app's, so next.config.ts's 2-year value never reaches a browser
+		# through the edge. 1 year is a sound production value; raising it
+		# is a deliberate, hard-to-undo commitment, so it is left to a human
+		# decision rather than drifting up by accident (audit 2026-08-11).
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
-		# SAMEORIGIN (not DENY) so we retain the option to embed in our
-		# own iframes (admin previews, OAuth popups, etc.) without
-		# touching this config. Modern equivalent is the CSP
-		# frame-ancestors directive — when CSP lands, this can go.
-		X-Frame-Options "SAMEORIGIN"
+		# DENY, matching next.config.ts's stated intent and the CSP the
+		# app already serves on page routes (`frame-ancestors 'none'`,
+		# apps/web/src/proxy.ts) — CSP has LANDED, so the "when CSP lands"
+		# note this comment used to carry is settled: nothing may frame us.
+		#
+		# Caddy's `header` REPLACES the app's, so prod served SAMEORIGIN
+		# while the app declared DENY — the two disagreed for real traffic
+		# (audit 2026-08-11). Safe to tighten: the webchat widget embeds on
+		# customer sites by INJECTING DOM (public/widget.js), never by
+		# iframing this origin, so no legitimate embedder exists.
+		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		# microphone=(self) — voice notes in the inbox composer need
 		# getUserMedia. geolocation=(self) — "Send location → My location"

@@ -495,6 +495,19 @@ export class ContactsService {
 
     // Catch-all `contact.updated` for legacy subscribers (workflow dispatch,
     // socket fanout, audit, web cache revalidate).
+    //
+    // BARE publish (not the outbox), and that is a DECISION, not an oversight
+    // (audit 2026-08-11). §18 routes irreversible-subscriber events through
+    // `publishInTx`, and this one does reach workflow dispatch + partner
+    // webhooks — so a crash in the window between the CAS commit above and the
+    // detached background tier loses that automation/webhook, unrecoverably
+    // (a human contact edit is never re-driven the way an inbound webhook is).
+    // Accepted because the window is milliseconds on a human-paced, low-volume
+    // path, and the alternative — an outbox row per contact edit, plus threading
+    // a tx through every one of ~21 publish sites — buys durability for the
+    // least automated surface in the product. If contact-driven automation ever
+    // becomes load-bearing for a customer, this is the site to convert first;
+    // `ingest.ts`'s `contact.created` carries the same acknowledgment.
     await this.bus.publish({
       type: "contact.updated",
       workspaceId,

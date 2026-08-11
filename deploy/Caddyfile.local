@@ -36,7 +36,8 @@
 	# Security headers mirror prod EXCEPT HSTS, which is omitted on purpose:
 	# Strict-Transport-Security on a plain-http localhost origin would tell
 	# the browser to force-https every future visit to localhost — poisoning
-	# OTHER localhost apps. Everything else matches deploy/Caddyfile.template.
+	# OTHER localhost apps. Everything else matches deploy/Caddyfile.template
+	# (verified 2026-08-11 — X-Frame-Options DENY now agrees on both sides).
 	header {
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"

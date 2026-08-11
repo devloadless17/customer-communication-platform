@@ -8,7 +8,7 @@ import type { Contact, Conversation } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
-import { publishInTx } from "@/lib/events/outbox";
+import { kickOutbox, publishInTx } from "@/lib/events/outbox";
 import {
   downloadCallRecording,
   downloadCallTranscript,
@@ -1318,12 +1318,24 @@ async function recordCallPermissionActivity(
     // CAS reopen, same shape as the call-ingest path: idempotent across
     // retries, and the status_changed publish only fires when THIS delivery
     // actually flipped the row.
-    const flip = await db.conversation.updateMany({
-      where: { id: conversation.id, status: "closed" },
-      data: { status: "pending" },
-    });
-    if (flip.count > 0) {
-      await publish({
+    //
+    // DURABLE, like the message-path twin (ingest.ts's `reopened` branch): the
+    // flip and its event co-commit in ONE tx and the event goes through the
+    // OUTBOX. A reopen fires the `On Conversation opened` workflow and the
+    // partner's `conversation.status_changed` webhook — both irreversible, and
+    // §18 requires the outbox for those. With a bare post-commit publish, a
+    // crash in the detached window lost both PERMANENTLY: the CAS has already
+    // committed, so Meta's redelivery of the same call webhook sees
+    // `flip.count === 0` and never re-publishes. (Audit 2026-08-11 — the
+    // message path was hardened for exactly this; the call path is its
+    // sibling and had been left behind.)
+    const flipped = await db.$transaction(async (tx) => {
+      const flip = await tx.conversation.updateMany({
+        where: { id: conversation.id, status: "closed" },
+        data: { status: "pending" },
+      });
+      if (flip.count === 0) return false;
+      await publishInTx(tx, {
         type: "conversation.status_changed",
         workspaceId,
         conversationId: conversation.id,
@@ -1336,7 +1348,9 @@ async function recordCallPermissionActivity(
           { previousStatus: "closed", changedByUserId: null },
         ),
       });
-    }
+      return true;
+    });
+    if (flipped) kickOutbox();
     // Monotonic bump so the thread rises in the inbox list for triage — the
     // `lt` guard stops an out-of-order webhook moving it backward past a
     // newer message or call.
