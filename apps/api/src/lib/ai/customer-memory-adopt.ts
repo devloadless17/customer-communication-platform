@@ -15,7 +15,12 @@ type Db = Pick<PrismaClient, "aiCustomerMemory">;
  * schema calls "permanent, PERSON-level memory" — and the rows themselves
  * accumulated unbounded, cleaned by no sweeper (audit 2026-08-10).
  *
- * Call INSIDE the same transaction as the reap, BEFORE the Customer delete.
+ * Call INSIDE the same transaction as the reap. Within that transaction the
+ * order is delete-first on purpose: the reap's `deleteMany` count is the only
+ * race-safe answer to "was the Customer actually childless", and adopting
+ * memories off a customer who was NOT reaped would strip a still-live person.
+ * Atomicity is the requirement — never call this on the bare client after a
+ * bare delete (a crash between the two strands the memories forever).
  * Dedup-aware: `@@unique([workspaceId, customerId, kind, value])` means a
  * blind updateMany P2002s when the adoptee already learned the same fact, so
  * duplicates are dropped rather than moved. `toCustomerId: null` = the person

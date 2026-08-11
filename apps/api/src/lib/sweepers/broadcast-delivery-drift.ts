@@ -1,6 +1,8 @@
 // Note: no `server-only` import — the NestJS api process loads this on boot
 // via @swc-node/register, outside the Next bundler context.
 
+import { Prisma } from "@prisma/client";
+
 import { db } from "@/lib/db";
 import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
@@ -86,6 +88,11 @@ export function stopBroadcastDeliveryDriftSweeper(): void {
     clearInterval(timer);
     timer = null;
   }
+}
+
+/** Exported for the spec — one full pass, no timers. */
+export async function sweepBroadcastDeliveryDriftOnce(): Promise<void> {
+  return sweepOnce();
 }
 
 async function sweepOnce(): Promise<void> {
@@ -177,13 +184,26 @@ async function sweepOnce(): Promise<void> {
   //
   // TERMINAL campaigns only. A running/queued campaign's counters are being
   // written concurrently by its lanes, and recomputing under them would
-  // reintroduce exactly the lost-update race the increments avoid.
+  // reintroduce exactly the lost-update race the increments avoid. The
+  // settle guard keys on COALESCE(completedAt, createdAt): Broadcast has NO
+  // `updatedAt` column — the first version referenced one, so this statement
+  // 42703'd on EVERY tick and the fail-soft catch below ate it; the feature
+  // shipped dead until its first spec ran (2026-08-11, session 2). A checker
+  // lesson repeated: Prisma raw SQL is invisible to the typechecker.
   //
   // The cancel marker is counted as failed deliberately — cancel() bumps
   // `failedCount` by the rows it marked, so the recount must agree with the
   // writer it is reconciling rather than inventing a third opinion.
   let countersFixed = 0;
   try {
+    // Aggregate ONLY the campaigns this tick already selected (recent
+    // terminal, <=50) — the first version had no WHERE in the subquery and
+    // full-scanned + grouped the ENTIRE BroadcastRecipient table every 6h
+    // even when nothing needed fixing (completeness review 2026-08-11; this
+    // codebase deliberately supports 100k-recipient campaigns). Campaigns
+    // older than RECENT_MS are out of reconcile scope by the same documented
+    // posture as the recipient-state half above.
+    const ids = broadcasts.map((b) => b.id);
     countersFixed = Number(await db.$executeRaw`
       UPDATE "Broadcast" b
       SET "sentCount" = t.sent, "failedCount" = t.failed
@@ -192,11 +212,12 @@ async function sweepOnce(): Promise<void> {
                COUNT(*) FILTER (WHERE r.status = 'sent')   AS sent,
                COUNT(*) FILTER (WHERE r.status = 'failed') AS failed
         FROM "BroadcastRecipient" r
+        WHERE r."broadcastId" IN (${Prisma.join(ids)})
         GROUP BY r."broadcastId"
       ) t
       WHERE b.id = t.id
         AND b.status IN ('completed','failed','canceled')
-        AND b."updatedAt" < NOW() - INTERVAL '10 minutes'
+        AND COALESCE(b."completedAt", b."createdAt") < NOW() - INTERVAL '10 minutes'
         AND (b."sentCount" <> t.sent OR b."failedCount" <> t.failed)
     `);
   } catch (err) {

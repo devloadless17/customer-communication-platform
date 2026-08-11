@@ -400,20 +400,27 @@ export async function applyContactRequestPhone(
     email: null,
   });
   if (adoptedCustomerId && adoptedCustomerId !== contact.customerId) {
-    await db.contact.updateMany({
-      where: { id: contact.id, workspaceId },
-      data: { customerId: adoptedCustomerId, version: { increment: 1 } },
-    });
-    if (contact.customerId) {
-      const reaped = await db.customer.deleteMany({
-        where: { id: contact.customerId, workspaceId, contacts: { none: {} } },
+    // ONE transaction for re-point + reap + memory adoption. This trio ran on
+    // the bare client until 2026-08-11: a crash between the Customer delete
+    // and the adopt stranded the person-level memories forever
+    // (`AiCustomerMemory.customerId` is a soft pointer with no FK and no
+    // sweeper — the exact hole customer-memory-adopt.ts exists to close).
+    await db.$transaction(async (tx) => {
+      await tx.contact.updateMany({
+        where: { id: contact.id, workspaceId },
+        data: { customerId: adoptedCustomerId, version: { increment: 1 } },
       });
-      // Person-level AI memories follow the adoption — see
-      // lib/ai/customer-memory-adopt.ts (audit 2026-08-10).
-      if (reaped.count > 0) {
-        await adoptCustomerMemories(db, workspaceId, contact.customerId, adoptedCustomerId);
+      if (contact.customerId) {
+        const reaped = await tx.customer.deleteMany({
+          where: { id: contact.customerId, workspaceId, contacts: { none: {} } },
+        });
+        // Person-level AI memories follow the adoption — see
+        // lib/ai/customer-memory-adopt.ts (audit 2026-08-10).
+        if (reaped.count > 0) {
+          await adoptCustomerMemories(tx, workspaceId, contact.customerId, adoptedCustomerId);
+        }
       }
-    }
+    });
   }
 
   // A phone landing on a phone-less contact changes the composer, the panel
