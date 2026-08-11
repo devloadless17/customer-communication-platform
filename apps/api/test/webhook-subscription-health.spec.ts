@@ -201,13 +201,12 @@ describe("webhook subscription health", () => {
       "the sweeper never probed this connection — the rest of this test is vacuous",
     ).toBe(true);
     expect(await needsReconnect()).toBe(false);
-    // No heal attempted — the subscription was already there.
-    expect(mockedEnsure).not.toHaveBeenCalledWith(
-      WABA,
-      expect.anything(),
-      expect.anything(),
-      expect.anything(),
-    );
+    // No heal attempted — the subscription was already there. Filtered on the
+    // first argument rather than not.toHaveBeenCalledWith(...): an arity change
+    // in ensureWabaSubscribed silently made the 4-arg negative vacuous once
+    // (the appSecret param, 2026-08-11), and a negative that can't fail is no
+    // assertion at all.
+    expect(mockedEnsure.mock.calls.filter(([waba]) => waba === WABA)).toHaveLength(0);
   });
 
   it("SELF-HEALS a dropped subscription instead of alerting", async () => {
@@ -225,6 +224,10 @@ describe("webhook subscription health", () => {
       expect.any(String),
       expect.any(String),
       APP,
+      // The threaded appSecret — undefined here because this fixture stores no
+      // per-connection or shared app secret; the parameter existing is what the
+      // production fix asserts (unsigned heals 400 against "Require app secret").
+      undefined,
     );
     expect(await needsReconnect()).toBe(false);
   });
@@ -251,13 +254,9 @@ describe("webhook subscription health", () => {
       "the sweeper never probed this connection — the rest of this test is vacuous",
     ).toBe(true);
     expect(await needsReconnect()).toBe(false);
-    // And it must not "heal" something it could not even read.
-    expect(mockedEnsure).not.toHaveBeenCalledWith(
-      WABA,
-      expect.anything(),
-      expect.anything(),
-      expect.anything(),
-    );
+    // And it must not "heal" something it could not even read. Arity-proof
+    // form — see the sibling assertion above.
+    expect(mockedEnsure.mock.calls.filter(([waba]) => waba === WABA)).toHaveLength(0);
   });
 
   it("classifies a DEAD TOKEN as broken, not transient", async () => {
@@ -321,6 +320,10 @@ describe("the subscription has to be OURS", () => {
       expect.any(String),
       expect.any(String),
       APP,
+      // The threaded appSecret — undefined here because this fixture stores no
+      // per-connection or shared app secret; the parameter existing is what the
+      // production fix asserts (unsigned heals 400 against "Require app secret").
+      undefined,
     );
   });
 
