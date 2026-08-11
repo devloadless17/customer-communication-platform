@@ -209,7 +209,7 @@
   var shadow = host.attachShadow({ mode: "open" });
   var css = [
     ":host,*{box-sizing:border-box}",
-    ".root{--c:" + BRAND + ";--ct:#fff;--lc:" + BRAND + ";--uc:" + BRAND + ";--uct:#fff;--surface:#fff;--surface2:#f5f7fb;--inb:#fff;--border:#e6e9f0;--ink:#0f1729;--ink2:#66748c;--radius:20px;font-family:var(--font,ui-sans-serif,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif);color:var(--ink)}",
+    ".root{--c:" + BRAND + ";--ct:#fff;--lc:" + BRAND + ";--uc:" + BRAND + ";--uct:#fff;--surface:#fff;--surface2:#f5f7fb;--inb:#fff;--border:#e6e9f0;--ink:#0f1729;--ink2:#5b6a83;--radius:20px;font-family:var(--font,ui-sans-serif,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif);color:var(--ink)}",
     ".root.dark{--surface:#0f172a;--surface2:#0b1220;--inb:#1e293b;--border:#243244;--ink:#e8edf6;--ink2:#93a1b8}",
     // Inline embeds fill their host container. `min-height` is the safety net: an
     // ancestor chain with no resolved height makes `height:100%` collapse to zero,

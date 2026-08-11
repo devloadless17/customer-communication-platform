@@ -898,7 +898,12 @@ function Preview({ widget }: { widget: WebchatWidgetView }) {
   const surface2 = dark ? "#0b1220" : "#f5f7fb";
   const inb = dark ? "#1e293b" : "#fff";
   const ink = dark ? "#e8edf6" : "#0f1729";
-  const ink2 = dark ? "#93a1b8" : "#66748c";
+  // Light ink2 is #5b6a83, not the old #66748c: the muted text sits on
+  // --surface2 (#f5f7fb) where #66748c was 4.41:1 — under WCAG AA's 4.5:1
+  // (axe `color-contrast`, audit 2026-08-11). #5b6a83 is 5.1:1 there and
+  // 5.5:1 on white; the REAL widget (public/widget.js) ships the same value
+  // so preview and product stay one look. Dark mode was already 6.8:1.
+  const ink2 = dark ? "#93a1b8" : "#5b6a83";
   const border = dark ? "#243244" : "#e6e9f0";
   const font = c.fontFamily === "serif" ? "Georgia, serif" : c.fontFamily === "rounded" ? "ui-rounded, system-ui, sans-serif" : undefined;
   // Match the real widget: it renders every configured question (capped at 6 by the
@@ -970,6 +975,9 @@ function Preview({ widget }: { widget: WebchatWidgetView }) {
     <button
       type="button"
       aria-hidden
+      // Decorative preview only — aria-hidden elements must not be reachable
+      // by keyboard (axe `aria-hidden-focus`, audit 2026-08-11).
+      tabIndex={-1}
       className="flex size-[52px] shrink-0 items-center justify-center rounded-full shadow-lg"
       style={{ background: launcherColor, color: contrastOn(launcherColor) }}
     >
