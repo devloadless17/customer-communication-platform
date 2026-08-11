@@ -398,6 +398,31 @@ on the composer surface — under WCAG AA; now #5b6a83 (5.1:1) in widget.js AND 
 settings preview. Preview's decorative launcher was keyboard-focusable while
 aria-hidden; tabIndex=-1.
 
+---
+
+# Phase C — Meta wire-conformance delta (2026-08-11)
+
+Method: the changelog RSS (the documented tie-breaker) fetched and diffed against the
+last verified rounds (2026-07-27/30/31). The MCP server was unavailable this session;
+doc pages fetched directly. Every entry since the last rounds dispositioned:
+
+| Changelog entry | Disposition |
+|---|---|
+| **Aug 4** Standby Webhooks (Meta Business Agent) | **n/a** — MBA is explicitly opt-in ("set up, configure, and enable"); standby applies only when MBA is the active handler. We never enable it. |
+| **Aug 3** incoming product messages in the interactive webhook | **covered by design** — the interactive catch-all persists ANY unknown subtype with rawPayload (nothing can drop; unread + 24h window still move); `context.referred_product` already typed with the documented render-later decision; `order` messages structurally parsed. No code against unconfirmed field shapes. |
+| **Jul 31 / Jul 30 / Jul 20 / Jun 15** Direct Send (GA, call button, review flow, beta) | **n/a** — separate opt-in product, not integrated; ordinary send paths unaffected. |
+| **Jul 15** ES Phone-Number-First subset | already documented in §19; ES not built. |
+| **Jun 30 / Jun 29 / Jun 25 / Jun 12 / Jun 10** call recording, username/BSUID, voicemail, coexistence edits/revokes, transfer_action+147005 | all covered by the 2026-07-27/30/31 rounds (verified in code: `transfer_action` + 147005 present; BSUID/coexistence/recording per their memories). |
+| **Jun 26** SIP webhooks | **n/a** — SIP deliberately never enabled (standing rule). |
+| **Jun 16** `messaging_account_id` preferred | **verified in code** — `messagingAccountField` uses the preferred spelling, opt-in, `{}` when unset. |
+| **Jun 11** UK removed from analytics-unsupported regions | **already correct** — the blocked-set docblock cites this exact entry; GB absent (EU-27 formulation never included it). |
+
+**Verdict: zero code changes required.** The July conformance rounds + the parser's
+fail-soft posture absorb the whole delta. Remaining wire items that need a HUMAN with a
+phone (cannot be done from this box): the live-call checklist — one real WhatsApp call
+through the WebRTC path end-to-end (ring → answer → recording → transcript), and the
+first-ever live Messenger call.
+
 ## Fix commits (local, NOT pushed — push = deploy)
 
 | Commit | Section | Content |
