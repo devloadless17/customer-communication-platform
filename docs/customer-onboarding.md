@@ -157,6 +157,21 @@ silent for real customers" is this gate, every time.
       account that HAS a role on the app (admin/developer/tester) — those
       deliver under Standard Access.
 
+## 6c · Post-onboarding verification — the truth check **[You]**
+
+After connect (and again after registration), run the reconciler — it reads
+every Meta-mirrored field fresh from Graph, diffs it against what the system
+stores, and heals drift through the same paths production uses:
+
+    # on the VPS
+    docker compose exec --workdir /app api node -r @swc-node/register \
+      apps/api/scripts/meta-reconcile.ts "<workspace name or id>"
+
+Every row should read `ok` or carry an explained MANUAL remedy (registration,
+phone-app migration). A `DRIFT` that survives a second run is a real bug —
+report it, don't shrug. This tool caught a live tier-clobbering bug on its
+first ever run (2026-08-11).
+
 ## 7 · Set expectations for day one **[You]**
 
 - [ ] **Messaging limit:** an unregistered number shows "Not assigned yet" —
