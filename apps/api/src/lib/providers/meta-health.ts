@@ -71,7 +71,10 @@ const TIER_DAILY_CAP: Record<string, number | null> = {
   TIER_100K: 100_000,
   TIER_UNLIMITED: null,
   /**
-   * `UNTIERED` is a documented member of `whatsapp_business_manager_messaging_limit`
+   * `UNTIERED` is an observed-on-the-wire member of `whatsapp_business_manager_messaging_limit`
+   * (seen live 2026-08-11 on an unregistered number; NOT in Meta's published
+   * vocabulary, which enumerates 250/2K/10K/100K/UNLIMITED — this mapping is
+   * wire tolerance, same posture as the template parsers)
    * alongside the TIER_* values, but Meta publishes NO numeric meaning for it.
    *
    * It is mapped here — rather than left to fall through `normalizeMessagingTier`'s
@@ -982,6 +985,16 @@ export async function checkBroadcastEligibility(
   // each pass a 100k cap and Meta silently rejects the last ~20k — and those
   // rejections get bucketed as "retryable", telling the operator to retry into
   // an exhausted budget.
+  //
+  // ADVISORY, not a hard refusal — matching the header's promise. Our usage
+  // count deliberately OVER-reports versus Meta's definition (docs: the limit
+  // counts messages DELIVERED "outside of a customer service window", while we
+  // count every attempted template send, window or not — free service-window
+  // sends accrue zero real budget). A hard block on an over-count refused a
+  // TIER_250 client's legitimate first campaign (doc-review 2026-08-11). Meta
+  // enforces the true limit; our job is the specific warning, not a fabricated
+  // refusal. The `audienceSize > cap` branch above stays hard — that comparison
+  // needs no usage estimate and is a plain fact about the tier.
   if (newUniques > remaining) {
     const overlap = audienceSize - newUniques;
     const alreadyCounted =
@@ -990,16 +1003,15 @@ export async function checkBroadcastEligibility(
         : "";
     return {
       ...withUsage,
-      allowed: false,
       exceedsCap: true,
       reason:
-        `This number has already messaged ${used.toLocaleString()} unique customers in ` +
-        `the last 24h, leaving ${remaining.toLocaleString()} of its ${cap.toLocaleString()} ` +
+        `This number has already messaged about ${used.toLocaleString()} unique customers in ` +
+        `the last 24h, leaving roughly ${remaining.toLocaleString()} of its ${cap.toLocaleString()} ` +
         `${tier}-tier allowance. This audience is ${audienceSize.toLocaleString()};` +
-        `${alreadyCounted} Meta would reject roughly ` +
-        `${(newUniques - remaining).toLocaleString()} of them. ` +
-        `Wait for the window to roll over, reduce the audience, or raise your messaging ` +
-        `limit with Meta first.`,
+        `${alreadyCounted} Meta may reject roughly ` +
+        `${(newUniques - remaining).toLocaleString()} of them. (Our count is an over-estimate: ` +
+        `replies inside an open 24h service window are free and don't spend this budget.) ` +
+        `If sends fail, wait for the window to roll over or split the campaign across days.`,
     };
   }
   if (withUsage.qualityRating === "RED") {

@@ -308,15 +308,14 @@ export class MessengerService {
     )?.secrets ?? {}) as MessengerChannelSecrets;
     const ownAppSecret = this.tryDecrypt(ownSecrets.appSecret ?? null, "appSecret");
     const appSecret = input.appSecret?.trim() || ownAppSecret || meta?.appSecret || null;
-    // The TOKEN gets the same three-tier chain as the secret. It used to skip
-    // the own-row tier, so re-saving an own-app Page without re-pasting its
-    // token silently re-derived from the SHARED app's system-user token — and
-    // the row then held an app-A token beside an app-B secret, mis-signing
-    // every later Graph call for the Page (`appsecret_proof` is rejected on a
-    // wrong pair even when the app doesn't require one).
+    // The row's own stored Page token — used ONLY at store time (below) to keep
+    // an own-app row's coherent token/secret pair. It must NOT join the
+    // sourceToken chain: a stored Page token cannot derive a fresh Page token
+    // or read Page metadata the way a user/system-user token can, and putting
+    // it first broke the advertised reconnect path (hit Save after a Graph 190
+    // and the stale revoked token won over the freshly rotated shared token).
     const ownPageToken = this.tryDecrypt(ownSecrets.pageAccessToken ?? null, "pageAccessToken");
-    const sourceToken =
-      input.pageAccessToken?.trim() || ownPageToken || meta?.systemUserToken || null;
+    const sourceToken = input.pageAccessToken?.trim() || meta?.systemUserToken || null;
     const appId = input.appId?.trim() || meta?.appId || undefined;
     if (!appSecret || !sourceToken) {
       throw new BadRequestException({
@@ -336,15 +335,20 @@ export class MessengerService {
     let pageName: string | undefined;
     let derivedPageToken: string | undefined;
     try {
-      // Signed with `appsecret_proof` (an app with "Require app secret" ON
-      // rejects unsigned server calls); token and secret resolve through the
-      // same typed → own-row → shared precedence, so the pair belongs to one
-      // app in any coherent setup.
+      // Signed with `appsecret_proof`, paired BY THE TOKEN'S TIER (same ladder
+      // as instagram.service): a typed token signs only with a typed secret,
+      // the shared token with the shared secret. NOT the fully-resolved
+      // `appSecret` — that chain includes the row's OWN secret, and signing the
+      // shared token with an own-app secret is a wrong proof Meta rejects even
+      // when none is required, failing every own-app re-save probe.
+      const probeProofSecret = input.pageAccessToken?.trim()
+        ? input.appSecret?.trim() || undefined
+        : (meta?.appSecret ?? undefined);
       const res = await fetch(
         withAppsecretProof(
           `${GRAPH_BASE}/${GRAPH_VERSION}/${encodeURIComponent(pageId)}?fields=name,access_token`,
           sourceToken,
-          appSecret,
+          probeProofSecret,
         ),
         {
           headers: { authorization: `Bearer ${sourceToken}` },
@@ -383,7 +387,21 @@ export class MessengerService {
           "Couldn't get a Page access token for this Page from your Meta App system-user token. Assign the system user to this Page (Business Settings → Pages → Add People) with a messaging task, or paste a Page access token directly.",
       });
     }
-    const tokenToStore = derivedPageToken ?? sourceToken;
+    // STORE-time pair coherence: a Page living on its OWN Meta app, re-saved
+    // without a typed token, must keep its stored token — the freshly derived
+    // one was issued via the SHARED app's system-user token, and persisting it
+    // beside the row's own appSecret is the app-A-token/app-B-secret mis-pair
+    // that mis-signs every later Graph call and webhook check. The derivation
+    // above still ran (it validates the Page + refreshes pageName); only the
+    // persisted credential is pinned. An operator deliberately moving the Page
+    // between apps signals it by pasting a token (or the matching secret).
+    const ownAppRow = Boolean(
+      ownAppSecret && meta?.appSecret && ownAppSecret !== meta.appSecret,
+    );
+    const tokenToStore =
+      !input.pageAccessToken?.trim() && ownAppRow && ownPageToken
+        ? ownPageToken
+        : (derivedPageToken ?? sourceToken);
 
     // Verify token: prefer the shared Meta App token (one callback for all
     // channels), then the channel's existing one, else mint.

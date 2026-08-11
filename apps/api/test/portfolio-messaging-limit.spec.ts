@@ -193,11 +193,16 @@ describe("portfolio budget", () => {
     expect(res.remainingDailyBudget).toBe(210);
   });
 
-  it("blocks when the audience's NEW recipients would exceed the shared cap", async () => {
-    // 210 remaining, asking for 240 brand-new recipients.
+  it("WARNS (advisory, allowed) when NEW recipients would exceed the shared cap", async () => {
+    // 210 remaining, asking for 240 brand-new recipients. ADVISORY since
+    // 2026-08-11: our usage count over-reports vs Meta's definition (we count
+    // every attempted template send; Meta counts deliveries OUTSIDE an open
+    // service window), so a hard block here refused legitimate campaigns.
+    // Meta enforces the true limit; we surface the specific warning.
     const fresh = Array.from({ length: 240 }, (_, i) => `nope-${i}`);
     const res = await checkBroadcastEligibility(workspaceId, 240, fresh);
-    expect(res.allowed).toBe(false);
+    expect(res.allowed).toBe(true);
+    expect(res.exceedsCap).toBe(true);
     expect(res.reason).toBeTruthy();
   });
 

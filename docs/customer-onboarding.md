@@ -159,9 +159,10 @@ silent for real customers" is this gate, every time.
 
 ## 7 · Set expectations for day one **[You]**
 
-- [ ] **Messaging limit:** a fresh number starts at Meta's lowest tier
-      (250–1,000 unique recipients per rolling 24h, shared across every number
-      in the portfolio). It grows with quality — don't plan a big broadcast on
+- [ ] **Messaging limit:** an unregistered number shows "Not assigned yet" —
+      Meta grants the first tier at registration. A fresh portfolio then starts
+      at **250 unique recipients per rolling 24h** (shared across every number
+      in the portfolio) and grows with quality — don't plan a big broadcast on
       day one.
 - [ ] **24-hour window:** free-form replies work for 24h after the customer's
       last message; outside it, only approved templates send.

@@ -217,14 +217,15 @@ export class InstagramService {
     // Source app-level credentials from the shared Meta App connection unless
     // overridden on this form. The Page access token is derived below.
     const meta = await getMetaConnection(workspaceId);
-    // THIS ROW'S OWN token, found by scanning for the row whose config carries
-    // this `pageId` — the row itself is keyed by igId, which only the Graph
-    // call below resolves, so the usual keyed lookup can't run yet. Without
-    // this middle tier, re-saving an own-app IG account without re-pasting its
-    // token re-derived the Page token from the SHARED app's system-user token,
-    // and the row then stored an app-A token beside its app-B secret —
-    // mis-signing every later Graph call (a WRONG `appsecret_proof` is
-    // rejected even when the app doesn't require one).
+    // THIS ROW'S OWN stored credentials, found by scanning for the row whose
+    // config carries this `pageId` — the row itself is keyed by igId, which
+    // only the Graph call below resolves, so the usual keyed lookup can't run
+    // yet. Used ONLY at store time to keep an own-app row's coherent
+    // token/secret pair — NOT in the sourceToken chain: the stored value is a
+    // derived PAGE token, and the `instagram_business_account` field the probe
+    // below reads requires a user/system-user token (Page reference), so
+    // probing with it made every ordinary re-save fail
+    // `instagram_not_linked_to_page` on a perfectly linked account.
     const preExisting = (
       await this.db.channelConnection.findMany({
         where: { workspaceId, channel: CHANNEL },
@@ -234,8 +235,7 @@ export class InstagramService {
     const preOwnSecrets = (preExisting?.secrets ?? {}) as InstagramChannelSecrets;
     const ownIgToken = this.tryDecrypt(preOwnSecrets.igAccessToken ?? null, "igAccessToken");
     const preOwnAppSecret = this.tryDecrypt(preOwnSecrets.appSecret ?? null, "appSecret");
-    const sourceToken =
-      input.igAccessToken?.trim() || ownIgToken || meta?.systemUserToken || null;
+    const sourceToken = input.igAccessToken?.trim() || meta?.systemUserToken || null;
     const appId = input.appId?.trim() || meta?.appId || undefined;
     // Checked BEFORE the Graph call that resolves `igId` — that call needs the
     // token. The app-secret half of this guard runs after, for the reason in the
@@ -262,15 +262,11 @@ export class InstagramService {
     // The proof secret for this call must belong to the app that issued
     // `sourceToken` — pair it BY THE TOKEN'S TIER: a typed token signs only
     // with a typed secret (never mis-signed with a fallback secret — Meta
-    // rejects a WRONG proof even when none is required), the row's own token
-    // signs with the row's own secret, and the shared token with the shared
-    // secret.
-    const typedToken = input.igAccessToken?.trim();
-    const proofSecret = typedToken
+    // rejects a WRONG proof even when none is required); the shared token
+    // signs with the shared secret.
+    const proofSecret = input.igAccessToken?.trim()
       ? input.appSecret?.trim() || undefined
-      : ownIgToken
-        ? (preOwnAppSecret ?? undefined)
-        : (meta?.appSecret ?? undefined);
+      : (meta?.appSecret ?? undefined);
     try {
       const res = await fetch(
         withAppsecretProof(
@@ -332,7 +328,18 @@ export class InstagramService {
           "Couldn't get a Page access token for this Page from your Meta App system-user token. Assign the system user to this Page (Business Settings → Pages → Add People) with a messaging task, or paste a Page access token directly.",
       });
     }
-    const tokenToStore = derivedPageToken ?? sourceToken;
+    // STORE-time pair coherence — same rule as messenger.service: an own-app
+    // row re-saved without a typed token keeps its stored token, so the newly
+    // derived shared-app token can't land beside the row's own appSecret (the
+    // mis-pair that mis-signs every later Graph call). Moving the account
+    // between apps is signalled by pasting a token.
+    const ownAppRow = Boolean(
+      preOwnAppSecret && meta?.appSecret && preOwnAppSecret !== meta.appSecret,
+    );
+    const tokenToStore =
+      !input.igAccessToken?.trim() && ownAppRow && ownIgToken
+        ? ownIgToken
+        : (derivedPageToken ?? sourceToken);
 
     // The row we are ABOUT TO WRITE, not the channel default. Reading the
     // default's config meant connecting a SECOND Page/account inherited the

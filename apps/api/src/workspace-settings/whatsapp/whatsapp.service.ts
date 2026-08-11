@@ -406,13 +406,28 @@ export class WhatsappService {
       // Registration readiness. `status` must be CONNECTED to message; a number
       // never registered for Cloud API reads DISCONNECTED/PENDING here. Warn,
       // don't block: the admin may be mid-setup, and the guarded /register
-      // endpoint below is the fix.
+      // endpoint below is the fix — UNLESS the number hasn't completed OTP
+      // ownership verification yet. Meta: "Before you can register your
+      // business phone number you must first verify its ownership", so telling
+      // a NOT_VERIFIED admin to press Register sent them into guaranteed
+      // failures that each burn one of Meta's 10-per-72h registration
+      // attempts (doc-review 2026-08-11; the field was fetched and dropped).
       const status = data.status?.toUpperCase();
+      const codeVerification = data.code_verification_status?.toUpperCase();
       if (status && status !== "CONNECTED") {
-        warnings.push(
-          `This number's Cloud API status is ${status} — sends will fail until it is ` +
-            `registered. Use "Register number" (two-step PIN) or register it in WhatsApp Manager.`,
-        );
+        if (codeVerification === "NOT_VERIFIED") {
+          warnings.push(
+            `This number's Cloud API status is ${status} and it has NOT completed ownership ` +
+              `verification. FIRST verify it in WhatsApp Manager → Phone numbers (SMS or ` +
+              `voice code to the number) — registering before that fails and wastes one of ` +
+              `Meta's 10 registration attempts per 72h. Then use "Register number".`,
+          );
+        } else {
+          warnings.push(
+            `This number's Cloud API status is ${status} — sends will fail until it is ` +
+              `registered. Use "Register number" (two-step PIN) or register it in WhatsApp Manager.`,
+          );
+        }
       }
       const ns = nameStatus?.toUpperCase();
       if (ns === "DECLINED" || ns === "EXPIRED" || ns === "NONE") {
@@ -1196,7 +1211,7 @@ export class WhatsappService {
         throw new BadRequestException({
           error: "register_attempts_exhausted",
           detail:
-            "Meta allows 10 registration attempts per number in 72 hours, and the next one would lock this number out of registration for up to 72 hours. Double-check the two-step PIN in WhatsApp Manager before trying again later.",
+            "You've used 9 of Meta's 10 registration attempts for this number in the current 72-hour window — we stop here so the final attempt isn't burned (the 11th locks registration for up to 72 hours). If the number already has two-step verification, the PIN must match it; if it doesn't, the PIN you enter here becomes its new two-step PIN. Also confirm the number completed ownership verification (OTP) in WhatsApp Manager before retrying later.",
         });
       }
     } catch (err) {

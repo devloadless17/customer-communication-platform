@@ -170,20 +170,21 @@ export class MetaService {
           // unregistered, ownership unverified) used to be discarded here.
           for (const w of out.warnings) channelWarnings.push(`WhatsApp ${label}: ${w}`);
         } else if (conn.channel === "messenger" && config.pageId) {
+          // NO token passed — deliberately. The channel derives a fresh Page
+          // token from the CURRENT shared system-user token (its default), and
+          // passing the system token as `pageAccessToken` would trip the
+          // "operator pasted a Page token" escape hatch on the
+          // page_token_derivation_failed guard, silently storing an unsendable
+          // system-user token as the Page token when derivation fails mid-
+          // rotation (2026-08-11 review, two independent confirmations).
           await this.messenger.updateConfig(workspaceId, {
             pageId: config.pageId,
             ...(shared?.appSecret ? { appSecret: shared.appSecret } : {}),
-            // Explicit, because each channel's updateConfig now prefers a row's
-            // own stored token over the shared one (same reasoning as the
-            // secret in the header note): a rotation must state the new token
-            // outright or the row re-derives from its stale stored copy.
-            ...(shared?.systemUserToken ? { pageAccessToken: shared.systemUserToken } : {}),
           });
         } else if (conn.channel === "instagram" && config.pageId) {
           await this.instagram.updateConfig(workspaceId, {
             pageId: config.pageId,
             ...(shared?.appSecret ? { appSecret: shared.appSecret } : {}),
-            ...(shared?.systemUserToken ? { igAccessToken: shared.systemUserToken } : {}),
           });
         } else {
           continue;
@@ -428,7 +429,22 @@ export class MetaService {
         },
       );
       if (!res.ok) {
-        // Wrong app id for this token, a Graph blip, whatever — indeterminate.
+        // A 4xx here is DEFINITIVE: the bearer was `appId|appSecret`, so Meta
+        // just rejected that exact pair. This was a silent log line, which made
+        // a mistyped App Secret save green and then kill ALL inbound forever —
+        // every webhook fails our HMAC and is dropped as forged, with no
+        // banner, no sweeper, nothing (doc-review 2026-08-11). Warn the admin
+        // at the one moment they're standing at the form. 5xx/network stay
+        // silent-skip: indeterminate must never punish a working rotation.
+        if (res.status >= 400 && res.status < 500) {
+          this.logger.warn(`debug_token rejected app credentials (http ${res.status})`);
+          return [
+            "Meta rejected this App ID + App Secret pair (the token could not be inspected " +
+              "with them). If the App Secret is wrong, EVERY inbound webhook will fail " +
+              "signature verification and be dropped — re-copy the secret from App " +
+              "Dashboard → Settings → Basic, and double-check the App ID beside it.",
+          ];
+        }
         this.logger.warn(`debug_token inspection skipped (http ${res.status})`);
         return [];
       }
