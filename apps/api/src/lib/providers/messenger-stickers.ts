@@ -77,7 +77,10 @@ export interface StickerCatalogAuth {
   graphVersion: string;
 }
 
-/** Meta's app access token is the literal `app_id|app_secret` pair. */
+/** Meta's app access token is the literal `app_id|app_secret` pair. The catalog
+ *  reads below also SIGN with `appsecret_proof` (proof of this token, keyed by
+ *  the same secret — the pattern meta.service's debug_token uses): an app with
+ *  "Require app secret" ON rejects unsigned server calls, app token or not. */
 function appAccessToken(auth: StickerCatalogAuth): string {
   return `${auth.appId}|${auth.appSecret}`;
 }
@@ -112,6 +115,7 @@ export async function listStickerPacks(
     `${GRAPH_BASE}/${auth.graphVersion}/sticker_packs${qs}`,
     appAccessToken(auth),
     { retry: true },
+    auth.appSecret,
   );
   const data = Array.isArray(res.data) ? (res.data as Array<Record<string, unknown>>) : [];
   return data.flatMap((row) => {
@@ -140,6 +144,7 @@ export async function listStickersInPack(
     `${GRAPH_BASE}/${auth.graphVersion}/${encodeURIComponent(packId)}/stickers${qs}`,
     appAccessToken(auth),
     { retry: true },
+    auth.appSecret,
   );
   const data = Array.isArray(res.data) ? (res.data as Array<Record<string, unknown>>) : [];
   return data.flatMap((row) => {
@@ -169,6 +174,7 @@ export async function searchStickers(
     `${GRAPH_BASE}/${auth.graphVersion}/sticker_search?${params.toString()}`,
     appAccessToken(auth),
     { retry: true },
+    auth.appSecret,
   );
   const data = Array.isArray(res.data) ? (res.data as Array<Record<string, unknown>>) : [];
   return data.flatMap((row) => {

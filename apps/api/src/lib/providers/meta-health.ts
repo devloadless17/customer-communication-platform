@@ -1137,6 +1137,9 @@ export async function linkWhatsappPortfolio(
   wabaId: string,
   accessToken: string,
   graphVersion: string,
+  /** Signs with `appsecret_proof` — a "Require app secret" customer app 400s
+   *  unsigned reads, which left the portfolio permanently unresolved. */
+  appSecret?: string,
 ): Promise<{ portfolioId: string; externalPortfolioId: string } | null> {
   let externalPortfolioId: string | null = null;
   try {
@@ -1144,6 +1147,7 @@ export async function linkWhatsappPortfolio(
       `${GRAPH_BASE}/${graphVersion}/${encodeURIComponent(wabaId)}?fields=owner_business_info`,
       accessToken,
       { retry: true },
+      appSecret,
     );
     const info = owner.owner_business_info;
     if (info && typeof info === "object") {
@@ -1183,6 +1187,7 @@ export async function linkWhatsappPortfolio(
         `?fields=whatsapp_business_manager_messaging_limit,verification_status`,
       accessToken,
       { retry: true },
+      appSecret,
     );
     tier = normalizeMessagingTier(node.whatsapp_business_manager_messaging_limit);
     const vs = node.verification_status;
@@ -1290,9 +1295,12 @@ export async function fetchWhatsappHealthFromGraph(
     // runner has to know, or it paces them ~4x too fast. `platform_type` rides along
     // because Meta's Coexistence doc pairs the two for exactly this check.
     `quality_rating,throughput,is_on_biz_app,platform_type`;
-  // Idempotent GET — one retry on a 5xx blip. No appsecret_proof (matches the
-  // send path default); the token alone authorizes a read of the number's own node.
-  const node = await graphGetJson(url, config.accessToken, { retry: true });
+  // Idempotent GET — one retry on a 5xx blip. Signed: the old "no
+  // appsecret_proof, matches the send path" note was stale (the send path signs
+  // via metaFetch when META_APPSECRET_PROOF=1), and against a customer app with
+  // "Require app secret" ON every unsigned health read 400'd, so the panel
+  // showed "Meta didn't respond" forever (observed live 2026-08-11).
+  const node = await graphGetJson(url, config.accessToken, { retry: true }, config.appSecret);
 
   const throughput = node.throughput;
   const throughputLevel =
@@ -1328,6 +1336,7 @@ export async function fetchWhatsappHealthFromGraph(
       config.wabaId,
       config.accessToken,
       config.graphVersion,
+      config.appSecret,
     );
   }
 

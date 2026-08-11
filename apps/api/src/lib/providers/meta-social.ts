@@ -2273,7 +2273,7 @@ export async function sendSocialCallAction(
     const sdpType = args.action === "media_update" ? "answer" : "offer";
     body.session = { sdp_type: sdpType, sdp: args.sdp };
   }
-  const res = await graphPostJson(url, opts.accessToken, body);
+  const res = await graphPostJson(url, opts.accessToken, body, opts.appSecret);
   const session = (res.session ?? {}) as {
     sdp_response?: { sdp?: string } | string;
     sdp_renegotiation?: { sdp?: string } | string;
@@ -2293,7 +2293,7 @@ export async function checkSocialCallPermission(
   opts: SocialSendTarget,
 ): Promise<SocialCallPermission> {
   const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messenger_call_permissions?psid=${encodeURIComponent(psid)}`;
-  const res = await graphGetJson(url, opts.accessToken, { retry: true });
+  const res = await graphGetJson(url, opts.accessToken, { retry: true }, opts.appSecret);
   const permission = (res.permission ?? {}) as { status?: string; expiration_time?: number };
   // The field is `can_perform_action`, NOT `can_perform`. This read used to be the
   // short spelling, which is present on no documented response — so both flags were
@@ -2338,7 +2338,7 @@ export async function requestSocialCallPermission(
   const res = await graphPostJson(url, opts.accessToken, {
     recipient: { id: psid },
     message: { attachment: { type: "template", payload: { template_type: "calling_optin" } } },
-  });
+  }, opts.appSecret);
   return { messageId: typeof res.message_id === "string" ? res.message_id : "" };
 }
 
@@ -2347,7 +2347,7 @@ export async function socialCallFeatureEnabled(opts: SocialSendTarget): Promise<
   const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/business_messaging_feature_status`;
   const res = await graphPostJson(url, opts.accessToken, {
     features: [{ feature: "messenger_api_calling" }],
-  });
+  }, opts.appSecret);
   const data = Array.isArray(res.data) ? (res.data as Array<{ feature?: string; status?: string }>) : [];
   return data.some((d) => d.feature === "messenger_api_calling" && String(d.status).toLowerCase() === "enabled");
 }
@@ -2364,7 +2364,7 @@ export async function setSocialCallRouting(
   opts: SocialSendTarget,
 ): Promise<void> {
   const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messenger_call_settings`;
-  await graphPostJson(url, opts.accessToken, { call_routing: { ring_target: ringTarget } });
+  await graphPostJson(url, opts.accessToken, { call_routing: { ring_target: ringTarget } }, opts.appSecret);
 }
 
 /** Read the Page's current inbound-call routing target. */
@@ -2372,7 +2372,7 @@ export async function getSocialCallRouting(
   opts: SocialSendTarget,
 ): Promise<"META" | "PARTNERS" | null> {
   const url = `${GRAPH_BASE}/${opts.graphVersion}/${opts.accountId}/messenger_call_settings?fields=call_routing`;
-  const res = await graphGetJson(url, opts.accessToken, { retry: true });
+  const res = await graphGetJson(url, opts.accessToken, { retry: true }, opts.appSecret);
   const routing = (res.call_routing ?? {}) as { ring_target?: string };
   return routing.ring_target === "META" || routing.ring_target === "PARTNERS"
     ? routing.ring_target
@@ -2396,7 +2396,7 @@ export async function setSocialCallEnabled(
     audio_enabled: enabled,
     video_enabled: enabled,
     icon_enabled: enabled,
-  });
+  }, opts.appSecret);
 }
 
 /**
