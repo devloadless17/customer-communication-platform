@@ -1087,17 +1087,30 @@ export class CallsService {
       },
     });
     const cap = connection?.wabaAccount?.portfolio?.messagingDailyCap ?? null;
-    // Unknown tier is reported as met rather than failed: we'd rather not block
-    // a working setup on a stat we haven't synced yet, and the provider
-    // enforces it regardless.
+    // Unknown tier is NON-BLOCKING (we'd rather not gate a working setup on a
+    // stat we haven't synced, and the provider enforces it regardless) — but it
+    // must SAY unknown, not assert "2,000+ ✓". An unregistered number has no
+    // tier at all, and rendering that as a confirmed pass told an operator the
+    // requirement was met when nothing was known (same honesty rule as the
+    // webhook-evidence check below, and the UNTIERED/"Unlimited" fix of
+    // 2026-08-11).
     const tierOk = cap === null || cap >= 2000;
     checks.push({
       key: "messaging_limit",
       ok: tierOk,
-      label: "Messaging limit of 2,000+ unique recipients",
-      detail: tierOk
-        ? null
-        : `Your number is on ${connection?.wabaAccount?.portfolio?.messagingTier ?? "a lower tier"}. Calling requires a 2,000/day messaging limit — this rises automatically as your quality and volume grow.`,
+      label:
+        cap === null
+          ? "Messaging limit of 2,000+ unique recipients (not confirmed)"
+          : "Messaging limit of 2,000+ unique recipients",
+      detail:
+        cap === null
+          ? "Not confirmed yet — Meta hasn't assigned or synced this portfolio's messaging " +
+            "limit (an unregistered number has none). Calling requires the 2,000/day tier; " +
+            "Meta enforces it when you enable calling, and this check firms up once health " +
+            "syncs after registration."
+          : tierOk
+            ? null
+            : `Your number is on ${connection?.wabaAccount?.portfolio?.messagingTier ?? "a lower tier"}. Calling requires a 2,000/day messaging limit — this rises automatically as your quality and volume grow.`,
     });
 
     // The provider's own view: is calling on, and is anything restricted?

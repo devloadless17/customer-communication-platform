@@ -162,19 +162,23 @@ test("fresh window: an audience inside the cap is allowed, budget reported", asy
   expect(gate.remainingDailyBudget).toBe(CAP);
 });
 
-test("THE FIX: a second campaign that fits the cap but NOT the remaining budget is blocked", async () => {
+test("a second campaign that fits the cap but NOT the remaining budget WARNS (advisory)", async () => {
   await clearSends();
   // 200 unique customers already messaged 2h ago → 50 left of 250.
   await seedSend(RECENT(), contactIds.slice(0, 200));
 
-  // 100 < 250, so the OLD gate allowed this. It must now be refused.
+  // 100 < 250 so the cap branch stays quiet; the budget branch fires. ADVISORY
+  // since 2026-08-11: our usage count over-reports vs Meta's definition (we
+  // count every attempted template send; Meta counts deliveries OUTSIDE an
+  // open service window), so a hard block here refused legitimate campaigns —
+  // Meta enforces the true limit, we surface the arithmetic.
   const gate = await checkBroadcastEligibility(TEAM_ID, 100);
-  expect(gate.allowed).toBe(false);
+  expect(gate.allowed).toBe(true);
   expect(gate.exceedsCap).toBe(true);
   expect(gate.recentUniqueRecipients).toBe(200);
   expect(gate.remainingDailyBudget).toBe(50);
-  // The reason must carry the arithmetic — an operator staring at a blocked
-  // 100-person campaign needs to know 50 of them would be rejected.
+  // The reason must carry the arithmetic — an operator staring at the warning
+  // needs to know roughly 50 of the 100 may be rejected.
   expect(gate.reason).toContain("200");
   expect(gate.reason).toContain("50");
 });

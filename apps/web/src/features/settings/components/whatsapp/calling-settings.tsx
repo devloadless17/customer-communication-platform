@@ -379,6 +379,7 @@ export function CallingSettings({
               timezoneId={timezoneId}
               windows={windows}
               disabled={saving || !settings.enabled}
+              saving={saving}
               onModeChange={setHoursMode}
               onTimezoneChange={setTimezoneId}
               onWindowsChange={setWindows}
@@ -720,6 +721,7 @@ function CallHoursEditor({
   timezoneId,
   windows,
   disabled,
+  saving,
   onModeChange,
   onTimezoneChange,
   onWindowsChange,
@@ -729,6 +731,10 @@ function CallHoursEditor({
   timezoneId: string;
   windows: CallHoursWindow[];
   disabled?: boolean;
+  /** A save is in flight. Distinct from `disabled` (which also covers
+   *  "calling is off") — the spinner keyed on `disabled` drew a permanently
+   *  disabled button as permanently LOADING (reported live 2026-08-11). */
+  saving?: boolean;
   onModeChange: (m: "always" | "custom") => void;
   onTimezoneChange: (tz: string) => void;
   onWindowsChange: (w: CallHoursWindow[]) => void;
@@ -856,7 +862,7 @@ function CallHoursEditor({
 
       <div>
         <Button type="button" size="sm" disabled={disabled} onClick={onSave}>
-          {disabled ? <Loader2 className="size-4 animate-spin" /> : null}
+          {saving ? <Loader2 className="size-4 animate-spin" /> : null}
           Save hours
         </Button>
       </div>
