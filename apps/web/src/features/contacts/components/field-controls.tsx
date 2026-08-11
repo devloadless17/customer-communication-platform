@@ -41,14 +41,19 @@ export function AddFieldRow({
     const trimmed = label.trim();
     if (!trimmed) return;
     setBusy(true);
-    if (scope === "team" && canManageFields) {
-      const ok = await onAddTeamWide(trimmed);
-      if (ok) setOpen(false);
-    } else {
-      await onAddPerContact(trimmed);
-      setOpen(false);
+    // finally, not bare awaits — a rejected fetch used to strand busy=true and
+    // leave the Add-field row disabled forever (2026-08-11 stuck-pending audit).
+    try {
+      if (scope === "team" && canManageFields) {
+        const ok = await onAddTeamWide(trimmed);
+        if (ok) setOpen(false);
+      } else {
+        await onAddPerContact(trimmed);
+        setOpen(false);
+      }
+    } finally {
+      setBusy(false);
     }
-    setBusy(false);
   }
 
   if (!open) {

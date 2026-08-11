@@ -515,7 +515,9 @@ function ConnectionStatus({
             <dd className="min-w-0 text-foreground">
               {current.messagingDailyCap != null
                 ? `${current.messagingDailyCap.toLocaleString()} customers / 24h`
-                : "Unlimited"}
+                : current.messagingTier === "TIER_UNLIMITED"
+                  ? "Unlimited"
+                  : "Not assigned yet"}
               {current.qualityRating && (
                 <span
                   className={cn(

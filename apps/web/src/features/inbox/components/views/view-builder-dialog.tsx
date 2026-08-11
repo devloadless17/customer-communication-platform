@@ -190,14 +190,21 @@ export function ViewBuilderDialog({
     const trimmed = name.trim();
     if (!trimmed || saving) return;
     setSaving(true);
-    const ok = await onSubmit({
-      name: trimmed,
-      color,
-      icon,
-      visibility: shared ? "shared" : "personal",
-      filters,
-    });
-    setSaving(false);
+    // finally, not a bare await — a rejected fetch used to strand saving=true,
+    // and the `saving` guard above then blocked every retry with the dialog
+    // stuck open (2026-08-11 stuck-pending audit).
+    let ok = false;
+    try {
+      ok = await onSubmit({
+        name: trimmed,
+        color,
+        icon,
+        visibility: shared ? "shared" : "personal",
+        filters,
+      });
+    } finally {
+      setSaving(false);
+    }
     if (ok) onClose();
   }
 

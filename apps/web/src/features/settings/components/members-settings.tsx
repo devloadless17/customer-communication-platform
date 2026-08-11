@@ -835,8 +835,15 @@ function OrgNameCard({
     e.preventDefault();
     if (!isDirty || saving) return;
     setSaving(true);
-    const ok = await onRename(trimmed);
-    setSaving(false);
+    // try/finally, not bare awaits: a rejected fetch (network drop) used to
+    // escape past the reset and leave this card's spinner stuck forever —
+    // the same failure shape as the calling page's Save hours report.
+    let ok = false;
+    try {
+      ok = await onRename(trimmed);
+    } finally {
+      setSaving(false);
+    }
     if (!ok) setDraft(currentName); // server rejected — snap back
   }
 

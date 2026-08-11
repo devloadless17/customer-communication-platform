@@ -56,8 +56,14 @@ export function EditableHeading({
       return;
     }
     setBusy(true);
-    const ok = await onSave(trimmed);
-    setBusy(false);
+    // finally, not a bare await — a rejected fetch used to strand busy=true and
+    // permanently lock the name input (2026-08-11 stuck-pending audit).
+    let ok = false;
+    try {
+      ok = await onSave(trimmed);
+    } finally {
+      setBusy(false);
+    }
     if (ok) setEditing(false);
   }
 

@@ -66,7 +66,11 @@ export function PortfolioSummary({
       <span className="text-muted-foreground">
         24h budget{" "}
         <span className="font-medium text-foreground/80">
-          {cap === null ? "Unlimited" : `${cap.toLocaleString()} customers`}
+          {cap !== null
+            ? `${cap.toLocaleString()} customers`
+            : portfolio.messagingTier === "TIER_UNLIMITED"
+              ? "Unlimited"
+              : "Not assigned yet"}
         </span>
         {accountsInGroup > 1 && (
           <>

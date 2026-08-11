@@ -526,7 +526,18 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     });
     if (!ok) return;
     setDeleting(true);
-    const res = await apiFetch(`/api/workspace/workflows/${workflow.id}`, { method: "DELETE" });
+    // try/catch, not a bare await — a rejected fetch (network drop mid-delete)
+    // used to escape with deleting=true, and the guard above then permanently
+    // blocked retry (2026-08-11 stuck-pending audit).
+    let res: Response;
+    try {
+      res = await apiFetch(`/api/workspace/workflows/${workflow.id}`, { method: "DELETE" });
+    } catch {
+      setTopErrors(["delete failed: network error"]);
+      toast.error("Couldn't delete the workflow");
+      setDeleting(false);
+      return;
+    }
     if (res.ok) {
       toast.success("Workflow deleted");
       router.push("/workflows"); // navigating away — leave `deleting` set

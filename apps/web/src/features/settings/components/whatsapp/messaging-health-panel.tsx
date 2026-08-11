@@ -389,9 +389,16 @@ export function MessagingHealthPanel({
                 )}
               </p>
             </div>
-          ) : (
+          ) : health.messagingTier === "TIER_UNLIMITED" ? (
             <p className="mt-4 text-xs text-muted-foreground">
               No 24-hour cap — this portfolio is on an unlimited messaging tier.
+            </p>
+          ) : (
+            <p className="mt-4 text-xs text-muted-foreground">
+              No messaging tier assigned yet — Meta grants the first tier when a
+              number in this portfolio is registered on Cloud API. Until then
+              sends aren&apos;t pre-checked here (Meta still enforces its own
+              rules).
             </p>
           )}
 
@@ -478,6 +485,9 @@ export function MessagingHealthPanel({
 /** "TIER_10K" → "10,000 customers / 24h". Meta's own vocabulary is opaque. */
 function tierLabel(tier: string): string {
   if (tier === "TIER_UNLIMITED") return "Unlimited";
+  // Meta's "no tier assigned" member — an unregistered number reports this,
+  // and rendering it as unlimited promised a brand-new account infinite sends.
+  if (tier === "UNTIERED") return "Not assigned yet";
   const m = /^TIER_(\d+)(K?)$/.exec(tier);
   if (!m) return tier;
   const n = Number(m[1]) * (m[2] === "K" ? 1_000 : 1);

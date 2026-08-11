@@ -82,8 +82,14 @@ export function EditableField({
       return;
     }
     setBusy(true);
-    const ok = await onSave(draft);
-    setBusy(false);
+    // finally, not a bare await: a rejected fetch used to strand busy=true and
+    // permanently lock this field (2026-08-11 stuck-pending audit).
+    let ok = false;
+    try {
+      ok = await onSave(draft);
+    } finally {
+      setBusy(false);
+    }
     if (ok) setEditing(false);
   }
 
