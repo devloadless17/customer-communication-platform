@@ -308,7 +308,15 @@ export class MessengerService {
     )?.secrets ?? {}) as MessengerChannelSecrets;
     const ownAppSecret = this.tryDecrypt(ownSecrets.appSecret ?? null, "appSecret");
     const appSecret = input.appSecret?.trim() || ownAppSecret || meta?.appSecret || null;
-    const sourceToken = input.pageAccessToken?.trim() || meta?.systemUserToken || null;
+    // The TOKEN gets the same three-tier chain as the secret. It used to skip
+    // the own-row tier, so re-saving an own-app Page without re-pasting its
+    // token silently re-derived from the SHARED app's system-user token — and
+    // the row then held an app-A token beside an app-B secret, mis-signing
+    // every later Graph call for the Page (`appsecret_proof` is rejected on a
+    // wrong pair even when the app doesn't require one).
+    const ownPageToken = this.tryDecrypt(ownSecrets.pageAccessToken ?? null, "pageAccessToken");
+    const sourceToken =
+      input.pageAccessToken?.trim() || ownPageToken || meta?.systemUserToken || null;
     const appId = input.appId?.trim() || meta?.appId || undefined;
     if (!appSecret || !sourceToken) {
       throw new BadRequestException({

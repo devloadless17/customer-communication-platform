@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { safeFetch } from "@/lib/http/safe-fetch";
 import { normalizeMimeType } from "@/lib/media-storage";
 
 import { blobStorage } from "./provider";
@@ -135,10 +136,20 @@ export async function captureRemoteContactAvatar(
   sourceUrl: string,
   currentAvatarUrl?: string | null,
 ): Promise<string | null> {
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), 20_000); // hung-CDN guard
   try {
-    const res = await fetch(sourceUrl, { redirect: "follow", signal: ac.signal });
+    // SSRF-SAFE, not raw `fetch` — the same reasoning as `fetchUrlBytes` in
+    // media-capture.ts, which handles the sibling URL class: this URL arrives
+    // from a webhook/Graph payload whose HMAC is signed with a secret the
+    // WORKSPACE ADMIN controls, so a crafted `profile_pic` could name any host
+    // reachable from this container. `safeFetch` refuses private/link-local
+    // ranges and pins the validated address; redirects OFF because a CDN 302
+    // to an internal host re-opens the hole one hop later. This was the one
+    // Meta-bound fetch outside the guarded mechanisms (audit 2026-08-11).
+    const res = await safeFetch(sourceUrl, {
+      timeoutMs: 20_000, // hung-CDN guard
+      maxRedirects: 0,
+      maxResponseBytes: MAX_AVATAR_BYTES,
+    });
     if (!res.ok) return null;
 
     const declared = Number.parseInt(res.headers.get("content-length") ?? "", 10);
@@ -169,7 +180,5 @@ export async function captureRemoteContactAvatar(
     return path;
   } catch {
     return null; // best-effort — keep the initials fallback on any failure
-  } finally {
-    clearTimeout(timer);
   }
 }

@@ -83,7 +83,14 @@ export class MetaService {
      * rows are skipped and reported.
      */
     previousSharedAppSecret: string | null,
-  ): Promise<{ resynced: string[]; skippedOwnApp: string[] }> {
+  ): Promise<{
+    resynced: string[];
+    skippedOwnApp: string[];
+    /** Accounts whose resync threw — surfaced to the admin, never log-only. */
+    failed: string[];
+    /** Per-account findings from the channels' own connect flows. */
+    channelWarnings: string[];
+  }> {
     const conns = await this.db.channelConnection.findMany({
       where: { workspaceId, isActive: true },
       select: {
@@ -107,8 +114,17 @@ export class MetaService {
     const shared = await getMetaConnection(workspaceId);
     const resynced: string[] = [];
     const skippedOwnApp: string[] = [];
+    // Failures and per-account warnings surfaced to the ADMIN, not just the log.
+    // A failed resync used to appear in neither `resynced` nor `warnings`: the
+    // admin rotated the token, read "Updated WhatsApp", and Messenger kept the
+    // old secret — Meta then signed its webhooks with a secret we no longer
+    // held and every inbound was dropped as forged, silently (2026-08-11
+    // swallowed-failures audit).
+    const failed: string[] = [];
+    const channelWarnings: string[] = [];
     for (const conn of conns) {
       const config = (conn.config ?? {}) as { phoneNumberId?: string; pageId?: string };
+      const label = conn.label ?? conn.externalAccountId ?? conn.channel;
       // Does this account live on its OWN Meta app? Compare against the PREVIOUS
       // shared secret — by now the new one is already stored, so comparing against
       // the current value would call every row "own app" and skip the rotation
@@ -136,38 +152,53 @@ export class MetaService {
           if (!wabaId) {
             // No WABA linked, so there is nothing coherent to re-save: the connect
             // path now requires one. Skip rather than throw — one unlinked number
-            // must not abort the whole workspace's resync.
+            // must not abort the whole workspace's resync — but SAY so: this row
+            // silently keeps the pre-rotation secret until someone reconnects it.
+            channelWarnings.push(
+              `WhatsApp number ${label} was skipped (no WhatsApp Business Account linked) — ` +
+                `it still uses the previous credentials. Reconnect it from Settings → WhatsApp.`,
+            );
             continue;
           }
-          await this.whatsapp.updateConfig(workspaceId, {
+          const out = await this.whatsapp.updateConfig(workspaceId, {
             phoneNumberId: config.phoneNumberId,
             wabaId,
             ...(shared?.appSecret ? { appSecret: shared.appSecret } : {}),
             ...(shared?.systemUserToken ? { accessToken: shared.systemUserToken } : {}),
           });
+          // The connect flow's own findings (WABA not subscribed, number
+          // unregistered, ownership unverified) used to be discarded here.
+          for (const w of out.warnings) channelWarnings.push(`WhatsApp ${label}: ${w}`);
         } else if (conn.channel === "messenger" && config.pageId) {
           await this.messenger.updateConfig(workspaceId, {
             pageId: config.pageId,
             ...(shared?.appSecret ? { appSecret: shared.appSecret } : {}),
+            // Explicit, because each channel's updateConfig now prefers a row's
+            // own stored token over the shared one (same reasoning as the
+            // secret in the header note): a rotation must state the new token
+            // outright or the row re-derives from its stale stored copy.
+            ...(shared?.systemUserToken ? { pageAccessToken: shared.systemUserToken } : {}),
           });
         } else if (conn.channel === "instagram" && config.pageId) {
           await this.instagram.updateConfig(workspaceId, {
             pageId: config.pageId,
             ...(shared?.appSecret ? { appSecret: shared.appSecret } : {}),
+            ...(shared?.systemUserToken ? { igAccessToken: shared.systemUserToken } : {}),
           });
         } else {
           continue;
         }
         resynced.push(conn.channel);
       } catch (err) {
-        this.logger.warn(
-          `resync ${conn.channel} after Meta App update failed: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+        const detail = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`resync ${conn.channel} after Meta App update failed: ${detail}`);
+        failed.push(
+          `${conn.channel} ${label}: resync FAILED (${detail.slice(0, 200)}) — that account may ` +
+            `still sign webhooks with the OLD credentials; re-save it from its own channel settings.`,
         );
       }
     }
-    return { resynced, skippedOwnApp };
+    return { resynced, skippedOwnApp, failed, channelWarnings };
   }
 
   private tryDecrypt(cipher: string | null, label: string): string | null {
@@ -317,7 +348,7 @@ export class MetaService {
 
     // Re-apply the new shared creds to every connected channel so a token
     // rotation takes effect everywhere immediately (no per-channel reconnect).
-    const { resynced, skippedOwnApp } = await this.resyncChannels(
+    const { resynced, skippedOwnApp, failed, channelWarnings } = await this.resyncChannels(
       workspaceId,
       previousSharedAppSecret,
     );
@@ -329,6 +360,11 @@ export class MetaService {
           `not the shared one: ${skippedOwnApp.join(", ")}. Update each from its own channel settings.`,
       );
     }
+    // Failures and the channels' own connect-time findings, in the response the
+    // rotating admin is actually reading — a failed resync in a log nobody
+    // tails means one channel keeps signing with the old secret and every
+    // inbound drops as forged.
+    warnings.push(...failed, ...channelWarnings);
     return { verifyToken, resynced, warnings };
   }
 

@@ -217,7 +217,25 @@ export class InstagramService {
     // Source app-level credentials from the shared Meta App connection unless
     // overridden on this form. The Page access token is derived below.
     const meta = await getMetaConnection(workspaceId);
-    const sourceToken = input.igAccessToken?.trim() || meta?.systemUserToken || null;
+    // THIS ROW'S OWN token, found by scanning for the row whose config carries
+    // this `pageId` — the row itself is keyed by igId, which only the Graph
+    // call below resolves, so the usual keyed lookup can't run yet. Without
+    // this middle tier, re-saving an own-app IG account without re-pasting its
+    // token re-derived the Page token from the SHARED app's system-user token,
+    // and the row then stored an app-A token beside its app-B secret —
+    // mis-signing every later Graph call (a WRONG `appsecret_proof` is
+    // rejected even when the app doesn't require one).
+    const preExisting = (
+      await this.db.channelConnection.findMany({
+        where: { workspaceId, channel: CHANNEL },
+        select: { config: true, secrets: true },
+      })
+    ).find((row) => ((row.config ?? {}) as InstagramChannelConfig).pageId === pageId);
+    const preOwnSecrets = (preExisting?.secrets ?? {}) as InstagramChannelSecrets;
+    const ownIgToken = this.tryDecrypt(preOwnSecrets.igAccessToken ?? null, "igAccessToken");
+    const preOwnAppSecret = this.tryDecrypt(preOwnSecrets.appSecret ?? null, "appSecret");
+    const sourceToken =
+      input.igAccessToken?.trim() || ownIgToken || meta?.systemUserToken || null;
     const appId = input.appId?.trim() || meta?.appId || undefined;
     // Checked BEFORE the Graph call that resolves `igId` — that call needs the
     // token. The app-secret half of this guard runs after, for the reason in the
@@ -242,16 +260,17 @@ export class InstagramService {
     let pageName: string | undefined;
     let derivedPageToken: string | undefined;
     // The proof secret for this call must belong to the app that issued
-    // `sourceToken`. Unlike the sibling services, the row's own secret can't be
-    // consulted yet (the lookup is keyed by igId, which this very call
-    // resolves), so sign only when the pair is unambiguous: a typed token pairs
-    // only with a typed secret (an own-app row re-saved without its secret
-    // stays unsigned rather than mis-signed with the shared secret — Meta
-    // rejects a WRONG proof even when none is required), and the shared token
-    // pairs with the shared secret.
-    const proofSecret = input.igAccessToken?.trim()
+    // `sourceToken` — pair it BY THE TOKEN'S TIER: a typed token signs only
+    // with a typed secret (never mis-signed with a fallback secret — Meta
+    // rejects a WRONG proof even when none is required), the row's own token
+    // signs with the row's own secret, and the shared token with the shared
+    // secret.
+    const typedToken = input.igAccessToken?.trim();
+    const proofSecret = typedToken
       ? input.appSecret?.trim() || undefined
-      : (meta?.appSecret ?? undefined);
+      : ownIgToken
+        ? (preOwnAppSecret ?? undefined)
+        : (meta?.appSecret ?? undefined);
     try {
       const res = await fetch(
         withAppsecretProof(

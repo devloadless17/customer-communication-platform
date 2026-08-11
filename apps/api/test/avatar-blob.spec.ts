@@ -36,6 +36,13 @@ vi.mock("@/lib/blob-storage/provider", async () => {
   return { blobStorage: localProvider };
 });
 
+// The capture path fetches through `safeFetch` (SSRF-guarded, DNS-pinning,
+// via node:https) — a stubbed global fetch never sees those requests, and the
+// guard would refuse any local fixture server. Mock the module seam instead.
+vi.mock("@/lib/http/safe-fetch", () => ({ safeFetch: vi.fn() }));
+const { safeFetch } = await import("@/lib/http/safe-fetch");
+const mockedSafeFetch = vi.mocked(safeFetch);
+
 const { localProvider } = await import("@/lib/blob-storage/local");
 const {
   AvatarUploadError,
@@ -132,14 +139,12 @@ describe("avatar storage", () => {
 
   it("captures a remote contact picture, and declines a non-image response", async () => {
     const contactId = "contact_capture_spec";
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
+    mockedSafeFetch.mockImplementation(
+      async () =>
         new Response(PNG, {
           status: 200,
           headers: { "content-type": "image/png" },
         }),
-      ),
     );
     const stored = await captureRemoteContactAvatar(
       contactId,
@@ -159,20 +164,18 @@ describe("avatar storage", () => {
       await captureRemoteContactAvatar(contactId, "https://cdn.example.com/pic.jpg", stored),
     ).toBe(stored);
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
+    mockedSafeFetch.mockImplementation(
+      async () =>
         new Response("<html>not an image</html>", {
           status: 200,
           headers: { "content-type": "text/html" },
         }),
-      ),
     );
     expect(
       await captureRemoteContactAvatar("contact_html", "https://cdn.example.com/x"),
     ).toBeNull();
 
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 404 })));
+    mockedSafeFetch.mockImplementation(async () => new Response("", { status: 404 }));
     expect(
       await captureRemoteContactAvatar("contact_404", "https://cdn.example.com/x"),
     ).toBeNull();
