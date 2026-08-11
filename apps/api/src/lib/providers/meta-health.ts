@@ -435,7 +435,17 @@ export async function persistWhatsappHealth(
       // 24h budget gate for the whole portfolio off one idle number's
       // webhook. Unrecognized ⇒ leave the stored tier alone; an explicit
       // null/empty from a caller still clears.
-      portfolioTier = normalized ?? undefined;
+      //
+      // `UNTIERED` gets the same leave-alone treatment HERE (though it is a
+      // recognized token): on the NUMBER node it means "this number has no
+      // tier" — true for any unregistered number — while its PORTFOLIO can
+      // simultaneously hold a real limit. Caught live by the reconciler on
+      // 2026-08-11: `linkWhatsappPortfolio` wrote the portfolio node's real
+      // TIER_250 and this per-number persist immediately clobbered it back to
+      // UNTIERED on every health poll, forever. The portfolio-node read in
+      // `linkWhatsappPortfolio` stays the ONLY writer allowed to store
+      // UNTIERED, since there it genuinely describes the portfolio.
+      portfolioTier = normalized === "UNTIERED" ? undefined : (normalized ?? undefined);
     } else {
       portfolioTier = null;
     }

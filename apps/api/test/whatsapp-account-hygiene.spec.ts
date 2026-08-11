@@ -142,6 +142,25 @@ describe("portfolio self-heal attribution (D2)", () => {
     expect(portfolio.messagingTier).toBe("TIER_2K");
     expect(portfolio.messagingDailyCap).toBe(2_000);
   });
+
+  it("a NUMBER-level UNTIERED never clobbers the portfolio's real tier", async () => {
+    // Caught live by the reconciler 2026-08-11: an unregistered number's node
+    // reads whatsapp_business_manager_messaging_limit=UNTIERED while its
+    // PORTFOLIO holds a real limit — linkWhatsappPortfolio wrote TIER_250 and
+    // the per-number persist clobbered it back to UNTIERED on every poll.
+    await persistWhatsappHealth(workspaceId, { messagingTier: "TIER_2K" }, connA);
+    await persistWhatsappHealth(workspaceId, { messagingTier: "UNTIERED" }, connA);
+    const conn = await prisma.channelConnection.findUniqueOrThrow({
+      where: { id: connA },
+      select: { wabaAccount: { select: { portfolioId: true } } },
+    });
+    const portfolio = await prisma.whatsappPortfolio.findUniqueOrThrow({
+      where: { id: conn.wabaAccount!.portfolioId! },
+      select: { messagingTier: true, messagingDailyCap: true },
+    });
+    expect(portfolio.messagingTier).toBe("TIER_2K");
+    expect(portfolio.messagingDailyCap).toBe(2_000);
+  });
 });
 
 describe("orphan portfolio GC (D8)", () => {

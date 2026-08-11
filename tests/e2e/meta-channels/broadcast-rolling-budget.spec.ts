@@ -246,11 +246,13 @@ test("a MIXED audience is charged only for the contacts new to the window", asyn
   const fits = [...contactIds.slice(0, 180), ...contactIds.slice(200, 240)];
   expect((await checkBroadcastEligibility(TEAM_ID, fits.length, fits)).allowed).toBe(true);
 
-  // 180 repeats + 60 new = 60 against a remaining 50 → blocked on the NEW ones.
+  // 180 repeats + 60 new = 60 against a remaining 50 → WARNED on the NEW ones
+  // (advisory since 2026-08-11 — see the sibling test above).
   const blocked = [...contactIds.slice(0, 180), ...contactIds.slice(200, 260)];
   const gate = await checkBroadcastEligibility(TEAM_ID, blocked.length, blocked);
-  expect(gate.allowed).toBe(false);
-  // The message must explain the overlap, or a blocked 240-person campaign
+  expect(gate.allowed).toBe(true);
+  expect(gate.exceedsCap).toBe(true);
+  // The message must explain the overlap, or a warned 240-person campaign
   // looks arbitrary when only 10 recipients are actually over the line.
   expect(gate.reason).toContain("already messaged in this window");
 });
@@ -258,10 +260,14 @@ test("a MIXED audience is charged only for the contacts new to the window", asyn
 test("without ids the gate stays CONSERVATIVE (treats every recipient as new)", async () => {
   await clearSends();
   await seedSend(RECENT(), contactIds.slice(0, 200));
-  // No ids → cannot compute overlap → assume all new → block. Erring toward a
-  // block is safe; erring the other way would wave through a doomed send.
+  // No ids → cannot compute overlap → assume all new → WARN (advisory since
+  // 2026-08-11: the usage count over-reports vs Meta's delivered-outside-
+  // service-window definition, so a hard block refused legitimate sends —
+  // conservatism now lives in the warning's arithmetic, not in a refusal).
   const gate = await checkBroadcastEligibility(TEAM_ID, 200);
-  expect(gate.allowed).toBe(false);
+  expect(gate.allowed).toBe(true);
+  expect(gate.exceedsCap).toBe(true);
+  expect(gate.reason).toBeTruthy();
 });
 
 test("legacy customer-mode broadcasts do not consume the WhatsApp budget", async () => {
