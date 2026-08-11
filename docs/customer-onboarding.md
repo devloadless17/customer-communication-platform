@@ -110,8 +110,13 @@ In the customer's App Dashboard.
       confirms the WABA owns it, subscribes the app to the WABA, and starts
       the health poll — read the warnings banner if one appears; it says
       exactly what to fix.
-- [ ] If the number's status isn't **Connected**: run the register flow with
-      the number's 6-digit two-step PIN (passed through to Meta, never stored).
+- [ ] If the number's status isn't **Connected**: first make sure the number
+      is **OTP-verified** (WhatsApp Manager → Phone numbers — a number showing
+      `NOT_VERIFIED` must complete the SMS/voice code before anything else),
+      then run the register flow with a 6-digit two-step PIN (passed through
+      to Meta, never stored). An unverified, unregistered number saves
+      cleanly, warns in the banner, and carries **zero traffic — inbound
+      included** — until both steps are done.
 
 ## 6 · Verify end-to-end — five minutes, do not skip **[You]**
 
