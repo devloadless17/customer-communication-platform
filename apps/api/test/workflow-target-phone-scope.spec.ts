@@ -20,7 +20,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { setSharedDb } from "@/lib/db";
 import { resolveStepTarget } from "@/lib/workflows/steps/target";
-import type { WorkflowEventEnvelope } from "@ccp/shared/workflows";
+import type { WorkflowEventEnvelope } from "@/lib/workflows/events";
 import { createTestPrismaClient } from "./_prisma";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
