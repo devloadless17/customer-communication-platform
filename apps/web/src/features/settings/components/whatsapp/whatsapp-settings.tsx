@@ -130,7 +130,8 @@ export function WhatsappSettings({
       // shared app just because the admin left the secret box blank.
       appSecret: form.get("appSecret") || undefined,
       appId: form.get("appId") || undefined,
-      // Pass through wabaId even when empty so the server can clear a stale id.
+      // Required (templates are per-WABA) — the field is `required` in the
+      // form, and the server 400s on empty, so this is never blank in practice.
       wabaId: form.get("wabaId") ?? "",
     };
     const res = await apiFetch("/api/workspace/whatsapp", {
@@ -587,12 +588,7 @@ function ManualForm({
    *  blank, since every prefilled value belongs to a different number. */
   addMode?: boolean;
 }) {
-  // In add mode the advanced block opens regardless — the WABA id lives in it
-  // and a second number almost always needs its own.
-  const advancedOpen =
-    Boolean(addMode) ||
-    Boolean(current.wabaId || current.appId) ||
-    Boolean(defaultExpandAdvanced);
+  const advancedOpen = Boolean(current.appId) || Boolean(defaultExpandAdvanced);
   return (
     <form
       id="whatsapp-connect-form"
@@ -640,26 +636,31 @@ function ManualForm({
           defaultValue={addMode ? "" : (current.phoneNumberId ?? "")}
           hint="Meta Business Suite → WhatsApp → API Setup → Phone numbers table → Phone number ID column. 15–16 digit number."
         />
+        {/* Required, and shown as such: the server refuses a connection without
+            it (templates, subscription health, and the cross-account send guard
+            are all per-WABA). It used to sit inside the collapsed "advanced"
+            section labelled optional, so a first-time admin skipped it and hit
+            a 400 on submit. */}
+        <Field
+          name="wabaId"
+          label="WhatsApp Business Account ID"
+          placeholder="e.g. 102290016451234"
+          required
+          mono
+          defaultValue={addMode ? "" : (current.wabaId ?? "")}
+          hint="Meta Business Suite → WhatsApp → API Setup → WhatsApp Business Account section → ID under the account name. Templates are per-WABA, so we need it to load yours."
+        />
         <details
           open={advancedOpen}
           className="mt-3 rounded-md border border-dashed border-border bg-muted/20 p-3 [&_summary::-webkit-details-marker]:hidden"
         >
           <summary className="cursor-pointer text-xs font-medium">
-            Templates &amp; advanced (optional)
+            Advanced (optional)
           </summary>
           <p className="mt-1 mb-3 text-2xs text-muted-foreground">
-            The WhatsApp Business Account ID loads your message templates. Leave
-            the access token blank to use your Meta App system-user token.
+            Leave the access token blank to use your Meta App system-user token.
           </p>
           <div className="flex flex-col gap-3">
-            <Field
-              name="wabaId"
-              label="WhatsApp Business Account ID"
-              placeholder="e.g. 102290016451234"
-              mono
-              defaultValue={addMode ? "" : (current.wabaId ?? "")}
-              hint="Meta Business Suite → WhatsApp → API Setup → WhatsApp Business Account section → ID under the account name."
-            />
             <Field
               name="accessToken"
               label="Access token (override, optional)"

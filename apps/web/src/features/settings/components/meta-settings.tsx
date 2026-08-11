@@ -123,6 +123,38 @@ export function MetaSettings({
               onCopy={() => current.verifyToken && copy(current.verifyToken, "vt")}
             />
           </div>
+          {/* WABA webhook fields are app-level dashboard config Graph can't set
+              for the customer (POST /{waba-id}/subscribed_apps takes no field
+              list — unlike Pages, whose fields we subscribe ourselves), so this
+              checklist is the only place the admin learns that ticking just
+              `messages` leaves template status, account health, and calling
+              webhooks dead. */}
+          <details className="mt-3 rounded-md border border-dashed border-border bg-muted/20 p-3 [&_summary::-webkit-details-marker]:hidden">
+            <summary className="cursor-pointer text-xs font-medium">
+              WhatsApp webhook fields to tick (beyond <code>messages</code>)
+            </summary>
+            <p className="mt-2 text-2xs text-muted-foreground">
+              Messenger &amp; Instagram field subscriptions are handled for you
+              when you connect a Page. WhatsApp fields live in your app
+              dashboard (WhatsApp → Configuration → Webhook fields) — tick all
+              of these so template status, account health, and calling stay in
+              sync:
+            </p>
+            <p className="mt-2 font-mono text-2xs leading-relaxed text-muted-foreground">
+              messages · message_template_status_update ·
+              message_template_quality_update ·
+              message_template_components_update · template_category_update ·
+              account_update · account_alerts · account_review_update ·
+              business_capability_update · phone_number_name_update ·
+              phone_number_quality_update · business_username_updates ·
+              user_preferences · security · calls
+            </p>
+            <p className="mt-2 text-2xs text-muted-foreground">
+              Using a number in Coexistence mode (still on the WhatsApp Business
+              app)? Also tick <code>smb_message_echoes</code>,{" "}
+              <code>history</code>, and <code>smb_app_state_sync</code>.
+            </p>
+          </details>
         </div>
       )}
 

@@ -82,7 +82,7 @@ Conflicts on migration files are merge-hell — the timestamps clash, Prisma re-
 | `ENCRYPTION_KEY` | `openssl rand -base64 32` | Per-dev. Encrypts per-team Meta secrets at rest. |
 | `INTERNAL_BUS_SECRET` | `openssl rand -base64 32` | Per-dev. Both apps must agree (use the same value in your `.env`). |
 | `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET` | A Cloudflare R2 bucket + an S3 API token ("Object Read & Write") | Media storage (inbound/outbound media + avatars). Without these, every inbound media message is silently swallowed. Don't share production keys. |
-| Meta credentials (per-team) | Your own Meta test app + a test recipient phone | Pasted in `/settings/whatsapp` after login, not in `.env`. See [docs/onboarding-future.md](docs/onboarding-future.md) for the SaaS-scale flow. |
+| Meta credentials (per-team) | Your own Meta test app + a test recipient phone | Pasted in `/settings/meta` + `/settings/whatsapp` after login, not in `.env`. The in-app settings pages walk through the full flow (callback URL, verify token, webhook fields). |
 
 **Never** commit `.env`. It's gitignored, but stay paranoid. Production secrets live on the VPS and in GHA only — they're not in any local env file.
 
