@@ -110,11 +110,21 @@ In the customer's App Dashboard.
       confirms the WABA owns it, subscribes the app to the WABA, and starts
       the health poll — read the warnings banner if one appears; it says
       exactly what to fix.
+- [ ] **Number still used in the WhatsApp Business PHONE app?** It cannot be
+      verified or registered while the phone app holds it (Meta allows one
+      home per number; Coexistence needs our pending Tech Provider approval).
+      The client must migrate: back up phone chats (their record only — history
+      never imports), then phone app → Settings → Account → **Delete account**
+      to release the number. Tell-tale signs of this state: WhatsApp Manager
+      shows the number **Offline**, Graph reads `is_on_biz_app: true` +
+      `DISCONNECTED`, the WABA is labeled "WhatsApp Business app".
 - [ ] If the number's status isn't **Connected**: first make sure the number
       is **OTP-verified** (WhatsApp Manager → Phone numbers — a number showing
       `NOT_VERIFIED` must complete the SMS/voice code before anything else),
       then run the register flow with a 6-digit two-step PIN (passed through
-      to Meta, never stored). An unverified, unregistered number saves
+      to Meta, never stored). If the number ever had two-step enabled in the
+      phone app, that EXISTING PIN is required — a wrong guess burns one of
+      Meta's 10 attempts per 72h. An unverified, unregistered number saves
       cleanly, warns in the banner, and carries **zero traffic — inbound
       included** — until both steps are done.
 
