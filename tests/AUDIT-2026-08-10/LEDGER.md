@@ -348,7 +348,7 @@ sensitive page, RSC fetching uniform, zero TODOs in web src.
 
 **B17-1 (HIGH, FIXED):** `customer-memory-adopt.ts` (written earlier IN THIS AUDIT)
 carried a raw NUL byte — git saw the file as binary, every grep-based sweep skipped it,
-and `check-binary-sources` was red, which would have FAILED the next deploy. ` `
+and `check-binary-sources` was red, which would have FAILED the next deploy. `\u0000`
 escape now; checker green. Lesson recorded in memory: run the checker suite after
 writing new files, and never put control bytes in source.
 **B17-2 (P2, FIXED):** shared inbox views had no realtime propagation (the one catalog
