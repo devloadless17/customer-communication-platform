@@ -126,6 +126,32 @@ In the customer's App Dashboard.
       tier, quality, and throughput. Use its refresh if the portfolio link is
       still resolving.
 
+## 6b · Adding Messenger / Instagram — the Advanced Access gate **[Customer]**
+
+WhatsApp inbound works as soon as the number is connected — Messenger and
+Instagram do NOT. Meta delivers their `messages` webhooks for the **general
+public** only when the app has **Advanced Access** on the messaging
+permissions. With Standard Access (or in Development mode) webhooks fire
+ONLY for users holding a role on the app — so "worked with my test account,
+silent for real customers" is this gate, every time.
+
+- [ ] App switched to **Live** mode (top toggle in the App Dashboard).
+- [ ] **Business verification** completed (Business Settings → Security
+      Center) — mandatory for Advanced Access.
+- [ ] App Review → Permissions & features: request **Advanced Access** for
+      `pages_messaging` and `pages_manage_metadata` (Messenger) and
+      `instagram_manage_messages` + `instagram_basic` (Instagram DMs).
+- [ ] Instagram only: professional (Business/Creator) account linked to the
+      Page, and in the Instagram app: Settings → Messages and story replies →
+      **Connected tools → "Allow access to messages" ON** — without it DMs
+      never reach any third-party tool, role or no role.
+- [ ] Page uses another messaging app too (an old bot, a previous vendor)?
+      Check the handover protocol: our app must be the Page's **primary
+      receiver** or messages route to the other app.
+- [ ] While App Review is pending, verify the plumbing by sending from an
+      account that HAS a role on the app (admin/developer/tester) — those
+      deliver under Standard Access.
+
 ## 7 · Set expectations for day one **[You]**
 
 - [ ] **Messaging limit:** a fresh number starts at Meta's lowest tier
