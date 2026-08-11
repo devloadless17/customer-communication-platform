@@ -77,6 +77,13 @@ In the customer's App Dashboard.
       leaked token without the secret. Leaving it in the wrong state has
       caused real API errors during past setups — set it deliberately, don't
       skip it.
+- [ ] **Set the API version**: App settings → **Advanced** → Upgrade API
+      version → match the platform's pinned Graph version (**v26.0** — the
+      `META_GRAPH_VERSION` default in `apps/api/src/lib/providers/config.ts`).
+      Outbound calls pin their version explicitly so this can't break them;
+      what it aligns is the schema of the **webhook payloads** Meta delivers,
+      which the parsers are audited against. Bump this doc when the code's
+      pinned version moves.
 - [ ] WhatsApp → Configuration: paste the **Callback URL** and **Verify token**
       from phase 3, hit Verify — the platform answers the handshake itself.
 - [ ] Tick the **webhook fields**. `messages` is the hard requirement; tick
