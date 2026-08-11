@@ -4,6 +4,7 @@ import { Prisma } from "@prisma/client";
 import { BadGatewayException, BadRequestException, Injectable, Logger } from "@nestjs/common";
 
 import { decryptSecret, encryptSecret } from "@/lib/crypto/envelope";
+import { withAppsecretProof } from "@/lib/providers/appsecret-proof";
 import { invalidateInstagramConfig } from "@/lib/providers/instagram-config";
 import { normalizeDefaultAccount } from "@/lib/providers/normalize-default-account";
 import {
@@ -240,10 +241,25 @@ export class InstagramService {
     let igUsername: string | undefined;
     let pageName: string | undefined;
     let derivedPageToken: string | undefined;
+    // The proof secret for this call must belong to the app that issued
+    // `sourceToken`. Unlike the sibling services, the row's own secret can't be
+    // consulted yet (the lookup is keyed by igId, which this very call
+    // resolves), so sign only when the pair is unambiguous: a typed token pairs
+    // only with a typed secret (an own-app row re-saved without its secret
+    // stays unsigned rather than mis-signed with the shared secret — Meta
+    // rejects a WRONG proof even when none is required), and the shared token
+    // pairs with the shared secret.
+    const proofSecret = input.igAccessToken?.trim()
+      ? input.appSecret?.trim() || undefined
+      : (meta?.appSecret ?? undefined);
     try {
       const res = await fetch(
-        `${GRAPH_BASE}/${GRAPH_VERSION}/${encodeURIComponent(pageId)}` +
-          `?fields=name,access_token,instagram_business_account{id,username}`,
+        withAppsecretProof(
+          `${GRAPH_BASE}/${GRAPH_VERSION}/${encodeURIComponent(pageId)}` +
+            `?fields=name,access_token,instagram_business_account{id,username}`,
+          sourceToken,
+          proofSecret,
+        ),
         {
           headers: { authorization: `Bearer ${sourceToken}` },
           signal: AbortSignal.timeout(20_000),

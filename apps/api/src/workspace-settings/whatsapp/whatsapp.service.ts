@@ -19,6 +19,7 @@ import {
   resumePausedBroadcastsForTeam,
 } from "@/lib/broadcast-runner";
 import { decryptSecret, encryptSecret } from "@/lib/crypto/envelope";
+import { withAppsecretProof } from "@/lib/providers/appsecret-proof";
 import { getMetaProvider } from "@/lib/providers";
 import { getRedisConnection } from "@/lib/workflows/queue";
 import {
@@ -363,9 +364,17 @@ export class WhatsappService {
       // identity + readiness: `verified_name`/`name_status` (a NONE/EXPIRED
       // name voids the certificate) and `status`/`code_verification_status`
       // (an unregistered number saves cleanly but fails every send).
+      // Signed with `appsecret_proof` (an app with "Require app secret" ON
+      // rejects unsigned server calls); token and secret resolve through the
+      // same typed → own-row → shared precedence, so the pair always belongs
+      // to one app in a coherent setup.
       const res = await fetch(
-        `${GRAPH_BASE}/${GRAPH_VERSION}/${encodeURIComponent(phoneNumberId)}` +
-          `?fields=display_phone_number,verified_name,name_status,code_verification_status,status`,
+        withAppsecretProof(
+          `${GRAPH_BASE}/${GRAPH_VERSION}/${encodeURIComponent(phoneNumberId)}` +
+            `?fields=display_phone_number,verified_name,name_status,code_verification_status,status`,
+          accessToken,
+          appSecret,
+        ),
         {
           headers: { authorization: `Bearer ${accessToken}` },
           // Hard per-call timeout — the only outbound api fetch that doesn't go
@@ -1194,7 +1203,12 @@ export class WhatsappService {
     let res: Response;
     try {
       res = await fetch(
-        `${GRAPH_BASE}/${GRAPH_VERSION}/${encodeURIComponent(config.phoneNumberId)}/register`,
+        // Signed for the same reason as the connect-time validation above.
+        withAppsecretProof(
+          `${GRAPH_BASE}/${GRAPH_VERSION}/${encodeURIComponent(config.phoneNumberId)}/register`,
+          config.accessToken,
+          config.appSecret,
+        ),
         {
           method: "POST",
           headers: {

@@ -4,6 +4,7 @@ import { Prisma } from "@prisma/client";
 import { BadGatewayException, BadRequestException, Injectable, Logger } from "@nestjs/common";
 
 import { decryptSecret, encryptSecret } from "@/lib/crypto/envelope";
+import { withAppsecretProof } from "@/lib/providers/appsecret-proof";
 import { invalidateMessengerConfig } from "@/lib/providers/messenger-config";
 import { normalizeDefaultAccount } from "@/lib/providers/normalize-default-account";
 import {
@@ -327,8 +328,16 @@ export class MessengerService {
     let pageName: string | undefined;
     let derivedPageToken: string | undefined;
     try {
+      // Signed with `appsecret_proof` (an app with "Require app secret" ON
+      // rejects unsigned server calls); token and secret resolve through the
+      // same typed → own-row → shared precedence, so the pair belongs to one
+      // app in any coherent setup.
       const res = await fetch(
-        `${GRAPH_BASE}/${GRAPH_VERSION}/${encodeURIComponent(pageId)}?fields=name,access_token`,
+        withAppsecretProof(
+          `${GRAPH_BASE}/${GRAPH_VERSION}/${encodeURIComponent(pageId)}?fields=name,access_token`,
+          sourceToken,
+          appSecret,
+        ),
         {
           headers: { authorization: `Bearer ${sourceToken}` },
           signal: AbortSignal.timeout(20_000),

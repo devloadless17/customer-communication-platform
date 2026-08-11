@@ -5,6 +5,7 @@ import { Prisma } from "@prisma/client";
 import { BadGatewayException, BadRequestException, Injectable, Logger } from "@nestjs/common";
 
 import { decryptSecret, encryptSecret } from "@/lib/crypto/envelope";
+import { withAppsecretProof } from "@/lib/providers/appsecret-proof";
 import { classifyMetaAppBinding } from "@/lib/providers/meta-app-binding";
 import {
   getMetaConnection,
@@ -233,10 +234,22 @@ export class MetaService {
     // the header, and a token in a query string is one access-log or proxy
     // line away from leaking.
     try {
-      const res = await fetch(`${GRAPH_BASE}/${GRAPH_VERSION}/me?fields=id`, {
-        headers: { authorization: `Bearer ${systemUserToken}` },
-        signal: AbortSignal.timeout(20_000),
-      });
+      // Signed with `appsecret_proof`: an app with "Require app secret" ON (the
+      // posture the onboarding runbook prescribes) rejects unsigned server
+      // calls with code 100 — and this validation is the FIRST Graph call a new
+      // workspace ever makes, so failing here blocked the whole onboarding.
+      // Both halves of the proof arrive in this same submission.
+      const res = await fetch(
+        withAppsecretProof(
+          `${GRAPH_BASE}/${GRAPH_VERSION}/me?fields=id`,
+          systemUserToken,
+          appSecret,
+        ),
+        {
+          headers: { authorization: `Bearer ${systemUserToken}` },
+          signal: AbortSignal.timeout(20_000),
+        },
+      );
       if (!res.ok) {
         const body = await res.text();
         throw new BadRequestException({
@@ -365,7 +378,14 @@ export class MetaService {
     };
     try {
       const res = await fetch(
-        `${GRAPH_BASE}/${GRAPH_VERSION}/debug_token?input_token=${encodeURIComponent(systemUserToken)}`,
+        // Signed like every other Graph call. Under "Require app secret" an
+        // unsigned call 400s, which silently skipped this inspection (fail-open
+        // below) and cost the admin the scope warnings it exists to give.
+        withAppsecretProof(
+          `${GRAPH_BASE}/${GRAPH_VERSION}/debug_token?input_token=${encodeURIComponent(systemUserToken)}`,
+          `${appId}|${appSecret}`,
+          appSecret,
+        ),
         {
           headers: { authorization: `Bearer ${appId}|${appSecret}` },
           signal: AbortSignal.timeout(20_000),
