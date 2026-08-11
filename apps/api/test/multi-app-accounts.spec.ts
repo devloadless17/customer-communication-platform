@@ -246,6 +246,24 @@ describe("an account on its OWN Meta app", () => {
 describe("an INSTAGRAM account on its OWN Meta app", () => {
   it("keeps its own app secret when re-saved without explicit ones", async () => {
     stubGraph();
+    // Record which bearer authenticates the Page probe — regression pin for the
+    // 2026-08-11 review: a stored PAGE token must never drive the probe (it
+    // cannot read `instagram_business_account`, and preferring it over the
+    // shared token broke the Save-to-reconnect self-heal).
+    const probeBearers: string[] = [];
+    const stubbed = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input instanceof Request ? input.url : input);
+        if (url.includes("instagram_business_account")) {
+          const auth = (init?.headers as Record<string, string> | undefined)?.authorization;
+          if (auth) probeBearers.push(auth);
+        }
+        return stubbed(input as string, init);
+      },
+    );
+
     // The ordinary re-save: the operator supplies only the Page. This is also
     // exactly what `MetaService.resyncChannels` replays for every Instagram row.
     await instagram.updateConfig(workspaceId, { pageId: IG_PAGE_OWN });
@@ -254,13 +272,21 @@ describe("an INSTAGRAM account on its OWN Meta app", () => {
       where: { workspaceId, channel: "instagram", externalAccountId: IG_ID_OWN },
       select: { secrets: true },
     });
-    const secrets = (row.secrets ?? {}) as { appSecret?: string };
+    const secrets = (row.secrets ?? {}) as { appSecret?: string; igAccessToken?: string };
     // Instagram's copy of this guard looked the row up by `pageId`, but an
     // Instagram row is keyed by the IG id — so it matched nothing, `ownAppSecret`
     // was always null, and the shared app's secret won every time. Meta then
     // signed this handle's webhooks with a secret we no longer held and every
     // inbound DM was dropped as forged.
     expect(secrets.appSecret ? decryptSecret(secrets.appSecret) : null).toBe(OWN_SECRET);
+    // STORE-time pair coherence (2026-08-11): the re-save derived a fresh Page
+    // token via the SHARED app's system-user token, but an own-app row must
+    // keep its stored token — persisting the shared-app derivation beside the
+    // row's own appSecret is the app-A-token/app-B-secret mis-pair.
+    expect(secrets.igAccessToken ? decryptSecret(secrets.igAccessToken) : null).toBe(OWN_TOKEN);
+    // And the probe itself authenticated with the SHARED system-user token —
+    // never the stored Page token.
+    expect(probeBearers).toEqual([`Bearer ${SHARED_TOKEN}`]);
   });
 });
 
