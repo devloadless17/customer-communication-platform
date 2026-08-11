@@ -9,6 +9,7 @@ import type { Prisma } from "@prisma/client";
 import { invalidateProviderConfig } from "@/lib/providers/config";
 import { invalidateWabaAnalytics } from "@/lib/analytics/waba-analytics";
 import { decryptSecret } from "@/lib/crypto/envelope";
+import { getMetaConnection } from "@/lib/providers/meta-connection";
 import { releaseWabaSubscription } from "@/lib/providers/meta-waba-subscription";
 import { releasePageSubscription } from "@/lib/providers/meta-page-subscription";
 import {
@@ -552,10 +553,26 @@ export class ChannelAccountsService {
       accessToken?: string;
       pageAccessToken?: string;
       igAccessToken?: string;
+      appSecret?: string;
     };
     const cipher =
       secrets.accessToken ?? secrets.pageAccessToken ?? secrets.igAccessToken ?? null;
     if (!cipher) return;
+    // The row's own app secret (a number on its own Meta app), falling back to
+    // the shared Meta App's — to sign the release with `appsecret_proof`, since
+    // a "Require app secret" customer app 400s the unsigned DELETE and the
+    // subscription then outlives the removal it was meant to end.
+    let appSecret: string | undefined;
+    if (secrets.appSecret) {
+      try {
+        appSecret = decryptSecret(secrets.appSecret);
+      } catch {
+        /* undecryptable — fall through to the shared secret */
+      }
+    }
+    if (!appSecret) {
+      appSecret = (await getMetaConnection(workspaceId))?.appSecret ?? undefined;
+    }
     let accessToken: string;
     try {
       accessToken = decryptSecret(cipher);
@@ -573,6 +590,7 @@ export class ChannelAccountsService {
         target.wabaAccount.externalWabaId,
         accessToken,
         GRAPH_VERSION,
+        appSecret,
       );
       return;
     }

@@ -540,6 +540,7 @@ export class WhatsappService {
         nextWabaId,
         phoneNumberId,
         accessToken,
+        appSecret,
       );
       if (wabaWarning) warnings.push(wabaWarning);
     }
@@ -718,6 +719,7 @@ export class WhatsappService {
         // Scoped to OUR app: a WABA shared with another BSP reads back non-empty
         // whether or not our subscription stuck. See isAppSubscribedToWaba.
         newConfig.appId,
+        appSecret,
       );
       if (!sub.ok) {
         warnings.push(
@@ -1112,13 +1114,14 @@ export class WhatsappService {
     wabaId: string,
     phoneNumberId: string,
     accessToken: string,
+    appSecret?: string,
   ): Promise<string | null> {
     // `listWabaPhoneNumberIds` is the one definition of this read, shared with the
     // health sweeper's re-parent probe (which asks the same question on a schedule).
     // Sharing it fixed two things this local copy had: it stopped at `limit=200`
     // with no paging, so a WABA above Meta's documented expanded limit could refuse
     // a number it really owns; and it bypassed `withAppsecretProof`.
-    const owned = await listWabaPhoneNumberIds(wabaId, accessToken, GRAPH_VERSION);
+    const owned = await listWabaPhoneNumberIds(wabaId, accessToken, GRAPH_VERSION, appSecret);
     if (!owned.ok) {
       // A skip is not silent: 401/403 means the token can't read the WABA
       // (`whatsapp_business_management` missing) — ownership is unverified AND

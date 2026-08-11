@@ -31,14 +31,19 @@ export async function ensureWabaSubscribed(
   accessToken: string,
   graphVersion: string,
   appId?: string | null,
+  /** Signs with `appsecret_proof`, like `listWabaPhoneNumberIds` below. Against a
+   *  customer app with "Require app secret" ON, the UNSIGNED subscribe 400s — so
+   *  the WABA was never subscribed, zero inbound arrived, and the 30-min sweeper's
+   *  self-heal failed the same way twice an hour (observed live 2026-08-11). */
+  appSecret?: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const url = `${GRAPH_BASE}/${graphVersion}/${encodeURIComponent(wabaId)}/subscribed_apps`;
   try {
     // Idempotent — subscribing an already-subscribed app succeeds.
-    await graphPostForm(url, accessToken, new FormData());
+    await graphPostForm(url, accessToken, new FormData(), appSecret);
     // Re-read rather than trust the `{success:true}` echo — the truth for the
     // settings warning must be what Meta stored, not our optimistic intent.
-    const after = await graphGetJson(url, accessToken);
+    const after = await graphGetJson(url, accessToken, undefined, appSecret);
     if (!isAppSubscribedToWaba(after, appId)) {
       return {
         ok: false,
@@ -177,10 +182,12 @@ export async function releaseWabaSubscription(
   wabaId: string,
   accessToken: string,
   graphVersion: string,
+  /** Same signing rationale as `ensureWabaSubscribed`. */
+  appSecret?: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const url = `${GRAPH_BASE}/${graphVersion}/${encodeURIComponent(wabaId)}/subscribed_apps`;
   try {
-    await graphDelete(url, accessToken);
+    await graphDelete(url, accessToken, appSecret);
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };

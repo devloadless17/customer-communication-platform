@@ -257,7 +257,7 @@ async function checkWhatsapp(
 
   const url = `${GRAPH_BASE}/${config.graphVersion}/${encodeURIComponent(wabaId)}/subscribed_apps`;
   try {
-    const res = await graphGetJson(url, config.accessToken, { retry: true });
+    const res = await graphGetJson(url, config.accessToken, { retry: true }, config.appSecret);
     // OUR app, not just any app — see isAppSubscribedToWaba. A WABA shared with
     // another BSP reads back non-empty while we receive nothing.
     if (isAppSubscribedToWaba(res, config.appId)) return { state: "ok", detail: "subscribed" };
@@ -272,6 +272,7 @@ async function checkWhatsapp(
       config.accessToken,
       config.graphVersion,
       config.appId,
+      config.appSecret,
     );
     if (healed.ok) {
       return { state: "ok", detail: `${missing} — re-subscribed`, healed: true };
