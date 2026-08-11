@@ -381,6 +381,23 @@ Fixed with decode-once-in-try/catch (covers the 08-01 bare-% concern in both wor
 **FG-2/3 (spec truths, FIXED):** round-robin last-resort spec now pins the 2026-08-10
 deliberate parks-Unassigned behavior; contacts-dialog count workspace-scoped.
 
+## E2E full-matrix verification (2026-08-11, user-requested)
+
+Every Playwright harness run against the complete audit-commit stack:
+
+| Suite | Result |
+|---|---|
+| Meta-channels harness (real API + mock Graph, incl. @pressure) | **170/170** |
+| Multi-account suite | **46/46** |
+| Batched app suite (8 batches, 98 spec files) | **all 8 green** (7/8 in one pass; batch 3's only failure was the login-setup infra timeout — 31/31 on rerun) |
+| UI/UX + accessibility rubric (axe) | **96 passed**, 2 axe failures → **fixed** → 45/45 axe green |
+| NEW: broadcast-optout-suppression.spec.ts (closes the B9 test debt) | **3/3** |
+
+**A11y-1 (P2, FIXED, `fix(a11y)`):** the REAL widget's muted ink (#66748c) was 4.41:1
+on the composer surface — under WCAG AA; now #5b6a83 (5.1:1) in widget.js AND the
+settings preview. Preview's decorative launcher was keyboard-focusable while
+aria-hidden; tabIndex=-1.
+
 ## Fix commits (local, NOT pushed — push = deploy)
 
 | Commit | Section | Content |
