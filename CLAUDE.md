@@ -1,6 +1,6 @@
 # Engineering Handbook — Omnichannel Shared Inbox
 
-This is the single source of truth for how this repository is designed and how future code must be written. Read it before making changes. Deeper detail lives beside the code it describes (see §20) so this file stays scannable — there is no `docs/` tree, it was removed as stale.
+This is the single source of truth for how this repository is designed and how future code must be written. Read it before making changes. Deeper detail lives beside the code it describes (see §20) so this file stays scannable — the architecture `docs/` tree was removed as stale, and `docs/` now holds only operator process runbooks (see §20).
 
 > **Prime directive.** Build a world-class, realtime, collaborative shared-inbox platform that is **simple, layered, predictable, and fast**. Every part must be clean, solid, and wired to the next through clear seams, so any one part can change or fail without breaking the rest. When in doubt, choose the simpler design.
 
@@ -363,10 +363,15 @@ Each links to the reasoning:
 
 ## 20. Where the detail lives
 
-`docs/` was **removed on purpose** — its contents had gone stale, and a stale
-doc is worse than none: it is read as authority. **This file is the source of
-truth.** Deeper detail lives next to the code it describes, which is the only
-place that cannot drift out of sync with it:
+The architecture `docs/` tree was **removed on purpose** — its contents had
+gone stale, and a stale doc is worse than none: it is read as authority.
+**This file is the source of truth.** Deeper detail lives next to the code it
+describes, which is the only place that cannot drift out of sync with it.
+The one deliberate exception: `docs/customer-onboarding.md`, an operator
+*process* runbook (added 2026-08-11 at the maintainer's request) — it
+describes call procedure, not architecture, and must be updated in the same
+commit as any change to the connect flow it walks through. Don't add
+architecture docs back into `docs/`.
 
 | Topic | Authority |
 |---|---|
@@ -379,6 +384,7 @@ place that cannot drift out of sync with it:
 | Data model + every invariant comment | [prisma/schema.prisma](prisma/schema.prisma) |
 | External `/v1` API reference | the in-app `/docs/api` page — [apps/web/src/app/docs/api/page.tsx](apps/web/src/app/docs/api/page.tsx), kept honest by `scripts/check-v1-docs.mjs` |
 | Local setup & dev matrix | [ONBOARDING.md](ONBOARDING.md) |
+| Customer onboarding runbook (operator process, the ONE doc in `docs/`) | [docs/customer-onboarding.md](docs/customer-onboarding.md) |
 | Deploy, heap, shutdown, queues, Caddy | [deploy/README.md](deploy/README.md) |
 | What has been verified, how, and when | [tests/VERIFICATION-2026-07-29.md](tests/VERIFICATION-2026-07-29.md) |
 
