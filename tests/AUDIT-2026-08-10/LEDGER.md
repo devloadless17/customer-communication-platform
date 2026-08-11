@@ -423,6 +423,88 @@ phone (cannot be done from this box): the live-call checklist — one real Whats
 through the WebRTC path end-to-end (ring → answer → recording → transcript), and the
 first-ever live Messenger call.
 
+---
+
+# Phase D — the BASE beneath the domains (2026-08-11, commit `audit(d)`)
+
+Four adversarial reviewers on lenses Phases A–C never used — deliberately NOT another
+domain sweep. **Two independent reviewers converged on the same top defect**, which is
+the strongest signal in this whole program that it was real.
+
+## D-1 (P1, FIXED) — a reopen that could be lost forever
+`ingest-call.ts`: a `callback_requested` permission grant reopens a closed conversation,
+committing the CAS flip and THEN publishing `conversation.status_changed` on the bare
+bus. A crash in that window loses the "On Conversation opened" workflow run AND the
+partner webhook **permanently** — Meta's redelivery re-runs the CAS, matches 0 rows, and
+never re-publishes. The message-ingest twin (`ingest.ts`) was hardened for exactly this
+and states the invariant; the main call path documents it too. This one path was left
+behind. Now flip + `publishInTx` co-commit in one transaction.
+
+## D-2 (P2, FIXED) — campaign counters nobody reconciled
+`Broadcast.sentCount`/`failedCount` are runner increments; the runner's own comment warns
+they can end "short of totalCount forever", and the report reads the COUNTERS while
+`BroadcastRecipient` rows hold the truth ("847 of 1,000 sent" on a fully-delivered
+campaign, permanently). `broadcast-delivery-drift` now recomputes them — TERMINAL
+campaigns only, 10-minute settle, cancel-marker counted as failed to agree with the
+writer it reconciles.
+
+## D-3 (P2, FIXED) — the board's real sort key had no index
+The ticket board orders by `lastActivityAt`, but the assignee/team composites were keyed
+on `createdAt` — "My tickets" matched the prefix then sorted the agent's whole ticket set
+IN MEMORY. `Conversation` has carried the equivalent for a while; `Ticket` didn't. Both
+counterparts added (migration `20260811090000`), applied while the table is small enough
+that the index build is instant — this is the change that gets expensive later.
+
+## D-4 (MEDIUM, FIXED) — the deploy's only restore point was optional
+A failed pre-migration `pg_dump` printed "⚠ proceeding" and ran migrations anyway,
+unverified (no non-empty check, stderr swallowed). Auto-rollback swaps CODE IMAGES ONLY —
+it cannot revert an applied migration — so that dump is the sole restore point a bad
+migration has; without it the fallback is an up-to-24h-stale nightly. Now stderr-visible,
+`[ -s ]`-verified, and **blocking**.
+
+## D-5 (LOW, FIXED) — frame policy disagreed with itself
+Caddy's `header` REPLACES the app's, so prod served `X-Frame-Options: SAMEORIGIN` while
+`next.config.ts` declared `DENY` and the app's own CSP says `frame-ancestors 'none'`.
+Aligned to DENY after verifying the webchat widget embeds by **DOM injection**, never by
+iframing this origin — nothing legitimate breaks. HSTS left at the served 1-year value
+with the authority stated in-file (raising it is a hard-to-undo commitment, left to a
+human decision rather than drifting up by accident).
+
+## Documented, not changed (deliberate deviations now stated in code)
+- **status-webhook durability**: `message.status_changed` publishes on the bus, not the
+  outbox — the one §18 exception. 3+ events per outbound message plus every broadcast
+  recipient would ~double write volume on the hottest path to make a *receipt* durable.
+- **`contact.updated` durability**: bare publish on a human-paced path; converting it
+  means an outbox row per contact edit across ~21 sites. Named as the first site to
+  convert if contact automation becomes load-bearing.
+- **`contact-share` version bump** is a bump, not a CAS — the wording claimed a 409 it
+  doesn't enforce here. Deliberate: a CAS would DROP a customer's self-asserted identity
+  on a race, which is worse than overwriting a field an agent can retype.
+- **§7 analytics coverage** corrected: `conversation-analytics-drift` reconciles only the
+  in/out message counters; `responsesCount`/`assignmentsCount`/first-* stamps are
+  fire-and-forget by design.
+
+## Verified clean (evidence in the reviewers' reports)
+**Data spine:** 184 `onDelete` relations traced — authored content SetNull-survives, junction
+rows cascade, and every SetNull FK a visibility predicate joins on is a POSITIVE match, so
+a nulled FK fails CLOSED (no leak). 50 unique constraints each matched to the check-then-act
+they backstop. CAS complete on every user-facing edit surface. `check-prisma-fields`'s
+tenancy allowlist exactly matches the schema (no silent tenantless model). Money is
+`Decimal(14,6)`. The 62 JSON columns' highest-risk one (saved-view criteria → SQL) is
+Zod-`.strict()` at the boundary.
+**Runtime:** every module-scope cache bounded (cap + eviction + TTL sweeper) — table of 13
+in the report; nothing scales with a tenant's row count; the outbox drainer starts on
+`onApplicationBootstrap` (not `onModuleInit`) so it can't dispatch into a partial subscriber
+table; shutdown inverts Nest's default correctly; sweeper mutex acquires synchronously (no
+TOCTOU); Redis loss fails soft for ingest and **closed** for sends.
+**Production runtime:** Dockerfiles/compose match every handbook invariant (heaps at 68%/75%
+of limits, grace 100s > BullMQ 90s lock, non-root, no secrets baked); all five dangerous
+env flags refuse prod boot; CI installs `--frozen-lockfile --ignore-scripts` with SHA-pinned
+actions and a blocking Trivy gate; all 54 migrations additive (no table rewrite).
+
+**Full-suite verification after the fixes: `pnpm check` green, API 1524/1524, web 49/49 —
+the first single-pass clean run of all 144 spec files on this box.**
+
 ## Fix commits (local, NOT pushed — push = deploy)
 
 | Commit | Section | Content |
