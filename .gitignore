@@ -78,3 +78,7 @@ tests/e2e/.meta-logs/
 
 # Generated from apps/web/public/widget.js by prebuild (see scripts/build-widget.mjs)
 apps/web/public/widget.min.js
+
+# Playwright CLI session artifacts (console/page dumps, per-machine)
+.playwright-cli/
+.playwright/
