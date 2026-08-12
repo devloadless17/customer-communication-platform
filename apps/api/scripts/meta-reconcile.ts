@@ -372,18 +372,30 @@ async function main() {
       const pageId = cfg.pageId ?? conn.externalAccountId ?? "";
       const entity = `${channel} ${conn.externalAccountId}`;
       try {
+        // The loaders take the ROW's id (they filter { id: accountId }), not
+        // the vendor account id — passing the Page/IG id read back
+        // "not-connected" for perfectly healthy rows (reconciler bug, fixed
+        // 2026-08-13 during the pre-launch live audit).
         const sc =
           channel === "messenger"
-            ? await getMessengerSendConfig(ws.id, conn.externalAccountId)
-            : await getInstagramSendConfig(ws.id, conn.externalAccountId);
-        const sub = await getPageSubscription(pageId, sc.accessToken, sc.graphVersion, cfg.appId ?? null, sc.appSecret);
+            ? await getMessengerSendConfig(ws.id, conn.id)
+            : await getInstagramSendConfig(ws.id, conn.id);
+        // Field names differ per channel: messenger carries `pageAccessToken`,
+        // instagram `igAccessToken` (a Page token — IG subscribes via the Page).
+        const token =
+          (sc as { pageAccessToken?: string }).pageAccessToken ??
+          (sc as { igAccessToken?: string }).igAccessToken ??
+          "";
+        const sub = await getPageSubscription(pageId, token, sc.graphVersion, cfg.appId ?? null, sc.appSecret);
         rows.push(
           compareField({
             entity,
             field: "page messaging subscription",
-            system: "subscribed",
-            meta: sub.subscribed ? "subscribed" : "NOT-SUBSCRIBED",
-            note: sub.subscribed ? `fields: ${sub.fields.slice(0, 6).join(",")}…` : "sweeper self-heals within 30 min, or re-save the channel",
+            system: "receives-messages",
+            meta: sub.receivesMessages ? "receives-messages" : "NOT-SUBSCRIBED",
+            note: sub.receivesMessages
+              ? `${sub.subscribedFields.length} fields${sub.scopedToApp ? " (our app)" : " (any app)"}${sub.missingFields.length ? `; missing: ${sub.missingFields.join(",")}` : ""}`
+              : "sweeper self-heals within 30 min, or re-save the channel",
           }),
         );
       } catch (err) {
