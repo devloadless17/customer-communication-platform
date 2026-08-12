@@ -60,6 +60,7 @@ import {
   SendTemplateValidationError,
   sendTemplateInternal,
 } from "@/lib/messaging/send-template-internal";
+import { clearChannelNeedsReconnect } from "@/lib/providers/channel-health";
 import { getProviderBinding, requireProviderMethod } from "@/lib/providers";
 import {
   NoChannelDestinationError,
@@ -3105,6 +3106,13 @@ export class MessagesService {
         senderUserId: userId,
         sentVia: "api/messages/template",
       });
+      // Send worked → the token is healthy; self-heal a stale reconnect flag,
+      // mirroring the text-send worker (send-worker.service.ts). This path
+      // MATTERS more than the text one: an account recovering from a dead
+      // token almost always has a CLOSED 24h window, so its first healthy
+      // send is a template — which never cleared the banner (caught live
+      // 2026-08-13: delivered hello_world, needsReconnect stayed true).
+      void clearChannelNeedsReconnect(workspaceId, "whatsapp");
       return { messageId: result.messageId };
     } catch (err) {
       if (err instanceof SendTemplateValidationError) {

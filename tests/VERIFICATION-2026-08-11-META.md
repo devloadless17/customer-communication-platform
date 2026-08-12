@@ -57,3 +57,24 @@ Four deploy failures and one dead feature were all caught by guards
 contract changes, update the unit spec AND its e2e twin in the same commit;
 when raw SQL ships, its spec must run against a real database in the same
 commit, because nothing else can see it.
+
+## Live local round (2026-08-13, night before launch — real creds, real Meta)
+
+Full-loop rig: dev stack + local DB + ngrok tunnel on the app's own dashboard
+callback. Verified LIVE: three-channel reconcile 57/0 after reconnecting
+messenger+IG through the real flow (fresh Page tokens — the reconnect path the
+review saved); app dashboard truth via meta_test MCP (5 topics, fields richer
+than required, rate limits 2%, v26, zero deprecations); inbound with REAL
+third-party traffic incl. Meta's ~30h webhook RETRY BACKLOG redelivered on
+tunnel-up — messages carried their ORIGINAL timestamps and the monotonic
+lastInboundAt/window clock handled late redelivery exactly right (initially
+misread as a staleness bug; it was the system being correct); UI truth
+(tier/quality/budget/IDs/window gates all honest); outbound template send via
+the UI → wamid → DELIVERED receipt back through the tunnel.
+
+Two defects found & fixed live: the reconciler's social block probed with
+wrong id/token-field/result-shape (3 bugs, mine — every alarm vindicated the
+system); and `needsReconnect` cleared only on the TEXT send path — an account
+recovering from a dead token almost always has a closed window, so its first
+healthy send is a TEMPLATE, which never cleared the banner. Clear added to the
+template success path; verified live (flag flipped false on the next send).
