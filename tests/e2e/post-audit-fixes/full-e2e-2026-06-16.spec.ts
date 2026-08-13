@@ -256,14 +256,53 @@ test("contacts: list + search + new-contact dialog (open/cancel, no create)", as
 // ---------------------------------------------------------------------------
 test("broadcasts: new-broadcast form renders audience picker (no submit)", async ({ page }) => {
   const errs = track(page);
-  await page.goto("/broadcasts/new", { waitUntil: "networkidle" });
-  await page.waitForTimeout(1500);
-  // the audience mode toggle (Everyone / Saved group / Custom) is part of the
-  // flow — it may be behind a first step, so just assert the broadcast composer
-  // rendered (not crashed) rather than drilling into the wizard.
-  const body = (await page.locator("body").innerText()).toLowerCase();
-  expect(body).toMatch(/broadcast|audience|template|recipients/);
-  expect(errs, "broadcast new errors").toEqual([]);
+  // `/broadcasts/new` deliberately bounces to channel settings when the
+  // workspace has no ACTIVE account on the composer's channel (the 07-27
+  // channel-first gate) — so composing requires one. The e2e workspace's
+  // whatsapp row is a credential-less placeholder (a real connection was
+  // removed at some point; the settings pre-mint re-created it inactive), so
+  // seed an active fixture account for the duration of this test. Never sent
+  // from — the test never submits.
+  const BCAST_PN = "e2e-bcast-fixture-pn";
+  const wsId = (
+    await db().workspace.findFirstOrThrow({
+      where: { id: "e2e-app-ws" },
+      select: { id: true },
+    })
+  ).id;
+  await db().channelConnection.upsert({
+    where: {
+      workspaceId_channel_externalAccountId: {
+        workspaceId: wsId,
+        channel: "whatsapp",
+        externalAccountId: BCAST_PN,
+      },
+    },
+    create: {
+      workspaceId: wsId,
+      channel: "whatsapp",
+      externalAccountId: BCAST_PN,
+      label: "e2e broadcast fixture",
+      config: { phoneNumberId: BCAST_PN },
+      secrets: {},
+      isActive: true,
+    },
+    update: { isActive: true },
+  });
+  try {
+    await page.goto("/broadcasts/new", { waitUntil: "networkidle" });
+    await page.waitForTimeout(1500);
+    // the audience mode toggle (Everyone / Saved group / Custom) is part of the
+    // flow — it may be behind a first step, so just assert the broadcast composer
+    // rendered (not crashed) rather than drilling into the wizard.
+    const body = (await page.locator("body").innerText()).toLowerCase();
+    expect(body).toMatch(/broadcast|audience|template|recipients/);
+    expect(errs, "broadcast new errors").toEqual([]);
+  } finally {
+    await db().channelConnection.deleteMany({
+      where: { workspaceId: wsId, channel: "whatsapp", externalAccountId: BCAST_PN },
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------
