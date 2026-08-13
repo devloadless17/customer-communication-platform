@@ -40,6 +40,8 @@ export interface MessengerCurrent {
   credentialsUndecryptable?: boolean;
   /** Set when a send failed with Graph 190 — the token expired/was revoked. */
   needsReconnect?: boolean;
+  /** Webhooks we 403'd in the last 24h — inbound may be silently dropping. */
+  webhookRejection?: { at: string; reason: string } | null;
   webhookSubscription?: PageSubscription | null;
   /** Live Page integrity. `null` = we could not ask, NOT "healthy". */
   integrity?: PageIntegrity | null;
@@ -235,6 +237,24 @@ export function MessengerSettings({
                 Meta rejected the last send because the Page token was revoked or
                 expired. Inbound messages still arrive, but replies will fail until
                 you re-enter a valid token below.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {current.connected && current.webhookRejection && (
+          <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-400">
+            <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+            <div>
+              <p className="font-medium">
+                {current.webhookRejection.reason === "bad_signature"
+                  ? "Incoming webhooks are being rejected — signature mismatch"
+                  : "Incoming webhooks are arriving without stored credentials"}
+              </p>
+              <p className="mt-0.5 text-amber-700/80 dark:text-amber-400/80">
+                {current.webhookRejection.reason === "bad_signature"
+                  ? "Meta is sending webhooks we can't verify because the signature doesn't match the stored App secret — incoming messages may be silently dropped. Re-copy the App secret from the Meta App dashboard."
+                  : "Meta is delivering webhooks but this channel has no stored credentials to verify them — finish connecting the channel below."}
               </p>
             </div>
           </div>

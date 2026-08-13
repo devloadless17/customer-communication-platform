@@ -1161,6 +1161,9 @@ export class MessagesService {
                     ...(clientTempId ? { clientTempId } : {}),
                   } as Omit<DomainEventOf<"message.sent">, "unreadCount" | "lastMessageAt">,
                 });
+                // The original send DID reach Meta (externalId proves it) —
+                // same account-scoped self-heal as the fresh-send path below.
+                void clearChannelNeedsReconnect(workspaceId, channel, exists.channelConnectionId);
                 return;
               }
               await publish({
@@ -1184,6 +1187,9 @@ export class MessagesService {
                 skipOutboundWebhook: true,
                 ...(clientTempId ? { clientTempId } : {}),
               } as DomainEventOf<"message.sent">);
+              // Replay of a send Meta already accepted — same account-scoped
+              // self-heal as the fresh-send path below.
+              void clearChannelNeedsReconnect(workspaceId, channel, exists.channelConnectionId);
               return;
             }
           }
@@ -1314,6 +1320,11 @@ export class MessagesService {
         detail: err instanceof Error ? err.message : String(err),
       });
     }
+
+    // Send worked → the token is healthy; self-heal a stale reconnect banner,
+    // scoped to the account this thread sends from (`exists` resolved it above
+    // — a sibling account's flag may be real, see channel-health.ts).
+    void clearChannelNeedsReconnect(workspaceId, channel, exists.channelConnectionId);
 
     // Timestamp monotonicity guard — outbound must sort strictly after any
     // inbound it might be responding to. Meta's webhook timestamps are
@@ -3106,13 +3117,9 @@ export class MessagesService {
         senderUserId: userId,
         sentVia: "api/messages/template",
       });
-      // Send worked → the token is healthy; self-heal a stale reconnect flag,
-      // mirroring the text-send worker (send-worker.service.ts). This path
-      // MATTERS more than the text one: an account recovering from a dead
-      // token almost always has a CLOSED 24h window, so its first healthy
-      // send is a template — which never cleared the banner (caught live
-      // 2026-08-13: delivered hello_world, needsReconnect stayed true).
-      void clearChannelNeedsReconnect(workspaceId, "whatsapp");
+      // The reconnect-flag self-heal (and its 190 counterpart) live INSIDE
+      // sendTemplateInternal, account-scoped — one site covers this path, the
+      // workflow `send_template` step and `/v1` alike (2026-08-13).
       return { messageId: result.messageId };
     } catch (err) {
       if (err instanceof SendTemplateValidationError) {

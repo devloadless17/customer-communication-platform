@@ -184,6 +184,16 @@ export function WebchatWidgetSettings({
                   <span className="max-w-[180px] truncate">{w.name}</span>
                   <span className="text-2xs opacity-70">{w.conversationCount}</span>
                   {!w.isActive && <span className="rounded bg-muted px-1 text-2xs">off</span>}
+                  {/* Unlocked = embeddable anywhere. Visible from the LIST so an
+                      admin who never opens the Install tab still sees it. */}
+                  {w.isActive && w.allowedOrigins.length === 0 && (
+                    <span
+                      className="rounded border border-amber-500/40 bg-amber-500/10 px-1 text-2xs text-amber-700 dark:text-amber-400"
+                      title="No allowed domains — any site can embed this widget. Lock it in the Install tab."
+                    >
+                      open to any site
+                    </span>
+                  )}
                 </button>
               ))}
             </div>
@@ -402,6 +412,16 @@ function Editor({
                 >
                   Lock to {widget.firstSeenOrigin}
                 </button>
+              </div>
+            )}
+            {/* The unlocked state must never be visually QUIET — before a first
+                visitor arrives there is no firstSeenOrigin to lock to, and the
+                old neutral gray line read as "nothing to do here". */}
+            {widget.allowedOrigins.length === 0 && !widget.firstSeenOrigin && (
+              <div className="rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-muted-foreground">
+                This widget is currently open to <strong className="text-foreground">any site</strong>.
+                Your site key is public, so anyone can embed it and impersonate you — add your
+                domain below to lock it down.
               </div>
             )}
             <div className="flex flex-wrap gap-1.5">

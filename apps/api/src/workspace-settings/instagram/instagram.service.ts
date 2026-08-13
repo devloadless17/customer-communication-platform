@@ -12,6 +12,7 @@ import {
   getPageSubscription,
   releasePageSubscription,
 } from "@/lib/providers/meta-page-subscription";
+import { recentWebhookRejection } from "@/lib/providers/channel-health";
 import { getMetaConnection } from "@/lib/providers/meta-connection";
 import { assertChannelDisconnectConfirmed } from "@/lib/providers/assert-channel-disconnect";
 
@@ -71,6 +72,9 @@ export interface InstagramConfigView {
   /** True when a send failed with Graph 190 (token expired/revoked) — drives the
    *  Settings "reconnect" banner. */
   needsReconnect: boolean;
+  /** Inbound webhooks we 403'd within the last 24h (bad_signature / no_config)
+   *  — see WhatsappConfigView.webhookRejection; same shape, same 24h filter. */
+  webhookRejection: { at: string; reason: string } | null;
   /**
    * Live subscription of the LINKED PAGE to the app. Instagram DMs ride the Page,
    * so an unsubscribed Page means no inbound — same failure mode as Messenger.
@@ -117,7 +121,13 @@ export class InstagramService {
   async getConfig(workspaceId: string): Promise<InstagramConfigView> {
     const conn = await this.db.channelConnection.findFirst({
       where: { workspaceId, channel: CHANNEL, isDefault: true },
-      select: { config: true, secrets: true, needsReconnect: true },
+      select: {
+        config: true,
+        secrets: true,
+        needsReconnect: true,
+        lastWebhookRejectedAt: true,
+        lastWebhookRejectReason: true,
+      },
     });
     const config = (conn?.config ?? {}) as InstagramChannelConfig;
     const secrets = (conn?.secrets ?? {}) as InstagramChannelSecrets;
@@ -202,6 +212,10 @@ export class InstagramService {
       appSecret,
       credentialsUndecryptable,
       needsReconnect: conn?.needsReconnect ?? false,
+      webhookRejection: recentWebhookRejection(
+        conn?.lastWebhookRejectedAt ?? null,
+        conn?.lastWebhookRejectReason ?? null,
+      ),
       webhookSubscription,
     };
   }

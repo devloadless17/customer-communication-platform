@@ -16,10 +16,29 @@ import { existsSync } from "node:fs";
 
 import { PrismaClient } from "@prisma/client";
 import { createTestPrismaClient } from "./_prisma";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { setSharedDb } from "@/lib/db";
+
+// The bus is irrelevant to what commits; stub publish so the send-path tests
+// below don't reach for the outbox drainer / socket fanout.
+vi.mock("@/lib/events/bus", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/events/bus")>();
+  return { ...actual, publish: vi.fn(async () => undefined) };
+});
+// The ONLY thing standing in for Meta on the send-path tests. Everything
+// below it — provider, config loader, internal senders — is production code.
+vi.mock("@/lib/providers/meta-transport", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/providers/meta-transport")>();
+  return { ...actual, metaFetch: vi.fn() };
+});
+
 import { seedWabaAccount } from "./_waba";
+import { encryptSecret } from "@/lib/crypto/envelope";
+import { metaFetch } from "@/lib/providers/meta-transport";
+import { invalidateProviderConfig } from "@/lib/providers/config";
+import { sendTextInternal } from "@/lib/messaging/send-text-internal";
+import { sendTemplateInternal } from "@/lib/messaging/send-template-internal";
 import {
   flagChannelNeedsReconnect,
   clearChannelNeedsReconnect,
@@ -176,5 +195,166 @@ describe("orphan portfolio GC (D8)", () => {
     // connA's container from the previous test still has a connection — kept.
     const kept = await prisma.whatsappPortfolio.count({ where: { workspaceId } });
     expect(kept).toBe(1);
+  });
+});
+
+/**
+ * Send-path clear/flag scoping — the 2026-08-13 regression pin.
+ *
+ * `8ac565c8` added a CHANNEL-WIDE clear on the template path: account A's
+ * successful template send un-flagged sibling B's real breakage. The clears
+ * (and the 190 flag) now live INSIDE sendTextInternal / sendTemplateInternal /
+ * executeTextSendJob, scoped to the account the thread sends from — one site
+ * covers the composer, the workflow steps and `/v1` alike.
+ */
+describe("send-path reconnect flag scoping (2026-08-13)", () => {
+  const fetchMock = vi.mocked(metaFetch);
+  let convOnA = "";
+  let templateOnA = "";
+
+  const flagged = (id: string) =>
+    prisma.channelConnection
+      .findUniqueOrThrow({ where: { id }, select: { needsReconnect: true } })
+      .then((r) => r.needsReconnect);
+
+  beforeAll(async () => {
+    // Give both accounts real (encrypted) credentials so getMetaSendConfig
+    // resolves, and a fresh health stamp so nothing treats them as stale.
+    for (const id of [connA, connB]) {
+      await prisma.channelConnection.update({
+        where: { id },
+        data: {
+          secrets: { accessToken: encryptSecret("tok"), appSecret: encryptSecret("sec") },
+          messagingHealthUpdatedAt: new Date(),
+        },
+      });
+    }
+    invalidateProviderConfig(workspaceId);
+    const contact = await prisma.contact.create({
+      data: {
+        workspaceId,
+        name: `HY Contact ${S}`,
+        identityChannel: "whatsapp",
+        phoneNumber: `9615${Date.now().toString().slice(-8)}`,
+        // Open 24h window so the free-form text send is allowed.
+        lastInboundAt: new Date(),
+      },
+      select: { id: true },
+    });
+    convOnA = (
+      await prisma.conversation.create({
+        data: {
+          workspaceId,
+          contactId: contact.id,
+          channel: "whatsapp",
+          channelConnectionId: connA,
+        },
+        select: { id: true },
+      })
+    ).id;
+    // A zero-variable approved template on A's OWN WABA (cross-WABA sends are
+    // refused before Meta is reached — template-account-scope.spec.ts).
+    const wabaOfA = (
+      await prisma.channelConnection.findUniqueOrThrow({
+        where: { id: connA },
+        select: { wabaAccountId: true },
+      })
+    ).wabaAccountId!;
+    templateOnA = (
+      await prisma.messageTemplate.create({
+        data: {
+          workspaceId,
+          wabaAccountId: wabaOfA,
+          name: `${S}_tpl`,
+          language: "en_US",
+          status: "approved",
+          category: "utility",
+          externalId: `${S}_tpl_ext`,
+          bodyText: "hello",
+          components: [{ type: "BODY", text: "hello" }],
+        },
+        select: { id: true },
+      })
+    ).id;
+  });
+
+  const okSend = () =>
+    fetchMock.mockImplementation(async () =>
+      new Response(JSON.stringify({ messages: [{ id: `wamid.${Date.now()}.${Math.random()}` }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  const deadToken = () =>
+    fetchMock.mockImplementation(async () =>
+      new Response(
+        JSON.stringify({ error: { message: "Error validating access token", code: 190 } }),
+        { status: 401, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+  it("A's successful TEXT send clears A only — sibling B stays flagged", async () => {
+    await flagChannelNeedsReconnect(workspaceId, "whatsapp", connA);
+    await flagChannelNeedsReconnect(workspaceId, "whatsapp", connB);
+    okSend();
+    await sendTextInternal({
+      workspaceId,
+      conversationId: convOnA,
+      body: "hi there",
+      sentVia: "test",
+    });
+    // The clear is fire-and-forget — poll until it lands.
+    await expect.poll(() => flagged(connA)).toBe(false);
+    expect(await flagged(connB)).toBe(true); // the 8ac565c8-class bug cleared this
+  });
+
+  it("A's successful TEMPLATE send clears A only — sibling B stays flagged", async () => {
+    await flagChannelNeedsReconnect(workspaceId, "whatsapp", connA);
+    // B still flagged from the previous test's assertion; re-assert anyway.
+    await flagChannelNeedsReconnect(workspaceId, "whatsapp", connB);
+    okSend();
+    await sendTemplateInternal({
+      workspaceId,
+      conversationId: convOnA,
+      templateId: templateOnA,
+      variables: { body: [] },
+      senderUserId: null,
+      sentVia: "test",
+    });
+    await expect.poll(() => flagged(connA)).toBe(false);
+    expect(await flagged(connB)).toBe(true);
+    await clearChannelNeedsReconnect(workspaceId, "whatsapp", connB);
+  });
+
+  it("a 190 on A's TEMPLATE send flags A only — templates now raise the banner too", async () => {
+    deadToken();
+    await expect(
+      sendTemplateInternal({
+        workspaceId,
+        conversationId: convOnA,
+        templateId: templateOnA,
+        variables: { body: [] },
+        senderUserId: null,
+        sentVia: "test",
+      }),
+    ).rejects.toThrow();
+    await expect.poll(() => flagged(connA)).toBe(true);
+    expect(await flagged(connB)).toBe(false);
+    await clearChannelNeedsReconnect(workspaceId, "whatsapp", connA);
+  });
+
+  it("a 190 on A's inline TEXT send flags A only (workflow//v1 path)", async () => {
+    deadToken();
+    await expect(
+      sendTextInternal({
+        workspaceId,
+        conversationId: convOnA,
+        body: "hi again",
+        sentVia: "test",
+      }),
+    ).rejects.toThrow();
+    await expect.poll(() => flagged(connA)).toBe(true);
+    expect(await flagged(connB)).toBe(false);
+    await clearChannelNeedsReconnect(workspaceId, "whatsapp", connA);
   });
 });

@@ -25,6 +25,7 @@ import {
   platformVerifyToken,
   groupEntriesByWorkspace,
 } from "@/lib/providers/app-level-webhook";
+import { recordWebhookRejected } from "@/lib/providers/channel-health";
 import { metaWireEnabled, wireIn } from "@/lib/providers/meta-wire";
 import {
   getMetaWebhookConfig,
@@ -498,6 +499,12 @@ function webhookForbidden(
         ? "no webhook config for this team+channel."
         : "Meta sent no signature header.";
   logger.warn(`[${workspaceId}] ${channel} webhook 403 — ${reason} (object=${objectType}): ${hint}`);
+  // Persist the rejection so Settings can surface it (a persistent mismatch is
+  // silently-lost inbound once Meta gives up). `no_signature` deliberately not
+  // recorded — see recordWebhookRejected.
+  if (reason === "bad_signature" || reason === "no_config") {
+    recordWebhookRejected(workspaceId, channel, reason);
+  }
   const rawBody = rawBodyOf(req);
   if (rawBody) wireIn(`${channel} REJECTED (${reason})`, rawBody.toString("utf8"));
   return new HttpException("forbidden", 403);

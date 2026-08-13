@@ -625,6 +625,22 @@ export interface WhatsappConfigView {
   qualityRating: string | null;
   /** Throughput level: "STANDARD" | "HIGH" | null. */
   throughputLevel: string | null;
+  /** Cloud API registration state of the number (Meta `status` on the
+   *  phone-number node, raw: "CONNECTED" | "DISCONNECTED" | "PENDING" | …).
+   *  Anything non-CONNECTED means every send fails — drives the settings
+   *  banner + per-account pill. Null = not yet observed. */
+  registrationStatus: string | null;
+  /** Live WABA↔app webhook-subscription verdict, read from Graph at page load
+   *  (mirrors Messenger's `webhookSubscription`). Null = couldn't read — the
+   *  page keeps its static "final check" hint. `scopedToApp` false means the
+   *  any-app fallback answered (no stored appId), an honest "probably". */
+  subscription: { subscribed: boolean; scopedToApp: boolean } | null;
+  /** Inbound webhooks we 403'd within the last 24h (bad_signature: the stored
+   *  App secret doesn't match what Meta signs with; no_config: webhooks arrive
+   *  but the channel holds no credentials to verify them). Null = none
+   *  recently — Meta stops retrying after ~24-36h, so older stamps are stale
+   *  history, not an active problem. */
+  webhookRejection: { at: string; reason: string } | null;
 }
 
 // Re-export commonly co-imported types so callers can grab everything from

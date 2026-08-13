@@ -41,6 +41,10 @@ import {
   stopWebhookSubscriptionHealthSweeper,
 } from "@/lib/sweepers/webhook-subscription-health";
 import {
+  startSubscriptionReleaseRetrySweeper,
+  stopSubscriptionReleaseRetrySweeper,
+} from "@/lib/sweepers/subscription-release-retry";
+import {
   startTemplateAnalyticsCaptureSweeper,
   stopTemplateAnalyticsCaptureSweeper,
 } from "@/lib/sweepers/template-analytics-capture";
@@ -213,6 +217,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private broadcastMaterializeDriftSweeperStarted = false;
   private whatsappHealthRefreshSweeperStarted = false;
   private webhookSubscriptionHealthSweeperStarted = false;
+  private subscriptionReleaseRetrySweeperStarted = false;
   private templateCatalogRefreshStarted = false;
   private templateAnalyticsCaptureStarted = false;
   private workHoursSweeperStarted = false;
@@ -557,6 +562,17 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.error("Failed to start webhook-subscription-health sweeper", err);
     }
+    // Its OWN try, like every sibling.
+    try {
+      // Settles webhook-subscription releases owed to Meta — a removed
+      // account whose DELETE /subscribed_apps failed keeps a durable IOU
+      // (PendingSubscriptionRelease) that this retries with backoff.
+      startSubscriptionReleaseRetrySweeper();
+      this.subscriptionReleaseRetrySweeperStarted = true;
+      this.logger.log("Subscription release-retry sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start subscription-release-retry sweeper", err);
+    }
     // Its OWN try, like every sibling — see the note below on why a shared try
     // leaves the other sweeper's stop-flag unset.
     try {
@@ -632,6 +648,14 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.warn(
         `stopWebhookSubscriptionHealthSweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    try {
+      if (this.subscriptionReleaseRetrySweeperStarted)
+        stopSubscriptionReleaseRetrySweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopSubscriptionReleaseRetrySweeper threw: ${err instanceof Error ? err.message : err}`,
       );
     }
     try {

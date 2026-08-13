@@ -26,13 +26,18 @@ export function AccountHealthRow({
 }) {
   const quality = health.qualityRating;
   const throughput = health.throughputLevel;
+  // Non-CONNECTED = every send from this number fails. The pill renders for
+  // exactly that case; a CONNECTED number is the silent normal, like an
+  // APPROVED display name.
+  const registration = health.registrationStatus;
+  const notRegistered = Boolean(registration && registration !== "CONNECTED");
   const ns = nameStatus?.toUpperCase() ?? null;
   const nameProblem = ns === "DECLINED" || ns === "EXPIRED" || ns === "NONE";
   const namePending = ns === "PENDING_REVIEW";
 
   // Nothing captured yet — say so plainly rather than rendering an empty row
   // that reads as "all clear".
-  if (!quality && !throughput && !health.updatedAt && !nameProblem && !namePending) {
+  if (!quality && !throughput && !health.updatedAt && !nameProblem && !namePending && !notRegistered) {
     return (
       <p className="mt-1 text-3xs text-muted-foreground">
         No health snapshot yet — Meta pushes these as they change, or press Refresh.
@@ -42,6 +47,23 @@ export function AccountHealthRow({
 
   return (
     <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-3xs">
+      {notRegistered && (
+        <span className="inline-flex items-center gap-1">
+          <span className="text-muted-foreground">Registration</span>
+          <span
+            className={cn(
+              "rounded-full border px-1.5 py-px font-medium",
+              registration === "PENDING"
+                ? "border-warning-border bg-warning-bg text-warning-fg"
+                : "border-destructive/30 bg-destructive/10 text-destructive",
+            )}
+            title="Sends from this number will fail until it is registered for Cloud API — use 'Register number' (two-step PIN), or register it in WhatsApp Manager → Phone numbers."
+          >
+            {registration === "PENDING" ? "PENDING" : `NOT REGISTERED · ${registration}`}
+          </span>
+        </span>
+      )}
+
       {quality && (
         <span className="inline-flex items-center gap-1">
           <span className="text-muted-foreground">Quality</span>

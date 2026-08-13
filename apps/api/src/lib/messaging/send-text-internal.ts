@@ -14,6 +14,11 @@ import {
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { getProviderBinding } from "@/lib/providers";
 import {
+  clearChannelNeedsReconnect,
+  flagChannelNeedsReconnect,
+} from "@/lib/providers/channel-health";
+import { normalizeMetaSendError } from "@/lib/providers/meta-send-error";
+import {
   NoChannelDestinationError,
   resolveContactChannel,
 } from "@/lib/providers/channel";
@@ -234,15 +239,39 @@ export async function sendTextInternal(
     throw err;
   }
 
-  const send = await binding.provider.sendText(
-    {
-      to: channel.to,
-      ...(channel.viaBsuid ? { viaBsuid: true } : {}),
-      body,
-      useHumanAgentTag,
-      ...(privateReply ? { privateReplyToCommentId: privateReply.commentId } : {}),
-    },
-    sendConfig,
+  let send;
+  try {
+    send = await binding.provider.sendText(
+      {
+        to: channel.to,
+        ...(channel.viaBsuid ? { viaBsuid: true } : {}),
+        body,
+        useHumanAgentTag,
+        ...(privateReply ? { privateReplyToCommentId: privateReply.commentId } : {}),
+      },
+      sendConfig,
+    );
+  } catch (err) {
+    // Graph 190 (token expired/revoked) → flag the SENDING account. This is
+    // the funnel for the INLINE text callers (workflow `send_message`, `/v1`)
+    // — the queue worker flags its own path, but these never passed through
+    // it, so a token exercised only by automation never raised the banner.
+    if (normalizeMetaSendError(err)?.code === "auth_expired") {
+      void flagChannelNeedsReconnect(
+        args.workspaceId,
+        conversation.channel,
+        conversation.channelConnectionId,
+      );
+    }
+    throw err;
+  }
+  // Send worked → the token is healthy; self-heal a stale reconnect banner,
+  // scoped to the account that sent (a sibling's flag may be real — see
+  // channel-health.ts).
+  void clearChannelNeedsReconnect(
+    args.workspaceId,
+    conversation.channel,
+    conversation.channelConnectionId,
   );
 
   if (send.heldForQualityAssessment) {

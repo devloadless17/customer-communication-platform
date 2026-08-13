@@ -790,6 +790,7 @@ model Workspace {
   outboundEvents          OutboundEvent[]
   outboundSendAttempts    OutboundSendAttempt[]
   channelConnections      ChannelConnection[]
+  pendingSubscriptionReleases PendingSubscriptionRelease[]
   whatsappPortfolios      WhatsappPortfolio[]
   whatsappBusinessAccounts WhatsappBusinessAccount[]
   webchatWidgets          WebchatWidget[]
@@ -886,6 +887,13 @@ model ChannelConnection {
   // the token — per Meta's access-token best practice. Cleared on reconnect.
   needsReconnect    Boolean   @default(false)
   lastAuthErrorAt   DateTime?
+  // Inbound webhooks REJECTED at our door (403: bad_signature / no_config).
+  // Meta gives up on an endpoint after ~24-36h of failures, so a persistent
+  // signature mismatch is silently-lost inbound — these two make it visible
+  // on Settings. Written channel-wide (a failed signature cannot be attributed
+  // to an account) and throttled in-process; see channel-health.ts.
+  lastWebhookRejectedAt   DateTime?
+  lastWebhookRejectReason String?
 
   // WhatsApp COEXISTENCE: this business phone number is registered for Cloud API
   // AND still in use in the WhatsApp Business app (Meta's `is_on_biz_app` on the
@@ -928,6 +936,14 @@ model ChannelConnection {
   // Throughput level: "STANDARD" (~80 msg/s) | "HIGH" (up to ~1000 msg/s). Drives
   // the runner's adaptive send pacing.
   throughputLevel          String?
+  // Cloud API registration state of this number (Meta `status` on the
+  // phone-number node, raw: CONNECTED | DISCONNECTED | PENDING | ...). Stored
+  // raw like qualityRating — Meta's vocabulary churns. Anything non-CONNECTED
+  // means EVERY send fails (the 2026-08-11 live incident: warned once at
+  // connect, then the page re-read "Connected" forever). Written at connect
+  // and by the health poll/sweep; rides the same node read as quality, so it
+  // costs no extra Graph call.
+  registrationStatus       String?
   // When the snapshot above was last refreshed (webhook or poll).
   messagingHealthUpdatedAt DateTime?
 
@@ -1050,6 +1066,46 @@ model ChannelConnection {
   // enforcement writes, and the credential fallback for a WABA whose own token
   // isn't set. Also backs the FK's SetNull scan on WABA delete.
   @@index([wabaAccountId])
+}
+
+/// A webhook-subscription RELEASE that failed and is owed to Meta (2026-08-13).
+///
+/// Removing a channel account tells Meta to stop delivering its webhooks
+/// (`DELETE .../subscribed_apps`) — but that release used to be one
+/// fire-and-forget attempt: a Graph blip and the removed customer's traffic
+/// kept arriving forever, dropped as `unknown_account` while we still received
+/// and parsed their message content. This row is the retry ledger: written
+/// BEFORE the inline attempt, deleted on success, retried by the
+/// `subscription-release-retry` sweeper with exponential backoff and a loud
+/// give-up at 7 attempts (the outbound-webhook posture). The sweeper re-checks
+/// "does any active connection still use this WABA/Page" before each retry, so
+/// a reconnect that raced the removal makes the row moot rather than released.
+model PendingSubscriptionRelease {
+  id          String @id @default(cuid())
+  workspaceId String
+
+  channel Channel
+  // The Meta object the subscription lives on: the WABA id (whatsapp) or the
+  // Page id (messenger/instagram — shared, so the writer only enqueues when
+  // NEITHER channel still uses the Page).
+  externalObjectId String
+
+  // Envelope-encrypted credentials the DELETE needs, copied off the removed
+  // row (which is gone by the time a retry runs): `accessToken` ciphertext,
+  // plus `appSecret` ciphertext when the account had its own. Bounded
+  // lifetime — the row dies on success or at the attempt ceiling.
+  secrets Json @default("{}")
+
+  attempts      Int      @default(0)
+  lastError     String?
+  nextAttemptAt DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  // The sweeper's pickup scan.
+  @@index([nextAttemptAt])
+  @@index([workspaceId])
 }
 
 /// A named VOICE on a Messenger Page — Meta's Personas API, mapped to one of our

@@ -66,7 +66,10 @@ import { graphGetJson } from "@/lib/providers/meta-graph";
 import { ensureWabaSubscribed } from "@/lib/providers/meta-waba-subscription";
 import { ensurePageSubscribedToMessaging } from "@/lib/providers/meta-page-subscription";
 import { invalidateProviderConfig } from "@/lib/providers/config";
-import { sweepWebhookSubscriptionHealthOnce } from "@/lib/sweepers/webhook-subscription-health";
+import {
+  applyResult,
+  sweepWebhookSubscriptionHealthOnce,
+} from "@/lib/sweepers/webhook-subscription-health";
 
 import { createTestPrismaClient } from "./_prisma";
 
@@ -374,6 +377,55 @@ describe("the subscription has to be OURS", () => {
       invalidateProviderConfig(workspaceId);
     }
   });
+
+  it("LEARNS the appId from the token and persists it — one-shot backfill (2026-08-13)", async () => {
+    // Same starting point as the fallback case above: a legacy row with no
+    // stored appId. But this time the token can answer `/app` — so the sweep
+    // learns the id, persists it into the config JSON, and runs THIS tick's
+    // check scoped already.
+    await prisma.channelConnection.update({
+      where: { id: connId },
+      data: { config: { phoneNumberId: PHONE } },
+    });
+    invalidateProviderConfig(workspaceId);
+    const base = graphRoutes({ subscribedApps: { data: [OTHER] } });
+    mockedGraph.mockImplementation(async (url: string) => {
+      if (String(url).includes("/app?fields=id")) return { id: APP };
+      return base(String(url));
+    });
+    mockedEnsure.mockResolvedValue({ ok: true });
+
+    try {
+      await sweepWebhookSubscriptionHealthOnce();
+
+      // Persisted — the fallback branch is now unreachable for this row.
+      const cfg = (
+        await prisma.channelConnection.findUniqueOrThrow({
+          where: { id: connId },
+          select: { config: true },
+        })
+      ).config as { appId?: string; phoneNumberId?: string };
+      expect(cfg.appId).toBe(APP);
+      expect(cfg.phoneNumberId, "read-merge-write must keep sibling keys").toBe(PHONE);
+      // And the check ran SCOPED this very tick: only the other BSP is
+      // subscribed, which any-app would have read as healthy — scoped, it is
+      // a miss, so the self-heal re-subscribe ran with OUR id.
+      expect(mockedEnsure).toHaveBeenCalledWith(
+        WABA,
+        expect.any(String),
+        expect.any(String),
+        APP,
+        undefined,
+      );
+      expect(await needsReconnect()).toBe(false); // healed, not flagged
+    } finally {
+      await prisma.channelConnection.update({
+        where: { id: connId },
+        data: { config: { phoneNumberId: PHONE, appId: APP } },
+      });
+      invalidateProviderConfig(workspaceId);
+    }
+  });
 });
 
 /**
@@ -551,5 +603,86 @@ describe("the WABA still has to OWN the numbers filed under it", () => {
     // Reached the subscription check, found it missing, could not heal → banner.
     expect(mockedEnsure).toHaveBeenCalled();
     expect(await needsReconnect()).toBe(true);
+  });
+});
+
+/**
+ * Persistent-indeterminate escalation (2026-08-13).
+ *
+ * `state: null` used to mean "no transition, ever" — a persistent non-190
+ * cause (403 missing whatsapp_business_management, OAuth-in-200, rejected
+ * appsecret_proof) read as "transient" every 30 minutes forever, silently.
+ * Now eight consecutive indeterminates SPANNING ≥3.5h flag `needsReconnect`.
+ *
+ * Driven through the exported `applyResult` seam, not full sweeps — see its
+ * docblock: eight platform-wide sweeps would feed `transient:` to every other
+ * live connection in the shared database and flag sibling fixtures.
+ * Only `Date` is faked so the pg pool's real timers keep working.
+ */
+describe("persistent-indeterminate escalation (2026-08-13)", () => {
+  const conn = () => ({
+    id: connId,
+    workspaceId,
+    channel: "whatsapp" as const,
+    label: null,
+    workspace: { name: `WHS WS ${S}` },
+  });
+  const transient = { state: null, detail: "transient: Graph 403 Forbidden" };
+  const healthy = { state: "ok" as const, detail: "subscribed" };
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("count alone is not enough — 8 rapid indeterminates stay quiet", async () => {
+    // A boot loop (or a spec driving rapid sweeps) is not four silent hours.
+    for (let i = 0; i < 8; i++) await applyResult(conn(), transient);
+    expect(await needsReconnect()).toBe(false);
+    await applyResult(conn(), healthy); // reset the streak for the next case
+  });
+
+  it("flags on the 8th indeterminate once the streak spans ~4h — not on the 7th", async () => {
+    for (let i = 0; i < 8; i++) {
+      vi.advanceTimersByTime(30 * 60_000); // the production sweep cadence
+      await applyResult(conn(), transient);
+      if (i < 7) {
+        expect(await needsReconnect(), `sweep ${i + 1} must not flag yet`).toBe(false);
+      }
+    }
+    expect(await needsReconnect()).toBe(true);
+  });
+
+  it("a definitive verdict in between resets the streak", async () => {
+    await clearReconnectFlag();
+    await applyResult(conn(), healthy);
+    for (let i = 0; i < 5; i++) {
+      vi.advanceTimersByTime(30 * 60_000);
+      await applyResult(conn(), transient);
+    }
+    await applyResult(conn(), healthy); // the answer came back — streak over
+    // Seven more indeterminates, old enough in wall-clock but one short in
+    // count since the reset: must stay quiet.
+    for (let i = 0; i < 7; i++) {
+      vi.advanceTimersByTime(40 * 60_000);
+      await applyResult(conn(), transient);
+    }
+    expect(await needsReconnect()).toBe(false);
+    // The 8th since the reset crosses both bounds.
+    vi.advanceTimersByTime(40 * 60_000);
+    await applyResult(conn(), transient);
+    expect(await needsReconnect()).toBe(true);
+  });
+
+  it("deliberate skips never count toward escalation", async () => {
+    await clearReconnectFlag();
+    await applyResult(conn(), healthy);
+    for (let i = 0; i < 20; i++) {
+      vi.advanceTimersByTime(30 * 60_000);
+      await applyResult(conn(), { state: null, detail: "not configured — skipped" });
+    }
+    expect(await needsReconnect()).toBe(false);
   });
 });

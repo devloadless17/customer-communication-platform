@@ -3,7 +3,10 @@
 
 import { db } from "@/lib/db";
 import { pickWabaProbe } from "@/lib/providers/waba-probe";
-import { flagChannelNeedsReconnect } from "@/lib/providers/channel-health";
+import {
+  clearChannelNeedsReconnect,
+  flagChannelNeedsReconnect,
+} from "@/lib/providers/channel-health";
 import { getMetaSendConfig } from "@/lib/providers/config";
 import { getInstagramSendConfig } from "@/lib/providers/instagram-config";
 import { getMessengerSendConfig } from "@/lib/providers/messenger-config";
@@ -14,10 +17,14 @@ import {
 } from "@/lib/providers/meta-page-subscription";
 import {
   ensureWabaSubscribed,
+  fetchTokenAppId,
   isAppSubscribedToWaba,
   listWabaPhoneNumberIds,
 } from "@/lib/providers/meta-waba-subscription";
-import { ProviderNotConfiguredError } from "@/lib/providers/config";
+import {
+  invalidateProviderConfig,
+  ProviderNotConfiguredError,
+} from "@/lib/providers/config";
 import { isPoolClosedError } from "@/lib/sweepers/_mutex";
 import type { Channel } from "@ccp/shared/types";
 
@@ -59,6 +66,32 @@ type ConnState = "ok" | "broken";
 /** connectionId → last definitive state (process-local; a restart re-logs
  *  a still-broken connection once, which is acceptable — arguably correct). */
 const lastState = new Map<string, ConnState>();
+/**
+ * connectionId → consecutive sweeps that ended INDETERMINATE (`transient:` —
+ * a Graph error that is neither "subscribed" nor "token dead"). One or two of
+ * those are genuinely transient; EIGHT in a row spanning ~4h is a persistent
+ * cause wearing a transient costume — a 403 from a token missing
+ * `whatsapp_business_management`, an OAuth error delivered with HTTP 200, a
+ * rejected appsecret_proof — and before 2026-08-13 it stayed "transient
+ * forever", silently, on the one sweeper whose job is to catch silence.
+ * At the threshold we escalate through the SAME path a definitive failure
+ * takes: flag `needsReconnect` (reconnecting with a correctly-scoped token is
+ * the fix for every known persistent cause) + one transition-logged error.
+ *
+ * BOTH dimensions are required, deliberately. The count alone would escalate
+ * on any rapid burst of sweeps (a boot loop; a spec driving the platform-wide
+ * sweep in a shared database, where every OTHER live connection reads
+ * `transient:` against a scoped mock) — the age requirement makes the claim
+ * literally what the log says: unverifiable FOR FOUR HOURS. Process-local
+ * like `lastState`, and the same restart posture: the flag persists; only
+ * the counter restarts, and a persistent cause re-accumulates within ~4h.
+ */
+const indeterminateStreak = new Map<string, { count: number; since: number }>();
+const INDETERMINATE_ESCALATION_COUNT = 8;
+const INDETERMINATE_ESCALATION_MIN_AGE_MS = 3.5 * 60 * 60_000;
+/** Once-per-process notice for connections whose appId can't be learned —
+ *  the unscoped check repeats every 30 min; the warning shouldn't. */
+const warnedUnscoped = new Set<string>();
 
 let timer: NodeJS.Timeout | null = null;
 let inFlight = false;
@@ -233,6 +266,63 @@ async function checkWhatsapp(
     throw err;
   }
 
+  // ONE-SHOT appId backfill for rows connected before the App ID field
+  // existed. Without it, `isAppSubscribedToWaba` below degrades to any-app —
+  // a WABA shared with another BSP reads "subscribed" while our app receives
+  // nothing, which is precisely the silent hole this sweeper exists to close.
+  // Learn the id from the token (`/app` = the issuing app), persist it with a
+  // read-merge-write (merge, never rebuild — a concurrent settings save must
+  // lose nothing but this one key), and it never runs again for the row.
+  let appId = config.appId;
+  if (!appId) {
+    const learned = await fetchTokenAppId(
+      config.accessToken,
+      config.graphVersion,
+      config.appSecret,
+    );
+    if (learned) {
+      appId = learned;
+      try {
+        const row = await db.channelConnection.findFirst({
+          where: { id: connectionId, workspaceId, channel: "whatsapp" },
+          select: { config: true, updatedAt: true },
+        });
+        if (row) {
+          // CAS on `updatedAt`: a concurrent settings save replaces the WHOLE
+          // config JSON, and a blind read-merge-write here would revert it to
+          // the stale copy this sweep read. With the guard the racing save
+          // wins, and the appId persist simply retries next sweep (connect
+          // now stamps appId itself, so the racing save likely carried it).
+          const won = await db.channelConnection.updateMany({
+            where: { id: connectionId, workspaceId, updatedAt: row.updatedAt },
+            data: {
+              config: {
+                ...((row.config ?? {}) as Record<string, unknown>),
+                appId: learned,
+              },
+            },
+          });
+          if (won.count > 0) {
+            invalidateProviderConfig(workspaceId);
+            console.log(
+              `[webhook-subscription-health] learned appId ${learned} for connection=${connectionId} — subscription checks now app-scoped`,
+            );
+          }
+        }
+      } catch (err) {
+        if (isPoolClosedError(err)) throw err;
+        // Best-effort — the check below still runs scoped this tick; the
+        // persist retries next sweep.
+      }
+    } else if (!warnedUnscoped.has(connectionId)) {
+      warnedUnscoped.add(connectionId);
+      console.warn(
+        `[webhook-subscription-health] appId unknown for connection=${connectionId} and ` +
+          "could not be learned from the token — subscription check runs UNSCOPED (any app counts)",
+      );
+    }
+  }
+
   // Ownership BEFORE subscription: a deprecated WABA can fail or lie on
   // `subscribed_apps`, and a definitive re-parent verdict must not be lost to a
   // transient error on the check that runs after it.
@@ -259,8 +349,9 @@ async function checkWhatsapp(
   try {
     const res = await graphGetJson(url, config.accessToken, { retry: true }, config.appSecret);
     // OUR app, not just any app — see isAppSubscribedToWaba. A WABA shared with
-    // another BSP reads back non-empty while we receive nothing.
-    if (isAppSubscribedToWaba(res, config.appId)) return { state: "ok", detail: "subscribed" };
+    // another BSP reads back non-empty while we receive nothing. `appId` is the
+    // stored value or the one just learned from the token above.
+    if (isAppSubscribedToWaba(res, appId)) return { state: "ok", detail: "subscribed" };
     const others = Array.isArray(res.data) ? res.data.length : 0;
     const missing =
       others > 0
@@ -271,7 +362,7 @@ async function checkWhatsapp(
       wabaId,
       config.accessToken,
       config.graphVersion,
-      config.appId,
+      appId,
       config.appSecret,
     );
     if (healed.ok) {
@@ -377,6 +468,9 @@ export async function sweepWebhookSubscriptionHealthOnce(): Promise<void> {
   for (const id of lastState.keys()) {
     if (!liveIds.has(id)) lastState.delete(id);
   }
+  for (const id of indeterminateStreak.keys()) {
+    if (!liveIds.has(id)) indeterminateStreak.delete(id);
+  }
 
   // One unit of WORK per subscription, not per connection.
   //
@@ -461,7 +555,16 @@ export async function sweepWebhookSubscriptionHealthOnce(): Promise<void> {
   await Promise.all(workers);
 }
 
-async function applyResult(
+/**
+ * Exported for `test/webhook-subscription-health.spec.ts` ONLY: the
+ * escalation threshold needs eight consecutive results, and driving eight
+ * full platform-wide sweeps from a spec would feed `transient:` results to
+ * every OTHER active connection in the shared dev/CI database too — with the
+ * escalation in place, that would flag rows belonging to sibling spec
+ * fixtures (cross-file flakiness) or the developer's real workspace. Driving
+ * this seam directly scopes the state machine to the spec's own row.
+ */
+export async function applyResult(
   conn: {
     id: string;
     workspaceId: string;
@@ -480,8 +583,34 @@ async function applyResult(
     console.warn(`[webhook-subscription-health] HEALED ${who}: ${result.detail}`);
   }
 
-  if (result.state === null) return; // transient / skipped — no transition
+  if (result.state === null) {
+    // Only genuinely INDETERMINATE results count toward escalation — the
+    // deliberate skips ("not configured", "no WABA linked") are stable quiet
+    // states, not failures to answer.
+    if (!result.detail.startsWith("transient:")) return;
+    const now = Date.now();
+    const streak = indeterminateStreak.get(conn.id) ?? { count: 0, since: now };
+    streak.count += 1;
+    indeterminateStreak.set(conn.id, streak);
+    if (
+      streak.count < INDETERMINATE_ESCALATION_COUNT ||
+      now - streak.since < INDETERMINATE_ESCALATION_MIN_AGE_MS
+    )
+      return;
+    indeterminateStreak.delete(conn.id); // re-escalate only after another full run
+    await flagChannelNeedsReconnect(conn.workspaceId, conn.channel, conn.id);
+    if (lastState.get(conn.id) !== "broken") {
+      console.error(
+        `[webhook-subscription-health] INDETERMINATE x${streak.count} — ` +
+          `subscription state unverifiable for ~4h ${who}: ${result.detail}`,
+      );
+    }
+    // Mark broken so recovery logs symmetrically and repeat ticks stay quiet.
+    lastState.set(conn.id, "broken");
+    return;
+  }
 
+  indeterminateStreak.delete(conn.id); // a definitive verdict breaks the streak
   const prev = lastState.get(conn.id);
   lastState.set(conn.id, result.state);
 
@@ -494,5 +623,12 @@ async function applyResult(
     }
   } else if (prev === "broken") {
     console.log(`[webhook-subscription-health] RECOVERED ${who}`);
+    // Clear the flag THIS sweeper raised, now that it has verified health
+    // itself. Matters most for idle/receive-only accounts: a successful send
+    // is the other clear path, and an account that never sends would wear the
+    // banner forever after a ≥4h platform-side blip escalated it (2026-08-13
+    // review). Account-scoped, `needsReconnect: true`-guarded — free when the
+    // flag was already cleared by a send or a reconnect.
+    await clearChannelNeedsReconnect(conn.workspaceId, conn.channel, conn.id);
   }
 }
