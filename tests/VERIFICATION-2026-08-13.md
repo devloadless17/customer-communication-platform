@@ -22,6 +22,7 @@ browser suite.
 | Multi-account matrix (46) | ✅ |
 | Browser e2e, 8 batches (~440 tests) | ✅ batches 0–6 green (first-pass failures all environmental, re-run proof); batch 7: 187/188 on the freshest run with the sole reproducible failure being the real bug fixed below (fix proven green on two subsequent runs) — later same-night re-runs each timed out a DIFFERENT handful (40s–2m, box degraded post-marathon), and every test in the batch passed in ≥1 run tonight |
 | Post-fix worktree gates | ✅ full `pnpm run check` green; API suite **1559/1559** (148 files — +29 new tests, zero regressions); web typecheck green |
+| Final MERGED-tree gates (production @ 0109a3cc) | ✅ `pnpm run check` + binary-sources green; web unit 49/49; Meta backend e2e **173/173 including `@pressure`** (converged in-suite this time — quiet box) |
 | Adversarial review of the fix diff itself | ✅ 1 P1 (spec type cast breaking the CI ratchet), 3 P2 (spoofable-banner comment honesty, backfill read-merge-write race, escalation flag never auto-clearing for idle accounts), 2 P3 — ALL applied and re-verified; core mechanics (tenancy, clear/flag seam, IOU ordering, escalation state machine) confirmed correct |
 | Adversarial review of the never-audited 02:00 commits (`05cd0df8`, `8ac565c8`) | ✅ both CORRECT; one LOW gap found → folded into backlog item 5 (below) |
 
