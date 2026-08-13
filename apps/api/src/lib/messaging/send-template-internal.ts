@@ -18,6 +18,11 @@ import {
   NoChannelDestinationError,
   resolveContactChannel,
 } from "@/lib/providers/channel";
+import {
+  clearChannelNeedsReconnect,
+  flagChannelNeedsReconnect,
+} from "@/lib/providers/channel-health";
+import { normalizeMetaSendError } from "@/lib/providers/meta-send-error";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import {
   countTemplatePlaceholders,
@@ -712,8 +717,10 @@ export async function sendTemplateInternal(
   // Throws on provider error. Caller decides: route maps to 422/502;
   // automation handler turns it into a 422-shaped ActionResult so BullMQ
   // doesn't retry a permanent Meta rejection.
-  const send = await sendTemplate(
-    {
+  let send;
+  try {
+    send = await sendTemplate(
+      {
       to: channel.to,
       ...(channel.viaBsuid ? { viaBsuid: true } : {}),
       name: template.name,
@@ -735,8 +742,35 @@ export async function sendTemplateInternal(
           : {}),
         ...(cardsForSend ? { cards: cardsForSend } : {}),
       },
-    },
-    sendConfig,
+      },
+      sendConfig,
+    );
+  } catch (err) {
+    // Graph 190 (token expired/revoked) → flag the SENDING account. This is
+    // the one place every template caller funnels through (composer, workflow
+    // `send_template`, `/v1`), so the reconnect banner rises no matter which
+    // path exercised the dead token — the text queue worker only ever saw its
+    // own path, and a token exercised solely by template sends never raised
+    // the banner at all.
+    if (normalizeMetaSendError(err)?.code === "auth_expired") {
+      void flagChannelNeedsReconnect(
+        args.workspaceId,
+        provider,
+        conversation.channelConnectionId,
+      );
+    }
+    throw err;
+  }
+  // Send worked → the token is healthy; self-heal a stale reconnect banner,
+  // scoped to the account that sent (a sibling's flag may be real — see
+  // channel-health.ts). Covers every caller for the same reason as the flag
+  // above; it matters most here because an account recovering from a dead
+  // token usually has a CLOSED 24h window, so its first healthy send is a
+  // template (caught live 2026-08-13).
+  void clearChannelNeedsReconnect(
+    args.workspaceId,
+    provider,
+    conversation.channelConnectionId,
   );
 
   if (send.heldForQualityAssessment) {

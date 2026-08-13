@@ -55,6 +55,9 @@ export default async function WhatsappSettingsPage() {
       messagingDailyCap: config.messagingDailyCap,
       qualityRating: config.qualityRating,
       throughputLevel: config.throughputLevel,
+      registrationStatus: config.registrationStatus,
+      subscription: config.subscription,
+      webhookRejection: config.webhookRejection,
     };
   } else {
     const { connected } = await listWhatsappTemplates();

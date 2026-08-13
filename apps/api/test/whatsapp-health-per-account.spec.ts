@@ -249,3 +249,90 @@ describe("health refresh sweeper", () => {
     expect(b.messagingHealthUpdatedAt).not.toBeNull();
   });
 });
+
+/**
+ * Registration status rides the same node read (2026-08-13).
+ *
+ * `status` was fetched at connect, warned about once, and DROPPED — the
+ * settings page then re-read "Connected" forever over a number whose every
+ * send failed (the 2026-08-11 live incident). It now persists per-number with
+ * the same leave-alone posture as every other health field.
+ */
+describe("registrationStatus (2026-08-13)", () => {
+  it("lands on the polled row only, and an absent field leaves it untouched", async () => {
+    mockedGraph.mockImplementation(async (url: string) => {
+      if (url.includes(PHONE_A)) {
+        return {
+          whatsapp_business_manager_messaging_limit: "TIER_2K",
+          quality_rating: "YELLOW",
+          throughput: { level: "STANDARD" },
+          status: "PENDING",
+        };
+      }
+      if (url.includes(`/${WABA}?`) && url.includes("owner_business_info")) {
+        return { owner_business_info: { id: PORTFOLIO } };
+      }
+      if (url.includes(PORTFOLIO)) {
+        return { whatsapp_business_manager_messaging_limit: "TIER_2K" };
+      }
+      return {};
+    });
+    await fetchWhatsappHealthFromGraph(workspaceId, connA);
+    const [a, b] = await Promise.all([
+      prisma.channelConnection.findUniqueOrThrow({
+        where: { id: connA },
+        select: { registrationStatus: true },
+      }),
+      prisma.channelConnection.findUniqueOrThrow({
+        where: { id: connB },
+        select: { registrationStatus: true },
+      }),
+    ]);
+    expect(a.registrationStatus).toBe("PENDING");
+    expect(b.registrationStatus).toBeNull(); // never polled — untouched
+
+    // A later poll whose response OMITS `status` must not clear the stored
+    // value (leave-alone posture, same as isOnBusinessApp).
+    mockedGraph.mockImplementation(async (url: string) => {
+      if (url.includes(PHONE_A)) {
+        return { quality_rating: "GREEN", throughput: { level: "STANDARD" } };
+      }
+      if (url.includes(`/${WABA}?`) && url.includes("owner_business_info")) {
+        return { owner_business_info: { id: PORTFOLIO } };
+      }
+      if (url.includes(PORTFOLIO)) return {};
+      return {};
+    });
+    await fetchWhatsappHealthFromGraph(workspaceId, connA);
+    expect(
+      (
+        await prisma.channelConnection.findUniqueOrThrow({
+          where: { id: connA },
+          select: { registrationStatus: true },
+        })
+      ).registrationStatus,
+    ).toBe("PENDING");
+  });
+
+  it("a CONNECTED poll overwrites a stored PENDING — the banner self-clears", async () => {
+    mockedGraph.mockImplementation(async (url: string) => {
+      if (url.includes(PHONE_A)) {
+        return { quality_rating: "GREEN", status: "connected" }; // raw case normalizes up
+      }
+      if (url.includes(`/${WABA}?`) && url.includes("owner_business_info")) {
+        return { owner_business_info: { id: PORTFOLIO } };
+      }
+      if (url.includes(PORTFOLIO)) return {};
+      return {};
+    });
+    await fetchWhatsappHealthFromGraph(workspaceId, connA);
+    expect(
+      (
+        await prisma.channelConnection.findUniqueOrThrow({
+          where: { id: connA },
+          select: { registrationStatus: true },
+        })
+      ).registrationStatus,
+    ).toBe("CONNECTED");
+  });
+});

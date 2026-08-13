@@ -182,6 +182,14 @@ export interface WhatsappHealthUpdate {
    */
   businessUsername?: string | null;
   /**
+   * Cloud API registration state of the number (Meta `status` on the
+   * phone-number node — CONNECTED | DISCONNECTED | PENDING | ...). Stored raw
+   * and uppercased like the tier. Per-NUMBER. `undefined` untouched; callers
+   * never pass `null` in practice (there is no "unregistered" webhook — the
+   * poll always reads a concrete value), but `null` clears for symmetry.
+   */
+  registrationStatus?: string | null;
+  /**
    * Calling enforcement. `null` clears a stored restriction/warning (the
    * provider lifted it); `undefined` leaves it untouched, because these events
    * carry partial state and a messaging-tier update must not wipe a live
@@ -406,6 +414,7 @@ export async function persistWhatsappHealth(
     throughputLevel?: string | null;
     isOnBusinessApp?: boolean | null;
     businessUsername?: string | null;
+    registrationStatus?: string | null;
   } = {};
   const wabaScoped: {
     callingRestrictedUntil?: Date | null;
@@ -469,6 +478,14 @@ export async function persistWhatsappHealth(
     // Already normalized (lowercase) by the parser/service; an empty string
     // is not a username.
     perNumber.businessUsername = update.businessUsername?.trim().toLowerCase() || null;
+  }
+  if (update.registrationStatus !== undefined) {
+    // Raw + uppercased, like the tier: Meta's vocabulary churns and this field
+    // gates a BANNER, not a send path — an unrecognized value must render as
+    // itself, never coerce to "fine".
+    perNumber.registrationStatus = update.registrationStatus
+      ? update.registrationStatus.trim().toUpperCase() || null
+      : null;
   }
   if (update.qualityRating !== undefined) {
     perNumber.qualityRating = update.qualityRating
@@ -1316,7 +1333,12 @@ export async function fetchWhatsappHealthFromGraph(
     // — a fixed ceiling outside the 80/1000 throughput ladder — so the broadcast
     // runner has to know, or it paces them ~4x too fast. `platform_type` rides along
     // because Meta's Coexistence doc pairs the two for exactly this check.
-    `quality_rating,throughput,is_on_biz_app,platform_type`;
+    // `status` is the number's Cloud API REGISTRATION state — non-CONNECTED
+    // means every send fails, and until 2026-08-13 it was read once at connect
+    // and dropped, so the settings page said "Connected" over a number that
+    // couldn't send (the 2026-08-11 live incident). Riding this read costs
+    // no extra Graph call and the health sweep keeps it fresh.
+    `quality_rating,throughput,is_on_biz_app,platform_type,status`;
   // Idempotent GET — one retry on a 5xx blip. Signed: the old "no
   // appsecret_proof, matches the send path" note was stale (the send path signs
   // via metaFetch when META_APPSECRET_PROOF=1), and against a customer app with
@@ -1374,6 +1396,11 @@ export async function fetchWhatsappHealthFromGraph(
       qualityRating: (node.quality_rating as string | undefined) ?? null,
       throughputLevel: (throughputLevel as string | undefined) ?? null,
       ...(isOnBusinessApp === undefined ? {} : { isOnBusinessApp }),
+      // Leave-alone posture: an absent field must not clear a stored state —
+      // only a present value writes (same rule as isOnBusinessApp above).
+      ...(typeof node.status === "string" && node.status
+        ? { registrationStatus: node.status }
+        : {}),
     },
     // Scope to the polled number — see the param doc on persistWhatsappHealth.
     connection?.id ?? null,

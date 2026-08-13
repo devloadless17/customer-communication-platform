@@ -1,5 +1,6 @@
 import { decryptSecret } from "@/lib/crypto/envelope";
 import { db } from "@/lib/db";
+import { platformAppSecrets } from "@/lib/providers/app-level-webhook";
 import { TtlCache } from "@/lib/providers/config-cache";
 import {
   getMetaConnection,
@@ -245,8 +246,19 @@ const DEFAULT_GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v26.0";
 interface SendConfigCipher {
   phoneNumberId: string;
   accessTokenCipher: string;
-  /** This ACCOUNT'S OWN app secret, for `appsecret_proof`. Ciphertext in cache
-   *  (never plaintext) exactly like the token above — see the cache header. */
+  /**
+   * Which ROW the access token above came from — and therefore which app
+   * secret may sign for it. A token and its `appsecret_proof` secret are a
+   * PAIR issued by one Meta app: a WABA-row business token (Embedded Signup)
+   * is issued by the PLATFORM app, so it pairs with `META_APP_SECRET` — never
+   * with the connection row's own secret, which belongs to a different app
+   * and would 400 every signed call. Carried per-cipher so the pairing is
+   * chosen in ONE branch at load time and can't silently cross.
+   */
+  tokenSource: "connection" | "waba";
+  /** The app secret belonging to the SAME row as `accessTokenCipher` (see
+   *  `tokenSource`). Ciphertext in cache (never plaintext) exactly like the
+   *  token — see the cache header. */
   appSecretCipher?: string;
   wabaId?: string;
   wabaAccountId?: string;
@@ -333,11 +345,32 @@ async function loadSendCipher(
   const wabaSecrets = (conn.wabaAccount?.secrets ?? {}) as MetaChannelSecrets;
   // WABA token wins when present: an ES tenant stores ONE customer-scoped token
   // on the WABA instead of a copy per number, so rotation touches one row.
-  const accessTokenCipher = wabaSecrets.accessToken ?? secrets.accessToken;
+  //
+  // The token and its app secret are chosen as a PAIR in this one branch —
+  // see SendConfigCipher.tokenSource. Before 2026-08-13 the token could come
+  // from the WABA row while the secret always came from the connection row;
+  // nothing writes WhatsappBusinessAccount.secrets.accessToken until Embedded
+  // Signup ships, so the cross-pairing was unreachable — this fences it
+  // before it can happen silently.
+  const pair = wabaSecrets.accessToken
+    ? {
+        accessTokenCipher: wabaSecrets.accessToken,
+        tokenSource: "waba" as const,
+        ...(wabaSecrets.appSecret ? { appSecretCipher: wabaSecrets.appSecret } : {}),
+      }
+    : secrets.accessToken
+      ? {
+          accessTokenCipher: secrets.accessToken,
+          tokenSource: "connection" as const,
+          // The account's OWN app secret (not the shared app's) — see
+          // MetaSendConfig.appSecret for why that distinction is load-bearing.
+          ...(secrets.appSecret ? { appSecretCipher: secrets.appSecret } : {}),
+        }
+      : null;
   const missing: string[] = [];
   if (!config.phoneNumberId) missing.push("phoneNumberId");
-  if (!accessTokenCipher) missing.push("accessToken");
-  if (missing.length > 0) return { kind: "err", missing };
+  if (!pair) missing.push("accessToken");
+  if (missing.length > 0 || !pair) return { kind: "err", missing };
   return {
     kind: "ok",
     cipher: {
@@ -345,16 +378,13 @@ async function loadSendCipher(
       // Store the CIPHERTEXT in cache, not the decrypted token. Decrypt
       // per-call so plaintext never lives longer than the request that
       // uses it. See the cache header comment for the security rationale.
-      accessTokenCipher: accessTokenCipher!,
+      ...pair,
       ...(conn.wabaAccount ? { wabaId: conn.wabaAccount.externalWabaId } : {}),
       ...(conn.wabaAccount ? { wabaAccountId: conn.wabaAccount.id } : {}),
       ...(config.messagingAccountId
         ? { messagingAccountId: config.messagingAccountId }
         : {}),
       ...(config.appId ? { appId: config.appId } : {}),
-      // The account's OWN app secret (not the shared app's) — see
-      // MetaSendConfig.appSecret for why that distinction is load-bearing.
-      ...(secrets.appSecret ? { appSecretCipher: secrets.appSecret } : {}),
       ...(config.displayPhoneNumber
         ? { displayPhoneNumber: config.displayPhoneNumber }
         : {}),
@@ -392,6 +422,16 @@ function materializeSendConfig(
       // Swallowed on purpose — see the spread below.
       appSecret = undefined;
     }
+  }
+  if (!appSecret && cipher.tokenSource === "waba") {
+    // A WABA-row business token (Embedded Signup) is issued by the PLATFORM
+    // app, so the proof secret is META_APP_SECRET — the same env the
+    // app-level webhook route verifies with. NEVER the connection row's own
+    // secret: that belongs to a different Meta app, and a proof signed with
+    // it 400s every call the token itself would have authorized. (First
+    // entry = the current secret; later entries exist only for rotation
+    // verify-windows.)
+    appSecret = platformAppSecrets()[0];
   }
   return {
     phoneNumberId: cipher.phoneNumberId,

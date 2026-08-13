@@ -36,8 +36,17 @@ import {
 } from "@/lib/providers/meta-health";
 import {
   ensureWabaSubscribed,
+  fetchTokenAppId,
+  isAppSubscribedToWaba,
   listWabaPhoneNumberIds,
+  releaseWabaSubscription,
 } from "@/lib/providers/meta-waba-subscription";
+import {
+  enqueuePendingRelease,
+  resolvePendingRelease,
+} from "@/lib/sweepers/subscription-release-retry";
+import { graphGetJson } from "@/lib/providers/meta-graph";
+import { recentWebhookRejection } from "@/lib/providers/channel-health";
 import { normalizeDefaultAccount } from "@/lib/providers/normalize-default-account";
 import {
   readTemplateAnalytics,
@@ -177,7 +186,10 @@ export class WhatsappService {
       select: {
         config: true,
         secrets: true,
+        isActive: true,
         needsReconnect: true,
+        lastWebhookRejectedAt: true,
+        lastWebhookRejectReason: true,
         // Messaging limit is portfolio-scoped (Meta, 2025-10-07), and the portfolio
         // hangs off the WABA (`owner_business_info` is a field on the WABA node).
         wabaAccount: {
@@ -188,6 +200,7 @@ export class WhatsappService {
         },
         qualityRating: true,
         throughputLevel: true,
+        registrationStatus: true,
       },
     });
     const config = (conn?.config ?? {}) as MetaChannelConfig;
@@ -250,6 +263,36 @@ export class WhatsappService {
       }
     }
 
+    // Best-effort webhook health, mirroring the Messenger/Instagram getConfig
+    // reads: a number can be "connected" with perfect credentials and still
+    // receive nothing, because the WABA↔app subscription lives on Meta's side
+    // and a dashboard re-save silently resets it. Read the truth live so the
+    // settings page can replace its static "final check" hint with a verdict.
+    // Never fatal — a Graph blip leaves it null (= unknown, keep the hint);
+    // the 30-min sweeper independently self-heals a genuinely missing one.
+    let subscription: WhatsappConfigView["subscription"] = null;
+    const subWabaId = conn?.wabaAccount?.externalWabaId;
+    if (conn?.isActive && subWabaId && accessToken) {
+      try {
+        const res = await graphGetJson(
+          `${GRAPH_BASE}/${GRAPH_VERSION}/${encodeURIComponent(subWabaId)}/subscribed_apps`,
+          accessToken,
+          undefined,
+          appSecret ?? undefined,
+        );
+        subscription = {
+          subscribed: isAppSubscribedToWaba(res, config.appId),
+          // any-app fallback when no appId is stored — an honest "probably"
+          // rather than a firm "yes"; see isAppSubscribedToWaba.
+          scopedToApp: Boolean(config.appId),
+        };
+      } catch (err) {
+        this.logger.warn(
+          `[${workspaceId}] could not read WABA subscription: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
     return {
       phoneNumberId: config.phoneNumberId ?? null,
       displayPhoneNumber: config.displayPhoneNumber ?? null,
@@ -267,6 +310,12 @@ export class WhatsappService {
       messagingDailyCap: conn?.wabaAccount?.portfolio?.messagingDailyCap ?? null,
       qualityRating: conn?.qualityRating ?? null,
       throughputLevel: conn?.throughputLevel ?? null,
+      registrationStatus: conn?.registrationStatus ?? null,
+      subscription,
+      webhookRejection: recentWebhookRejection(
+        conn?.lastWebhookRejectedAt ?? null,
+        conn?.lastWebhookRejectReason ?? null,
+      ),
     };
   }
 
@@ -359,6 +408,10 @@ export class WhatsappService {
     let displayNumber: string | undefined;
     let verifiedName: string | undefined;
     let nameStatus: string | undefined;
+    // Persisted alongside the identity fields below — the 2026-08-11 incident:
+    // this was read, warned about once, and DROPPED, so the settings page said
+    // "Connected" forever over a number whose every send failed.
+    let registrationStatus: string | undefined;
     try {
       // One node read validates the credentials AND captures the number's
       // identity + readiness: `verified_name`/`name_status` (a NONE/EXPIRED
@@ -413,6 +466,7 @@ export class WhatsappService {
       // failures that each burn one of Meta's 10-per-72h registration
       // attempts (doc-review 2026-08-11; the field was fetched and dropped).
       const status = data.status?.toUpperCase();
+      registrationStatus = status;
       const codeVerification = data.code_verification_status?.toUpperCase();
       if (status && status !== "CONNECTED") {
         if (codeVerification === "NOT_VERIFIED") {
@@ -608,6 +662,19 @@ export class WhatsappService {
       if (capWarning) warnings.push(capWarning);
     }
 
+    // appId is shared — source it from the Meta App connection (used for
+    // template header-media upload); a pasted value or existing one overrides.
+    // When NOTHING supplies it, learn it from the token itself (`/app` resolves
+    // to the issuing app): without a stored appId, `isAppSubscribedToWaba`
+    // degrades to any-app, so a WABA shared with another BSP reads "subscribed"
+    // while our app receives nothing. One extra Graph read, connect-time only;
+    // best-effort (null leaves the field absent, the sweeper backfills later).
+    const resolvedAppId =
+      input.appId?.trim() ||
+      meta?.appId ||
+      existingConfig.appId ||
+      (await fetchTokenAppId(accessToken, GRAPH_VERSION, appSecret ?? undefined)) ||
+      undefined;
     const newConfig = pruneUndefined<MetaChannelConfig>({
       phoneNumberId,
       verifyToken,
@@ -616,9 +683,7 @@ export class WhatsappService {
       // send-config loader reading the JSON while template scoping read the column
       // — two copies of one fact that could drift. The `wabaAccountId` FK is the
       // single authority and the loader joins it.
-      // appId is shared — source it from the Meta App connection (used for
-      // template header-media upload); a pasted value or existing one overrides.
-      appId: input.appId?.trim() || meta?.appId || existingConfig.appId || undefined,
+      appId: resolvedAppId,
     });
     // Encrypted at rest with the app-wide ENCRYPTION_KEY (lib/crypto/envelope.ts).
     // Read paths (getMetaSendConfig / getMetaWebhookConfig) decrypt transparently.
@@ -646,6 +711,7 @@ export class WhatsappService {
         // The number's Meta-verified identity, captured by the node read above.
         verifiedName: verifiedName ?? null,
         nameStatus: nameStatus ?? null,
+        registrationStatus: registrationStatus ?? null,
         // First account on this channel becomes the send default.
         isDefault: !(await this.db.channelConnection.count({
           where: { workspaceId, channel: META_PROVIDER },
@@ -660,6 +726,7 @@ export class WhatsappService {
         // Meta hiccup can't blank a stored name (the webhook keeps it live).
         ...(verifiedName !== undefined ? { verifiedName } : {}),
         ...(nameStatus !== undefined ? { nameStatus } : {}),
+        ...(registrationStatus !== undefined ? { registrationStatus } : {}),
         config: newConfig as Prisma.InputJsonValue,
         secrets: newSecrets as Prisma.InputJsonValue,
         isActive: true,
@@ -1267,6 +1334,12 @@ export class WhatsappService {
   async disconnect(workspaceId: string, confirmAll?: boolean): Promise<void> {
     // Refuse an ambiguous blast radius; see the helper.
     await assertChannelDisconnectConfirmed(workspaceId, META_PROVIDER, confirmAll);
+    // Gather the rows BEFORE the delete — they are the credential source for
+    // the webhook-subscription release below, and gone afterwards.
+    const departing = await this.db.channelConnection.findMany({
+      where: { workspaceId, channel: META_PROVIDER },
+      select: { secrets: true, wabaAccount: { select: { externalWabaId: true } } },
+    });
     // Drop the connection row entirely (wipes creds + verify token, matching
     // the old "null every meta_* column" behavior). Historical messages are
     // untouched — they live on their own tables. deleteMany so a
@@ -1274,6 +1347,60 @@ export class WhatsappService {
     await this.db.channelConnection.deleteMany({
       where: { workspaceId, channel: META_PROVIDER },
     });
+    // Release every WABA subscription the channel held. The per-account
+    // remove path has released since 2026-07-29; this channel-wide disconnect
+    // never did — Meta kept POSTing every number's traffic, dropped as
+    // `unknown_account` (2026-08-13). IOU-first like the remove path, so a
+    // Graph failure leaves a durable retry (subscription-release-retry.ts).
+    const byWaba = new Map<string, { accessToken?: string; appSecret?: string }>();
+    for (const row of departing) {
+      const wabaId = row.wabaAccount?.externalWabaId;
+      const raw = (row.secrets ?? {}) as { accessToken?: string; appSecret?: string };
+      if (!wabaId || !raw.accessToken || byWaba.has(wabaId)) continue;
+      // Explicit PICK, not the cast object — the ledger must hold only the two
+      // ciphertexts the release needs, never whatever else `secrets` may grow.
+      byWaba.set(wabaId, {
+        accessToken: raw.accessToken,
+        ...(raw.appSecret ? { appSecret: raw.appSecret } : {}),
+      });
+    }
+    for (const [wabaId, s] of byWaba) {
+      const pendingId = await enqueuePendingRelease({
+        workspaceId,
+        channel: META_PROVIDER,
+        externalObjectId: wabaId,
+        secrets: s,
+      });
+      let accessToken: string | null = null;
+      try {
+        accessToken = decryptSecret(s.accessToken!);
+      } catch {
+        continue; // undecryptable — the IOU stays; the sweeper reports it
+      }
+      let appSecret: string | undefined;
+      if (s.appSecret) {
+        try {
+          appSecret = decryptSecret(s.appSecret);
+        } catch {
+          appSecret = undefined;
+        }
+      }
+      if (!appSecret) {
+        appSecret = (await getMetaConnection(workspaceId))?.appSecret ?? undefined;
+      }
+      const released = await releaseWabaSubscription(
+        wabaId,
+        accessToken,
+        GRAPH_VERSION,
+        appSecret,
+      );
+      if (released.ok) await resolvePendingRelease(pendingId);
+      else
+        this.logger.warn(
+          `[${workspaceId}] WABA ${wabaId} subscription release failed on disconnect ` +
+            `(retry sweeper owns it): ${released.error}`,
+        );
+    }
     // Every portfolio row just lost all its connections (SetNull FK) — GC them
     // so a later reconnect starts clean instead of self-healing onto a stale
     // container.

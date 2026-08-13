@@ -19,7 +19,7 @@ import {
   isPairRateLimitError,
   normalizeMetaSendError,
 } from "@/lib/providers/meta";
-import { flagChannelNeedsReconnect, clearChannelNeedsReconnect } from "@/lib/providers/channel-health";
+import { flagChannelNeedsReconnect } from "@/lib/providers/channel-health";
 import { createWorkerConnection } from "@/lib/workflows/queue";
 
 import { MessagesService } from "./messages.service";
@@ -374,9 +374,9 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     try {
       await this.messages.executeTextSendJob(data, jobId);
-      // Send worked → the token is healthy; self-heal a stale reconnect flag
-      // (no-op query when it isn't set). Covers every channel, incl. WhatsApp.
-      void clearChannelNeedsReconnect(data.workspaceId, data.channel ?? "whatsapp");
+      // The reconnect-flag self-heal lives INSIDE executeTextSendJob now,
+      // scoped to the account that sent — a channel-wide clear here un-flagged
+      // a sibling account's real breakage (2026-08-13).
     } catch (err) {
       const { reason, detail, recoverable } = categorizeSendError(err);
 

@@ -95,6 +95,42 @@ export function isAppSubscribedToWaba(
 }
 
 /**
+ * The Meta APP the token belongs to (`GET /app?fields=id` — the `/app` node
+ * resolves to the app that ISSUED the bearer token).
+ *
+ * This is what makes the "is OUR app subscribed" check above scopable for rows
+ * connected before the App ID form field existed: their `config.appId` is
+ * empty, so `isAppSubscribedToWaba` degrades to any-app — a shared WABA reads
+ * healthy while our app receives nothing. Learn the id from the token once
+ * (connect-time, plus a one-shot sweeper backfill for legacy rows), persist
+ * it, and the fallback branch becomes unreachable in practice while staying
+ * exactly as documented for the rows it still covers.
+ *
+ * Never throws — `null` means "couldn't learn it today"; callers keep the
+ * unscoped behaviour and try again another day.
+ */
+export async function fetchTokenAppId(
+  accessToken: string,
+  graphVersion: string,
+  appSecret?: string,
+): Promise<string | null> {
+  try {
+    const res = await graphGetJson(
+      `${GRAPH_BASE}/${graphVersion}/app?fields=id`,
+      accessToken,
+      { retry: true },
+      appSecret,
+    );
+    const id = (res as { id?: unknown }).id;
+    if (typeof id === "string" && id.length > 0) return id;
+    if (typeof id === "number") return String(id);
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Every phone-number id this WABA currently owns (`GET /{waba-id}/phone_numbers`).
  *
  * Two callers, one question: connect-time asserts the pasted WABA really owns the

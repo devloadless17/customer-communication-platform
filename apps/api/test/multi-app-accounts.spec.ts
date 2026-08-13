@@ -27,14 +27,14 @@
  */
 import { existsSync } from "node:fs";
 
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, type Prisma } from "@prisma/client";
 import { createTestPrismaClient } from "./_prisma";
 import { seedWabaAccount } from "./_waba";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { setSharedDb } from "@/lib/db";
 import { decryptSecret, encryptSecret } from "@/lib/crypto/envelope";
-import { invalidateProviderConfig } from "@/lib/providers/config";
+import { getMetaSendConfig, invalidateProviderConfig } from "@/lib/providers/config";
 import { invalidateMetaConnection } from "@/lib/providers/meta-connection";
 import { WhatsappService } from "@/workspace-settings/whatsapp/whatsapp.service";
 import { InstagramService } from "@/workspace-settings/instagram/instagram.service";
@@ -307,5 +307,146 @@ describe("an account on the SHARED Meta app", () => {
     expect((await storedCreds(PHONE_SHARED)).appSecret).toBe(rotatedShared);
     // …and the own-app number is untouched by the other account's rotation.
     expect((await storedCreds(PHONE_OWN)).appSecret).toBe(OWN_SECRET);
+  });
+});
+
+/**
+ * LOAD-TIME token/secret pairing — the twin of the store-time pins above
+ * (2026-08-13, pre-Embedded-Signup fence).
+ *
+ * `getMetaSendConfig` prefers a WABA-row business token when one exists (ES
+ * stores ONE customer-scoped token per WABA), but until 2026-08-13 the
+ * `appsecret_proof` secret ALWAYS came from the connection row — a token and
+ * a secret from two different Meta apps, which 400s every signed call. The
+ * pairing is now chosen as one struct in one branch: a WABA token takes the
+ * WABA row's secret, else the platform META_APP_SECRET (ES business tokens
+ * are issued by the platform app) — never the connection row's.
+ */
+describe("load-time token/secret pairing (WABA business token)", () => {
+  const ES_TOKEN = `${S}_es_business_token`;
+  let ownConnId = "";
+
+  beforeAll(async () => {
+    ownConnId = (
+      await prisma.channelConnection.findFirstOrThrow({
+        where: { workspaceId, channel: "whatsapp", externalAccountId: PHONE_OWN },
+        select: { id: true },
+      })
+    ).id;
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await prisma.whatsappBusinessAccount.update({
+      where: { externalWabaId: WABA_OWN },
+      data: { secrets: {} },
+    });
+    invalidateProviderConfig(workspaceId);
+  });
+
+  it("pairs a WABA-row token with the platform secret, never the connection row's", async () => {
+    vi.stubEnv("META_APP_SECRET", `${S}_platform_secret`);
+    await prisma.whatsappBusinessAccount.update({
+      where: { externalWabaId: WABA_OWN },
+      data: { secrets: { accessToken: encryptSecret(ES_TOKEN) } },
+    });
+    invalidateProviderConfig(workspaceId);
+
+    const config = await getMetaSendConfig(workspaceId, ownConnId);
+    expect(config.accessToken).toBe(ES_TOKEN); // the WABA token won
+    expect(config.appSecret).toBe(`${S}_platform_secret`); // paired with the platform app
+    expect(config.appSecret).not.toBe(OWN_SECRET); // the exact fenced bug
+  });
+
+  it("a WABA row carrying its OWN secret pairs with that one", async () => {
+    await prisma.whatsappBusinessAccount.update({
+      where: { externalWabaId: WABA_OWN },
+      data: {
+        secrets: {
+          accessToken: encryptSecret(ES_TOKEN),
+          appSecret: encryptSecret(`${S}_waba_own_secret`),
+        },
+      },
+    });
+    invalidateProviderConfig(workspaceId);
+
+    const config = await getMetaSendConfig(workspaceId, ownConnId);
+    expect(config.accessToken).toBe(ES_TOKEN);
+    expect(config.appSecret).toBe(`${S}_waba_own_secret`);
+  });
+
+  it("without a WABA token, the connection row's own pair still holds", async () => {
+    const config = await getMetaSendConfig(workspaceId, ownConnId);
+    expect(config.accessToken).toBe(OWN_TOKEN);
+    expect(config.appSecret).toBe(OWN_SECRET);
+  });
+});
+
+/**
+ * getConfig's LIVE `subscribed_apps` verdict (2026-08-13) — WhatsApp parity
+ * with the Messenger/Instagram settings reads. The static "final check" hint
+ * becomes a real answer, and it must be scoped to OUR app (a WABA shared with
+ * another BSP reads non-empty while we receive nothing).
+ */
+describe("whatsapp getConfig live subscription verdict", () => {
+  const OUR_APP = `${S}_verdict_app`;
+
+  async function setDefaultRowAppId(appId: string | null) {
+    const row = await prisma.channelConnection.findFirstOrThrow({
+      where: { workspaceId, channel: "whatsapp", isDefault: true },
+      select: { id: true, config: true },
+    });
+    const config = { ...(row.config as Record<string, unknown>) };
+    if (appId) config.appId = appId;
+    else delete config.appId;
+    await prisma.channelConnection.update({
+      where: { id: row.id },
+      data: { config: config as Prisma.InputJsonObject },
+    });
+  }
+
+  function stubSubscribedApps(payload: unknown | Error) {
+    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes("/subscribed_apps")) {
+        if (payload instanceof Error) throw payload;
+        return jsonResponse(payload);
+      }
+      return jsonResponse({ success: true, data: [] });
+    });
+  }
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    await setDefaultRowAppId(null);
+  });
+
+  it("false when only another BSP subscribes; true when ours is present; honest about scoping", async () => {
+    await setDefaultRowAppId(OUR_APP);
+    stubSubscribedApps({ data: [{ whatsapp_business_api_data: { id: "someone_else" } }] });
+    let view = await service.getConfig(workspaceId);
+    expect(view.subscription).toEqual({ subscribed: false, scopedToApp: true });
+
+    stubSubscribedApps({
+      data: [
+        { whatsapp_business_api_data: { id: "someone_else" } },
+        { whatsapp_business_api_data: { id: OUR_APP } },
+      ],
+    });
+    view = await service.getConfig(workspaceId);
+    expect(view.subscription).toEqual({ subscribed: true, scopedToApp: true });
+  });
+
+  it("falls back to any-app (scopedToApp=false) when no appId is stored", async () => {
+    stubSubscribedApps({ data: [{ whatsapp_business_api_data: { id: "someone_else" } }] });
+    const view = await service.getConfig(workspaceId);
+    expect(view.subscription).toEqual({ subscribed: true, scopedToApp: false });
+  });
+
+  it("a Graph error leaves the verdict NULL and never fails getConfig", async () => {
+    stubSubscribedApps(new Error("Graph 503"));
+    const view = await service.getConfig(workspaceId);
+    expect(view.subscription).toBeNull();
+    expect(view.phoneNumberId).not.toBeNull(); // the page still rendered
   });
 });

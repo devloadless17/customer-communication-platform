@@ -59,6 +59,9 @@ export interface ChannelAccountView {
 export interface ChannelAccountHealth {
   qualityRating: string | null;
   throughputLevel: string | null;
+  /** Cloud API registration state (Meta `status`, raw) — non-CONNECTED means
+   *  every send from this number fails. */
+  registrationStatus: string | null;
   updatedAt: string | null;
   portfolio: {
     externalId: string | null;
@@ -120,6 +123,8 @@ export interface MessengerConfigView {
   appSecret: string | null;
   credentialsUndecryptable: boolean;
   needsReconnect: boolean;
+  /** Webhooks we 403'd in the last 24h — inbound may be silently dropping. */
+  webhookRejection: { at: string; reason: string } | null;
   /** Live Page↔app webhook subscription; null when it couldn't be checked. */
   webhookSubscription: {
     receivesMessages: boolean;
@@ -149,6 +154,8 @@ export interface InstagramConfigView {
   appSecret: string | null;
   credentialsUndecryptable: boolean;
   needsReconnect: boolean;
+  /** Webhooks we 403'd in the last 24h — inbound may be silently dropping. */
+  webhookRejection: { at: string; reason: string } | null;
   /** Live subscription of the LINKED PAGE (IG DMs ride it); null when unchecked. */
   webhookSubscription: {
     receivesMessages: boolean;

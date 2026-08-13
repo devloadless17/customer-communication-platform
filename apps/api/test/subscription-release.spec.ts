@@ -29,6 +29,7 @@ import { seedWabaAccount } from "./_waba";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { setSharedDb } from "@/lib/db";
+import { sweepSubscriptionReleasesOnce } from "@/lib/sweepers/subscription-release-retry";
 import { encryptSecret } from "@/lib/crypto/envelope";
 import { ChannelAccountsService } from "@/workspace-settings/channel-accounts/channel-accounts.service";
 import type { DbService } from "@/db/db.service";
@@ -224,6 +225,97 @@ describe("the release is best-effort", () => {
     await expect(service.remove(workspaceId, "whatsapp", only)).resolves.toBeUndefined();
     expect(
       await prisma.channelConnection.findUnique({ where: { id: only } }),
+    ).toBeNull();
+  });
+});
+
+/**
+ * The retry LEDGER (2026-08-13) — a failed release is no longer the end of
+ * the story. `PendingSubscriptionRelease` is written before the inline
+ * attempt, deleted on success, and settled by the retry sweeper with a
+ * reconnect-race guard and a loud give-up at 7 attempts.
+ */
+describe("the release retry ledger", () => {
+  it("a failed DELETE leaves an IOU; a successful one settles it", async () => {
+    vi.stubGlobal("fetch", async () => new Response("nope", { status: 500 }));
+    const wabaId = `${S}_waba_iou`;
+    const waba = await seedWabaAccount(prisma, workspaceId, wabaId);
+    const only = await mkWhatsapp("iou", waba, true);
+    await service.remove(workspaceId, "whatsapp", only);
+    const iou = await prisma.pendingSubscriptionRelease.findFirst({
+      where: { workspaceId, externalObjectId: wabaId },
+    });
+    expect(iou).not.toBeNull();
+    expect(iou!.channel).toBe("whatsapp");
+
+    // The sweeper retries once Graph recovers, and settles the row.
+    stubGraph();
+    await sweepSubscriptionReleasesOnce();
+    expect(deletedFor(wabaId)).toBe(true);
+    expect(
+      await prisma.pendingSubscriptionRelease.findFirst({
+        where: { workspaceId, externalObjectId: wabaId },
+      }),
+    ).toBeNull();
+  });
+
+  it("a successful inline release writes and immediately settles the IOU", async () => {
+    stubGraph();
+    const wabaId = `${S}_waba_ok`;
+    const waba = await seedWabaAccount(prisma, workspaceId, wabaId);
+    const only = await mkWhatsapp("ok", waba, true);
+    await service.remove(workspaceId, "whatsapp", only);
+    expect(deletedFor(wabaId)).toBe(true);
+    expect(
+      await prisma.pendingSubscriptionRelease.findFirst({
+        where: { workspaceId, externalObjectId: wabaId },
+      }),
+    ).toBeNull();
+  });
+
+  it("a reconnect that raced the retry makes the release MOOT — dropped without calling Graph", async () => {
+    vi.stubGlobal("fetch", async () => new Response("nope", { status: 500 }));
+    const wabaId = `${S}_waba_race`;
+    const waba = await seedWabaAccount(prisma, workspaceId, wabaId);
+    const only = await mkWhatsapp("race", waba, true);
+    await service.remove(workspaceId, "whatsapp", only);
+    expect(
+      await prisma.pendingSubscriptionRelease.findFirst({
+        where: { workspaceId, externalObjectId: wabaId },
+      }),
+    ).not.toBeNull();
+
+    // The customer reconnects the same WABA before the retry fires. Releasing
+    // now would take the LIVE account's inbound dark — the guard must drop
+    // the row instead.
+    const wabaAgain = await seedWabaAccount(prisma, workspaceId, wabaId);
+    await mkWhatsapp("race2", wabaAgain, false);
+    stubGraph(); // records calls; none may be a DELETE for this WABA
+    await sweepSubscriptionReleasesOnce();
+    expect(deletedFor(wabaId)).toBe(false);
+    expect(
+      await prisma.pendingSubscriptionRelease.findFirst({
+        where: { workspaceId, externalObjectId: wabaId },
+      }),
+    ).toBeNull();
+  });
+
+  it("gives up LOUDLY at the attempt ceiling and drops the row", async () => {
+    vi.stubGlobal("fetch", async () => new Response("nope", { status: 500 }));
+    const wabaId = `${S}_waba_ceiling`;
+    const waba = await seedWabaAccount(prisma, workspaceId, wabaId);
+    const only = await mkWhatsapp("ceiling", waba, true);
+    await service.remove(workspaceId, "whatsapp", only);
+    // Fast-forward the ledger to one attempt below the ceiling.
+    await prisma.pendingSubscriptionRelease.updateMany({
+      where: { workspaceId, externalObjectId: wabaId },
+      data: { attempts: 6, nextAttemptAt: new Date(0) },
+    });
+    await sweepSubscriptionReleasesOnce(); // 7th failure → give up
+    expect(
+      await prisma.pendingSubscriptionRelease.findFirst({
+        where: { workspaceId, externalObjectId: wabaId },
+      }),
     ).toBeNull();
   });
 });

@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { LocalTime } from "@/components/local-time";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/layouts/page-header";
@@ -56,6 +57,13 @@ export interface WhatsappCurrent {
   messagingDailyCap?: number | null;
   qualityRating?: string | null;
   throughputLevel?: string | null;
+  /** Cloud API registration state (Meta `status`, raw). Non-CONNECTED means
+   *  every send fails — the card must not say "Connected" over it. */
+  registrationStatus?: string | null;
+  /** Live WABA↔app webhook-subscription verdict (null = couldn't read). */
+  subscription?: { subscribed: boolean; scopedToApp: boolean } | null;
+  /** Webhooks we 403'd in the last 24h — inbound may be silently dropping. */
+  webhookRejection?: { at: string; reason: string } | null;
 }
 
 export function WhatsappSettings({
@@ -480,14 +488,48 @@ function ConnectionStatus({
       </div>
     );
   }
+  // Cloud API registration is what actually lets the number SEND — a stored
+  // credential set with a non-CONNECTED status is not "Connected", and saying
+  // so was the 2026-08-11 live incident (warned once at connect, then this
+  // card re-read green forever).
+  const registration = current.registrationStatus ?? null;
+  const notRegistered = Boolean(registration && registration !== "CONNECTED");
   return (
-    <div className="rounded-xl border border-success-border bg-success-bg p-4 text-xs">
+    <div
+      className={cn(
+        "rounded-xl border p-4 text-xs",
+        notRegistered
+          ? "border-warning-border bg-warning-bg"
+          : "border-success-border bg-success-bg",
+      )}
+    >
       <div className="flex items-center gap-2">
-        <Check className="size-3.5 text-success-fg" />
-        <span className="font-medium text-success-fg">
-          Connected
+        {notRegistered ? (
+          <AlertTriangle className="size-3.5 text-warning-fg" />
+        ) : (
+          <Check className="size-3.5 text-success-fg" />
+        )}
+        <span className={cn("font-medium", notRegistered ? "text-warning-fg" : "text-success-fg")}>
+          {notRegistered
+            ? registration === "PENDING"
+              ? "Registration incomplete"
+              : "Not registered"
+            : "Connected"}
         </span>
+        {notRegistered && (
+          <span className="rounded-full border border-warning-border px-1.5 py-0.5 font-mono text-2xs text-warning-fg">
+            {registration}
+          </span>
+        )}
       </div>
+      {notRegistered && (
+        <p className="mt-2 text-warning-fg/90">
+          Sends will fail until this number is registered for Cloud API. Use
+          &quot;Register number&quot; (two-step PIN) below, or register it in WhatsApp
+          Manager → Phone numbers. A number still on the WhatsApp Business phone app
+          must be migrated off it first.
+        </p>
+      )}
       <dl className="mt-2 grid grid-cols-[120px_1fr] gap-x-3 gap-y-1 text-muted-foreground">
         {current.displayNumber && (
           <>
@@ -550,13 +592,55 @@ function ConnectionStatus({
           </div>
         </div>
       )}
+      {current.webhookRejection && (
+        <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-amber-700 dark:text-amber-400">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+          <div>
+            <p className="font-medium">
+              {current.webhookRejection.reason === "bad_signature"
+                ? "Incoming webhooks are being rejected — signature mismatch"
+                : "Incoming webhooks are arriving without stored credentials"}
+            </p>
+            <p className="mt-0.5 text-amber-700/80 dark:text-amber-400/80">
+              {current.webhookRejection.reason === "bad_signature"
+                ? "Meta is sending webhooks we can't verify because the signature doesn't match the stored App secret — incoming messages may be silently dropped. Re-copy the App secret (Meta App dashboard → Settings → Basic), or check whether this callback URL is subscribed under a different Meta app."
+                : "Meta is delivering webhooks but this channel has no stored credentials to verify them — finish connecting the channel below."}{" "}
+              Last rejected <LocalTime iso={current.webhookRejection.at} format="listTime" /> ago.
+            </p>
+          </div>
+        </div>
+      )}
+      {current.subscription && !current.subscription.subscribed && (
+        <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-amber-700 dark:text-amber-400">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+          <div>
+            <p className="font-medium">Not subscribed to this WABA&apos;s webhooks</p>
+            <p className="mt-0.5 text-amber-700/80 dark:text-amber-400/80">
+              {current.subscription.scopedToApp
+                ? "This app is not among the WABA's subscribers, so no incoming messages will arrive."
+                : "Nothing is subscribed to this WABA, so no incoming messages will arrive."}{" "}
+              This usually self-heals within 30 minutes; to fix it now, press
+              &quot;Validate &amp; save&quot; on the credentials form, or subscribe the app in
+              Meta → WhatsApp → Configuration.
+            </p>
+          </div>
+        </div>
+      )}
       {showFinalStepHint && (
         <>
-          <p className="mt-3 border-t border-success-border pt-2 text-2xs text-muted-foreground">
-            Final check: in Meta → WhatsApp → Configuration, confirm you&apos;ve subscribed
-            to the <span className="font-mono">messages</span> field. Without it, no
-            incoming messages will arrive.
-          </p>
+          {current.subscription?.subscribed ? (
+            <p className="mt-3 border-t border-success-border pt-2 text-2xs text-muted-foreground">
+              Webhook subscription verified{" "}
+              {current.subscription.scopedToApp ? "for this app" : "(any app — App id unknown)"} —
+              the <span className="font-mono">messages</span> field is delivered to this WABA.
+            </p>
+          ) : current.subscription ? null : (
+            <p className="mt-3 border-t border-success-border pt-2 text-2xs text-muted-foreground">
+              Final check: in Meta → WhatsApp → Configuration, confirm you&apos;ve subscribed
+              to the <span className="font-mono">messages</span> field. Without it, no
+              incoming messages will arrive.
+            </p>
+          )}
           <p className="mt-2 text-2xs text-muted-foreground">
             Using this number on your phone too (Coexistence)? Also subscribe to{" "}
             <span className="font-mono">smb_message_echoes</span>,{" "}

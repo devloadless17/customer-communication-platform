@@ -43,6 +43,7 @@ export default async function InstagramSettingsPage() {
       appSecret: config.appSecret,
       credentialsUndecryptable: config.credentialsUndecryptable,
       needsReconnect: config.needsReconnect,
+      webhookRejection: config.webhookRejection,
       webhookSubscription: config.webhookSubscription,
     };
   } else {

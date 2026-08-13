@@ -12,6 +12,7 @@ import {
   getPageSubscription,
   releasePageSubscription,
 } from "@/lib/providers/meta-page-subscription";
+import { recentWebhookRejection } from "@/lib/providers/channel-health";
 import { getMetaConnection } from "@/lib/providers/meta-connection";
 import { assertChannelDisconnectConfirmed } from "@/lib/providers/assert-channel-disconnect";
 
@@ -79,6 +80,9 @@ export interface MessengerConfigView {
   /** True when a send failed with Graph 190 — the token expired/was revoked and
    *  the channel must be reconnected. Drives the Settings "reconnect" banner. */
   needsReconnect: boolean;
+  /** Inbound webhooks we 403'd within the last 24h (bad_signature / no_config)
+   *  — see WhatsappConfigView.webhookRejection; same shape, same 24h filter. */
+  webhookRejection: { at: string; reason: string } | null;
   /**
    * Live Page↔app webhook subscription, read from Graph. `null` when we can't
    * check (not connected yet, or Graph unreachable). When `receivesMessages` is
@@ -148,7 +152,13 @@ export class MessengerService {
   async getConfig(workspaceId: string): Promise<MessengerConfigView> {
     const conn = await this.db.channelConnection.findFirst({
       where: { workspaceId, channel: CHANNEL, isDefault: true },
-      select: { config: true, secrets: true, needsReconnect: true },
+      select: {
+        config: true,
+        secrets: true,
+        needsReconnect: true,
+        lastWebhookRejectedAt: true,
+        lastWebhookRejectReason: true,
+      },
     });
     const config = (conn?.config ?? {}) as MessengerChannelConfig;
     const secrets = (conn?.secrets ?? {}) as MessengerChannelSecrets;
@@ -273,6 +283,10 @@ export class MessengerService {
       appSecret,
       credentialsUndecryptable,
       needsReconnect: conn?.needsReconnect ?? false,
+      webhookRejection: recentWebhookRejection(
+        conn?.lastWebhookRejectedAt ?? null,
+        conn?.lastWebhookRejectReason ?? null,
+      ),
       webhookSubscription,
       integrity,
     };

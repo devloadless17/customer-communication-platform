@@ -13,6 +13,10 @@ import { getMetaConnection } from "@/lib/providers/meta-connection";
 import { releaseWabaSubscription } from "@/lib/providers/meta-waba-subscription";
 import { releasePageSubscription } from "@/lib/providers/meta-page-subscription";
 import {
+  enqueuePendingRelease,
+  resolvePendingRelease,
+} from "@/lib/sweepers/subscription-release-retry";
+import {
   gcOrphanWhatsappPortfolios,
   portfolioTemplateLimit,
 } from "@/lib/providers/meta-health";
@@ -91,6 +95,9 @@ export interface ChannelAccountHealth {
   qualityRating: string | null;
   /** STANDARD (~80 msg/s) | HIGH (~1,000 msg/s) — per number. */
   throughputLevel: string | null;
+  /** Cloud API registration state (Meta `status`, raw) — per number.
+   *  Non-CONNECTED means every send fails; drives the "Not registered" pill. */
+  registrationStatus: string | null;
   /** When Meta last told us, or we last asked. */
   updatedAt: string | null;
   /**
@@ -228,6 +235,7 @@ export class ChannelAccountsService {
         createdAt: true,
         qualityRating: true,
         throughputLevel: true,
+        registrationStatus: true,
         messagingHealthUpdatedAt: true,
       },
     });
@@ -259,6 +267,7 @@ export class ChannelAccountsService {
           : {
               qualityRating: r.qualityRating,
               throughputLevel: r.throughputLevel,
+              registrationStatus: r.registrationStatus,
               updatedAt: r.messagingHealthUpdatedAt?.toISOString() ?? null,
               portfolio: r.wabaAccount?.portfolio
                 ? {
@@ -586,12 +595,28 @@ export class ChannelAccountsService {
         where: { workspaceId, channel: "whatsapp", wabaAccountId: target.wabaAccount.id },
       });
       if (siblings > 0) return; // another number still needs this WABA's webhooks
-      await releaseWabaSubscription(
+      // IOU first, settle on success — a Graph blip used to end the story
+      // here and Meta kept POSTing forever. See subscription-release-retry.ts.
+      const pendingId = await enqueuePendingRelease({
+        workspaceId,
+        channel: "whatsapp",
+        externalObjectId: target.wabaAccount.externalWabaId,
+        secrets: {
+          ...(cipher ? { accessToken: cipher } : {}),
+          ...(secrets.appSecret ? { appSecret: secrets.appSecret } : {}),
+        },
+      });
+      const released = await releaseWabaSubscription(
         target.wabaAccount.externalWabaId,
         accessToken,
         GRAPH_VERSION,
         appSecret,
       );
+      if (released.ok) await resolvePendingRelease(pendingId);
+      else
+        this.logger.warn(
+          `[${workspaceId}] WABA subscription release failed (retry sweeper owns it): ${released.error}`,
+        );
       return;
     }
 
@@ -618,10 +643,30 @@ export class ChannelAccountsService {
         return undefined;
       }
     })();
-    await releasePageSubscription(pageId, accessToken, GRAPH_VERSION, {
+    // IOU only when the release will actually DELETE — a kept (still-in-use)
+    // subscription owes Meta nothing.
+    const pendingId = stillInUse
+      ? null
+      : await enqueuePendingRelease({
+          workspaceId,
+          channel,
+          externalObjectId: pageId,
+          secrets: {
+            ...(cipher ? { accessToken: cipher } : {}),
+            ...((target.secrets as { appSecret?: string } | null)?.appSecret
+              ? { appSecret: (target.secrets as { appSecret?: string }).appSecret }
+              : {}),
+          },
+        });
+    const released = await releasePageSubscription(pageId, accessToken, GRAPH_VERSION, {
       stillInUse,
       ...(ownAppSecret ? { appSecret: ownAppSecret } : {}),
     });
+    if (released.ok) await resolvePendingRelease(pendingId);
+    else
+      this.logger.warn(
+        `[${workspaceId}] Page subscription release failed (retry sweeper owns it): ${released.error}`,
+      );
   }
 
   /**
