@@ -58,6 +58,12 @@ provisions their first workspace automatically (stages, starter flags, and a
 One set of app credentials serves WhatsApp, Messenger, and Instagram. Do this
 page before the WhatsApp page.
 
+> **Standard: ONE Meta app per client.** All their numbers, WABAs, Pages and
+> IG accounts subscribe to that one app — one secret to rotate, one dashboard,
+> one callback. (A client arriving with assets already split across two apps
+> still onboards fine — per-connection credential overrides + multi-secret
+> webhook verification handle it — but never *create* a second app.)
+
 - [ ] Paste **App Secret** and **system-user token** (both required).
 - [ ] Fill **App ID** too. Labelled optional, but with it the platform can
       verify "is *our* app subscribed to this WABA" precisely instead of
