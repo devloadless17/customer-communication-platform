@@ -37,7 +37,9 @@ const PreChatFieldSchema = z
      * Inferring it meant a reworded question silently started a second field.
      * Validated against real definitions on save (`assertContactFieldsExist`).
      */
-    key: z.string().trim().min(1).max(60).optional(),
+    // 64, not 60: `slugifyKey` caps the base at 60 and the contact-fields service
+    // appends a `_2`/`_3` suffix on collision, so a real key can exceed 60.
+    key: z.string().trim().min(1).max(64).optional(),
   })
   .strict();
 

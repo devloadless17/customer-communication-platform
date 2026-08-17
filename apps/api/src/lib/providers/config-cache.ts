@@ -78,6 +78,13 @@ export class TtlCache<V> {
     this.map.delete(key);
   }
 
+  /** Drop every entry. For caches keyed by something OTHER than the thing whose
+   *  change invalidates them (e.g. per-conversation entries invalidated by a
+   *  widget-level setting), where targeted deletion isn't possible. */
+  clear(): void {
+    this.map.clear();
+  }
+
   /**
    * Drop every entry whose key starts with `prefix`.
    *

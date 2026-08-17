@@ -5,6 +5,7 @@ import { Prisma } from "@prisma/client";
 
 import {
   invalidateWebchatwidgetKey,
+  invalidateWebchatwidgetShowsAgentName,
   invalidateWebchatwidgetTeam,
   type WebchatwidgetConfig,
   type WebchatwidgetPreChatField,
@@ -181,6 +182,7 @@ export class WebchatwidgetAdminService {
     // resolved config the visitor gateway reads.
     invalidateWebchatwidgetTeam(workspaceId);
     invalidateWebchatwidgetKey(existing.publicKey);
+    invalidateWebchatwidgetShowsAgentName();
     await this.announce(workspaceId);
     return this.toView(updated, existing._count.conversations);
   }

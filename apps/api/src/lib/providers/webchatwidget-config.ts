@@ -177,6 +177,18 @@ export function invalidateWebchatwidgetKey(publicKey: string): void {
 }
 
 /**
+ * Drop the agent-name gate cache. Called on every widget save because the cache
+ * is keyed by CONVERSATION while the setting lives on the WIDGET — there is no
+ * targeted key to delete. Clearing all of it is cheap (one indexed lookup to
+ * refill, only on webchat conversations) and it is the difference between an
+ * admin hiding agent names and that taking effect NOW rather than within 60s,
+ * which for a privacy control is the whole point.
+ */
+export function invalidateWebchatwidgetShowsAgentName(): void {
+  showNameCache.clear();
+}
+
+/**
  * Send-side config. Throws ProviderNotConfigured when the team has no active
  * widget, so the outbound preflight fails fast with `channel_not_connected` —
  * same contract as the Meta loaders. Returns an empty config on success (the
@@ -255,10 +267,16 @@ async function withSelectOptions(
   if (catalog.size === 0) return config;
   return {
     ...config,
-    preChatFields: fields.map((f) => {
-      const entry = f.key ? catalog.get(f.key) : undefined;
-      return entry ? { ...f, options: entry.options } : f;
-    }),
+    preChatFields: fields
+      // A select field with an empty option list has nothing a visitor could
+      // validly answer: the widget falls back to a text box and the server then
+      // fails to resolve whatever they typed, discarding it silently. Dropping
+      // the question is honest — better not to ask than to bin the answer.
+      .filter((f) => !(f.key && catalog.get(f.key)?.options.length === 0))
+      .map((f) => {
+        const entry = f.key ? catalog.get(f.key) : undefined;
+        return entry ? { ...f, options: entry.options } : f;
+      }),
   };
 }
 

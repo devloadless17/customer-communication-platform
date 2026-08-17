@@ -7,6 +7,7 @@ import { normalizeStringMap } from "@/lib/normalize-string-map";
 import { splitContactName } from "@/lib/providers/ingest";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
 import { isReservedFieldKey } from "@ccp/shared/contacts/reserved-fields";
+import type { WebchatwidgetConfig } from "@/lib/providers/webchatwidget-config";
 import type { Channel } from "@ccp/shared/types";
 
 /**
@@ -64,6 +65,56 @@ const BUILTIN_FIELD_BY_SLUG: Record<string, "firstName" | "lastName" | "language
   address: "location",
 };
 
+/**
+ * Coerce a visitor-typed value to what its target column actually stores, or
+ * `null` to refuse it. Free-text columns (name parts, location) take the value
+ * as-is, capped; the coded ones are validated to the same shape the REST contact
+ * schemas enforce, so every writer of these columns agrees.
+ */
+function normalizeBuiltinValue(
+  column: "firstName" | "lastName" | "language" | "countryCode" | "location",
+  raw: string,
+): string | null {
+  const v = raw.trim();
+  if (!v) return null;
+  if (column === "countryCode") {
+    // ISO 3166-1 alpha-2, stored uppercase (contacts.schemas.ts CountryCodeSchema).
+    return /^[A-Za-z]{2}$/.test(v) ? v.toUpperCase() : null;
+  }
+  if (column === "language") {
+    // BCP-47 tag, e.g. "ar", "en-US" (contacts.schemas.ts LanguageSchema: 2–12).
+    return /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$/.test(v) && v.length <= 12 ? v : null;
+  }
+  return v.slice(0, 120);
+}
+
+/**
+ * The custom-field targets a widget is ALLOWED to write, as `key → label`.
+ *
+ * `preChat` arrives from an anonymous, unauthenticated browser, and every key it
+ * carried used to be honoured — including keys naming no configured question. A
+ * scripted client could therefore mint contact fields at will in the tenant's
+ * workspace, bypassing the 50-field cap the settings service enforces, and each
+ * one shows up in the contact panel, exports, filters and the token picker. The
+ * widget's OWN configuration is the authority on what it may collect, so answers
+ * are intersected against it and anything else is dropped.
+ *
+ * The label is carried so a resurrected definition is named after the question
+ * ("Company") rather than its raw slug ("company").
+ */
+export function preChatFieldTargets(config: WebchatwidgetConfig): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const f of config.preChatFields ?? []) {
+    if (f.type !== "text") continue;
+    // Bound questions carry the key; legacy ones still derive it from the label.
+    // An explicit key is already a canonical ContactFieldDefinition key (and can
+    // carry a `_2` collision suffix) — slugifying it again risks truncating it.
+    const key = f.key ? f.key.trim() : slugifyFieldKey(f.label);
+    if (key) out.set(key, (f.label || key).trim().slice(0, 60));
+  }
+  return out;
+}
+
 export async function applyWebchatPreChatIdentity(
   workspaceId: string,
   channel: Channel,
@@ -74,6 +125,9 @@ export async function applyWebchatPreChatIdentity(
     phone?: string | null;
     custom?: Record<string, string> | null;
   },
+  /** What this widget is configured to collect (see preChatFieldTargets). When
+   *  omitted every key is accepted — kept for callers with no widget context. */
+  allowedCustom?: ReadonlyMap<string, string>,
 ): Promise<void> {
   const name = fields.name?.trim() || null;
   const email = fields.email?.trim().toLowerCase() || null;
@@ -156,7 +210,12 @@ export async function applyWebchatPreChatIdentity(
     // diverts the mappable ones; anything else reserved is dropped, not
     // stored under a colliding key.
     if (isReservedFieldKey(key) && !BUILTIN_FIELD_BY_SLUG[key]) continue;
-    candidates.push({ key, label, val });
+    // Not a question this widget asks → not ours to store, and certainly not
+    // ours to create a workspace-wide field for.
+    if (allowedCustom && !allowedCustom.has(key)) continue;
+    // Prefer the CONFIGURED label over the submitted one for anything we may end
+    // up creating a definition from.
+    candidates.push({ key, label: allowedCustom?.get(key) ?? label, val });
   }
   // A REAL definition outranks the alias map. Most alias keys (`first_name`,
   // `location`, …) are reserved, so no definition can exist for them and the
@@ -167,7 +226,9 @@ export async function applyWebchatPreChatIdentity(
   // stored somewhere nobody was looking. An explicitly created field is an
   // explicit intent; only fall back to the column when no definition exists.
   const definedKeys = new Set(
-    (
+    candidates.length === 0
+      ? []
+      : (
       await db.contactFieldDefinition.findMany({
         where: { workspaceId, key: { in: candidates.map((c) => c.key) } },
         select: { key: true },
@@ -180,8 +241,17 @@ export async function applyWebchatPreChatIdentity(
     const { key, val } = candidate;
     const builtin = BUILTIN_FIELD_BY_SLUG[key];
     if (!builtin || definedKeys.has(key)) continue;
+    const clean = normalizeBuiltinValue(builtin, val);
+    // A CODED column refuses a value it can't honour rather than storing prose.
+    // `countryCode` is ISO-3166 alpha-2 and `language` is BCP-47 — every other
+    // write path enforces that (contacts.schemas.ts) and the panel, templates and
+    // workflows all read them as codes. A visitor typing "Lebanon" into a pre-chat
+    // "Country" question would otherwise poison a column the product treats as
+    // machine-readable. Dropping is right: the question is optional context, not
+    // the reason they came, and a wrong code is worse than none.
+    if (clean === null) { candidates.splice(i, 1); continue; }
     // Known contact column → set it directly (skip if already that value).
-    if (contact[builtin] !== val) builtinPatch[builtin] = val.slice(0, 120);
+    if (contact[builtin] !== clean) builtinPatch[builtin] = clean;
     candidates.splice(i, 1);
   }
   // A key that belongs to a SELECT-type definition must store an option ID, never

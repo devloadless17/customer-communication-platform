@@ -21,7 +21,7 @@ import { blobStorage } from "@/lib/blob-storage";
 import { publish } from "@/lib/events/bus";
 import { mapMessage } from "@/lib/queries/_shared";
 import { REPLY_TO_INCLUDE } from "@/lib/queries/_shared";
-import { applyWebchatPreChatIdentity } from "@/lib/identity/webchat-prechat";
+import { applyWebchatPreChatIdentity, preChatFieldTargets } from "@/lib/identity/webchat-prechat";
 import { recordConversationEvent } from "@/lib/inbox/events";
 import {
   recordFirstSeenOrigin,
@@ -436,9 +436,16 @@ export class WebchatwidgetGateway
     if (body.preChat) {
       const contactId = await this.contactIdFor(data.workspaceId, data.externalContactId);
       if (contactId) {
-        await applyWebchatPreChatIdentity(data.workspaceId, CHANNEL, contactId, body.preChat).catch(
-          (err) => this.logger.error(`prechat identity failed: ${err}`),
-        );
+        // Scoped to what THIS widget is configured to ask. `preChat` is
+        // unauthenticated client input, and an unrestricted key set let a
+        // scripted visitor mint workspace-wide contact fields at will.
+        await applyWebchatPreChatIdentity(
+          data.workspaceId,
+          CHANNEL,
+          contactId,
+          body.preChat,
+          preChatFieldTargets(data.resolved.config),
+        ).catch((err) => this.logger.error(`prechat identity failed: ${err}`));
       }
     }
 

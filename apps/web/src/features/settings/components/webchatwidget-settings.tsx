@@ -145,7 +145,15 @@ export function WebchatWidgetSettings({
   }
 
   async function remove(id: string) {
-    if (!confirm("Delete this widget? Existing conversations keep their history.")) return;
+    const last = widgets.filter((w) => w.isActive).length <= 1;
+    if (
+      !confirm(
+        last
+          ? "Delete this widget? It's your only active one, so agents will no longer be able to reply to ANY website chat until you create another. Existing conversations keep their history."
+          : "Delete this widget? Existing conversations keep their history.",
+      )
+    )
+      return;
     setBusy(true);
     setError(null);
     try {
@@ -326,19 +334,19 @@ function Editor({
           {tab === "content" && (
           <Section title="Content">
             <Field label="Widget name" hint="Internal — how you identify this site.">
-              <input value={widget.name} onChange={(e) => onName(e.target.value)} className={inputCls} />
+              <input value={widget.name} maxLength={80} onChange={(e) => onName(e.target.value)} className={inputCls} />
             </Field>
             <Field label="Header title" hint="Shown to visitors at the top of the chat.">
-              <input value={c.headerTitle ?? ""} placeholder={widget.name} onChange={(e) => onConfig({ headerTitle: e.target.value })} className={inputCls} />
+              <input value={c.headerTitle ?? ""} maxLength={80} placeholder={widget.name} onChange={(e) => onConfig({ headerTitle: e.target.value })} className={inputCls} />
             </Field>
             <Field label="Header subtitle">
-              <input value={c.headerSubtitle ?? ""} placeholder="Typically replies in a few minutes" onChange={(e) => onConfig({ headerSubtitle: e.target.value })} className={inputCls} />
+              <input value={c.headerSubtitle ?? ""} maxLength={120} placeholder="Typically replies in a few minutes" onChange={(e) => onConfig({ headerSubtitle: e.target.value })} className={inputCls} />
             </Field>
             <Field label="Welcome message">
-              <textarea value={c.welcomeMessage ?? ""} onChange={(e) => onConfig({ welcomeMessage: e.target.value })} rows={2} className={`${inputCls} resize-y`} />
+              <textarea value={c.welcomeMessage ?? ""} maxLength={1000} onChange={(e) => onConfig({ welcomeMessage: e.target.value })} rows={2} className={`${inputCls} resize-y`} />
             </Field>
             <Field label="Away message" hint="Shown when no agent is online, so visitors know to expect an email reply.">
-              <input value={c.awayMessage ?? ""} placeholder="We're away right now — leave a message and we'll reply by email." onChange={(e) => onConfig({ awayMessage: e.target.value })} className={inputCls} />
+              <input value={c.awayMessage ?? ""} maxLength={200} placeholder="We're away right now — leave a message and we'll reply by email." onChange={(e) => onConfig({ awayMessage: e.target.value })} className={inputCls} />
             </Field>
             <Field label="Suggested questions" hint="One per line, up to 6.">
               <SuggestedQuestions
@@ -389,7 +397,7 @@ function Editor({
           {tab === "behavior" && (
           <Section
             title="Launcher & placement"
-            desc="These shape the install snippet, not the live widget — after changing them, re-copy the snippet from the Install tab onto your site."
+            desc="Deploy mode, position and bubble label shape the INSTALL SNIPPET, not the live widget — after changing them, re-copy the snippet from the Install tab onto your site."
           >
             <div className="grid grid-cols-2 gap-3">
               <Field label="Deploy mode" hint="One per page — the widget is a singleton.">
@@ -420,7 +428,7 @@ function Editor({
             </div>
             {!isInline && (
               <Field label="Bubble label" hint="Optional text beside the bubble.">
-                <input value={c.launcherLabel ?? ""} placeholder="e.g. Chat with us" onChange={(e) => onConfig({ launcherLabel: e.target.value })} className={inputCls} />
+                <input value={c.launcherLabel ?? ""} maxLength={40} placeholder="e.g. Chat with us" onChange={(e) => onConfig({ launcherLabel: e.target.value })} className={inputCls} />
               </Field>
             )}
             {isInline && (
@@ -437,7 +445,7 @@ function Editor({
           {tab === "behavior" && (
           <Section
             title="Pre-chat form"
-            desc="Optionally ask for a few details before the chat starts. Name, Email and Phone fill the contact's own details; choose Text for anything else — it's saved as a workspace contact field, created automatically from the label."
+            desc="Ask for a few details before the chat starts. Each question saves to a contact field you choose, so you always know where an answer lands — pick an existing field or create one here."
           >
             <PreChatEditor
               fields={c.preChatFields ?? []}
@@ -981,6 +989,7 @@ function PreChatEditor({
   }
   function setTarget(i: number, value: string) {
     setErr(null);
+    if (value !== "__new__") setCreatingAt(null); // don't leave a create panel open
     if (value === "__new__") {
       setCreatingAt(i);
       setNewLabel("");
@@ -1035,6 +1044,11 @@ function PreChatEditor({
       {fields.length === 0 && <span className="text-xs text-muted-foreground">No questions — visitors chat right away.</span>}
       {fields.map((f, i) => {
         const bound = f.type === "text" && f.key ? contactFields.find((d) => d.key === f.key) : null;
+        // The bound field was deleted in Settings → Contact fields. Without an
+        // option for it the <select> renders BLANK (selectedIndex -1) and every
+        // save 400s on a key three tabs away — so name it and say what to do.
+        const missing =
+          f.type === "text" && !!f.key && !bound && !PRECHAT_BUILTIN_TARGETS.some((b) => b.key === f.key);
         // A legacy row (configured before the picker) has no key — its answers land
         // in a field named after the question. Say so, and let them re-point it.
         const unbound = f.type === "text" && !f.key;
@@ -1044,6 +1058,7 @@ function PreChatEditor({
               <input
                 value={f.label}
                 onChange={(e) => onChange(fields.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)))}
+                maxLength={60}
                 placeholder="Question the visitor sees"
                 aria-label="Question"
                 className="min-w-0 flex-1 rounded-lg border bg-background px-2.5 py-1.5 text-sm"
@@ -1065,6 +1080,7 @@ function PreChatEditor({
                 className="min-w-0 flex-1 rounded-lg border bg-background px-2 py-1.5 text-sm"
               >
                 {unbound && <option value="">{`Custom field “${f.label}” (created on first answer)`}</option>}
+                {missing && <option value={`field:${f.key}`}>{`⚠ Deleted field “${f.key}” — pick a new one`}</option>}
                 <optgroup label="Contact details">
                   {IDENTITY_TARGETS.map((b) => (
                     <option key={b.value} value={b.value}>{b.label}</option>
@@ -1096,6 +1112,11 @@ function PreChatEditor({
                 Not linked to a contact field yet — pick one above so you know exactly where answers land.
               </p>
             )}
+            {missing && (
+              <p className="text-2xs text-destructive">
+                The contact field this question saved to was deleted. Pick a new destination — saving is blocked until you do.
+              </p>
+            )}
             {creatingAt === i && (
               <div className="flex min-w-0 flex-col gap-1.5 rounded-lg bg-muted/50 p-2">
                 <div className="flex min-w-0 items-center gap-2">
@@ -1104,6 +1125,7 @@ function PreChatEditor({
                     autoFocus
                     onChange={(e) => setNewLabel(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void createField(i); } }}
+                    maxLength={60}
                     placeholder="Field name, e.g. Business name"
                     aria-label="New contact field name"
                     className="min-w-0 flex-1 rounded-lg border bg-background px-2.5 py-1.5 text-sm"
@@ -1144,16 +1166,16 @@ function Preview({ widget }: { widget: WebchatWidgetView }) {
   const dark =
     c.themeMode === "dark" ||
     (c.themeMode === "auto" && typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: dark)").matches);
-  const surface = dark ? "#0f172a" : "#fff";
-  const surface2 = dark ? "#0b1220" : "#f5f7fb";
-  const ink = dark ? "#e8edf6" : "#0f1729";
+  const surface = dark ? "#0f1626" : "#fff";
+  const surface2 = dark ? "#0b101c" : "#f7f8fa";
+  const ink = dark ? "#e8edf6" : "#101828";
   // Light ink2 is #5b6a83, not the old #66748c: the muted text sits on
   // --surface2 (#f5f7fb) where #66748c was 4.41:1 — under WCAG AA's 4.5:1
   // (axe `color-contrast`, audit 2026-08-11). #5b6a83 is 5.1:1 there and
   // 5.5:1 on white; the REAL widget (public/widget.js) ships the same value
   // so preview and product stay one look. Dark mode was already 6.8:1.
   const ink2 = dark ? "#93a1b8" : "#5b6a83";
-  const border = dark ? "#243244" : "#e6e9f0";
+  const border = dark ? "#222c3f" : "#eceef2";
   const font = c.fontFamily === "serif" ? "Georgia, serif" : c.fontFamily === "rounded" ? "ui-rounded, system-ui, sans-serif" : undefined;
   // Match the real widget: it renders every configured question (capped at 6 by the
   // schema), not a hardcoded 3 — the preview was under-reporting.
@@ -1174,7 +1196,9 @@ function Preview({ widget }: { widget: WebchatWidgetView }) {
             // Same two-word initials the real widget renders ("Acme Support" → "AS").
             title.trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "•"
           )}
-          <span className="absolute -bottom-0.5 -right-0.5 size-3 rounded-full bg-emerald-400" style={{ boxShadow: `0 0 0 2px ${primary}` }} />
+          {/* Grey, like the widget: it refuses to show green before the first presence
+              frame, so a green preview would promise a state the product won't fake. */}
+          <span className="absolute -bottom-0.5 -right-0.5 size-3 rounded-full bg-slate-400" style={{ boxShadow: `0 0 0 2px ${primary}` }} />
         </span>
         <div className="min-w-0">
           <div className="truncate text-[15px] font-bold leading-tight">{title}</div>
@@ -1187,8 +1211,14 @@ function Preview({ widget }: { widget: WebchatWidgetView }) {
           // Matches the widget: the welcome is a message FROM the team, avatar and
           // all — keep these two in step, they were divergent once already.
           <div className="flex items-end gap-2">
-            <span className="flex size-7 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold" style={{ background: `${primary}22`, color: primary }}>
-              {(title.trim()[0] || "C").toUpperCase()}
+            <span className="flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-full text-[10px] font-semibold" style={{ background: `${primary}22`, color: primary }}>
+              {c.agentAvatarDataUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={c.agentAvatarDataUrl} alt="" className="size-full object-cover" />
+              ) : (
+                // Two initials, like the widget's `initials()` — "Acme Support" → "AS".
+                title.trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "•"
+              )}
             </span>
             <div className="max-w-[82%] rounded-2xl rounded-bl-md px-3.5 py-2 text-sm" style={{ background: surface, border: `1px solid ${border}`, color: ink }}>
               {c.welcomeMessage}

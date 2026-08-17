@@ -140,6 +140,12 @@
    */
   function resetVisitorIdentity() {
     [K.visitor, K.chatted, K.seen, K.open, K.draft, K.outbox, K.prechat, K.active].forEach(lsDel);
+    // CLOSE FIRST. `deleteDatabase` blocks silently while any connection is open,
+    // and idb() holds one for the tab's lifetime. This used to be masked by the
+    // page reload that followed; ending the session in place made the delete a
+    // no-op, so a "cleared" chat's queued attachments survived and were re-sent
+    // under the NEXT visitor identity. The confirm promises the opposite.
+    idbClose();
     try { indexedDB.deleteDatabase("ccp_wc_" + siteKey); } catch (_e) {}
   }
 
@@ -511,6 +517,21 @@
    * going straight back to a fresh, usable chat.
    */
   function doReset(silent) {
+    // STOP EVERYTHING IN FLIGHT FIRST — a reset that only hides the UI leaves the
+    // old session running behind it. A live recording is the worst of these: the
+    // panel would hide the red pulse and its cancel button while the mic stayed
+    // open, and the 5-minute cap would then auto-SEND that audio into the NEXT
+    // conversation. Same reasoning as closePanel's guard.
+    if (S.recording) stopRecord(false);
+    ibar.style.display = ""; // showRecBar hid it; teardownRec may not have run yet
+    if (vnCurrent) { try { vnCurrent.pause(); } catch (_e) {} vnCurrent = null; }
+    if (S.readTimer) { clearTimeout(S.readTimer); S.readTimer = null; }
+    if (S.typingClear) { clearTimeout(S.typingClear); S.typingClear = null; }
+    if (draftTimer) { clearTimeout(draftTimer); draftTimer = null; }
+    // Invalidate any parked flush chain so its send-timeout can't fire against the
+    // new session (see flushGen).
+    flushGen++;
+    flushing = false;
     resetVisitorIdentity();
     // A fresh identity needs a fresh handshake — visitorId rides the socket auth,
     // so the old connection can't be reused for the new session.
@@ -528,12 +549,19 @@
     S.viewInit = false; S.formDone = false; S.ready = false; S.closed = false;
     S.hasMore = false; S.oldestCursor = null; S.loadingOlder = false;
     S.preChat = null; S.typingOn = false; S.presenceSent = true;
+    S.agentsOnline = undefined; S.retryDelay = 0;
     hideTyping(); clearReply(); clearStage(); clearUnread(); hideLoading();
     // Everything except the persistent "Load earlier" bar, which is ours.
     Array.prototype.slice.call(bodyEl.children).forEach(function (n) { if (n !== earlierBar) n.remove(); });
     showEarlier(false);
     ta.value = ""; autogrow(); updateSend();
+    // clearUnread + the draft debounce write these back AFTER the wipe above.
+    lsDel(K.seen); lsDel(K.draft);
     composer.style.display = "none";
+    // A widget whose handshake is fatally rejected has nothing to restart into —
+    // wiping the body would otherwise leave a blank panel with no explanation on
+    // the very misconfiguration the installer is trying to diagnose.
+    if (S.fatal) { appendSys("Chat is unavailable right now. Please try again later."); return; }
     if (silent) return startNewSession();
     setConn("idle");
     renderSessionEnded();
@@ -729,7 +757,10 @@
   function openPanel() {
     if (INLINE) return;
     // Opening the chat is the moment a socket is actually needed (see boot()).
-    ensureConnected();
+    // Reopening after ENDING one is a request to start again: connecting without
+    // clearing the ended card left it sitting above a live welcome and composer.
+    if (bodyEl.querySelector(".ended")) startNewSession();
+    else ensureConnected();
     S.open = true; panel.classList.add("open"); requestAnimationFrame(function () { panel.classList.add("in"); });
     if (launcher) launcher.style.display = "none";
     showLoading();
@@ -1041,7 +1072,7 @@
     backBtn.addEventListener("click", function () {
       if (step === 0) return;
       // Keep whatever is typed, even if invalid — Back must never destroy input.
-      var inp = fld.querySelector("input");
+      var inp = fld.querySelector("input,select");
       if (inp) answers[step] = inp.value.trim();
       step--; paint();
     });
@@ -1547,11 +1578,16 @@
   // some embedded webviews throw on `indexedDB.open`, and a widget must degrade to
   // today's behaviour rather than break the chat.
   var IDB_STORE = "files";
+  // One connection for the tab, so `deleteDatabase` has exactly one thing to close
+  // (see resetVisitorIdentity) instead of a new handle per operation.
+  var idbConn = null;
+  function idbClose() { if (idbConn) { try { idbConn.close(); } catch (_e) {} idbConn = null; } }
   function idb(cb) {
+    if (idbConn) return cb(idbConn);
     var req;
     try { req = indexedDB.open("ccp_wc_" + siteKey, 1); } catch (_e) { return cb(null); }
     req.onupgradeneeded = function () { try { req.result.createObjectStore(IDB_STORE); } catch (_e) {} };
-    req.onsuccess = function () { cb(req.result); };
+    req.onsuccess = function () { idbConn = req.result; cb(idbConn); };
     req.onerror = function () { cb(null); };
     req.onblocked = function () { cb(null); };
   }
@@ -1620,6 +1656,10 @@
   // interrupted by the disconnect would otherwise sit untouched until its 12s
   // SEND_TIMEOUT expired, stalling a reconnect that already happened.
   var flushing = false;
+  // Bumped whenever a chain is abandoned (disconnect, session reset). A timeout
+  // parked from an older chain would otherwise mark a message the RECONNECT
+  // already delivered as failed, and then resume sending alongside the new chain.
+  var flushGen = 0;
   function flushOutbox() {
     if (flushing || !S.socket || !S.socket.connected) return;
     var cids = Object.keys(S.pending)
@@ -1627,23 +1667,27 @@
       .sort(function (a, b) { return (S.pending[a].ts || 0) - (S.pending[b].ts || 0); });
     if (!cids.length) return;
     flushing = true;
+    var gen = ++flushGen;
     var i = 0;
     var next = function () {
+      if (gen !== flushGen) return; // superseded — a newer chain owns the queue
       if (i >= cids.length || !S.socket || !S.socket.connected) { flushing = false; return; }
       var cid = cids[i++], p = S.pending[cid];
       if (!p) return next();
       if (p.file) { doUpload(cid, next); return; }
-      sendPayload(cid, next);
+      sendPayload(cid, next, gen);
     };
     next();
   }
-  function sendPayload(cid, after) {
+  function sendPayload(cid, after, gen) {
     var p = S.pending[cid]; if (!p) return after && after();
     markPending(cid, "inflight");
     var settled = false, advanced = false;
     var go = function () { if (!advanced) { advanced = true; if (after) after(); } };
     var timer = setTimeout(function () {
-      if (settled) return;
+      // A chain the socket abandoned must not flip a message the reconnect
+      // already delivered back to "failed".
+      if (settled || (gen !== undefined && gen !== flushGen)) return;
       // Timed out — surface Retry and let the queue move on, but do NOT mark this
       // resolved: a late ack below can still arrive and correct the bubble.
       markPending(cid, "failed"); go();
@@ -2006,6 +2050,7 @@
       // drop, so a stale `true` here swallowed the first typing signal after
       // reconnect. Same for presence — the server assumes present on connect.
       S.typingOn = false; S.presenceSent = true;
+      flushGen++;
       // Release the flush latch. A chain parked inside sendPayload waiting on an
       // ack never reaches next(), so `flushing` stayed true and the RECONNECT's
       // flushOutbox() returned at its first check — queued messages then sat
