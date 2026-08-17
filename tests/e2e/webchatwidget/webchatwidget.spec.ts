@@ -616,12 +616,14 @@ test("visitor 'Start a new conversation' records a timeline note on the fresh th
     });
     if (ca?.contactId) createdContactIds.add(ca.contactId);
 
-    // ⋯ → "End chat" → confirm. doReset sets the restart marker + reloads
-    // (which drops the injected widget), so we re-mount for the rotated visitor.
+    // ⋯ → "End chat" → confirm. The session ends IN PLACE — a widget must never
+    // reload the page hosting it — leaving an ended card whose "Start new chat
+    // session" reconnects under the rotated visitor id. No re-mount needed.
     await v.locator('button.hx[aria-label="More options"]').click();
     await v.getByRole("menuitem", { name: "End chat" }).click();
     await v.locator("button.rcy").click();
-    await mountWidget(v, PUBLIC_KEY);
+    await expect(v.locator(".ended")).toContainText("Your chat session has ended.");
+    await v.locator(".ended .cstart").click();
     await pastPreChat(v);
     const msg2 = `restart second ${RUN}`;
     await v.locator(".composer textarea").fill(msg2);

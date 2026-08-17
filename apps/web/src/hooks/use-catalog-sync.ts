@@ -120,19 +120,37 @@ export function useCatalogSync(): void {
     // only calls `disconnect(true)` on a socket when the session's shape
     // changed under it (agent-visibility flip, role change, workspace
     // revocation), and the caches are always busted BEFORE the disconnect —
-    // so an RSC re-derive here reads the new truth. This is the reliable
-    // path: the flip's own `team:catalog:changed` frame is emitted before the
-    // disconnect but can be lost in the closing transport's write buffer.
+    // so an RSC re-derive reads the new truth. This is the reliable path: the
+    // flip's own `team:catalog:changed` frame is emitted before the disconnect
+    // but can be lost in the closing transport's write buffer.
+    //
+    // CRITICAL: the refresh fires on the RECONNECT, never on the disconnect.
+    // A deploy drains sockets with this very reason, so refreshing here aimed a
+    // full server-side re-render at an api container that was on its way down —
+    // every open tab, simultaneously, inside the exact window where the render
+    // must fail. That throw reaches `global-error.tsx` (a segment's own layout
+    // error skips its sibling error.tsx), which re-renders the same broken tree
+    // on "Try again" — so tabs sat on "Something broke." until a hard refresh.
+    // Waiting for the socket to come back loses nothing: a catalog re-derive is
+    // only meaningful against a server that can answer it.
+    const needsRefresh = { current: false };
     const onDisconnect = (reason: string) => {
       if (reason !== "io server disconnect") return;
+      needsRefresh.current = true;
+    };
+    const onConnect = () => {
+      if (!needsRefresh.current) return;
+      needsRefresh.current = false;
       startTransition(() => router.refresh());
     };
 
     socket.on("team:catalog:changed", onChanged);
     socket.on("disconnect", onDisconnect);
+    socket.on("connect", onConnect);
     return () => {
       socket.off("team:catalog:changed", onChanged);
       socket.off("disconnect", onDisconnect);
+      socket.off("connect", onConnect);
       if (pending.current !== null) {
         window.clearTimeout(pending.current);
         pending.current = null;

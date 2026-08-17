@@ -10,6 +10,8 @@ import {
   type WebchatwidgetPreChatField,
 } from "@/lib/providers/webchatwidget-config";
 
+import { PRECHAT_BUILTIN_KEYS } from "@ccp/shared/contacts/prechat-targets";
+
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
 import type { CreateWidgetInput, UpdateWidgetInput } from "./webchatwidget.schemas";
@@ -116,7 +118,15 @@ export class WebchatwidgetAdminService {
     workspaceId: string,
     fields: { type: string; key?: string }[] | undefined,
   ): Promise<void> {
-    const keys = [...new Set((fields ?? []).filter((f) => f.type === "text" && f.key).map((f) => f.key!))];
+    // Built-in columns (first name, location, language…) are legitimate targets
+    // but have no definition row, so they'd fail a definitions-only lookup.
+    const keys = [
+      ...new Set(
+        (fields ?? [])
+          .filter((f) => f.type === "text" && f.key && !PRECHAT_BUILTIN_KEYS.has(f.key))
+          .map((f) => f.key!),
+      ),
+    ];
     if (keys.length === 0) return;
     const found = await this.db.contactFieldDefinition.findMany({
       where: { workspaceId, key: { in: keys } },

@@ -8,6 +8,7 @@ import { apiErrorMessage } from "@ccp/shared/api/error-message";
 import { PageHeader } from "@/components/layouts/page-header";
 import type { WebchatWidgetView } from "@/lib/api/queries";
 import type { ContactFieldDefinition } from "@ccp/shared/types";
+import { PRECHAT_BUILTIN_TARGETS } from "@ccp/shared/contacts/prechat-targets";
 
 type Field = NonNullable<WebchatWidgetView["config"]["preChatFields"]>[number];
 const BRAND = "#4f46e5";
@@ -40,9 +41,18 @@ export function WebchatWidgetSettings({
   const [selectedId, setSelectedId] = useState<string | null>(initial[0]?.id ?? null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Fields created from the pre-chat picker land here immediately, so the new
-  // option is selectable without waiting for a route refresh.
-  const [contactFields, setContactFields] = useState<ContactFieldDefinition[]>(initialContactFields);
+  // Fields created from the pre-chat picker, held only until the server's list
+  // catches up. Deliberately NOT `useState(initialContactFields)`: that freezes
+  // the list at mount, so a field added over in Settings → Contact fields never
+  // appeared here — even though creating one publishes `team:catalog:changed`,
+  // which refreshes this route and hands us fresh props. Merging keeps the
+  // server authoritative while a just-created field is selectable immediately.
+  const [createdFields, setCreatedFields] = useState<ContactFieldDefinition[]>([]);
+  const contactFields = useMemo(() => {
+    const byKey = new Map(initialContactFields.map((d) => [d.key, d]));
+    for (const d of createdFields) if (!byKey.has(d.key)) byKey.set(d.key, d);
+    return [...byKey.values()];
+  }, [initialContactFields, createdFields]);
   // Transient "Saved ✓" on the button — without it a successful save gave no
   // feedback at all (the button just flicked back to "Save changes").
   const [saved, setSaved] = useState(false);
@@ -228,7 +238,7 @@ export function WebchatWidgetSettings({
               error={error}
               contactFields={contactFields}
               canCreateFields={canCreateFields}
-              onFieldCreated={(def) => setContactFields((cur) => (cur.some((d) => d.key === def.key) ? cur : [...cur, def]))}
+              onFieldCreated={(def) => setCreatedFields((cur) => (cur.some((d) => d.key === def.key) ? cur : [...cur, def]))}
               onName={(name) => patchLocal(selected.id, { name })}
               onActive={(isActive) => patchLocal(selected.id, { isActive })}
               onOrigins={(allowedOrigins) => patchLocal(selected.id, { allowedOrigins })}
@@ -939,10 +949,12 @@ const MAX_SUGGESTED_QUESTIONS = 6;
  * and binds to it, so it exists for every contact, not just the ones who happen to
  * answer this widget's form.
  */
-const BUILTIN_TARGETS = [
-  { value: "name", label: "Full name", hint: "the contact's name" },
-  { value: "email", label: "Email address", hint: "the contact's email" },
-  { value: "phone", label: "Phone number", hint: "the contact's phone" },
+/** Identity targets — carried by the question's TYPE, not a key, because they
+ *  have merge semantics the other columns don't. */
+const IDENTITY_TARGETS = [
+  { value: "name", label: "Full name" },
+  { value: "email", label: "Email address" },
+  { value: "phone", label: "Phone number" },
 ] as const;
 
 function PreChatEditor({
@@ -974,15 +986,23 @@ function PreChatEditor({
       setNewLabel("");
       return;
     }
-    const custom = value.startsWith("field:") ? contactFields.find((d) => d.key === value.slice(6)) : null;
+    // Everything under "field:" binds by key — a workspace contact field OR one of
+    // the built-in columns (first name, location…), which the API accepts too.
+    if (value.startsWith("field:")) {
+      const key = value.slice(6);
+      const target =
+        contactFields.find((d) => d.key === key) ??
+        PRECHAT_BUILTIN_TARGETS.find((b) => b.key === key);
+      if (!target) return;
+      onChange(fields.map((x, j) => (j === i ? { ...x, type: "text", key, label: x.label || target.label } : x)));
+      return;
+    }
+    const identity = IDENTITY_TARGETS.find((b) => b.value === value);
+    // An identity target drops the key — the answer goes to its own column.
     onChange(
-      fields.map((x, j) => {
-        if (j !== i) return x;
-        if (custom) return { ...x, type: "text", key: custom.key, label: x.label || custom.label };
-        const builtin = BUILTIN_TARGETS.find((b) => b.value === value);
-        // Switching to a built-in drops the key — the answer goes to a column now.
-        return { ...x, type: (builtin?.value ?? "text") as Field["type"], key: undefined, label: x.label || builtin?.label || "" };
-      }),
+      fields.map((x, j) =>
+        j === i ? { ...x, type: (identity?.value ?? "text") as Field["type"], key: undefined, label: x.label || identity?.label || "" } : x,
+      ),
     );
   }
 
@@ -1014,7 +1034,7 @@ function PreChatEditor({
     <div className="flex flex-col gap-2.5">
       {fields.length === 0 && <span className="text-xs text-muted-foreground">No questions — visitors chat right away.</span>}
       {fields.map((f, i) => {
-        const bound = f.type === "text" ? contactFields.find((d) => d.key === f.key) : null;
+        const bound = f.type === "text" && f.key ? contactFields.find((d) => d.key === f.key) : null;
         // A legacy row (configured before the picker) has no key — its answers land
         // in a field named after the question. Say so, and let them re-point it.
         const unbound = f.type === "text" && !f.key;
@@ -1046,12 +1066,15 @@ function PreChatEditor({
               >
                 {unbound && <option value="">{`Custom field “${f.label}” (created on first answer)`}</option>}
                 <optgroup label="Contact details">
-                  {BUILTIN_TARGETS.map((b) => (
+                  {IDENTITY_TARGETS.map((b) => (
                     <option key={b.value} value={b.value}>{b.label}</option>
+                  ))}
+                  {PRECHAT_BUILTIN_TARGETS.map((b) => (
+                    <option key={b.key} value={`field:${b.key}`}>{b.label}</option>
                   ))}
                 </optgroup>
                 {contactFields.length > 0 && (
-                  <optgroup label="Contact fields">
+                  <optgroup label="Custom fields">
                     {contactFields.map((d) => (
                       <option key={d.key} value={`field:${d.key}`}>
                         {d.label}
@@ -1161,10 +1184,15 @@ function Preview({ widget }: { widget: WebchatWidgetView }) {
       )}
       <div className="flex min-h-[210px] flex-col gap-2 p-3.5" style={{ background: surface2 }}>
         {c.welcomeMessage && (
-          // The real widget renders the welcome as a centered SYSTEM pill (.sys),
-          // not an agent bubble — the preview must not promise a different look.
-          <div className="max-w-[88%] self-center rounded-xl px-3 py-1.5 text-center text-xs" style={{ background: `${ink2}1f`, color: ink2 }}>
-            {c.welcomeMessage}
+          // Matches the widget: the welcome is a message FROM the team, avatar and
+          // all — keep these two in step, they were divergent once already.
+          <div className="flex items-end gap-2">
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold" style={{ background: `${primary}22`, color: primary }}>
+              {(title.trim()[0] || "C").toUpperCase()}
+            </span>
+            <div className="max-w-[82%] rounded-2xl rounded-bl-md px-3.5 py-2 text-sm" style={{ background: surface, border: `1px solid ${border}`, color: ink }}>
+              {c.welcomeMessage}
+            </div>
           </div>
         )}
         {/* Real order: welcome → question pills → the visitor's first message
@@ -1195,7 +1223,7 @@ function Preview({ widget }: { widget: WebchatWidgetView }) {
         </div>
       </div>
       {c.showBranding !== false && (
-        <div className="pb-2 text-center text-[11px]" style={{ background: surface, color: ink2 }}>⚡ Powered by Loadless</div>
+        <div className="pb-2 text-center text-[10.5px] tracking-wide opacity-75" style={{ background: surface, color: ink2 }}>Powered by Loadless</div>
       )}
     </div>
   );

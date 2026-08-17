@@ -223,8 +223,8 @@
   var shadow = host.attachShadow({ mode: "open" });
   var css = [
     ":host,*{box-sizing:border-box}",
-    ".root{--c:" + BRAND + ";--ct:#fff;--lc:" + BRAND + ";--uc:" + BRAND + ";--uct:#fff;--surface:#fff;--surface2:#f5f7fb;--inb:#fff;--border:#e6e9f0;--ink:#0f1729;--ink2:#5b6a83;--radius:20px;font-family:var(--font,ui-sans-serif,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif);color:var(--ink)}",
-    ".root.dark{--surface:#0f172a;--surface2:#0b1220;--inb:#1e293b;--border:#243244;--ink:#e8edf6;--ink2:#93a1b8}",
+    ".root{--c:" + BRAND + ";--ct:#fff;--lc:" + BRAND + ";--uc:" + BRAND + ";--uct:#fff;--surface:#fff;--surface2:#f7f8fa;--inb:#fff;--border:#eceef2;--ink:#101828;--ink2:#5b6a83;--radius:22px;font-family:var(--font,ui-sans-serif,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif);color:var(--ink)}",
+    ".root.dark{--surface:#0f1626;--surface2:#0b101c;--inb:#1a2335;--border:#222c3f;--ink:#e8edf6;--ink2:#93a1b8}",
     // Inline embeds fill their host container. `min-height` is the safety net: an
     // ancestor chain with no resolved height makes `height:100%` collapse to zero,
     // which reads as "the widget didn't load" rather than "size your container".
@@ -240,7 +240,7 @@
     // override it with the gradient.
     // Icon color derives from the launcher color (--lct, set in applyConfig) — a
     // hardcoded #fff was invisible on a light launcher color.
-    ".launch .b{width:60px;height:60px;border-radius:9999px;background:var(--lc);background:linear-gradient(145deg,var(--lc),color-mix(in srgb,var(--lc) 78%,#000));color:var(--lct,#fff);display:flex;align-items:center;justify-content:center;box-shadow:0 14px 30px -8px color-mix(in srgb,var(--lc) 60%,transparent),0 4px 10px rgba(0,0,0,.12);transition:transform .18s ease}",
+    ".launch .b{width:60px;height:60px;border-radius:9999px;background:var(--lc);background:linear-gradient(145deg,var(--lc),color-mix(in srgb,var(--lc) 78%,#000));color:var(--lct,#fff);display:flex;align-items:center;justify-content:center;box-shadow:0 12px 28px -10px color-mix(in srgb,var(--lc) 55%,transparent),0 3px 8px rgba(16,24,40,.10);transition:transform .2s cubic-bezier(.2,.8,.2,1)}",
     ".launch:hover .b{transform:scale(1.06)}.launch:active .b{transform:scale(.95)}.launch .b svg{width:28px;height:28px}.launch .b img{width:30px;height:30px;border-radius:9999px;object-fit:cover}",
     ".launch .lbl{background:var(--surface);color:var(--ink);font-size:13.5px;font-weight:600;padding:9px 14px;border-radius:9999px;box-shadow:0 8px 22px -8px rgba(0,0,0,.25);white-space:nowrap;display:none}",
     ".launch.showlbl .lbl{display:block}",
@@ -257,7 +257,7 @@
     ".panel{position:fixed;bottom:94px;z-index:2147483647;width:376px;max-width:calc(100vw - 24px);height:min(600px,calc(100vh - 116px));background:var(--surface);border-radius:var(--radius);box-shadow:0 24px 60px -12px rgba(15,23,42,.30),0 2px 10px rgba(15,23,42,.10),0 0 0 1px rgba(15,23,42,.07);display:none;flex-direction:column;overflow:hidden;opacity:0;transform:translateY(12px) scale(.98)}",
     ".root.dark .panel{box-shadow:0 24px 60px -12px rgba(0,0,0,.62),0 2px 10px rgba(0,0,0,.35),0 0 0 1px rgba(255,255,255,.09)}",
     ".panel.right{right:22px}.panel.left{left:22px}",
-    ".panel.open{display:flex}.panel.in{opacity:1;transform:none;transition:opacity .22s ease,transform .22s cubic-bezier(.2,.8,.2,1)}",
+    ".panel.open{display:flex}.panel.in{opacity:1;transform:none;transition:opacity .24s ease,transform .28s cubic-bezier(.16,1,.3,1)}",
     ".panel.inline{position:relative;right:auto;left:auto;bottom:auto;width:100%;height:100%;max-width:100%;border-radius:inherit;opacity:1;transform:none;display:flex;box-shadow:0 0 0 1px rgba(15,23,42,.07)}",
     ".root.dark .panel.inline{box-shadow:0 0 0 1px rgba(255,255,255,.09)}",
     "@media (max-width:480px){.panel:not(.inline){right:0;left:0;bottom:0;top:0;width:100vw;max-width:100vw;height:100vh;height:100dvh;border-radius:0}}",
@@ -266,45 +266,42 @@
     // client's site zoomed in and horizontally scrollable. 16px on mobile is the
     // documented way to opt out; desktop keeps the tighter 14px above.
     "@media (max-width:480px){.composer textarea,.form input{font-size:16px}}",
-    "header{display:flex;align-items:center;gap:11px;padding:15px 16px;background:var(--c);background:linear-gradient(135deg,var(--c),color-mix(in srgb,var(--c) 82%,#000));color:var(--ct);flex:0 0 auto}",
-    ".hava{width:38px;height:38px;border-radius:11px;background:rgba(255,255,255,.18);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;position:relative;overflow:hidden;flex:0 0 auto}.hava img{width:100%;height:100%;object-fit:cover}",
+    "header{display:flex;align-items:center;gap:11px;padding:16px 17px;background:var(--c);background:linear-gradient(135deg,color-mix(in srgb,var(--c) 96%,#fff),color-mix(in srgb,var(--c) 88%,#000));color:var(--ct);flex:0 0 auto;box-shadow:inset 0 -1px 0 rgba(255,255,255,.10)}",
+    ".hava{width:38px;height:38px;border-radius:12px;background:rgba(255,255,255,.16);box-shadow:inset 0 0 0 1px rgba(255,255,255,.14);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;position:relative;overflow:hidden;flex:0 0 auto}.hava img{width:100%;height:100%;object-fit:cover}",
     ".hdot{position:absolute;right:-2px;bottom:-2px;width:12px;height:12px;border-radius:9999px;background:#22c55e;box-shadow:0 0 0 2px var(--c)}.hdot.re{background:#f59e0b}.hdot.off{background:#9ca3af}",
-    ".htxt{flex:1;min-width:0}.htxt b{display:block;font-size:15.5px;font-weight:700;letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.25}.htxt small{font-size:12px;opacity:.9}",
+    ".htxt{flex:1;min-width:0}.htxt b{display:block;font-size:15px;font-weight:650;letter-spacing:-.012em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.25}.htxt small{font-size:11.5px;opacity:.82;letter-spacing:-.004em}",
     // Drag-to-resize grip on the panel's OUTER top corner (the one pointing away
     // from the screen edge the panel is anchored to). Replaced an expand/restore
     // toggle button: two icon states in the header to pick between two fixed sizes,
     // when what people want is simply "a bit bigger". Desktop only — the mobile
     // panel is already full-screen. Generous 18px target over a subtle 10px mark.
     "@media (max-width:480px){.rsz{display:none}}",
-    // Inset past the 20px corner radius, or `overflow:hidden` clips the mark into
-    // a stray fragment. The hit area stays generous; only the mark is inset.
-    ".rsz{position:absolute;top:0;width:26px;height:26px;z-index:7;touch-action:none;opacity:0;transition:opacity .15s}",
-    ".panel:hover .rsz{opacity:.45}.rsz:hover{opacity:.85!important}",
+    // INVISIBLE by design — the cursor is the affordance, exactly like an OS window
+    // corner. A drawn grip mark sat on the header's rounded corner and read as a
+    // rendering artifact, which is worse than no affordance at all.
+    ".rsz{position:absolute;top:0;width:24px;height:24px;z-index:7;touch-action:none}",
     ".panel.right .rsz{left:0;cursor:nwse-resize}.panel.left .rsz{right:0;cursor:nesw-resize}",
-    ".rsz::after{content:'';position:absolute;top:9px;width:8px;height:8px;border-top:1.5px solid var(--ct)}",
-    ".panel.right .rsz::after{left:9px;border-left:1.5px solid var(--ct);border-top-left-radius:2px}",
-    ".panel.left .rsz::after{right:9px;border-right:1.5px solid var(--ct);border-top-right-radius:2px}",
     ".hmw{position:relative;margin-left:auto;display:flex}",
     ".hmenu{position:absolute;top:calc(100% + 6px);right:0;min-width:190px;background:var(--surface);color:var(--ink);border:1px solid var(--border);border-radius:12px;box-shadow:0 18px 40px -12px rgba(15,23,42,.3);padding:5px;display:none;flex-direction:column;z-index:3}.hmenu.on{display:flex}",
     ".hmi{background:transparent;border:0;text-align:left;font:inherit;font-size:13.5px;color:inherit;padding:9px 11px;border-radius:8px;cursor:pointer;white-space:nowrap}.hmi:hover{background:var(--surface2)}",
     ".hx{background:transparent;border:0;color:inherit;cursor:pointer;opacity:.9;padding:7px;border-radius:9px;display:flex}.hx:hover{opacity:1;background:rgba(255,255,255,.16)}.hx svg{width:18px;height:18px}",
     ".awaybar{background:color-mix(in srgb,var(--ink2) 8%,var(--surface));color:var(--ink2);font-size:12px;text-align:center;padding:7px 12px;flex:0 0 auto;display:none;border-bottom:1px solid var(--border)}.awaybar.on{display:block}",
     ".restrip{background:#fff7ed;color:#9a3412;font-size:12px;text-align:center;padding:6px;flex:0 0 auto;display:none}.root.dark .restrip{background:#3a2a12;color:#fbbf77}.restrip.on{display:block}",
-    ".body{flex:1 1 auto;overflow-y:auto;padding:16px 14px;background:var(--surface2);display:flex;flex-direction:column;gap:3px;position:relative;scroll-behavior:smooth}",
+    ".body{flex:1 1 auto;overflow-y:auto;padding:18px 16px 16px;background:var(--surface2);display:flex;flex-direction:column;gap:0;position:relative;scroll-behavior:smooth}",
     ".body::-webkit-scrollbar{width:8px}.body::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--ink2) 35%,transparent);border-radius:8px}",
-    ".day{align-self:center;font-size:11px;font-weight:600;color:var(--ink2);background:color-mix(in srgb,var(--ink2) 12%,transparent);border-radius:9999px;padding:3px 11px;margin:8px 0}",
-    ".sname{font-size:11.5px;font-weight:600;color:var(--ink2);margin:6px 0 1px 40px}",
+    ".day{align-self:center;font-size:10px;font-weight:650;letter-spacing:.06em;text-transform:uppercase;color:var(--ink2);background:color-mix(in srgb,var(--ink2) 9%,transparent);border-radius:9999px;padding:4px 12px;margin:12px 0 6px}",
+    ".sname{font-size:11px;font-weight:600;color:var(--ink2);letter-spacing:.005em;margin:9px 0 2px 40px}",
     ".sname .aib{display:inline-block;margin-left:5px;padding:0 5px;border-radius:9999px;font-size:9.5px;font-weight:700;letter-spacing:.03em;color:var(--c);background:color-mix(in srgb,var(--c) 14%,transparent);vertical-align:middle}",
     ".mr .av.aiav{background:linear-gradient(145deg,var(--c),color-mix(in srgb,var(--c) 55%,#000));font-size:9.5px}",
-    ".mr{display:flex;gap:8px;align-items:flex-end;max-width:86%;margin-top:2px}.mr.out{align-self:flex-end;flex-direction:row-reverse}.mr.in{align-self:flex-start}",
-    ".mr .av{width:28px;height:28px;border-radius:9999px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;font-size:10.5px;font-weight:700;color:#fff;background:linear-gradient(145deg,#94a3b8,#64748b);overflow:hidden}.mr .av img{width:100%;height:100%;object-fit:cover}.mr.out .av,.mr.grp .av{display:none}.mr.grp{margin-left:36px}.mr.grp.out{margin-left:0;margin-right:0}",
+    ".mr{display:flex;gap:8px;align-items:flex-end;max-width:86%;margin-top:9px}.mr.grp{margin-top:3px}.mr.out{align-self:flex-end;flex-direction:row-reverse}.mr.in{align-self:flex-start}",
+    ".mr .av{width:28px;height:28px;border-radius:9999px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:650;letter-spacing:.02em;color:var(--c);background:color-mix(in srgb,var(--c) 13%,var(--surface));box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--c) 16%,transparent);overflow:hidden}.mr .av img{width:100%;height:100%;object-fit:cover}.mr.out .av,.mr.grp .av{display:none}.mr.grp{margin-left:36px}.mr.grp.out{margin-left:0;margin-right:0}",
     ".col{display:flex;flex-direction:column;min-width:0}.mr.out .col{align-items:flex-end}",
-    ".bubble{padding:10px 13px;border-radius:17px;font-size:14px;line-height:1.5;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere;max-width:100%;box-shadow:0 1px 1px rgba(15,23,42,.05)}",
+    ".bubble{padding:10px 14px;border-radius:18px;font-size:14px;line-height:1.55;letter-spacing:-.003em;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere;max-width:100%;box-shadow:0 1px 2px rgba(16,24,40,.04)}",
     reduceMotion ? "" : ".bubble.anim{animation:cin .2s ease-out}@keyframes cin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}",
-    ".mr.out .bubble{background:var(--uc);background:linear-gradient(145deg,var(--uc),color-mix(in srgb,var(--uc) 88%,#000));color:var(--uct);border-bottom-right-radius:6px}",
-    ".mr.in .bubble{background:var(--inb);color:var(--ink);border:1px solid var(--border);border-bottom-left-radius:6px}",
+    ".mr.out .bubble{background:var(--uc);background:linear-gradient(160deg,color-mix(in srgb,var(--uc) 97%,#fff),color-mix(in srgb,var(--uc) 90%,#000));color:var(--uct);border-bottom-right-radius:7px;box-shadow:0 2px 8px -2px color-mix(in srgb,var(--uc) 38%,transparent)}",
+    ".mr.in .bubble{background:var(--inb);color:var(--ink);border:1px solid var(--border);border-bottom-left-radius:7px}",
     ".bubble a{color:inherit;text-decoration:underline;text-underline-offset:2px}",
-    ".meta{font-size:10.5px;color:var(--ink2);margin:3px 5px 0;display:flex;gap:4px;align-items:center}.tick.err{color:#ef4444}.retry{color:#ef4444;cursor:pointer;text-decoration:underline}.tick.read{color:#38bdf8}",
+    ".meta{font-size:10.5px;color:var(--ink2);margin:4px 6px 0;display:flex;gap:4px;align-items:center;font-variant-numeric:tabular-nums;opacity:.9}.tick.err{color:#ef4444}.retry{color:#ef4444;cursor:pointer;text-decoration:underline}.tick.read{color:#38bdf8}",
     ".rep{opacity:0;background:transparent;border:0;color:var(--ink2);cursor:pointer;font-size:14px;align-self:center;padding:4px;border-radius:7px;transition:opacity .12s}.mr:hover .rep{opacity:.7}.rep:hover{opacity:1;background:color-mix(in srgb,var(--ink2) 14%,transparent)}",
     ".rq{border-left:3px solid rgba(0,0,0,.18);padding:2px 8px;margin-bottom:5px;font-size:12.5px;opacity:.85;max-height:44px;overflow:hidden}.mr.out .rq{border-left-color:rgba(255,255,255,.55)}.rq.jump{cursor:pointer}.rq.jump:hover{opacity:1}",
     // Brief highlight on the message a quote jumped to, so the eye lands on it.
@@ -324,10 +321,13 @@
     ".doc{display:flex;align-items:center;gap:9px;text-decoration:none;color:inherit;font-size:13px}.doc .ic{width:32px;height:32px;flex:0 0 auto;border-radius:8px;background:rgba(0,0,0,.08);display:flex;align-items:center;justify-content:center}",
     ".prog{height:4px;background:rgba(0,0,0,.14);border-radius:9999px;overflow:hidden;margin-top:7px}.prog i{display:block;height:100%;background:currentColor;width:0;transition:width .15s}",
     ".typ{display:inline-flex;gap:4px;padding:4px 2px}.typ i{width:6px;height:6px;background:var(--ink2);border-radius:9999px;animation:tb 1s infinite}.typ i:nth-child(2){animation-delay:.15s}.typ i:nth-child(3){animation-delay:.3s}@keyframes tb{0%,80%,100%{transform:scale(.6);opacity:.5}40%{transform:scale(1);opacity:1}}",
-    ".pills{display:flex;flex-wrap:wrap;gap:7px;margin-top:8px}.pill{background:var(--surface);color:var(--c);border:1px solid var(--border);border-radius:9999px;padding:8px 14px;font-size:13px;font-weight:500;cursor:pointer;transition:.12s}.pill:hover{background:var(--c);color:var(--ct);border-color:var(--c)}",
-    ".sys{align-self:center;font-size:12px;color:var(--ink2);background:color-mix(in srgb,var(--ink2) 12%,transparent);border-radius:11px;padding:6px 13px;text-align:center;margin:6px 0}",
+    ".pills{display:flex;flex-wrap:wrap;gap:7px;margin-top:8px}.pill{background:var(--surface);color:var(--c);border:1px solid color-mix(in srgb,var(--c) 22%,var(--border));border-radius:9999px;padding:8px 15px;font-size:13px;font-weight:550;letter-spacing:-.004em;cursor:pointer;transition:.16s ease;box-shadow:0 1px 2px rgba(16,24,40,.04)}.pill:hover{background:var(--c);color:var(--ct);border-color:var(--c)}",
+    ".sys{align-self:center;font-size:12.5px;line-height:1.5;color:var(--ink2);background:color-mix(in srgb,var(--ink2) 8%,transparent);border-radius:13px;padding:8px 14px;text-align:center;margin:8px 0;max-width:90%}",
     ".sys.closed{display:flex;flex-direction:column;align-items:center;gap:8px;max-width:88%}",
-    ".cstart{border:1px solid var(--c);background:transparent;color:var(--c);font:inherit;font-size:12.5px;font-weight:600;border-radius:9999px;padding:6px 14px;cursor:pointer;transition:.12s}.cstart:hover{background:var(--c);color:var(--ct)}",
+    // End-of-session state: what happened, a rule, and the one way forward.
+    ".ended{margin-top:auto;padding-top:14px;border-top:1px solid var(--border);display:flex;flex-direction:column;align-items:center;gap:11px}",
+    ".ended .em{font-size:13.5px;line-height:1.5;color:var(--ink2);text-align:center;letter-spacing:-.004em}",
+    ".cstart{border:1px solid color-mix(in srgb,var(--c) 35%,var(--border));background:var(--surface);color:var(--c);font:inherit;font-size:12.5px;font-weight:600;letter-spacing:-.004em;border-radius:9999px;padding:8px 16px;cursor:pointer;transition:.16s ease;box-shadow:0 1px 2px rgba(16,24,40,.05)}.cstart:hover{background:var(--c);color:var(--ct)}",
     ".rconf{align-self:center;max-width:88%;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:12px 14px;margin:6px 0;box-shadow:0 8px 22px -10px rgba(15,23,42,.25)}.rct{font-size:13px;color:var(--ink);margin-bottom:10px}.rca{display:flex;gap:8px;justify-content:flex-end}",
     ".rcy{border:0;background:var(--c);color:var(--ct);font:inherit;font-size:12.5px;font-weight:600;border-radius:9px;padding:7px 14px;cursor:pointer}.rcn{border:0;background:transparent;color:var(--ink2);font:inherit;font-size:12.5px;padding:7px 10px;cursor:pointer}.rcn:hover{color:var(--ink)}",
     ".newp{position:absolute;left:50%;transform:translateX(-50%);top:-46px;background:var(--c);color:var(--ct);border:0;border-radius:9999px;padding:7px 15px;font-size:12.5px;font-weight:600;cursor:pointer;box-shadow:0 8px 20px -6px rgba(0,0,0,.35);display:none;white-space:nowrap;z-index:2}.newp.on{display:block}",
@@ -341,7 +341,7 @@
     ".fback{border:0;background:transparent;color:var(--ink2);font:inherit;font-size:13px;cursor:pointer;padding:6px 2px}.fback:hover{color:var(--ink)}",
     ".fnext{width:auto;min-width:104px;height:38px;border-radius:11px;font-weight:600;padding:0 18px}",
     ".rc{display:none;align-items:center;gap:9px;padding:8px 14px;background:color-mix(in srgb,var(--c) 8%,var(--surface));border-top:1px solid var(--border);font-size:12.5px;color:var(--ink);flex:0 0 auto}.rc.on{display:flex}.rc .qt{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.rc button{border:0;background:transparent;cursor:pointer;color:var(--ink2);font-size:16px}",
-    ".composer{padding:12px 14px calc(14px + env(safe-area-inset-bottom,0px));background:var(--surface);flex:0 0 auto;position:relative}",
+    ".composer{padding:12px 14px calc(14px + env(safe-area-inset-bottom,0px));background:var(--surface);flex:0 0 auto;position:relative;box-shadow:inset 0 1px 0 var(--border)}",
     ".emw{position:relative;display:flex}",
     // Fixed-width cells that add up to the container width EXACTLY, and overflow:
     // visible — no scrollbar. 15 emojis in 8 columns = two clean rows (8 + 7).
@@ -349,11 +349,11 @@
     ".emo{width:30px;height:30px;border:0;background:transparent;cursor:pointer;font-size:18px;line-height:1;padding:0;border-radius:7px;display:flex;align-items:center;justify-content:center}.emo:hover{background:var(--surface2)}",
     // Staged-attachment chip: the file the visitor picked but hasn't sent yet.
     ".stg{display:none;align-items:center;gap:10px;margin-bottom:8px;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:14px}.stg.on{display:flex}.stg img{width:40px;height:40px;flex:0 0 auto;object-fit:cover;border-radius:9px}.stg .ic{width:40px;height:40px;flex:0 0 auto;border-radius:9px;background:color-mix(in srgb,var(--ink2) 12%,transparent);display:flex;align-items:center;justify-content:center;font-size:18px}.stg .meta{flex:1;min-width:0}.stg .nm{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.stg .sz{font-size:11.5px;color:var(--ink2)}.stg .x{border:0;background:transparent;cursor:pointer;color:var(--ink2);font-size:17px;line-height:1;padding:4px}.stg .x:hover{color:var(--ink)}",
-    ".ibar{display:flex;align-items:flex-end;gap:4px;background:var(--surface2);border:1.5px solid var(--border);border-radius:24px;padding:5px 5px 5px 7px;transition:border-color .15s,box-shadow .15s}.ibar.focus{border-color:var(--c);box-shadow:0 0 0 3px color-mix(in srgb,var(--c) 16%,transparent)}",
+    ".ibar{display:flex;align-items:flex-end;gap:4px;background:var(--surface);border:1px solid var(--border);border-radius:26px;padding:5px 5px 5px 8px;transition:border-color .18s ease,box-shadow .18s ease,background .18s ease}.ibar.focus{border-color:color-mix(in srgb,var(--c) 55%,var(--border));background:var(--surface);box-shadow:0 0 0 3.5px color-mix(in srgb,var(--c) 11%,transparent)}",
     ".composer textarea{flex:1;resize:none;border:0;outline:none;background:transparent;font:inherit;font-size:14px;line-height:1.45;padding:8px 6px;max-height:112px;min-height:20px;overflow-y:hidden;color:var(--ink);appearance:none;-webkit-appearance:none}",
     ".rbtn{width:38px;height:38px;flex:0 0 auto;border:0;border-radius:9999px;cursor:pointer;display:flex;align-items:center;justify-content:center;background:transparent;color:var(--ink2);transition:.12s}.rbtn:hover{background:color-mix(in srgb,var(--ink2) 14%,transparent);color:var(--ink)}.rbtn svg{width:19px;height:19px}",
-    ".sbtn{background:var(--c);color:var(--ct)}.sbtn:hover{filter:brightness(1.06);background:var(--c)}.sbtn:disabled{opacity:.4;cursor:not-allowed;filter:none}",
-    ".foot{font-size:11px;color:var(--ink2);text-align:center;padding:2px 0 0;flex:0 0 auto}.foot a{color:inherit;text-decoration:none;font-weight:600}",
+    ".sbtn{background:var(--c);color:var(--ct);box-shadow:0 2px 8px -2px color-mix(in srgb,var(--c) 45%,transparent)}.sbtn:hover{filter:brightness(1.05);background:var(--c)}.sbtn:disabled{opacity:.4;cursor:not-allowed;filter:none}",
+    ".foot{font-size:10.5px;color:var(--ink2);opacity:.75;text-align:center;letter-spacing:.02em;padding:2px 0 1px;flex:0 0 auto}.foot a{color:inherit;text-decoration:none;font-weight:600}",
     ".earlier{display:flex;justify-content:center;padding:2px 0 8px}.earlierbtn{background:var(--surface);color:var(--ink2);border:1px solid var(--border);border-radius:9999px;padding:5px 14px;font-size:12px;cursor:pointer;transition:.12s}.earlierbtn:hover{background:var(--surface2);color:var(--ink)}.earlierbtn:disabled{opacity:.6;cursor:default}",
     ".rbtn.rec{background:#ef4444;color:#fff}",
     ".recbar{display:flex;align-items:center;gap:9px;flex:1;color:var(--ink);font-size:13px;padding:0 6px}.recbar .rd{width:9px;height:9px;border-radius:9999px;background:#ef4444;animation:rpulse 1.1s infinite}@keyframes rpulse{0%,100%{opacity:1}50%{opacity:.35}}.recbar .rt{flex:1;font-variant-numeric:tabular-nums}.recbar button{border:0;background:transparent;cursor:pointer;color:var(--ink2);font-size:16px;padding:2px 4px}.recbar .snd{color:var(--c);font-weight:700}",
@@ -495,17 +495,64 @@
   // conversation — and reset actions belong in an overflow menu. The prominent,
   // discoverable version lives on the closed-chat notice (its natural moment).
   function requestReset() {
-    if (!S.formDone && !lsGet(K.chatted)) { doReset(); return; } // nothing to lose → just do it
+    if (!S.formDone && !lsGet(K.chatted)) { doReset(true); return; } // nothing to lose → just do it
     showResetConfirm();
   }
-  function doReset() {
+  /**
+   * End the session IN PLACE — never reload the page.
+   *
+   * This used to call `location.reload()` to get a clean slate. That reloads the
+   * CUSTOMER'S ENTIRE WEBSITE: their page state, scroll position, half-filled
+   * forms and analytics session, all discarded because someone closed a chat.
+   * A widget must never do that to the page hosting it. So tear our own state
+   * down explicitly instead, and show the visitor where they are.
+   *
+   * `silent` skips the ended card for the nothing-to-lose case (never chatted),
+   * going straight back to a fresh, usable chat.
+   */
+  function doReset(silent) {
     resetVisitorIdentity();
-    // Mark this as a DELIBERATE restart (survives the reload — resetVisitorIdentity
-    // doesn't touch this key) so the next first message records a timeline note.
-    try { lsSet(K.restart, "1"); } catch (_e) {}
-    // Full reload re-runs boot() from a clean slate (no half-reset socket / cached
-    // messages / pending sends).
-    try { location.reload(); } catch (_e) { /* sandboxed iframe — best effort */ }
+    // A fresh identity needs a fresh handshake — visitorId rides the socket auth,
+    // so the old connection can't be reused for the new session.
+    if (S.socket) { try { S.socket.disconnect(); } catch (_e) {} S.socket = null; }
+    S.visitorId = newVisitorId();
+    lsSet(K.visitor, S.visitorId);
+    // The restart marker is only for the RELOAD path (boot reads it). In place we
+    // carry the flag in memory, so a later refresh can't replay it.
+    lsDel(K.restart);
+    S.startedNew = true;
+    // Clear the conversation — "cleared on this device" is the promise the confirm
+    // makes, and the privacy reason people end a chat on a shared computer.
+    S.byId = {}; S.pending = {};
+    S.lastGroup = null; S.lastDayLabel = null;
+    S.viewInit = false; S.formDone = false; S.ready = false; S.closed = false;
+    S.hasMore = false; S.oldestCursor = null; S.loadingOlder = false;
+    S.preChat = null; S.typingOn = false; S.presenceSent = true;
+    hideTyping(); clearReply(); clearStage(); clearUnread(); hideLoading();
+    // Everything except the persistent "Load earlier" bar, which is ours.
+    Array.prototype.slice.call(bodyEl.children).forEach(function (n) { if (n !== earlierBar) n.remove(); });
+    showEarlier(false);
+    ta.value = ""; autogrow(); updateSend();
+    composer.style.display = "none";
+    if (silent) return startNewSession();
+    setConn("idle");
+    renderSessionEnded();
+  }
+  /** The end-of-session state: what happened, and the one way forward. */
+  function renderSessionEnded() {
+    if (bodyEl.querySelector(".ended")) return;
+    bodyEl.appendChild(el("div", { class: "ended" }, [
+      el("div", { class: "em" }, "Your chat session has ended."),
+      el("button", { class: "cstart", type: "button", onclick: startNewSession }, "Start new chat session"),
+    ]));
+    scrollToBottom(true);
+  }
+  /** Reconnect under the new identity; `ready` + an empty `history` then rebuild
+   *  the view (pre-chat form or welcome) exactly as a first-time visitor sees it. */
+  function startNewSession() {
+    bodyEl.querySelectorAll(".ended").forEach(function (n) { n.remove(); });
+    showLoading();
+    ensureConnected();
   }
   /** Inline, in-widget confirm — matches the widget's styling, works in the shadow
    *  DOM, and reads far less jarring than a native browser popup. */
@@ -514,7 +561,7 @@
     var box = el("div", { class: "rconf" }, [
       el("div", { class: "rct" }, "End this chat? Your conversation is cleared on this device."),
       el("div", { class: "rca" }, [
-        el("button", { class: "rcy", type: "button", onclick: doReset }, "End chat"),
+        el("button", { class: "rcy", type: "button", onclick: function () { doReset(false); } }, "End chat"),
         el("button", { class: "rcn", type: "button", onclick: function () { box.remove(); } }, "Cancel"),
       ]),
     ]);
@@ -779,7 +826,7 @@
     // Explicit else — a cached subtitle the org has since cleared must be undone.
     if (cfg.headerSubtitle) { subEl.textContent = cfg.headerSubtitle; subEl.style.display = ""; }
     else { subEl.textContent = ""; subEl.style.display = "none"; }
-    if (cfg.showBranding !== false) { footEl.innerHTML = "⚡ Powered by Loadless"; footEl.style.display = ""; } else footEl.style.display = "none";
+    if (cfg.showBranding !== false) { footEl.textContent = "Powered by Loadless"; footEl.style.display = ""; } else footEl.style.display = "none";
     // "Just chat" — hide the header on an embedded (inline / full-page) widget, so the
     // host page's own chrome frames it. Only for INLINE: a floating bubble needs its
     // header for the close/expand controls (a headerless mobile bubble would trap the
@@ -811,6 +858,8 @@
     });
   } catch (_e) {}
   function agentAvatar() { var cfg = (S.cfg && S.cfg.config) || {}; return cfg.agentAvatarDataUrl || null; }
+  /** The business's display name — the header title, else the widget's own name. */
+  function orgName() { var c = S.cfg || {}; return (c.config && c.config.headerTitle) || c.name || ""; }
   function onReady(payload) {
     S.ready = true; applyConfig(payload); emitApi("ready", { conversationId: (payload && payload.conversationId) || null });
     restoreDraft();
@@ -1002,7 +1051,13 @@
   function hasThread() { return Object.keys(S.byId).length > 0; }
   function renderWelcome() {
     if (hasThread()) return; var cfg = (S.cfg && S.cfg.config) || {};
-    if (cfg.welcomeMessage) appendSys(cfg.welcomeMessage);
+    // The welcome is the COMPANY speaking, so it renders as a message from them —
+    // avatar and all — not as a grey system chip. A centred chip reads as a
+    // notice about the chat rather than the first line of it, which is why every
+    // mainstream chat product uses a bubble here.
+    if (cfg.welcomeMessage) {
+      appendBubble({ direction: "out", body: cfg.welcomeMessage, status: "sent", createdAt: new Date().toISOString(), _local: true }, { anim: false });
+    }
     var qs = Array.isArray(cfg.suggestedQuestions) ? cfg.suggestedQuestions : [];
     if (qs.length) { var p = el("div", { class: "pills" }); qs.forEach(function (q) { p.appendChild(el("button", { class: "pill", type: "button", onclick: function () { ta.value = q; onSend(); } }, q)); }); bodyEl.appendChild(p); }
   }
@@ -1076,7 +1131,10 @@
     if (!isVisitor) {
       var av = el("div", { class: "av" + (m.ai ? " aiav" : "") }); var avImg = m.ai ? null : agentAvatar();
       if (avImg) av.appendChild(el("img", { src: avImg, alt: "" }));
-      else av.appendChild(document.createTextNode(m.ai ? "AI" : initials(m.senderName)));
+      // Falls back to the ORG's initials, not a bullet: an agent message carries no
+      // sender name whenever the workspace hides them (or for the welcome), and a
+      // lone "•" beside every reply looks like a failed render.
+      else av.appendChild(document.createTextNode(m.ai ? "AI" : initials(m.senderName || orgName())));
       row.appendChild(av);
     }
     // The rendered strings are kept on the row for upsert's no-change check —
@@ -1744,7 +1802,7 @@
   // ── typing / receipts ──────────────────────────────────────────────────────────
   var typingRow = null;
   function showTyping() {
-    if (typingRow || S.closed) return; var av = el("div", { class: "av" }); var a = agentAvatar(); if (a) av.appendChild(el("img", { src: a, alt: "" })); else av.appendChild(document.createTextNode("•"));
+    if (typingRow || S.closed) return; var av = el("div", { class: "av" }); var a = agentAvatar(); if (a) av.appendChild(el("img", { src: a, alt: "" })); else av.appendChild(document.createTextNode(initials(orgName())));
     typingRow = el("div", { class: "mr in" }, [av, el("div", { class: "col" }, el("div", { class: "bubble", html: '<span class="typ"><i></i><i></i><i></i></span>' }))]);
     bodyEl.appendChild(typingRow); scrollIfStuck(); emitApi("typing", true);
   }

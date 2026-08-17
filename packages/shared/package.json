@@ -18,6 +18,7 @@
     "./api-keys/scopes": "./src/api-keys/scopes.ts",
     "./assignment/types": "./src/assignment/types.ts",
     "./contacts/reserved-fields": "./src/contacts/reserved-fields.ts",
+    "./contacts/prechat-targets": "./src/contacts/prechat-targets.ts",
     "./contacts/transfer-columns": "./src/contacts/transfer-columns.ts",
     "./presence": "./src/presence.ts",
     "./work-hours": "./src/work-hours.ts",
