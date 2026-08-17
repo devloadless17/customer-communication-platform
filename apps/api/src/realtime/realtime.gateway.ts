@@ -143,8 +143,22 @@ export class RealtimeGateway
   private readonly visitorPresence = new Map<string, { present: boolean; leftAt: number | null }>();
   private static readonly VISITOR_PRESENCE_CAP = 5_000;
 
-  notifyVisitorPresence(conversationId: string, present: boolean): void {
-    const leftAt = present ? null : Date.now();
+  /**
+   * `reason` distinguishes the two ways a visitor stops being present, because
+   * the inbox chip words them differently and both readings must be true:
+   *   - "socket"     — the page closed/navigated. A real departure, so it carries
+   *                    `leftAt` and renders "Left 3m ago".
+   *   - "visibility" — the tab is backgrounded but the page is still open. They
+   *                    have NOT left, so `leftAt` stays null and it renders the
+   *                    plain "Away". Dating this would tell the agent someone
+   *                    left when they are one tab away and may reply instantly.
+   */
+  notifyVisitorPresence(
+    conversationId: string,
+    present: boolean,
+    reason: "socket" | "visibility" = "socket",
+  ): void {
+    const leftAt = present || reason === "visibility" ? null : Date.now();
     this.visitorPresence.set(conversationId, { present, leftAt });
     if (this.visitorPresence.size > RealtimeGateway.VISITOR_PRESENCE_CAP) this.evictPresence();
     this.emitter.emitToConversation(conversationId, "conversation:visitor_presence", {

@@ -78,6 +78,8 @@ const AppearanceSchema = z.object({
   // Show the replying agent's name to visitors. Default: shown. When off the name is
   // suppressed server-side (delivery + history) — it never reaches the wire.
   showAgentName: z.boolean().optional(),
+  // Dial code prefilled in the pre-chat phone field ("" clears → widget default).
+  phoneDialCode: z.string().trim().regex(/^\d{0,4}$/).optional(),
   // launcher / placement (settings-only — the widget reads these from data-* attrs)
   //
   // The three DEPLOY MODES, mutually exclusive per page:

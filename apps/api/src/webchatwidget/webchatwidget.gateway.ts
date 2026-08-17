@@ -105,6 +105,9 @@ interface WidgetSocketData {
   ip: string;
   /** Whether we've last relayed a typing-on to the agents (so disconnect can clear it). */
   typingOn?: boolean;
+  /** Last presence the visitor reported (tab visible?). Defaults to true — a
+   *  socket is opened by a page the visitor is looking at. See onVisitorPresence. */
+  visible?: boolean;
 }
 
 /** Body of a `visitor:message` frame. `body` is text or a media caption. */
@@ -480,6 +483,38 @@ export class WebchatwidgetGateway
     this.realtime.notifyVisitorTyping(data.conversationId, on);
   }
 
+  /**
+   * Visitor switched tabs / came back → relay real presence to the agent inbox.
+   *
+   * Socket connect/disconnect alone answers "is the page loaded", not "is the
+   * person here": a backgrounded tab keeps its socket, so an agent saw "Online"
+   * for someone who had walked away. The widget reports its `document.hidden`
+   * transitions and we feed them through the SAME `notifyVisitorPresence` seam
+   * the connect/disconnect path uses — no new event type, no new state, and the
+   * inbox's existing Online / Away / "Left Xm ago" rendering just becomes honest.
+   *
+   * Deliberately last-writer-wins: a second tab that becomes visible re-asserts
+   * presence, which is the correct answer for the person.
+   */
+  @SubscribeMessage("visitor:presence")
+  onVisitorPresence(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { visible?: unknown },
+  ): void {
+    const data = client.data as WidgetSocketData | undefined;
+    if (!data?.conversationId) return;
+    // Same bucket as the other cheap visitor frames — a scripted client could
+    // otherwise flip presence at wire speed and storm every viewing agent.
+    if (!this.allowCheapFrame(data)) return;
+    const visible = body?.visible === true;
+    // State-flip dedupe: only a CHANGE is worth a fanout.
+    if (visible === (data.visible ?? true)) return;
+    data.visible = visible;
+    // "visibility" — the page is still open, so this renders as "Away", never as
+    // "Left 3m ago" (which would misreport someone one tab away as departed).
+    this.realtime.notifyVisitorPresence(data.conversationId, visible, "visibility");
+  }
+
   /** Clear a lingering "customer is typing…" if the visitor drops mid-type. */
   handleDisconnect(client: Socket): void {
     const data = client.data as WidgetSocketData | undefined;
@@ -569,11 +604,13 @@ export class WebchatwidgetGateway
     });
     if (msgs.length === 0) return;
     await this.db.message.updateMany({
-      where: { id: { in: msgs.map((m) => m.id) } },
+      // ids come from the workspace-scoped findMany above; workspaceId rides along
+      // anyway to keep the §7 "in the where of every query" invariant unconditional.
+      where: { workspaceId, id: { in: msgs.map((m) => m.id) } },
       data: { status },
     });
-    const conv = await this.db.conversation.findUnique({
-      where: { id: conversationId },
+    const conv = await this.db.conversation.findFirst({
+      where: { id: conversationId, workspaceId },
       select: { contactId: true },
     });
     if (!conv) return;

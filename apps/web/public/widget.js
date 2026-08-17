@@ -55,14 +55,21 @@
     // they submitted but haven't sent a message yet (so there's no history to infer
     // it from). Without it a refresh in that gap re-asks for their details.
     prechat: "ccp_wc_prechat_" + siteKey,
-    /** Panel widened by the visitor — persisted like the open-state. */
-    expanded: "ccp_wc_expanded_" + siteKey,
+    /** Panel size the visitor dragged to ({w,h}) — persisted like the open-state. */
+    size: "ccp_wc_size_" + siteKey,
     /** Epoch ms of the visitor's last activity — drives the idle-session reset. */
     active: "ccp_wc_active_" + siteKey,
     /** One-shot marker set by the explicit "Start a new conversation" control, read
      *  once on the next boot so the first message tells the server this fresh
      *  conversation was a deliberate restart (→ a timeline note for the agent). */
     restart: "ccp_wc_restart_" + siteKey,
+    /** Last-applied appearance payload ({name, config}), re-applied synchronously
+     *  on the next boot so the first paint carries the org's real branding instead
+     *  of flashing the built-in default and re-theming when the config arrives. */
+    theme: "ccp_wc_theme_" + siteKey,
+    /** Visitor-side sound mute (⋯ menu) — a per-device preference, so it survives
+     *  identity resets like the panel size does. */
+    muted: "ccp_wc_muted_" + siteKey,
   };
   // Storage access itself can THROW (Safari private mode, "block all cookies"), so
   // every call is guarded. Fall back localStorage → sessionStorage → in-memory:
@@ -79,6 +86,10 @@
   function lsSet(k, v) {
     memStore[k] = v;
     try { localStorage.setItem(k, v); return; } catch (_e) {}
+    // The write failed (quota/blocked) but an OLD value may sit in localStorage —
+    // and lsGet prefers localStorage, so it would shadow the fresher fallback copy
+    // forever. Drop the stale primary before falling back.
+    try { localStorage.removeItem(k); } catch (_e) {}
     try { sessionStorage.setItem(k, v); } catch (_e) {}
   }
   function lsDel(k) {
@@ -145,13 +156,14 @@
     formDone: false, closed: false, cfg: null, preChat: null, replyTo: null, fatal: false,
     /** File picked but not sent yet — see stageFile/clearStage. */
     staged: null,
-    /** Panel widened via the ⋯ menu (launcher modes only). */
-    expanded: false,
     /** Whether an agent is currently online — from the server `agents` frame. */
     agentsOnline: undefined,
     byId: {}, pending: {}, unread: 0, lastSeenTs: Number(lsGet(K.seen) || 0),
     lastGroup: null, lastDayLabel: null, stick: true, readTimer: null, typingClear: null,
     hasMore: false, oldestCursor: null, loadingOlder: false, typingOn: false, recording: null,
+    /** Last visibility reported to the server (see emitPresence). Server assumes
+     *  visible on connect, so start matched to that. */
+    presenceSent: true,
     visitorId: lsGet(K.visitor) || newVisitorId(),
     /** Set when this boot follows an explicit "Start a new conversation" — attached
      *  to the first message so the server records the restart note, then cleared. */
@@ -181,6 +193,8 @@
   function linkify(t) { var re = /(https?:\/\/[^\s<]+[^\s<.,;:!?)\]}'"])/g, out = "", last = 0, m; while ((m = re.exec(t))) { out += esc(t.slice(last, m.index)); out += '<a href="' + esc(m[0]) + '" target="_blank" rel="noopener noreferrer nofollow">' + esc(m[0]) + "</a>"; last = m.index + m[0].length; } out += esc(t.slice(last)); return out; }
   function initials(n) { if (!n) return "•"; var p = n.trim().split(/\s+/).slice(0, 2); return p.map(function (x) { return x[0]; }).join("").toUpperCase() || "•"; }
   function fmtTime(iso) { return (iso ? new Date(iso) : new Date()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+  /** Human labels for local placeholder bubbles ("📎 Photo", not "📎 image"). */
+  var KIND_LABEL = { image: "Photo", video: "Video", audio: "Audio", document: "Document" };
   function fmtDay(iso) { var d = iso ? new Date(iso) : new Date(), t = new Date(), y = new Date(t - 864e5); if (d.toDateString() === t.toDateString()) return "Today"; if (d.toDateString() === y.toDateString()) return "Yesterday"; return d.toLocaleDateString([], { month: "short", day: "numeric" }); }
   function newCid() { return "c" + Math.random().toString(36).slice(2) + Date.now().toString(36); }
   function mediaUrl(id, thumb) { return apiBase + "/api/widget/media/" + encodeURIComponent(id) + "?key=" + encodeURIComponent(siteKey) + "&v=" + encodeURIComponent(S.visitorId) + (thumb ? "&thumb=1" : ""); }
@@ -224,16 +238,28 @@
     // in-app browsers render an invisible launcher, a white-on-white header, and
     // unreadable outgoing bubbles. The flat colour lands first; modern engines then
     // override it with the gradient.
-    ".launch .b{width:60px;height:60px;border-radius:9999px;background:var(--lc);background:linear-gradient(145deg,var(--lc),color-mix(in srgb,var(--lc) 78%,#000));color:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 14px 30px -8px color-mix(in srgb,var(--lc) 60%,transparent),0 4px 10px rgba(0,0,0,.12);transition:transform .18s ease}",
+    // Icon color derives from the launcher color (--lct, set in applyConfig) — a
+    // hardcoded #fff was invisible on a light launcher color.
+    ".launch .b{width:60px;height:60px;border-radius:9999px;background:var(--lc);background:linear-gradient(145deg,var(--lc),color-mix(in srgb,var(--lc) 78%,#000));color:var(--lct,#fff);display:flex;align-items:center;justify-content:center;box-shadow:0 14px 30px -8px color-mix(in srgb,var(--lc) 60%,transparent),0 4px 10px rgba(0,0,0,.12);transition:transform .18s ease}",
     ".launch:hover .b{transform:scale(1.06)}.launch:active .b{transform:scale(.95)}.launch .b svg{width:28px;height:28px}.launch .b img{width:30px;height:30px;border-radius:9999px;object-fit:cover}",
     ".launch .lbl{background:var(--surface);color:var(--ink);font-size:13.5px;font-weight:600;padding:9px 14px;border-radius:9999px;box-shadow:0 8px 22px -8px rgba(0,0,0,.25);white-space:nowrap;display:none}",
     ".launch.showlbl .lbl{display:block}",
+    ".launch.pre{visibility:hidden}",
     ".badge{position:absolute;top:-2px;right:-2px;min-width:20px;height:20px;padding:0 5px;border-radius:9999px;background:#ef4444;color:#fff;font-size:11px;font-weight:700;display:none;align-items:center;justify-content:center;box-shadow:0 0 0 2px var(--surface)}.badge.on{display:flex}",
     ".lwrap{position:relative;display:flex}",
-    ".panel{position:fixed;bottom:94px;z-index:2147483647;width:392px;max-width:calc(100vw - 24px);height:min(640px,calc(100vh - 116px));background:var(--surface);border-radius:var(--radius);box-shadow:0 32px 64px -16px rgba(15,23,42,.34),0 0 0 1px var(--border);display:none;flex-direction:column;overflow:hidden;opacity:0;transform:translateY(12px) scale(.98)}",
+    // 376×600 default — corner-chat scale (Crisp/Drift territory); the visitor can
+    // widen it with the expand control when they want more room.
+    // The hairline is a TRANSLUCENT dark ring, not a solid light one. `var(--border)`
+    // (#e6e9f0) is only correct against a light page — on a dark customer site it
+    // painted a visible white outline around the panel, which reads as a cheap
+    // sticker rather than a floating surface. Translucent ink disappears on dark
+    // backgrounds and still separates the panel on light ones.
+    ".panel{position:fixed;bottom:94px;z-index:2147483647;width:376px;max-width:calc(100vw - 24px);height:min(600px,calc(100vh - 116px));background:var(--surface);border-radius:var(--radius);box-shadow:0 24px 60px -12px rgba(15,23,42,.30),0 2px 10px rgba(15,23,42,.10),0 0 0 1px rgba(15,23,42,.07);display:none;flex-direction:column;overflow:hidden;opacity:0;transform:translateY(12px) scale(.98)}",
+    ".root.dark .panel{box-shadow:0 24px 60px -12px rgba(0,0,0,.62),0 2px 10px rgba(0,0,0,.35),0 0 0 1px rgba(255,255,255,.09)}",
     ".panel.right{right:22px}.panel.left{left:22px}",
     ".panel.open{display:flex}.panel.in{opacity:1;transform:none;transition:opacity .22s ease,transform .22s cubic-bezier(.2,.8,.2,1)}",
-    ".panel.inline{position:relative;right:auto;left:auto;bottom:auto;width:100%;height:100%;max-width:100%;border-radius:inherit;opacity:1;transform:none;display:flex;box-shadow:0 0 0 1px var(--border)}",
+    ".panel.inline{position:relative;right:auto;left:auto;bottom:auto;width:100%;height:100%;max-width:100%;border-radius:inherit;opacity:1;transform:none;display:flex;box-shadow:0 0 0 1px rgba(15,23,42,.07)}",
+    ".root.dark .panel.inline{box-shadow:0 0 0 1px rgba(255,255,255,.09)}",
     "@media (max-width:480px){.panel:not(.inline){right:0;left:0;bottom:0;top:0;width:100vw;max-width:100vw;height:100vh;height:100dvh;border-radius:0}}",
     // iOS Safari auto-zooms the HOST PAGE when a form control with font-size < 16px
     // takes focus, and never zooms back out — so tapping the message box left the
@@ -244,13 +270,20 @@
     ".hava{width:38px;height:38px;border-radius:11px;background:rgba(255,255,255,.18);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;position:relative;overflow:hidden;flex:0 0 auto}.hava img{width:100%;height:100%;object-fit:cover}",
     ".hdot{position:absolute;right:-2px;bottom:-2px;width:12px;height:12px;border-radius:9999px;background:#22c55e;box-shadow:0 0 0 2px var(--c)}.hdot.re{background:#f59e0b}.hdot.off{background:#9ca3af}",
     ".htxt{flex:1;min-width:0}.htxt b{display:block;font-size:15.5px;font-weight:700;letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.25}.htxt small{font-size:12px;opacity:.9}",
-    // Expanded panel. Capped against the viewport so it can never overflow, and the
-    // height grows too — a wider panel with the same height looks letterboxed.
-    // Desktop only. On mobile the panel is already full-screen, so a width cap here
-    // would SHRINK it (the reported "expand does the opposite"). Below 481px the
-    // rule doesn't apply and the button is hidden.
-    "@media (min-width:481px){.panel.wide{width:min(720px,calc(100vw - 32px));height:min(760px,calc(100vh - 116px))}}",
-    "@media (max-width:480px){header .hexp{display:none}}",
+    // Drag-to-resize grip on the panel's OUTER top corner (the one pointing away
+    // from the screen edge the panel is anchored to). Replaced an expand/restore
+    // toggle button: two icon states in the header to pick between two fixed sizes,
+    // when what people want is simply "a bit bigger". Desktop only — the mobile
+    // panel is already full-screen. Generous 18px target over a subtle 10px mark.
+    "@media (max-width:480px){.rsz{display:none}}",
+    // Inset past the 20px corner radius, or `overflow:hidden` clips the mark into
+    // a stray fragment. The hit area stays generous; only the mark is inset.
+    ".rsz{position:absolute;top:0;width:26px;height:26px;z-index:7;touch-action:none;opacity:0;transition:opacity .15s}",
+    ".panel:hover .rsz{opacity:.45}.rsz:hover{opacity:.85!important}",
+    ".panel.right .rsz{left:0;cursor:nwse-resize}.panel.left .rsz{right:0;cursor:nesw-resize}",
+    ".rsz::after{content:'';position:absolute;top:9px;width:8px;height:8px;border-top:1.5px solid var(--ct)}",
+    ".panel.right .rsz::after{left:9px;border-left:1.5px solid var(--ct);border-top-left-radius:2px}",
+    ".panel.left .rsz::after{right:9px;border-right:1.5px solid var(--ct);border-top-right-radius:2px}",
     ".hmw{position:relative;margin-left:auto;display:flex}",
     ".hmenu{position:absolute;top:calc(100% + 6px);right:0;min-width:190px;background:var(--surface);color:var(--ink);border:1px solid var(--border);border-radius:12px;box-shadow:0 18px 40px -12px rgba(15,23,42,.3);padding:5px;display:none;flex-direction:column;z-index:3}.hmenu.on{display:flex}",
     ".hmi{background:transparent;border:0;text-align:left;font:inherit;font-size:13.5px;color:inherit;padding:9px 11px;border-radius:8px;cursor:pointer;white-space:nowrap}.hmi:hover{background:var(--surface2)}",
@@ -278,7 +311,7 @@
     reduceMotion ? ".mr.flash .bubble{box-shadow:0 0 0 3px color-mix(in srgb,var(--c) 45%,transparent)}" : ".mr.flash .bubble{animation:rqring 1.4s ease}@keyframes rqring{0%,100%{box-shadow:0 0 0 0 transparent}28%,62%{box-shadow:0 0 0 3px color-mix(in srgb,var(--c) 45%,transparent)}}",
     ".media{min-height:48px}.media img,.media video{max-width:var(--media-max,236px);max-height:250px;border-radius:13px;display:block;cursor:pointer;background:color-mix(in srgb,var(--ink2) 10%,transparent)}.media audio{width:100%;min-width:min(260px,100%);max-width:100%}",
     // Voice note: a purpose-built row, not native controls. Sized in ch/flex so it
-    // fills whatever width the bubble has — including the expanded panel.
+    // fills whatever width the bubble has — including a resized panel.
     ".vn{display:flex;align-items:center;gap:10px;min-width:180px;padding:2px 0}",
     ".vnplay{flex:0 0 auto;width:34px;height:34px;border:0;border-radius:9999px;cursor:pointer;display:flex;align-items:center;justify-content:center;background:color-mix(in srgb,currentColor 14%,transparent);color:inherit;transition:.12s}.vnplay:hover{background:color-mix(in srgb,currentColor 22%,transparent)}.vnplay:disabled{opacity:.5;cursor:default}.vnplay svg{width:16px;height:16px}",
     ".vnbar{flex:1;min-width:0;display:flex;flex-direction:column;gap:5px}",
@@ -324,20 +357,36 @@
     ".earlier{display:flex;justify-content:center;padding:2px 0 8px}.earlierbtn{background:var(--surface);color:var(--ink2);border:1px solid var(--border);border-radius:9999px;padding:5px 14px;font-size:12px;cursor:pointer;transition:.12s}.earlierbtn:hover{background:var(--surface2);color:var(--ink)}.earlierbtn:disabled{opacity:.6;cursor:default}",
     ".rbtn.rec{background:#ef4444;color:#fff}",
     ".recbar{display:flex;align-items:center;gap:9px;flex:1;color:var(--ink);font-size:13px;padding:0 6px}.recbar .rd{width:9px;height:9px;border-radius:9999px;background:#ef4444;animation:rpulse 1.1s infinite}@keyframes rpulse{0%,100%{opacity:1}50%{opacity:.35}}.recbar .rt{flex:1;font-variant-numeric:tabular-nums}.recbar button{border:0;background:transparent;cursor:pointer;color:var(--ink2);font-size:16px;padding:2px 4px}.recbar .snd{color:var(--c);font-weight:700}",
-    ".drop{position:absolute;inset:8px;background:color-mix(in srgb,var(--c) 10%,transparent);border:2px dashed var(--c);border-radius:14px;display:none;align-items:center;justify-content:center;color:var(--c);font-weight:700;z-index:5}.drop.on{display:flex}",
-    ".toast{position:absolute;left:14px;right:14px;bottom:74px;background:#111827;color:#fff;font-size:13px;padding:10px 13px;border-radius:12px;opacity:0;transition:opacity .2s;pointer-events:none;text-align:center;z-index:6}.toast.on{opacity:.97}",
+    // Both anchored to the PANEL, not the scrolling body: an absolutely-positioned
+    // child of a scroll container scrolls WITH the content, so error toasts were
+    // invisible in any conversation longer than one screenful (the exact bug class
+    // the "new messages" pill was moved out of the body for).
+    ".drop{position:absolute;inset:8px;background:color-mix(in srgb,var(--c) 10%,transparent);border:2px dashed var(--c);border-radius:14px;display:none;align-items:center;justify-content:center;color:var(--c);font-weight:700;z-index:5;pointer-events:none}.drop.on{display:flex}",
+    ".toast{position:absolute;left:14px;right:14px;bottom:calc(100% + 10px);background:#111827;color:#fff;font-size:13px;padding:10px 13px;border-radius:12px;opacity:0;transition:opacity .2s;pointer-events:none;text-align:center;z-index:6}.toast.on{opacity:.97}",
     ".lb{position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:2147483647;display:none;align-items:center;justify-content:center;padding:24px;cursor:zoom-out}.lb.on{display:flex}.lb img{max-width:100%;max-height:100%;border-radius:10px}",
   ].join("");
   var st = document.createElement("style"); st.textContent = css; shadow.appendChild(st);
   var root = el("div", { class: "root" }); shadow.appendChild(root);
 
   // ── launcher ───────────────────────────────────────────────────────────────
+  // Appearance cached from the last visit — parsed BEFORE the launcher exists so
+  // its very first paint carries the org's real branding (no default-blue flash),
+  // and so a first-EVER visit (no cache yet) mounts the launcher hidden (`pre`)
+  // until the config answers. A corrupt entry is dropped, never fatal.
+  var cachedCfg = null;
+  try {
+    var cachedRaw = lsGet(K.theme);
+    if (cachedRaw) { cachedCfg = JSON.parse(cachedRaw); if (!cachedCfg || !cachedCfg.config) cachedCfg = null; }
+  } catch (_e) { lsDel(K.theme); }
+  // What's currently persisted — applyConfig skips the (stringify + storage) write
+  // when nothing changed, which is every reconnect's `ready` frame.
+  var lastThemeSnap = cachedCfg ? cachedRaw : null;
   var launcher = null, badge = el("span", { class: "badge", "aria-hidden": "true" });
   if (A.launcher && !INLINE) {
     var lb = el("span", { class: "b" });
     lb.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
     var lwrap = el("div", { class: "lwrap" }, [lb, badge]);
-    launcher = el("button", { class: "launch " + A.position + (A.label ? " showlbl" : ""), "aria-label": "Open chat", "aria-haspopup": "dialog" },
+    launcher = el("button", { class: "launch " + A.position + (A.label ? " showlbl" : "") + (cachedCfg ? "" : " pre"), "aria-label": "Open chat", "aria-haspopup": "dialog" },
       A.position === "left" ? [lwrap, el("span", { class: "lbl" }, A.label)] : [el("span", { class: "lbl" }, A.label), lwrap]);
     root.appendChild(launcher);
   }
@@ -347,8 +396,6 @@
   var hava = el("div", { class: "hava" }); var havaInit = document.createTextNode("•"); hava.appendChild(havaInit);
   var hdot = el("span", { class: "hdot", "aria-hidden": "true" }); hava.appendChild(hdot);
   var titleEl = el("b", null, "Chat"); var subEl = el("small", null, "");
-  var EXPAND_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>';
-  var RESTORE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3H4v5M20 16v5h-5M4 3l6 6M20 21l-6-6"/></svg>';
   var closeBtn = el("button", { class: "hx", "aria-label": "Close chat", html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>' });
   // Overflow menu. Expand, sound and "start a new conversation" all want a home in
   // the header, and three more icons beside ✕ is clutter — so they live behind one
@@ -372,34 +419,76 @@
   root.addEventListener("click", function () { closeMenu(); });
   document.addEventListener("click", function () { closeMenu(); });
 
-  var expandBtn = el("button", { class: "hx hexp", "aria-label": "Expand chat", html: EXPAND_SVG });
-  var headerCtl = INLINE ? [menuWrap] : [expandBtn, menuWrap];
+  var headerCtl = [menuWrap];
   var headerEl = el("header", null, [hava, el("div", { class: "htxt" }, [titleEl, subEl])].concat(headerCtl));
   if (!INLINE) headerEl.appendChild(closeBtn);
   panel.appendChild(headerEl);
 
   /**
-   * Expand / restore the panel.
+   * Drag-to-resize, from the panel's outer top corner.
    *
-   * The default 392px is right for a corner chat, but it is what makes media
-   * controls, images and long messages feel cramped — so let the visitor widen it on
-   * demand instead of making the widget more intrusive for everyone by default.
-   * Persisted so it survives a refresh, like the open-state.
+   * The default is right for a corner chat, but it makes media, images and long
+   * messages feel cramped — so let the visitor size it to taste rather than making
+   * the widget more intrusive for everyone by default. Replaces an expand/restore
+   * toggle: one continuous gesture instead of a two-state button, and no second
+   * icon in the header.
    *
-   * Launcher modes only: an inline embed is sized by the host's container, and
-   * resizing our own panel there would fight their CSS.
+   * Launcher modes only (an inline embed is sized by the host's container, and
+   * resizing our own panel there would fight their CSS) and desktop only (the
+   * mobile panel is already full-screen). Persisted like the open-state.
    */
-  function setExpanded(on, persist) {
-    S.expanded = !!on;
-    panel.classList.toggle("wide", S.expanded);
-    if (persist) { if (S.expanded) lsSet(K.expanded, "1"); else lsDel(K.expanded); }
-    if (!INLINE) {
-      expandBtn.innerHTML = S.expanded ? RESTORE_SVG : EXPAND_SVG;
-      expandBtn.setAttribute("aria-label", S.expanded ? "Restore chat size" : "Expand chat");
-    }
+  var SIZE_MIN_W = 340, SIZE_MIN_H = 420;
+  function isResizable() { return !INLINE && window.innerWidth > 480; }
+  function applyPanelSize(w, h) {
+    // Clamp to the viewport so a drag can never push the panel off-screen, and to
+    // a sane minimum so it can't be shrunk into an unusable sliver.
+    var maxW = Math.min(760, window.innerWidth - 44);
+    var maxH = window.innerHeight - 116;
+    var cw = Math.max(SIZE_MIN_W, Math.min(w, Math.max(SIZE_MIN_W, maxW)));
+    var ch = Math.max(SIZE_MIN_H, Math.min(h, Math.max(SIZE_MIN_H, maxH)));
+    panel.style.width = cw + "px";
+    panel.style.height = ch + "px";
+    return { w: cw, h: ch };
+  }
+  /** Re-apply (or drop) the stored size — called on boot and on viewport changes,
+   *  so crossing the mobile breakpoint hands sizing back to the CSS. */
+  function syncPanelSize() {
+    var clear = function () { panel.style.width = ""; panel.style.height = ""; };
+    if (!isResizable()) return clear(); // mobile / inline — the CSS owns sizing
+    var raw = lsGet(K.size);
+    if (!raw) return clear();
+    try {
+      var s = JSON.parse(raw);
+      if (s && s.w && s.h) applyPanelSize(s.w, s.h); else clear();
+    } catch (_e) { lsDel(K.size); clear(); }
+  }
+  var rszEl = el("div", { class: "rsz", "aria-hidden": "true" });
+  panel.appendChild(rszEl);
+  var rszFrom = null;
+  rszEl.addEventListener("pointerdown", function (e) {
+    if (!isResizable()) return;
+    e.preventDefault();
+    var r = panel.getBoundingClientRect();
+    rszFrom = { x: e.clientX, y: e.clientY, w: r.width, h: r.height };
+    try { rszEl.setPointerCapture(e.pointerId); } catch (_e) {}
+  });
+  rszEl.addEventListener("pointermove", function (e) {
+    if (!rszFrom) return;
+    // The panel is anchored to its bottom + its own side, so the grip's corner
+    // moves AWAY from that side to grow: mirror the x delta for a left-anchored panel.
+    var dx = A.position === "left" ? e.clientX - rszFrom.x : rszFrom.x - e.clientX;
+    applyPanelSize(rszFrom.w + dx, rszFrom.h + (rszFrom.y - e.clientY));
+  });
+  function endResize() {
+    if (!rszFrom) return;
+    rszFrom = null;
+    var r = panel.getBoundingClientRect();
+    lsSet(K.size, JSON.stringify({ w: Math.round(r.width), h: Math.round(r.height) }));
     scrollToBottom(false);
   }
-  if (!INLINE) expandBtn.addEventListener("click", function () { setExpanded(!S.expanded, true); });
+  rszEl.addEventListener("pointerup", endResize);
+  rszEl.addEventListener("pointercancel", endResize);
+  window.addEventListener("resize", syncPanelSize);
   // Reset = close this chat on this device and start fresh. Reworded from "Start a
   // new conversation" to "Clear this chat" in the menu: the model is one thread per
   // visitor, so this is a RESET (privacy on a shared computer), not a second
@@ -423,15 +512,23 @@
   function showResetConfirm() {
     if (bodyEl.querySelector(".rconf")) return;
     var box = el("div", { class: "rconf" }, [
-      el("div", { class: "rct" }, "Start a new conversation? This closes your current chat on this device."),
+      el("div", { class: "rct" }, "End this chat? Your conversation is cleared on this device."),
       el("div", { class: "rca" }, [
-        el("button", { class: "rcy", type: "button", onclick: doReset }, "Start new"),
+        el("button", { class: "rcy", type: "button", onclick: doReset }, "End chat"),
         el("button", { class: "rcn", type: "button", onclick: function () { box.remove(); } }, "Cancel"),
       ]),
     ]);
     bodyEl.appendChild(box); scrollIfStuck();
   }
-  menuItem("Clear this chat", requestReset);
+  menuItem("End chat", requestReset);
+  // Visitor-side mute for the notification chime — only offered when the org has
+  // sounds on at all (shown/hidden in applyConfig).
+  var muteItem = menuItem(lsGet(K.muted) === "1" ? "Unmute sounds" : "Mute sounds", function () {
+    var muted = lsGet(K.muted) === "1";
+    if (muted) lsDel(K.muted); else lsSet(K.muted, "1");
+    muteItem.textContent = muted ? "Mute sounds" : "Unmute sounds";
+  });
+  muteItem.style.display = "none";
   var reStrip = el("div", { class: "restrip" }, "Reconnecting…"); panel.appendChild(reStrip);
   // Shown when no agent is online, so a visitor knows to expect a reply by email
   // rather than typing into silence (NN/g: if you're not staffed, say so).
@@ -443,8 +540,10 @@
   var earlierBar = el("div", { class: "earlier" });
   var earlierBtn = el("button", { class: "earlierbtn", onclick: function () { loadOlder(); } }, "Load earlier messages");
   earlierBar.appendChild(earlierBtn); earlierBar.style.display = "none";
-  bodyEl.appendChild(dropEl); bodyEl.appendChild(toastEl); bodyEl.appendChild(earlierBar);
+  bodyEl.appendChild(earlierBar);
   panel.appendChild(bodyEl);
+  // Panel-anchored overlays (NOT in the scrolling body — see the .drop/.toast CSS note).
+  panel.appendChild(dropEl);
   var replyBar = el("div", { class: "rc" }); var replyQt = el("div", { class: "qt" });
   replyBar.appendChild(el("span", null, "Reply:")); replyBar.appendChild(replyQt);
   replyBar.appendChild(el("button", { "aria-label": "Cancel reply", onclick: clearReply }, "✕"));
@@ -473,9 +572,10 @@
   var stgClear = el("button", { class: "x", type: "button", "aria-label": "Remove attachment", html: "&times;" });
   var stageEl = el("div", { class: "stg" }, [stgThumb, el("div", { class: "meta" }, [stgName, stgSize]), stgClear]);
   var composer = el("div", { class: "composer" }, [stageEl, ibar, fileInput]);
-  // Pinned above the composer (not inside the scrolling body) so it stays put while
+  // Pinned above the composer (not inside the scrolling body) so they stay put while
   // the visitor scrolls history — see the .newp CSS note.
   composer.appendChild(newPill);
+  composer.appendChild(toastEl);
   // Hidden until the socket proves itself (`ready`/`history`) or the pre-chat
   // form is submitted. Previously it painted immediately while S.formDone was
   // still false, so onSend() returned early and a visitor typing into an
@@ -560,23 +660,42 @@
       }
       return;
     }
-    if (window.innerWidth > 480) { panel.style.height = ""; return; }
+    // Desktop: hand sizing back to the visitor's dragged size (or the CSS default
+    // when they've never resized). Blanket-clearing the height here silently undid
+    // a restored size, because openPanel() calls this right after boot applies it.
+    if (window.innerWidth > 480) { syncPanelSize(); return; }
     panel.style.height = vv.height + "px";
     scrollToBottom(false);
   }
   if (vv) { vv.addEventListener("resize", syncViewport); vv.addEventListener("scroll", syncViewport); }
+  // First-open placeholder: until `history` decides the view, the body is empty and
+  // the composer hidden — a blank white panel that reads as broken while the socket
+  // connects. One quiet "Loading…" pill fills that gap; removed the moment the real
+  // view (form / welcome / thread) renders, or on a terminal failure.
+  var loadEl = null;
+  function showLoading() {
+    if (loadEl || S.viewInit || S.fatal) return;
+    loadEl = el("div", { class: "sys" }, "Loading…");
+    bodyEl.appendChild(loadEl);
+  }
+  function hideLoading() { if (loadEl) { if (loadEl.parentNode) loadEl.parentNode.removeChild(loadEl); loadEl = null; } }
   function openPanel() {
     if (INLINE) return;
     // Opening the chat is the moment a socket is actually needed (see boot()).
     ensureConnected();
     S.open = true; panel.classList.add("open"); requestAnimationFrame(function () { panel.classList.add("in"); });
     if (launcher) launcher.style.display = "none";
+    showLoading();
     clearUnread(); if (S.formDone) setTimeout(function () { ta.focus(); }, 40); scrollToBottom(true); markRead();
     lsSet(K.open, "1");
     syncViewport();
   }
   function closePanel() {
     if (INLINE) return;
+    // A recording must never outlive the visible panel: the red pulse is the only
+    // indicator the mic is hot, and the 5-minute cap would otherwise auto-SEND
+    // ambient audio recorded behind a closed chat. Closing cancels, never sends.
+    if (S.recording) stopRecord(false);
     S.open = false; panel.classList.remove("in"); panel.classList.remove("open");
     panel.style.height = "";
     if (launcher) launcher.style.display = "flex";
@@ -586,6 +705,12 @@
   if (launcher) launcher.addEventListener("click", function () { lastFocus = launcher; openPanel(); });
   closeBtn.addEventListener("click", closePanel);
   panel.addEventListener("keydown", function (e) {
+    // Escape peels one layer at a time: an open popover closes first, the panel
+    // only on the next press — losing the whole panel when you meant to dismiss
+    // the emoji picker is a classic keyboard-user trap.
+    if (e.key === "Escape" && (emojiPop.classList.contains("on") || menuEl.classList.contains("on"))) {
+      e.preventDefault(); emojiPop.classList.remove("on"); closeMenu(); return;
+    }
     if (e.key === "Escape" && !INLINE) { e.preventDefault(); closePanel(); return; }
     if (e.key === "Tab" && !INLINE) {
       var f = Array.prototype.filter.call(panel.querySelectorAll("button,textarea,input,a[href]"), function (x) { return x.offsetParent !== null; });
@@ -625,28 +750,66 @@
   if (prior && prior.q && prior.q.length) prior.q.forEach(function (c) { try { if (window.CCPWebchat[c[0]]) window.CCPWebchat[c[0]].apply(null, c[1] || []); } catch (_e) {} });
 
   // ── theming / config ────────────────────────────────────────────────────────
-  function applyConfig(payload) {
+  /** First-ever visit: the launcher mounted hidden (no cached theme yet) and shows
+   *  on the first applyConfig — or after this fallback, so a blocked/failed config
+   *  fetch degrades to the default look rather than no widget at all. */
+  function revealLauncher() { if (launcher) launcher.classList.remove("pre"); }
+  setTimeout(revealLauncher, 2000);
+  function applyConfig(payload, fromCache) {
     S.cfg = payload || {}; var cfg = (payload && payload.config) || {}, th = cfg.theme || {};
     var c = hex(th.primaryColor) || BRAND, lc = hex(th.launcherColor) || c, uc = hex(th.userBubbleColor) || c;
     root.style.setProperty("--c", c); root.style.setProperty("--ct", contrastOn(c));
-    root.style.setProperty("--lc", lc); root.style.setProperty("--uc", uc); root.style.setProperty("--uct", contrastOn(uc));
+    root.style.setProperty("--lc", lc); root.style.setProperty("--lct", contrastOn(lc));
+    root.style.setProperty("--uc", uc); root.style.setProperty("--uct", contrastOn(uc));
     var font = cfg.fontFamily === "rounded" ? "'Nunito',ui-rounded,'Segoe UI',system-ui,sans-serif" : cfg.fontFamily === "serif" ? "Georgia,'Times New Roman',serif" : "";
     if (font) root.style.setProperty("--font", font); else root.style.removeProperty("--font");
     var dark = cfg.themeMode === "dark" || (cfg.themeMode === "auto" && (function () { try { return matchMedia("(prefers-color-scheme:dark)").matches; } catch (_e) { return false; } })());
     root.classList.toggle("dark", !!dark);
     var name = cfg.headerTitle || (payload && payload.name) || "Chat";
     titleEl.textContent = name;
-    if (cfg.logoDataUrl) { hava.innerHTML = ""; hava.appendChild(el("img", { src: cfg.logoDataUrl, alt: "" })); hava.appendChild(hdot); }
-    else havaInit.nodeValue = initials(name);
+    panel.setAttribute("aria-label", name);
+    // BOTH branches rebuild the avatar box: the logo branch destroys the initials
+    // text node, so a one-sided `else` that wrote to it mutated a DETACHED node —
+    // removing a configured logo (now reachable via the cached-config path) left
+    // the stale image up for the whole session.
+    hava.innerHTML = "";
+    if (cfg.logoDataUrl) hava.appendChild(el("img", { src: cfg.logoDataUrl, alt: "" }));
+    else { havaInit = document.createTextNode(initials(name)); hava.appendChild(havaInit); }
+    hava.appendChild(hdot);
+    // Explicit else — a cached subtitle the org has since cleared must be undone.
     if (cfg.headerSubtitle) { subEl.textContent = cfg.headerSubtitle; subEl.style.display = ""; }
-    if (cfg.showBranding !== false) { footEl.innerHTML = "⚡ Powered by chat"; footEl.style.display = ""; } else footEl.style.display = "none";
+    else { subEl.textContent = ""; subEl.style.display = "none"; }
+    if (cfg.showBranding !== false) { footEl.innerHTML = "⚡ Powered by Loadless"; footEl.style.display = ""; } else footEl.style.display = "none";
     // "Just chat" — hide the header on an embedded (inline / full-page) widget, so the
     // host page's own chrome frames it. Only for INLINE: a floating bubble needs its
     // header for the close/expand controls (a headerless mobile bubble would trap the
     // visitor with no way out).
     headerEl.style.display = INLINE && cfg.showHeader === false ? "none" : "";
     applyAttachmentPolicy();
+    muteItem.style.display = cfg.soundEnabled ? "" : "none";
+    // Persist what we just painted so the NEXT page load themes synchronously at
+    // mount instead of flashing the default and re-painting when config arrives.
+    // Skipped when unchanged (every reconnect), and the base64 logo/avatar are
+    // stripped past ~256KB — this lives in the CUSTOMER site's storage quota.
+    if (!fromCache && payload && payload.config) {
+      var snap = JSON.stringify({ name: payload.name || "", config: cfg });
+      if (snap.length > 262144) {
+        var slim = {};
+        for (var ck in cfg) if (ck !== "logoDataUrl" && ck !== "agentAvatarDataUrl") slim[ck] = cfg[ck];
+        snap = JSON.stringify({ name: payload.name || "", config: slim });
+      }
+      if (snap !== lastThemeSnap) { lastThemeSnap = snap; lsSet(K.theme, snap); }
+    }
+    revealLauncher();
   }
+  // Follow the OS light/dark switch live when themeMode is "auto" — applyConfig
+  // only samples it once.
+  try {
+    matchMedia("(prefers-color-scheme:dark)").addEventListener("change", function (ev) {
+      var cfg2 = (S.cfg && S.cfg.config) || {};
+      if (cfg2.themeMode === "auto") root.classList.toggle("dark", ev.matches);
+    });
+  } catch (_e) {}
   function agentAvatar() { var cfg = (S.cfg && S.cfg.config) || {}; return cfg.agentAvatarDataUrl || null; }
   function onReady(payload) {
     S.ready = true; applyConfig(payload); emitApi("ready", { conversationId: (payload && payload.conversationId) || null });
@@ -671,6 +834,7 @@
    */
   function initView(hasMessages) {
     if (S.viewInit) return; S.viewInit = true;
+    hideLoading();
     var cfg = (S.cfg && S.cfg.config) || {};
     var fields = Array.isArray(cfg.preChatFields) ? cfg.preChatFields : [];
     // `K.prechat` covers the gap the message list can't: a visitor who completed the
@@ -713,7 +877,7 @@
     function label(f) { return f.label + (f.required ? "" : " (optional)"); }
     /** Validate the CURRENT step. Returns an error string, or "" when valid. */
     function validate(f, v) {
-      if (f.required && !v) return "This one's required.";
+      if (f.required && !v) return "This field is required.";
       if (f.type === "email" && v && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) return "That email doesn't look right.";
       if (f.type === "phone" && v && !/^[+()\-\s\d]{6,}$/.test(v)) return "That phone number doesn't look right.";
       return "";
@@ -847,7 +1011,7 @@
     // any sticker forwarded from a Meta thread — still carry kind `sticker`. Absent
     // this branch they fell through to the document row, so a photo rendered as a
     // grey 📄 link.
-    if (m.media.kind === "image" || m.media.kind === "sticker") return '<div class="media"><img src="' + url + '" alt="image" loading="lazy" data-full="' + url + '"></div>';
+    if (m.media.kind === "image" || m.media.kind === "sticker") return '<div class="media"><img src="' + url + '" alt="Photo" loading="lazy" data-full="' + url + '"></div>';
     if (m.media.kind === "video") return '<div class="media"><video src="' + url + '" controls preload="metadata"' + (m.media.hasThumbnail ? ' poster="' + mediaUrl(m.id, true) + '"' : "") + "></video></div>";
     if (m.media.kind === "audio") {
       // ALL audio uses the SAME purpose-built player. Native <audio controls> is
@@ -891,11 +1055,15 @@
       else av.appendChild(document.createTextNode(m.ai ? "AI" : initials(m.senderName)));
       row.appendChild(av);
     }
-    var bub = el("div", { class: "bubble" + (anim ? " anim" : ""), html: bubbleHtml(m) });
-    var meta = el("div", { class: "meta", html: metaHtml(m, isVisitor) });
+    // The rendered strings are kept on the row for upsert's no-change check —
+    // reading them back via .innerHTML never matches (the serializer re-encodes
+    // quotes differently than esc()), so every reconnect replay rebuilt media.
+    var bh = bubbleHtml(m), mh = metaHtml(m, isVisitor);
+    var bub = el("div", { class: "bubble" + (anim ? " anim" : ""), html: bh });
+    var meta = el("div", { class: "meta", html: mh });
     row.appendChild(el("div", { class: "col" }, [bub, meta]));
     if (!m._local && m.externalId) row.appendChild(el("button", { class: "rep", title: "Reply", "aria-label": "Reply", onclick: function () { setReply(m); } }, "↩"));
-    row._meta = meta; row._bub = bub;
+    row._meta = meta; row._bub = bub; row._bubHtml = bh; row._metaHtml = mh;
     wireMedia(bub);
     if (m.id) { S.byId[m.id] = { el: row, msg: m }; trimHistory(); }
     return row;
@@ -933,14 +1101,18 @@
     if (ids.length <= MAX_RENDERED) return;
     var dist = bodyEl.scrollHeight - bodyEl.scrollTop - bodyEl.clientHeight;
     if (dist > 400) return; // reading older messages — leave the DOM alone
-    ids
+    var entries = ids
       .map(function (id) { return S.byId[id]; })
-      .sort(function (a, b) { return new Date(a.msg.createdAt) - new Date(b.msg.createdAt); })
-      .slice(0, ids.length - TRIM_TO)
-      .forEach(function (e) {
-        if (e.el && e.el.parentNode) e.el.parentNode.removeChild(e.el);
-        delete S.byId[e.msg.id];
-      });
+      .sort(function (a, b) { return new Date(a.msg.createdAt) - new Date(b.msg.createdAt); });
+    entries.slice(0, ids.length - TRIM_TO).forEach(function (e) {
+      if (e.el && e.el.parentNode) e.el.parentNode.removeChild(e.el);
+      delete S.byId[e.msg.id];
+    });
+    // Rewind the cursor to the oldest SURVIVING row — leaving it pointing below the
+    // trimmed block made the next "Load earlier" fetch skip everything trimmed,
+    // rendering a contiguous-looking thread with a silent gap.
+    var oldestKept = entries[ids.length - TRIM_TO];
+    if (oldestKept && oldestKept.msg.id) S.oldestCursor = { ts: oldestKept.msg.createdAt, id: oldestKept.msg.id };
     S.hasMore = true; showEarlier(true); // dropped rows are re-fetchable
   }
   function prependOlder(msgs) {
@@ -973,8 +1145,14 @@
   function loadOlder() {
     if (S.loadingOlder || !S.hasMore || !S.oldestCursor || !S.socket || !S.socket.connected) return;
     S.loadingOlder = true; earlierBtn.textContent = "Loading…"; earlierBtn.disabled = true;
+    // The ack is the ONLY thing that re-arms the button — if it never fires (server
+    // error mid-handler), "Load earlier" wedged on "Loading…" for the session.
+    var settled = false;
+    function rearm() { S.loadingOlder = false; earlierBtn.textContent = "Load earlier messages"; earlierBtn.disabled = false; }
+    var lot = setTimeout(function () { if (!settled) { settled = true; rearm(); } }, 12000);
     S.socket.emit("visitor:loadOlder", { before: S.oldestCursor }, function (p) {
-      S.loadingOlder = false; earlierBtn.textContent = "Load earlier messages"; earlierBtn.disabled = false;
+      if (settled) return;
+      settled = true; clearTimeout(lot); rearm();
       var msgs = (p && p.messages) || [];
       if (msgs.length) { prependOlder(msgs); S.oldestCursor = { ts: msgs[0].createdAt, id: msgs[0].id }; }
       S.hasMore = !!(p && p.hasMore); showEarlier(S.hasMore);
@@ -992,17 +1170,22 @@
     // a no-op, which is the common case.
     if (m.id && S.byId[m.id]) {
       var e = S.byId[m.id]; e.msg = m;
-      if (e.el._bub) { var h = bubbleHtml(m); if (e.el._bub.innerHTML !== h) { e.el._bub.innerHTML = h; wireMedia(e.el._bub); } }
-      if (e.el._meta) { var mh = metaHtml(m, m.direction === "in"); if (e.el._meta.innerHTML !== mh) e.el._meta.innerHTML = mh; }
+      // Compare against the STORED render string, not .innerHTML — the serializer
+      // re-encodes quotes/apostrophes differently than esc(), so reading it back
+      // never matched for such bodies and every replay rebuilt the media anyway.
+      if (e.el._bub) { var h = bubbleHtml(m); if (e.el._bubHtml !== h) { e.el._bubHtml = h; e.el._bub.innerHTML = h; wireMedia(e.el._bub); } }
+      if (e.el._meta) { var mh = metaHtml(m, m.direction === "in"); if (e.el._metaHtml !== mh) { e.el._metaHtml = mh; e.el._meta.innerHTML = mh; } }
       return;
     }
     appendBubble(m, { anim: !quiet });
-    if (!quiet && m.direction === "out") { hideTyping(); if (S.socket && S.socket.connected) S.socket.emit("visitor:received"); if (!S.open || document.hidden) { bumpUnread(); playPing(); } else markRead(); }
+    // Viewing it live counts as reading it — stamp the seen watermark too, or the
+    // next boot's history replay re-counts this message as unread (phantom badge).
+    if (!quiet && m.direction === "out") { hideTyping(); if (S.socket && S.socket.connected) S.socket.emit("visitor:received"); if (!S.open || document.hidden) { bumpUnread(); playPing(); } else { markRead(); clearUnread(); } }
     // Host-page hook. `quiet` marks a history replay, so a host badge doesn't
     // re-fire for messages the visitor already saw on a reconnect.
     if (!quiet) emitApi("message", { direction: m.direction, body: m.body, hasMedia: !!m.media, createdAt: m.createdAt });
   }
-  function applyStatus(id, s) { var e = S.byId[id]; if (e) { e.msg.status = s; if (e.msg.direction === "in" && e.el._meta) e.el._meta.innerHTML = metaHtml(e.msg, true); } }
+  function applyStatus(id, s) { var e = S.byId[id]; if (e) { e.msg.status = s; if (e.msg.direction === "in" && e.el._meta) { e.el._metaHtml = metaHtml(e.msg, true); e.el._meta.innerHTML = e.el._metaHtml; } } }
 
   function wireMedia(bub) {
     if (!bub) return;
@@ -1089,7 +1272,7 @@
     track.addEventListener("pointerup", function () { dragging = false; });
     track.addEventListener("pointercancel", function () { dragging = false; });
   }
-  function openLightbox(url) { lightbox.innerHTML = ""; lightbox.appendChild(el("img", { src: url, alt: "image" })); lightbox.classList.add("on"); }
+  function openLightbox(url) { lightbox.innerHTML = ""; lightbox.appendChild(el("img", { src: url, alt: "Photo" })); lightbox.classList.add("on"); }
   lightbox.addEventListener("click", function () { lightbox.classList.remove("on"); });
   document.addEventListener("keydown", function (e) { if (e.key === "Escape" && lightbox.classList.contains("on")) lightbox.classList.remove("on"); });
 
@@ -1122,7 +1305,7 @@
     if (!entry || !entry.el) {
       // Quoted message is older than the loaded window — say so instead of doing
       // nothing, which reads as a broken click.
-      return toast("That message is further up — tap “Load earlier”.");
+      return toast("That message is further up — use “Load earlier messages”.");
     }
     entry.el.scrollIntoView({ block: "center", behavior: "smooth" });
     var bub = entry.el.querySelector(".mr") || entry.el;
@@ -1139,7 +1322,20 @@
     if (scrolledUp && top < 48 && S.hasMore && !S.loadingOlder) loadOlder();
   });
   newPill.addEventListener("click", function () { S.stick = true; scrollToBottom(true); });
-  function scrollToBottom(force) { if (force || S.stick) { bodyEl.scrollTop = bodyEl.scrollHeight; newPill.classList.remove("on"); } }
+  function scrollToBottom(force) {
+    if (!(force || S.stick)) return;
+    // `.body` scrolls smoothly, which is right for a one-message nudge — but a big
+    // jump (opening the panel onto history) animated a "fly-through" of the whole
+    // thread. Big jumps snap instantly, same trick as prependOlder's restore.
+    var dist = bodyEl.scrollHeight - bodyEl.scrollTop - bodyEl.clientHeight;
+    if (dist > 600) {
+      var pb = bodyEl.style.scrollBehavior;
+      bodyEl.style.scrollBehavior = "auto";
+      bodyEl.scrollTop = bodyEl.scrollHeight;
+      bodyEl.style.scrollBehavior = pb || "";
+    } else bodyEl.scrollTop = bodyEl.scrollHeight;
+    newPill.classList.remove("on");
+  }
   function onNewRow(isVisitor) { if (isVisitor || S.stick) scrollToBottom(true); else newPill.classList.add("on"); }
   /** Scroll to bottom only if already stuck there — for typing/system rows that
    *  must NEVER raise the "New messages" pill. */
@@ -1156,7 +1352,23 @@
     titleTimer = setInterval(function () { document.title = (on = !on) ? "💬 New message" : baseTitle; }, 1000);
   }
   function stopFlash() { if (titleTimer) { clearInterval(titleTimer); titleTimer = null; document.title = baseTitle; } }
-  document.addEventListener("visibilitychange", function () { if (!document.hidden) { stopFlash(); if (S.open) { clearUnread(); markRead(); } } });
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) { stopFlash(); if (S.open) { clearUnread(); markRead(); } }
+    emitPresence();
+  });
+  /**
+   * Tell the agents whether the visitor is actually LOOKING at the page.
+   *
+   * A backgrounded tab keeps its socket open, so connect/disconnect alone made the
+   * inbox show "Online" for someone who had switched away. One tiny frame per real
+   * tab switch (deduped on change) feeds the server's existing presence seam.
+   */
+  function emitPresence() {
+    var visible = !document.hidden;
+    if (!S.socket || !S.socket.connected || visible === S.presenceSent) return;
+    S.presenceSent = visible;
+    S.socket.emit("visitor:presence", { visible: visible });
+  }
 
   // ── reply ────────────────────────────────────────────────────────────────────
   function setReply(m) { S.replyTo = { externalId: m.externalId, body: m.media ? (m.media.kind || "attachment") : m.body }; replyQt.textContent = S.replyTo.body || ""; replyBar.classList.add("on"); ta.focus(); }
@@ -1279,7 +1491,7 @@
           if (!rec || !rec.blob || S.pending[cid]) continue;
           var recTs = (rec.payload && rec.payload.clientTs) || new Date(rec.createdAt || 0).getTime();
           if (!isFresh(recTs)) { idbDel(cid); continue; } // stale queued file — drop it, don't retry days later
-          var m = { direction: "in", body: rec.voice ? "🎤 voice message" : "📎 " + (rec.kind || "file"), media: null, status: "queued", createdAt: rec.createdAt || new Date().toISOString(), _local: true };
+          var m = { direction: "in", body: rec.voice ? "🎤 Voice message" : "📎 " + (KIND_LABEL[rec.kind] || "File"), media: null, status: "queued", createdAt: rec.createdAt || new Date().toISOString(), _local: true };
           var row = appendBubble(m, { anim: false });
           S.pending[cid] = { el: row, payload: rec.payload || { clientMsgId: cid, body: "" }, status: "queued", file: rec.blob, fileName: rec.name, kind: rec.kind, voice: rec.voice, durationMs: rec.durationMs, ts: (rec.payload && rec.payload.clientTs) || new Date(rec.createdAt || Date.now()).getTime() };
           renderPending(cid);
@@ -1296,10 +1508,25 @@
     var row = appendBubble(m, { anim: true }); S.pending[cid] = { el: row, payload: payload, status: status || "queued", file: file || null, ts: payload.clientTs || Date.now() }; renderPending(cid); return row;
   }
   function renderPending(cid) {
+    // Timestamp is when the visitor WROTE it (p.ts), not the current repaint time —
+    // a restored queued bubble was re-stamping itself with "now" on every boot.
     var p = S.pending[cid]; if (!p || !p.el._meta) return; var meta = p.el._meta;
-    if (p.status === "failed") { meta.innerHTML = esc(fmtTime()) + ' <span class="tick err">⚠</span> '; meta.appendChild(el("span", { class: "retry", onclick: function () { retry(cid); } }, "Retry")); }
-    else meta.innerHTML = esc(fmtTime()) + " " + tickHtml(p.status);
+    var when = esc(fmtTime(p.ts || undefined));
+    if (p.status === "failed") {
+      meta.innerHTML = when + ' <span class="tick err">⚠</span> ';
+      meta.appendChild(el("span", { class: "retry", onclick: function () { retry(cid); } }, "Retry"));
+      // A frozen progress bar under ⚠ Retry reads as still-uploading — drop it.
+      if (p._prog) { if (p._prog.parentNode) p._prog.parentNode.removeChild(p._prog); p._prog = null; }
+    } else meta.innerHTML = when + " " + tickHtml(p.status);
     if (p.file && (p.status === "queued" || p.status === "inflight") && !p._prog) { p._prog = el("div", { class: "prog" }, el("i")); p.el._bub.appendChild(p._prog); }
+  }
+  /** Move pending (unsent/queued) bubbles BELOW whatever just rendered — history
+   *  and the welcome block arrive after boot's outbox restore, so without this the
+   *  visitor's newest unsent message sat pinned above the whole thread. */
+  function resortPending() {
+    Object.keys(S.pending)
+      .sort(function (a, b) { return (S.pending[a].ts || 0) - (S.pending[b].ts || 0); })
+      .forEach(function (cid) { var p = S.pending[cid]; if (p.el && p.el.parentNode === bodyEl) bodyEl.appendChild(p.el); });
   }
   function removePending(cid) { var p = S.pending[cid]; if (!p) return; if (p.el && p.el.parentNode) p.el.parentNode.removeChild(p.el); delete S.pending[cid]; idbDel(cid); persistOutbox(); }
   function markPending(cid, s) { var p = S.pending[cid]; if (!p) return; p.status = s; renderPending(cid); persistOutbox(); }
@@ -1372,7 +1599,9 @@
     // Remember that this visitor has a thread, so future page loads connect eagerly
     // and agent replies still reach them without opening the panel first.
     lsSet(K.chatted, "1"); lsSet(K.active, String(Date.now()));
-    clearReply(); optimistic(cid, payload, null, "queued"); ensureConnected(); persistOutbox(); flushOutbox();
+    // Optimistic bubble FIRST — it reads S.replyTo for the quote stripe, so
+    // clearing the reply before it rendered an empty quote on every reply.
+    optimistic(cid, payload, null, "queued"); clearReply(); ensureConnected(); persistOutbox(); flushOutbox();
   }
 
   // ── media ─────────────────────────────────────────────────────────────────────
@@ -1403,11 +1632,18 @@
     return a.indexOf(kind === "sticker" ? "image" : kind) >= 0;
   }
   function anyAttachmentAllowed() { var a = allowedKinds(); return !a || a.length > 0; }
-  /** `accept` for the file picker, so the OS dialog only offers usable types. */
+  /** `accept` for the file picker, so the OS dialog only offers usable types.
+   *  Exact MIMEs, not wildcards: `image/*` let the iOS picker offer HEIC photos
+   *  that OK_MIME then rejected — with an explicit list iOS transcodes to JPEG
+   *  instead. Keep in step with OK_MIME above. */
   function acceptAttr() {
-    var a = allowedKinds();
-    if (!a) return "";
-    var map = { image: "image/*", video: "video/*", audio: "audio/*", document: ".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv" };
+    var a = allowedKinds() || ["image", "video", "audio", "document"];
+    var map = {
+      image: "image/jpeg,image/png,image/gif,image/webp",
+      video: "video/mp4,video/webm,video/quicktime,video/3gpp",
+      audio: "audio/mpeg,audio/mp4,audio/ogg,audio/wav,audio/webm,audio/aac,audio/x-m4a",
+      document: ".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv",
+    };
     return a.map(function (k) { return map[k] || ""; }).filter(Boolean).join(",");
   }
   /** Show/hide the attach + mic buttons to match the policy. */
@@ -1437,8 +1673,10 @@
     var caption = (opts && opts.caption) || "";
     var payload = { clientMsgId: cid, body: caption.slice(0, 4096), clientTs: Date.now() };
     if (opts && opts.staged && opts.staged.preview) URL.revokeObjectURL(opts.staged.preview);
-    if (S.replyTo) payload.replyToExternalId = S.replyTo.externalId; if (S.preChat) { payload.preChat = S.preChat; S.preChat = null; } if (S.startedNew) { payload.startedNew = true; S.startedNew = false; } clearReply();
-    var m = { direction: "in", body: caption || (voice ? "🎤 voice message" : "📎 " + kind), media: null, status: "queued", createdAt: new Date().toISOString(), _local: true };
+    var rq = null;
+    if (S.replyTo) { payload.replyToExternalId = S.replyTo.externalId; rq = { body: S.replyTo.body || "" }; }
+    if (S.preChat) { payload.preChat = S.preChat; S.preChat = null; } if (S.startedNew) { payload.startedNew = true; S.startedNew = false; } clearReply();
+    var m = { direction: "in", body: caption || (voice ? "🎤 Voice message" : "📎 " + (KIND_LABEL[kind] || "File")), media: null, status: "queued", createdAt: new Date().toISOString(), replyTo: rq, _local: true };
     var row = appendBubble(m, { anim: true }); S.pending[cid] = { el: row, payload: payload, status: "queued", file: file, fileName: file.name, kind: kind, voice: voice, durationMs: durationMs, ts: payload.clientTs }; renderPending(cid);
     // Persist the bytes BEFORE attempting the upload, so a refresh mid-upload (or
     // while offline) can still recover the file. Cleared on success in doUpload.
@@ -1495,10 +1733,15 @@
   ta.addEventListener("input", function () { emitTyping(true); if (typingStopTimer) clearTimeout(typingStopTimer); typingStopTimer = setTimeout(function () { emitTyping(false); }, 2500); });
 
   // ── notification sound (opt-in via config.soundEnabled) ──────────────────────
-  var audioCtx = null;
+  var audioCtx = null, lastPingAt = 0;
   function playPing() {
     var cfg = (S.cfg && S.cfg.config) || {};
     if (!cfg.soundEnabled) return;
+    if (lsGet(K.muted) === "1") return; // visitor-side mute (⋯ menu)
+    // Coalesce bursts: a multi-bubble agent answer should chime once, not N times.
+    var now = Date.now();
+    if (now - lastPingAt < 1500) return;
+    lastPingAt = now;
     try {
       audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
       // resume() returns a promise that REJECTS under the autoplay policy when no
@@ -1614,11 +1857,15 @@
     else if (S.agentsOnline) cls += "";
     else cls += " off";
     hdot.className = cls;
-    hdot.title = S.agentsOnline ? "An agent is online" : "We're away — leave a message and we'll reply";
+    // Unknown (pre-`agents` frame) is neutral — claiming "we're away" before the
+    // first presence frame contradicted the banner's own unknown≠away handling.
+    hdot.title = S.agentsOnline ? "An agent is online" : S.agentsOnline === false ? "We're away — leave a message and we'll reply" : "Chat with us";
     // Away banner: only once we actually KNOW no agent is online (not while unknown).
     var cfg = (S.cfg && S.cfg.config) || {};
     var away = S.agentsOnline === false;
-    awayBar.textContent = cfg.awayMessage || "We're away right now — leave a message and we'll reply by email.";
+    // Default copy promises nothing specific — "by email" was a lie for orgs that
+    // never collect an email. Orgs that do reply by email say so in awayMessage.
+    awayBar.textContent = cfg.awayMessage || "We're away right now — leave a message and we'll get back to you.";
     awayBar.classList.toggle("on", away);
   }
   function setConn(c) {
@@ -1664,8 +1911,30 @@
       window.addEventListener("pagehide", function () { try { if (S.socket && S.socket.connected) S.socket.disconnect(); } catch (e) {} });
       window.addEventListener("pageshow", function (e) { if (e.persisted && S.socket && !S.socket.connected && !S.fatal) { try { S.socket.connect(); } catch (er) {} } });
     }
-    socket.on("connect", function () { setConn("online"); flushOutbox(); markRead(); });
-    socket.on("disconnect", function (reason) { setConn("reconnecting"); hideTyping(); if (reason === "io server disconnect" && !S.fatal) { socket.connect(); } });
+    socket.on("connect", function () {
+      setConn("online"); bodyEl.querySelectorAll(".sys.io-err").forEach(function (n) { n.remove(); });
+      S.retryDelay = 0; // healthy again — next outage starts from the short delay
+      // The server assumes a fresh socket means "present". Correct it immediately
+      // when this connect happened in a hidden tab (background reconnect).
+      S.presenceSent = true; emitPresence();
+      flushOutbox(); markRead();
+    });
+    socket.on("disconnect", function (reason) {
+      // Reset the typing latch: the server cleared its per-socket state on the
+      // drop, so a stale `true` here swallowed the first typing signal after
+      // reconnect. Same for presence — the server assumes present on connect.
+      S.typingOn = false; S.presenceSent = true;
+      // Release the flush latch. A chain parked inside sendPayload waiting on an
+      // ack never reaches next(), so `flushing` stayed true and the RECONNECT's
+      // flushOutbox() returned at its first check — queued messages then sat
+      // undelivered until each 12s send-timeout expired one at a time, with a
+      // false ⚠ Retry on the first. Re-arming interrupted sends on reconnect is
+      // exactly what flushOutbox's header promises; this is what makes it true.
+      // Re-sending is safe: same clientMsgId, and the server dedupes on externalId.
+      flushing = false;
+      setConn("reconnecting"); hideTyping();
+      if (reason === "io server disconnect" && !S.fatal) { socket.connect(); }
+    });
     socket.io.on("reconnect_attempt", function () { setConn("reconnecting"); });
     // A rejected handshake is TERMINAL, not transient: retrying forever (attempts
     // Infinity) just hides a misconfiguration behind a "Reconnecting…" strip while
@@ -1683,10 +1952,27 @@
             ? "Add " + location.origin + " to this widget's allowed origins in Settings → Website chat."
             : "Check the data-webchat-key value against Settings → Website chat.")
         );
+        // Terminal — hide the loading pill and the composer, or the visitor types
+        // into a box whose sends queue forever with no path to delivery.
+        hideLoading();
+        composer.style.display = "none";
         appendSys("Chat is unavailable right now. Please try again later.");
         return;
       }
       setConn("reconnecting");
+      // A MIDDLEWARE rejection is not a transport failure: socket.io marks the
+      // client INACTIVE and stops retrying on its own. So a TRANSIENT server-side
+      // handshake failure (a DB blip while resolving the site key) left the widget
+      // on "Reconnecting…" forever with nothing behind it — recoverable only by a
+      // page reload the visitor has no reason to try. Retry ourselves, with
+      // capped backoff, until it comes back.
+      if (socket.active === false && !S.fatal) {
+        S.retryDelay = Math.min((S.retryDelay || 800) * 2, 30000);
+        setTimeout(function () {
+          if (S.fatal || S.socket !== socket || socket.connected) return;
+          try { socket.connect(); } catch (_e) {}
+        }, S.retryDelay);
+      }
     });
     socket.on("ready", onReady);
     socket.on("history", function (p) {
@@ -1694,11 +1980,22 @@
       // "load earlier" availability travels with every history batch.
       if (!S.oldestCursor && msgs.length) S.oldestCursor = { ts: msgs[0].createdAt, id: msgs[0].id };
       S.hasMore = !!(p && p.hasMore); showEarlier(S.hasMore);
-      if (!msgs.length) { initView(false); return; }
+      if (!msgs.length) { initView(false); resortPending(); return; }
+      // Boot renders queued outbox bubbles BEFORE history arrives, so on the first
+      // history render they sit above the whole thread with a stray "Today" pill.
+      // Wipe the day labels (the render below rebuilds them) and move the pending
+      // rows back to the bottom, where unsent messages belong.
+      var hadPending = false;
+      for (var pc in S.pending) { hadPending = true; break; }
+      if (!S.viewInit && hadPending) {
+        bodyEl.querySelectorAll(".day").forEach(function (n) { n.remove(); });
+        S.lastDayLabel = null;
+      }
       S.lastGroup = null; var unseen = 0;
       msgs.forEach(function (m) { var isNew = !(m.id && S.byId[m.id]); upsert(m, true); if (isNew && m.direction === "out" && new Date(m.createdAt).getTime() > S.lastSeenTs) unseen++; });
       initView(true);
       S.formDone = true; composer.style.display = ""; dropPills(); lsSet(K.chatted, "1"); lsSet(K.active, String(Date.now()));
+      resortPending();
       if (unseen && !S.open) { S.unread = 0; for (var i = 0; i < unseen; i++) bumpUnread(); }
       scrollToBottom(false); markRead();
     });
@@ -1760,7 +2057,14 @@
       restore();
       connect();
     };
-    s.onerror = function () { S.loadingIo = false; restore(); setConn("offline"); console.error("[webchat] failed to load socket.io client"); };
+    s.onerror = function () {
+      S.loadingIo = false; restore(); setConn("offline");
+      // Say so in the panel — an open chat stuck on the loading pill forever reads
+      // as broken. Cleared on a later successful connect (retry path).
+      hideLoading();
+      if (!bodyEl.querySelector(".sys.io-err")) bodyEl.appendChild(el("div", { class: "sys io-err" }, "Chat couldn't load. Check your connection and try again."));
+      console.error("[webchat] failed to load socket.io client");
+    };
     document.head.appendChild(s);
   }
 
@@ -1779,6 +2083,11 @@
    * Otherwise the socket opens the moment they open the chat.
    */
   function boot() {
+    // Theme synchronously from the cached appearance — boot() runs before the
+    // browser's first paint, so a returning visitor never sees the default colors
+    // even for a frame. The real config (HTTP or socket `ready`) re-applies over
+    // it moments later, which is a no-op unless the org changed their settings.
+    if (cachedCfg) applyConfig(cachedCfg, true);
     // Draft first, and independent of the socket: restoreDraft() used to run only
     // from onReady(), so a visitor whose handshake failed — or who simply had not
     // opened the panel yet — saw an empty box even though their text was saved.
@@ -1792,9 +2101,11 @@
     // Reopen if they left it open. Deliberately AFTER the restores so the panel
     // paints with the draft and any queued bubbles already in place, and only in
     // launcher mode (inline is always open by definition).
-    if (!INLINE && lsGet(K.expanded) === "1") setExpanded(true, false);
+    syncPanelSize();
     var wasOpen = !INLINE && lsGet(K.open) === "1";
     var needsLive = INLINE || S.open || wasOpen || !!lsGet(K.chatted) || hasQueued;
+    // Inline embeds are open by definition — give them the loading pill too.
+    if (INLINE) showLoading();
     if (wasOpen) openPanel();
     if (needsLive) { ensureConnected(); return; }
     setConn("idle");

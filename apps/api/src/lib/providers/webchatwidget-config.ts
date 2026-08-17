@@ -115,6 +115,11 @@ export interface WebchatwidgetConfig {
    * either way (bot disclosure, not an agent identity).
    */
   showAgentName?: boolean;
+  /**
+   * Dial code (digits only, e.g. "961") prefilled in the pre-chat PHONE field so
+   * visitors don't drop their country code. Absent → the widget's built-in default.
+   */
+  phoneDialCode?: string;
   // ---- launcher / placement defaults (used by the settings UI to generate the
   //      embed snippet; the widget itself reads these from data-* attributes) ----
   /**
@@ -245,22 +250,36 @@ export async function webchatwidgetAiAllowed(conversationId: string): Promise<bo
 /**
  * Should THIS conversation's visitor frames carry the replying agent's name?
  *
- * Mirrors `webchatwidgetAiAllowed` (one indexed lookup, only on the webchatwidget
- * delivery/history paths) but with the OPPOSITE default: showing the name is the
- * long-standing behavior, so this fails OPEN — `true` for a non-widget
- * conversation, a missing/inactive source widget, or an absent key. Only an
+ * Mirrors `webchatwidgetAiAllowed` but with the OPPOSITE default: showing the name
+ * is the long-standing behavior, so this fails OPEN — `true` for a non-widget
+ * conversation, a missing source widget, an absent key, or a DB error. Only an
  * explicit `config.showAgentName === false` suppresses the name.
+ *
+ * Cached (60s TTL) and fail-soft because it sits on the REALTIME delivery tier:
+ * the delivery service deliberately keeps that path off per-message DB reads
+ * (see its nameCache note), and an uncaught throw there would drop the whole
+ * message frame — the visitor wouldn't see the agent's reply until reconnect.
  */
+const showNameCache = new TtlCache<boolean>();
+
 export async function webchatwidgetShowsAgentName(conversationId: string): Promise<boolean> {
-  const conv = await db.conversation.findUnique({
-    where: { id: conversationId },
-    select: {
-      webchatWidgetId: true,
-      webchatWidget: { select: { config: true } },
-    },
-  });
-  const cfg = (conv?.webchatWidget?.config ?? {}) as WebchatwidgetConfig;
-  return cfg.showAgentName !== false;
+  const hit = showNameCache.get(conversationId);
+  if (hit !== undefined) return hit;
+  try {
+    const conv = await db.conversation.findUnique({
+      where: { id: conversationId },
+      select: {
+        webchatWidgetId: true,
+        webchatWidget: { select: { config: true } },
+      },
+    });
+    const cfg = (conv?.webchatWidget?.config ?? {}) as WebchatwidgetConfig;
+    const show = cfg.showAgentName !== false;
+    showNameCache.set(conversationId, show);
+    return show;
+  } catch {
+    return true;
+  }
 }
 
 /**

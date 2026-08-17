@@ -591,7 +591,7 @@ test("presence: agent sees the visitor Online while connected, then Left on disc
 });
 
 test("visitor 'Start a new conversation' records a timeline note on the fresh thread", async ({ browser }) => {
-  // Deliberately starting over (⋯ → Clear this chat → confirm) rotates the visitor
+  // Deliberately starting over (⋯ → End chat → confirm) rotates the visitor
   // to a brand-new contact + conversation, and the fresh thread carries a
   // "visitor_started_conversation" note so the agent knows it's a restart.
   const ctx = await browser.newContext();
@@ -616,10 +616,10 @@ test("visitor 'Start a new conversation' records a timeline note on the fresh th
     });
     if (ca?.contactId) createdContactIds.add(ca.contactId);
 
-    // ⋯ → "Clear this chat" → confirm. doReset sets the restart marker + reloads
+    // ⋯ → "End chat" → confirm. doReset sets the restart marker + reloads
     // (which drops the injected widget), so we re-mount for the rotated visitor.
     await v.locator('button.hx[aria-label="More options"]').click();
-    await v.getByRole("menuitem", { name: "Clear this chat" }).click();
+    await v.getByRole("menuitem", { name: "End chat" }).click();
     await v.locator("button.rcy").click();
     await mountWidget(v, PUBLIC_KEY);
     await pastPreChat(v);
@@ -1456,31 +1456,41 @@ test("attachment policy is enforced by the SERVER, not just the widget", async (
   try {
     const v = await ctx.newPage();
     await mountWidget(v, w.publicKey);
-    await expect(v.locator('input[type=file]')).toHaveAttribute("accept", "image/*");
+    // Explicit mimes, not `image/*`: the wildcard let the iOS picker offer HEIC
+    // photos that the shared OK_MIME list then rejected (widget.js acceptAttr).
+    await expect(v.locator('input[type=file]')).toHaveAttribute("accept", "image/jpeg,image/png,image/gif,image/webp");
   } finally {
     await ctx.close();
   }
 });
 
-test("visitor can expand the panel, and it survives a refresh", async ({ browser }) => {
-  // A fixed 392px is what made media controls and images feel cramped; widening on
-  // demand beats widening the default, which would make the widget more intrusive
-  // for every visitor who never needs it.
-  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+test("visitor can drag-resize the panel, and the size survives a refresh", async ({ browser }) => {
+  // The corner-chat default is what made media controls and images feel cramped;
+  // sizing on demand beats a bigger default, which would make the widget more
+  // intrusive for every visitor who never needs it. Replaced an expand/restore
+  // toggle — one continuous gesture instead of two fixed sizes behind a button.
+  const ctx = await browser.newContext({ viewport: { width: 1400, height: 1000 } });
   try {
     const v = await ctx.newPage();
     await mountWidget(v, PUBLIC_KEY);
     const width = (): Promise<number> => v.evaluate(`Math.round(document.getElementById("ccp-webchat-root").shadowRoot.querySelector(".panel").getBoundingClientRect().width)`);
     const narrow = await width();
-    expect(narrow).toBeLessThan(450); // corner-chat default (~392, sub-pixel varies)
+    expect(narrow).toBeLessThan(450); // corner-chat default (~376, sub-pixel varies)
 
-    await v.locator('[aria-label="Expand chat"]').click();
-    await expect.poll(width).toBeGreaterThan(600);
+    // Drag the outer top corner away from the screen edge to grow the panel.
+    const grip = await v.evaluate(`(() => {
+      const r = document.getElementById("ccp-webchat-root").shadowRoot.querySelector(".rsz").getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    })()`) as { x: number; y: number };
+    await v.mouse.move(grip.x, grip.y);
+    await v.mouse.down();
+    await v.mouse.move(grip.x - 200, grip.y - 120, { steps: 8 });
+    await v.mouse.up();
+    await expect.poll(width).toBeGreaterThan(narrow + 150);
+    const dragged = await width();
 
     await mountWidget(v, PUBLIC_KEY); // re-mount = fresh page load
-    expect(await width()).toBeGreaterThan(600); // persisted
-    await v.locator('[aria-label="Restore chat size"]').click();
-    await expect.poll(width).toBeLessThan(450);
+    expect(Math.abs((await width()) - dragged)).toBeLessThanOrEqual(4); // persisted
   } finally {
     await ctx.close();
   }

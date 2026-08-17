@@ -206,6 +206,7 @@ export interface WebchatWidgetView {
     aiEnabled?: boolean;
     showHeader?: boolean;
     showAgentName?: boolean;
+    phoneDialCode?: string;
     launcher?: "bubble" | "off" | "inline";
     position?: "right" | "left";
     launcherLabel?: string;

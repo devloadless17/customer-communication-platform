@@ -14,6 +14,7 @@ import {
   Post,
   Query,
   Res,
+  ServiceUnavailableException,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -42,6 +43,8 @@ const CHANNEL = "webchatwidget" as const;
 /** Max widget upload size — smaller than the agent composer's 100 MB (website
  *  visitors share images / short clips / docs, not multi-GB media). */
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+/** Process-wide cap on upload bytes buffered on the heap at once (see uploadMedia). */
+const MAX_INFLIGHT_UPLOAD_BYTES = 256 * 1024 * 1024;
 
 /**
  * PUBLIC, anonymous widget HTTP surface (no SessionGuard). Authenticated by the
@@ -56,6 +59,8 @@ const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 @Controller("api/widget")
 export class WebchatwidgetPublicController {
   private readonly logger = new Logger(WebchatwidgetPublicController.name);
+  /** Static — one counter per process, shared by every request. */
+  private static inflightUploadBytes = 0;
 
   constructor(private readonly db: DbService) {}
 
@@ -114,6 +119,17 @@ export class WebchatwidgetPublicController {
     filename?: string;
   }> {
     if (!file) throw new BadRequestException({ error: "file_required" });
+    // Process-wide ceiling on bytes BUFFERED for widget uploads at any instant.
+    // The per-IP bucket bounds one client, not a fleet: uploads land on disk via
+    // multer but are read whole onto the heap below for the signature check + blob
+    // put, so N concurrent 25MB uploads from many IPs would approach the api
+    // service's heap limit. 503 is deliberate — transient, the widget's retry
+    // path handles it — and the counter is released in the inner finally.
+    if (WebchatwidgetPublicController.inflightUploadBytes + file.size > MAX_INFLIGHT_UPLOAD_BYTES) {
+      await unlink(file.path).catch(() => undefined);
+      throw new ServiceUnavailableException({ error: "upload_busy", detail: "Too many uploads right now — try again in a moment." });
+    }
+    WebchatwidgetPublicController.inflightUploadBytes += file.size;
     try {
       // STRICT: a browser always sends Origin on a POST, so a missing one here
       // is a script — see the transport note on resolve().
@@ -174,6 +190,7 @@ export class WebchatwidgetPublicController {
         detail: "This file could not be uploaded. Try a different file.",
       });
     } finally {
+      WebchatwidgetPublicController.inflightUploadBytes -= file.size;
       await unlink(file.path).catch(() => undefined);
     }
   }

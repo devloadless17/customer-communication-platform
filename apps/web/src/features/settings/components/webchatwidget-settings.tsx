@@ -35,6 +35,9 @@ export function WebchatWidgetSettings({
   const [selectedId, setSelectedId] = useState<string | null>(initial[0]?.id ?? null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Transient "Saved ✓" on the button — without it a successful save gave no
+  // feedback at all (the button just flicked back to "Save changes").
+  const [saved, setSaved] = useState(false);
 
   const selected = widgets.find((w) => w.id === selectedId) ?? null;
 
@@ -63,7 +66,7 @@ export function WebchatWidgetSettings({
       setWidgets((ws) => [...ws, data.widget!]);
       setSelectedId(data.widget.id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "create failed");
+      setError(e instanceof Error ? e.message : "Couldn't create the widget.");
     } finally {
       setBusy(false);
     }
@@ -99,6 +102,7 @@ export function WebchatWidgetSettings({
           aiEnabled: w.config.aiEnabled ?? false,
           showHeader: w.config.showHeader ?? true,
           showAgentName: w.config.showAgentName ?? true,
+          phoneDialCode: w.config.phoneDialCode ?? "",
           launcher: w.config.launcher ?? "bubble",
           position: w.config.position ?? "right",
           launcherLabel: w.config.launcherLabel ?? "",
@@ -111,8 +115,10 @@ export function WebchatWidgetSettings({
       const data = (await res.json()) as { widget?: WebchatWidgetView };
       if (!data.widget) throw new Error("Couldn't save the widget.");
       patchLocal(w.id, data.widget);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "save failed");
+      setError(e instanceof Error ? e.message : "Couldn't save the widget.");
     } finally {
       setBusy(false);
     }
@@ -124,11 +130,14 @@ export function WebchatWidgetSettings({
     setError(null);
     try {
       const res = await apiFetch(`/api/workspace/webchatwidget/${id}`, { method: "DELETE" });
-      if (!res.ok) throw new Error("delete failed");
-      setWidgets((ws) => ws.filter((w) => w.id !== id));
-      setSelectedId((cur) => (cur === id ? null : cur));
+      if (!res.ok) throw new Error(await apiErrorMessage(res, "Couldn't delete the widget."));
+      // Select the next surviving widget — clearing to null with one widget left
+      // rendered a blank page (no tabs below 2 widgets, no editor without a selection).
+      const next = widgets.filter((w) => w.id !== id);
+      setWidgets(next);
+      setSelectedId((cur) => (cur === id ? (next[0]?.id ?? null) : cur));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "delete failed");
+      setError(e instanceof Error ? e.message : "Couldn't delete the widget.");
     } finally {
       setBusy(false);
     }
@@ -205,6 +214,8 @@ export function WebchatWidgetSettings({
               widget={selected}
               appOrigin={appOrigin}
               busy={busy}
+              saved={saved}
+              error={error}
               onName={(name) => patchLocal(selected.id, { name })}
               onActive={(isActive) => patchLocal(selected.id, { isActive })}
               onOrigins={(allowedOrigins) => patchLocal(selected.id, { allowedOrigins })}
@@ -223,6 +234,8 @@ function Editor({
   widget,
   appOrigin,
   busy,
+  saved,
+  error,
   onName,
   onActive,
   onOrigins,
@@ -233,6 +246,8 @@ function Editor({
   widget: WebchatWidgetView;
   appOrigin: string;
   busy: boolean;
+  saved: boolean;
+  error: string | null;
   onName: (v: string) => void;
   onActive: (v: boolean) => void;
   onOrigins: (v: string[]) => void;
@@ -343,7 +358,10 @@ function Editor({
           )}
 
           {tab === "behavior" && (
-          <Section title="Launcher & placement">
+          <Section
+            title="Launcher & placement"
+            desc="These shape the install snippet, not the live widget — after changing them, re-copy the snippet from the Install tab onto your site."
+          >
             <div className="grid grid-cols-2 gap-3">
               <Field label="Deploy mode" hint="One per page — the widget is a singleton.">
                 <select value={c.launcher ?? "bubble"} onChange={(e) => onConfig({ launcher: e.target.value as "bubble" | "off" | "inline" })} className={inputCls}>
@@ -388,13 +406,27 @@ function Editor({
           )}
 
           {tab === "behavior" && (
-          <Section title="Pre-chat form" desc="Optionally ask for a few details before the chat starts.">
+          <Section
+            title="Pre-chat form"
+            desc="Optionally ask for a few details before the chat starts. Name, Email and Phone fill the contact's own details; choose Text for anything else — it's saved as a workspace contact field, created automatically from the label."
+          >
             <PreChatEditor fields={c.preChatFields ?? []} onChange={(preChatFields) => onConfig({ preChatFields })} />
+            {(c.preChatFields ?? []).some((f) => f.type === "phone") && (
+              <Field label="Phone dial code" hint="Prefilled in the phone field so visitors don't drop their country code.">
+                <input
+                  value={c.phoneDialCode ?? ""}
+                  placeholder="e.g. 961"
+                  inputMode="numeric"
+                  onChange={(e) => onConfig({ phoneDialCode: e.target.value.replace(/\D/g, "").slice(0, 4) })}
+                  className={inputCls}
+                />
+              </Field>
+            )}
           </Section>
           )}
 
           {tab === "install" && (
-          <Section title="Allowed domains" desc="Only these sites may embed the widget. localhost is always allowed for testing.">
+          <Section title="Allowed domains" desc="Only these sites may embed the widget. An empty list allows any site (useful while testing).">
             {/* Trust-on-first-use. Your site key is public — it's in the page source
                 of every page you install it on — so an unlocked widget can be lifted
                 onto someone else's site and used to impersonate you. Rather than
@@ -466,7 +498,7 @@ function Editor({
             <Toggle checked={c.showAgentName !== false} onChange={(v) => onConfig({ showAgentName: v })} label="Show agent name to visitors" hint="When off, replies appear without the replying agent's name — agents stay anonymous." />
             <AttachmentPolicy value={c.allowedMediaKinds} onChange={(allowedMediaKinds) => onConfig({ allowedMediaKinds })} />
             <Toggle checked={c.showBranding !== false} onChange={(v) => onConfig({ showBranding: v })} label="Show “Powered by” footer" />
-            <Toggle checked={widget.isActive} onChange={onActive} label="Active" hint="Inactive widgets stop accepting new chats." />
+            <Toggle checked={widget.isActive} onChange={onActive} label="Active" hint="Turning this off disables the widget on your site completely — existing conversations included, not just new chats." />
           </Section>
           )}
         </div>
@@ -554,13 +586,18 @@ function Editor({
       </Section>
       )}
 
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <button onClick={onDelete} disabled={busy} className="inline-flex items-center gap-1.5 rounded-lg border border-destructive/40 px-3 py-2 text-sm text-destructive transition hover:bg-destructive/5 disabled:opacity-50">
           <Trash2 className="size-4" /> Delete
         </button>
-        <button onClick={onSave} disabled={busy} className="rounded-lg bg-primary px-5 py-2 text-sm font-medium text-primary-foreground transition hover:opacity-90 disabled:opacity-50">
-          {busy ? "Saving…" : "Save changes"}
-        </button>
+        <div className="flex min-w-0 items-center gap-3">
+          {/* The page-top banner can be scrolled out of view on the long Install
+              tab — repeat the failure right where the admin is looking. */}
+          {error && <span className="truncate text-xs text-destructive">{error}</span>}
+          <button onClick={onSave} disabled={busy} className="rounded-lg bg-primary px-5 py-2 text-sm font-medium text-primary-foreground transition hover:opacity-90 disabled:opacity-50">
+            {busy ? "Saving…" : saved ? "Saved ✓" : "Save changes"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -714,9 +751,12 @@ const CCP_WEBCHAT_STUB =
 
 /** Build the `<script>` embed tag with the org's launcher/position/label choices. */
 function buildScript(origin: string, key: string, c: WebchatWidgetView["config"]): string {
+  // The label is free text (≤40 chars) — escape it or a quote in the label breaks
+  // the copyable snippet's attribute quoting.
+  const escAttr = (s: string) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
   const attrs = [`data-webchat-key="${key}"`];
   if ((c.position ?? "right") === "left") attrs.push(`data-webchat-position="left"`);
-  if (c.launcherLabel) attrs.push(`data-webchat-label="${c.launcherLabel}"`);
+  if (c.launcherLabel) attrs.push(`data-webchat-label="${escAttr(c.launcherLabel)}"`);
   if ((c.launcher ?? "bubble") === "off") attrs.push(`data-webchat-launcher="off"`);
   return `<script src="${origin}/widget.js" ${attrs.join(" ")} defer></script>`;
 }
@@ -885,7 +925,7 @@ function PreChatEditor({ fields, onChange }: { fields: Field[]; onChange: (f: Fi
           </select>
           <label className="flex shrink-0 items-center gap-1 text-xs">
             <input type="checkbox" checked={f.required} onChange={(e) => onChange(fields.map((x, j) => (j === i ? { ...x, required: e.target.checked } : x)))} />
-            req
+            Required
           </label>
           <button onClick={() => onChange(fields.filter((_, j) => j !== i))} className="shrink-0 text-muted-foreground hover:text-destructive" aria-label="Remove field">
             ×
@@ -916,7 +956,6 @@ function Preview({ widget }: { widget: WebchatWidgetView }) {
     (c.themeMode === "auto" && typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: dark)").matches);
   const surface = dark ? "#0f172a" : "#fff";
   const surface2 = dark ? "#0b1220" : "#f5f7fb";
-  const inb = dark ? "#1e293b" : "#fff";
   const ink = dark ? "#e8edf6" : "#0f1729";
   // Light ink2 is #5b6a83, not the old #66748c: the muted text sits on
   // --surface2 (#f5f7fb) where #66748c was 4.41:1 — under WCAG AA's 4.5:1
@@ -942,7 +981,8 @@ function Preview({ widget }: { widget: WebchatWidgetView }) {
             // eslint-disable-next-line @next/next/no-img-element
             <img src={c.logoDataUrl} alt="" className="size-full object-cover" />
           ) : (
-            (title.trim()[0] || "C").toUpperCase()
+            // Same two-word initials the real widget renders ("Acme Support" → "AS").
+            title.trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "•"
           )}
           <span className="absolute -bottom-0.5 -right-0.5 size-3 rounded-full bg-emerald-400" style={{ boxShadow: `0 0 0 2px ${primary}` }} />
         </span>
@@ -954,13 +994,15 @@ function Preview({ widget }: { widget: WebchatWidgetView }) {
       )}
       <div className="flex min-h-[210px] flex-col gap-2 p-3.5" style={{ background: surface2 }}>
         {c.welcomeMessage && (
-          <div className="max-w-[82%] self-start rounded-2xl rounded-bl-md px-3 py-2 text-sm" style={{ background: inb, border: `1px solid ${border}`, color: ink }}>
+          // The real widget renders the welcome as a centered SYSTEM pill (.sys),
+          // not an agent bubble — the preview must not promise a different look.
+          <div className="max-w-[88%] self-center rounded-xl px-3 py-1.5 text-center text-xs" style={{ background: `${ink2}1f`, color: ink2 }}>
             {c.welcomeMessage}
           </div>
         )}
-        <div className="max-w-[82%] self-end rounded-2xl rounded-br-md px-3 py-2 text-sm" style={{ background: `linear-gradient(145deg, ${user}, ${user}e0)`, color: contrastOn(user) }}>
-          Hi! I have a question.
-        </div>
+        {/* Real order: welcome → question pills → the visitor's first message
+            (pills disappear once they send — showing them after a sent bubble
+            was a state the widget never has). */}
         {qs.length > 0 && (
           <div className="mt-1 flex flex-wrap gap-1.5">
             {qs.map((q, i) => (
@@ -970,6 +1012,9 @@ function Preview({ widget }: { widget: WebchatWidgetView }) {
             ))}
           </div>
         )}
+        <div className="max-w-[82%] self-end rounded-2xl rounded-br-md px-3 py-2 text-sm" style={{ background: `linear-gradient(145deg, ${user}, ${user}e0)`, color: contrastOn(user) }}>
+          Hi! I have a question.
+        </div>
       </div>
       <div className="p-3" style={{ background: surface }}>
         <div className="flex items-center gap-1.5 rounded-3xl px-2 py-1.5" style={{ background: surface2, border: `1.5px solid ${border}` }}>
@@ -983,7 +1028,7 @@ function Preview({ widget }: { widget: WebchatWidgetView }) {
         </div>
       </div>
       {c.showBranding !== false && (
-        <div className="pb-2 text-center text-[11px]" style={{ background: surface, color: ink2 }}>Powered by chat</div>
+        <div className="pb-2 text-center text-[11px]" style={{ background: surface, color: ink2 }}>⚡ Powered by Loadless</div>
       )}
     </div>
   );
