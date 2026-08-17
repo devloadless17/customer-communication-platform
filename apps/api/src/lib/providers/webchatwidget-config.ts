@@ -1,3 +1,4 @@
+import { loadSelectFieldCatalog } from "@/lib/contact-fields/select-values";
 import { db } from "@/lib/db";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import { TtlCache } from "@/lib/providers/config-cache";
@@ -52,6 +53,21 @@ export interface WebchatwidgetPreChatField {
   /** Drives the input type + identity handling (email/phone → strong key). */
   type: "text" | "name" | "email" | "phone";
   required: boolean;
+  /**
+   * `ContactFieldDefinition.key` this question writes to — `text` questions only.
+   * The label is the question the visitor reads; this is where the answer lands,
+   * and the two are deliberately independent so rewording a question can't
+   * silently start a second field. Absent on legacy rows configured before the
+   * picker existed, which still fall back to a slug of the label (webchat-prechat.ts).
+   */
+  key?: string;
+  /**
+   * Options, when `key` names a SELECT field. Not persisted in the widget's config
+   * — attached at resolve time from the live definition, so renaming or reordering
+   * options can't leave a stale copy on the visitor's form. The widget renders a
+   * dropdown and submits an option ID.
+   */
+  options?: { id: string; name: string }[];
 }
 
 /** Appearance overrides; each blank falls back to a platform default. */
@@ -209,12 +225,41 @@ export async function resolveWebchatwidgetByPublicKey(
           widgetId: widget.id,
           name: widget.name,
           allowedOrigins: widget.allowedOrigins,
-          config: (widget.config ?? {}) as WebchatwidgetConfig,
+          config: await withSelectOptions(widget.workspaceId, (widget.config ?? {}) as WebchatwidgetConfig),
           firstSeenOrigin: widget.firstSeenOrigin,
         }
       : null;
   byKeyCache.set(publicKey, resolved);
   return resolved;
+}
+
+/**
+ * Attach live option lists to any pre-chat question bound to a SELECT contact
+ * field, so the widget can render a dropdown instead of a free-text box.
+ *
+ * Read here rather than stored in the widget's config because options are edited
+ * elsewhere (Settings → Contact fields): a persisted copy would go stale, and a
+ * visitor picking a renamed option would submit a value that resolves to nothing.
+ * One indexed query, and only for widgets that actually bind a select field —
+ * inside the cached resolve, so at most once per TTL per widget.
+ */
+async function withSelectOptions(
+  workspaceId: string,
+  config: WebchatwidgetConfig,
+): Promise<WebchatwidgetConfig> {
+  const fields = config.preChatFields;
+  if (!Array.isArray(fields) || fields.length === 0) return config;
+  const keys = fields.filter((f) => f.type === "text" && f.key).map((f) => f.key!);
+  if (keys.length === 0) return config;
+  const catalog = await loadSelectFieldCatalog(workspaceId, keys);
+  if (catalog.size === 0) return config;
+  return {
+    ...config,
+    preChatFields: fields.map((f) => {
+      const entry = f.key ? catalog.get(f.key) : undefined;
+      return entry ? { ...f, options: entry.options } : f;
+    }),
+  };
 }
 
 /**

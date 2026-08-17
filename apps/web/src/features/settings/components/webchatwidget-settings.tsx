@@ -7,6 +7,7 @@ import { apiFetch } from "@/lib/api/client-fetch";
 import { apiErrorMessage } from "@ccp/shared/api/error-message";
 import { PageHeader } from "@/components/layouts/page-header";
 import type { WebchatWidgetView } from "@/lib/api/queries";
+import type { ContactFieldDefinition } from "@ccp/shared/types";
 
 type Field = NonNullable<WebchatWidgetView["config"]["preChatFields"]>[number];
 const BRAND = "#4f46e5";
@@ -26,15 +27,22 @@ export function WebchatWidgetSettings({
   widgets: initial,
   canManage,
   appOrigin,
+  contactFields: initialContactFields,
+  canCreateFields,
 }: {
   widgets: WebchatWidgetView[];
   canManage: boolean;
   appOrigin: string;
+  contactFields: ContactFieldDefinition[];
+  canCreateFields: boolean;
 }) {
   const [widgets, setWidgets] = useState<WebchatWidgetView[]>(initial);
   const [selectedId, setSelectedId] = useState<string | null>(initial[0]?.id ?? null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Fields created from the pre-chat picker land here immediately, so the new
+  // option is selectable without waiting for a route refresh.
+  const [contactFields, setContactFields] = useState<ContactFieldDefinition[]>(initialContactFields);
   // Transient "Saved ✓" on the button — without it a successful save gave no
   // feedback at all (the button just flicked back to "Save changes").
   const [saved, setSaved] = useState(false);
@@ -88,7 +96,9 @@ export function WebchatWidgetSettings({
           headerTitle: w.config.headerTitle ?? "",
           headerSubtitle: w.config.headerSubtitle ?? "",
           suggestedQuestions: w.config.suggestedQuestions ?? [],
-          preChatFields: w.config.preChatFields ?? [],
+          // `options` is attached by the server for the WIDGET's benefit and is not
+          // part of the write schema (which is .strict()) — never echo it back.
+          preChatFields: (w.config.preChatFields ?? []).map(({ options: _options, ...f }) => f),
           showBranding: w.config.showBranding ?? true,
           logoDataUrl: w.config.logoDataUrl ?? "",
           agentAvatarDataUrl: w.config.agentAvatarDataUrl ?? "",
@@ -216,6 +226,9 @@ export function WebchatWidgetSettings({
               busy={busy}
               saved={saved}
               error={error}
+              contactFields={contactFields}
+              canCreateFields={canCreateFields}
+              onFieldCreated={(def) => setContactFields((cur) => (cur.some((d) => d.key === def.key) ? cur : [...cur, def]))}
               onName={(name) => patchLocal(selected.id, { name })}
               onActive={(isActive) => patchLocal(selected.id, { isActive })}
               onOrigins={(allowedOrigins) => patchLocal(selected.id, { allowedOrigins })}
@@ -236,6 +249,9 @@ function Editor({
   busy,
   saved,
   error,
+  contactFields,
+  canCreateFields,
+  onFieldCreated,
   onName,
   onActive,
   onOrigins,
@@ -248,6 +264,9 @@ function Editor({
   busy: boolean;
   saved: boolean;
   error: string | null;
+  contactFields: ContactFieldDefinition[];
+  canCreateFields: boolean;
+  onFieldCreated: (def: ContactFieldDefinition) => void;
   onName: (v: string) => void;
   onActive: (v: boolean) => void;
   onOrigins: (v: string[]) => void;
@@ -410,7 +429,13 @@ function Editor({
             title="Pre-chat form"
             desc="Optionally ask for a few details before the chat starts. Name, Email and Phone fill the contact's own details; choose Text for anything else — it's saved as a workspace contact field, created automatically from the label."
           >
-            <PreChatEditor fields={c.preChatFields ?? []} onChange={(preChatFields) => onConfig({ preChatFields })} />
+            <PreChatEditor
+              fields={c.preChatFields ?? []}
+              onChange={(preChatFields) => onConfig({ preChatFields })}
+              contactFields={contactFields}
+              canCreateFields={canCreateFields}
+              onFieldCreated={onFieldCreated}
+            />
             {(c.preChatFields ?? []).some((f) => f.type === "phone") && (
               <Field label="Phone dial code" hint="Prefilled in the phone field so visitors don't drop their country code.">
                 <input
@@ -901,43 +926,185 @@ function SuggestedQuestions({
 /** Server caps the list at 6 (webchatwidget.schemas.ts) — keep them in step. */
 const MAX_SUGGESTED_QUESTIONS = 6;
 
-function PreChatEditor({ fields, onChange }: { fields: Field[]; onChange: (f: Field[]) => void }) {
+/**
+ * Pre-chat questions, each BOUND to a real destination.
+ *
+ * Every question picks where its answer goes — the contact's own Name / Email /
+ * Phone, or one of the workspace's contact fields — instead of typing a label the
+ * server turned into a field key by guessing. Two things that used to be possible
+ * are now impossible: asking for something that lands nowhere an agent looks, and
+ * rewording a question into a silently-duplicated second field.
+ *
+ * "New contact field…" creates a real workspace field (Settings → Contact fields)
+ * and binds to it, so it exists for every contact, not just the ones who happen to
+ * answer this widget's form.
+ */
+const BUILTIN_TARGETS = [
+  { value: "name", label: "Full name", hint: "the contact's name" },
+  { value: "email", label: "Email address", hint: "the contact's email" },
+  { value: "phone", label: "Phone number", hint: "the contact's phone" },
+] as const;
+
+function PreChatEditor({
+  fields,
+  onChange,
+  contactFields,
+  canCreateFields,
+  onFieldCreated,
+}: {
+  fields: Field[];
+  onChange: (f: Field[]) => void;
+  contactFields: ContactFieldDefinition[];
+  canCreateFields: boolean;
+  onFieldCreated: (def: ContactFieldDefinition) => void;
+}) {
+  const [creatingAt, setCreatingAt] = useState<number | null>(null);
+  const [newLabel, setNewLabel] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  /** One flat value per row: a built-in target, or `field:<key>` for a custom one. */
+  function targetOf(f: Field): string {
+    return f.type === "text" ? (f.key ? `field:${f.key}` : "") : f.type;
+  }
+  function setTarget(i: number, value: string) {
+    setErr(null);
+    if (value === "__new__") {
+      setCreatingAt(i);
+      setNewLabel("");
+      return;
+    }
+    const custom = value.startsWith("field:") ? contactFields.find((d) => d.key === value.slice(6)) : null;
+    onChange(
+      fields.map((x, j) => {
+        if (j !== i) return x;
+        if (custom) return { ...x, type: "text", key: custom.key, label: x.label || custom.label };
+        const builtin = BUILTIN_TARGETS.find((b) => b.value === value);
+        // Switching to a built-in drops the key — the answer goes to a column now.
+        return { ...x, type: (builtin?.value ?? "text") as Field["type"], key: undefined, label: x.label || builtin?.label || "" };
+      }),
+    );
+  }
+
+  async function createField(i: number) {
+    const label = newLabel.trim();
+    if (!label) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await apiFetch("/api/workspace/contact-fields", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ label }),
+      });
+      if (!res.ok) throw new Error(await apiErrorMessage(res, "Couldn't create the field."));
+      const { definition } = (await res.json()) as { definition?: ContactFieldDefinition };
+      if (!definition) throw new Error("Couldn't create the field.");
+      onFieldCreated(definition);
+      onChange(fields.map((x, j) => (j === i ? { ...x, type: "text", key: definition.key, label: x.label || definition.label } : x)));
+      setCreatingAt(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Couldn't create the field.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <div className="flex flex-col gap-2">
-      {fields.length === 0 && <span className="text-xs text-muted-foreground">No fields — visitors chat right away.</span>}
-      {fields.map((f, i) => (
-        <div key={f.id ?? i} className="flex min-w-0 items-center gap-2">
-          <input
-            value={f.label}
-            onChange={(e) => onChange(fields.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)))}
-            placeholder="Label"
-            className="min-w-0 flex-1 rounded-lg border bg-background px-2.5 py-1.5 text-sm"
-          />
-          <select
-            value={f.type}
-            onChange={(e) => onChange(fields.map((x, j) => (j === i ? { ...x, type: e.target.value as Field["type"] } : x)))}
-            className="shrink-0 rounded-lg border bg-background px-2 py-1.5 text-sm"
-          >
-            <option value="name">Name</option>
-            <option value="email">Email</option>
-            <option value="phone">Phone</option>
-            <option value="text">Text</option>
-          </select>
-          <label className="flex shrink-0 items-center gap-1 text-xs">
-            <input type="checkbox" checked={f.required} onChange={(e) => onChange(fields.map((x, j) => (j === i ? { ...x, required: e.target.checked } : x)))} />
-            Required
-          </label>
-          <button onClick={() => onChange(fields.filter((_, j) => j !== i))} className="shrink-0 text-muted-foreground hover:text-destructive" aria-label="Remove field">
-            ×
-          </button>
-        </div>
-      ))}
+    <div className="flex flex-col gap-2.5">
+      {fields.length === 0 && <span className="text-xs text-muted-foreground">No questions — visitors chat right away.</span>}
+      {fields.map((f, i) => {
+        const bound = f.type === "text" ? contactFields.find((d) => d.key === f.key) : null;
+        // A legacy row (configured before the picker) has no key — its answers land
+        // in a field named after the question. Say so, and let them re-point it.
+        const unbound = f.type === "text" && !f.key;
+        return (
+          <div key={f.id ?? i} className="flex min-w-0 flex-col gap-1.5 rounded-lg border p-2.5">
+            <div className="flex min-w-0 items-center gap-2">
+              <input
+                value={f.label}
+                onChange={(e) => onChange(fields.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)))}
+                placeholder="Question the visitor sees"
+                aria-label="Question"
+                className="min-w-0 flex-1 rounded-lg border bg-background px-2.5 py-1.5 text-sm"
+              />
+              <label className="flex shrink-0 items-center gap-1 text-xs">
+                <input type="checkbox" checked={f.required} onChange={(e) => onChange(fields.map((x, j) => (j === i ? { ...x, required: e.target.checked } : x)))} />
+                Required
+              </label>
+              <button onClick={() => onChange(fields.filter((_, j) => j !== i))} className="shrink-0 text-muted-foreground hover:text-destructive" aria-label="Remove question">
+                ×
+              </button>
+            </div>
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="shrink-0 text-2xs text-muted-foreground">Saves to</span>
+              <select
+                value={targetOf(f)}
+                aria-label="Where the answer is saved"
+                onChange={(e) => setTarget(i, e.target.value)}
+                className="min-w-0 flex-1 rounded-lg border bg-background px-2 py-1.5 text-sm"
+              >
+                {unbound && <option value="">{`Custom field “${f.label}” (created on first answer)`}</option>}
+                <optgroup label="Contact details">
+                  {BUILTIN_TARGETS.map((b) => (
+                    <option key={b.value} value={b.value}>{b.label}</option>
+                  ))}
+                </optgroup>
+                {contactFields.length > 0 && (
+                  <optgroup label="Contact fields">
+                    {contactFields.map((d) => (
+                      <option key={d.key} value={`field:${d.key}`}>
+                        {d.label}
+                        {d.type === "select" ? " (choices)" : ""}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                {canCreateFields && <option value="__new__">+ New contact field…</option>}
+              </select>
+            </div>
+            {bound?.type === "select" && (
+              <p className="text-2xs text-muted-foreground">
+                Visitors pick from this field&apos;s {bound.options?.length ?? 0} choices — edit them in Settings → Contact fields.
+              </p>
+            )}
+            {unbound && (
+              <p className="text-2xs text-amber-600 dark:text-amber-500">
+                Not linked to a contact field yet — pick one above so you know exactly where answers land.
+              </p>
+            )}
+            {creatingAt === i && (
+              <div className="flex min-w-0 flex-col gap-1.5 rounded-lg bg-muted/50 p-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  <input
+                    value={newLabel}
+                    autoFocus
+                    onChange={(e) => setNewLabel(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void createField(i); } }}
+                    placeholder="Field name, e.g. Business name"
+                    aria-label="New contact field name"
+                    className="min-w-0 flex-1 rounded-lg border bg-background px-2.5 py-1.5 text-sm"
+                  />
+                  <button onClick={() => void createField(i)} disabled={busy || !newLabel.trim()} className="shrink-0 rounded-lg bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50">
+                    {busy ? "Creating…" : "Create"}
+                  </button>
+                  <button onClick={() => { setCreatingAt(null); setErr(null); }} className="shrink-0 text-xs text-muted-foreground hover:text-foreground">
+                    Cancel
+                  </button>
+                </div>
+                <p className="text-2xs text-muted-foreground">Added to every contact in this workspace, like any field in Settings → Contact fields.</p>
+                {err && <p className="text-2xs text-destructive">{err}</p>}
+              </div>
+            )}
+          </div>
+        );
+      })}
       {fields.length < 6 && (
         <button
-          onClick={() => onChange([...fields, { id: `f_${Math.random().toString(36).slice(2)}`, label: "Email", type: "email", required: false }])}
+          onClick={() => onChange([...fields, { id: `f_${Math.random().toString(36).slice(2)}`, label: "Email address", type: "email", required: false }])}
           className="self-start text-xs font-medium text-primary"
         >
-          + Add field
+          + Add question
         </button>
       )}
     </div>

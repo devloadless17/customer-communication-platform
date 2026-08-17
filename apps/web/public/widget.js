@@ -331,7 +331,7 @@
     ".rconf{align-self:center;max-width:88%;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:12px 14px;margin:6px 0;box-shadow:0 8px 22px -10px rgba(15,23,42,.25)}.rct{font-size:13px;color:var(--ink);margin-bottom:10px}.rca{display:flex;gap:8px;justify-content:flex-end}",
     ".rcy{border:0;background:var(--c);color:var(--ct);font:inherit;font-size:12.5px;font-weight:600;border-radius:9px;padding:7px 14px;cursor:pointer}.rcn{border:0;background:transparent;color:var(--ink2);font:inherit;font-size:12.5px;padding:7px 10px;cursor:pointer}.rcn:hover{color:var(--ink)}",
     ".newp{position:absolute;left:50%;transform:translateX(-50%);top:-46px;background:var(--c);color:var(--ct);border:0;border-radius:9999px;padding:7px 15px;font-size:12.5px;font-weight:600;cursor:pointer;box-shadow:0 8px 20px -6px rgba(0,0,0,.35);display:none;white-space:nowrap;z-index:2}.newp.on{display:block}",
-    ".form{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:18px;display:flex;flex-direction:column;gap:11px;margin-top:6px}.form h3{margin:0;font-size:15px;font-weight:700}.form p{margin:0;font-size:13px;color:var(--ink2)}.form .fld{display:flex;flex-direction:column;gap:5px}.form label{font-size:12px;font-weight:600}.form input{font:inherit;font-size:14px;padding:10px 12px;border:1px solid var(--border);border-radius:11px;outline:none;background:var(--surface);color:var(--ink)}.form input:focus{border-color:var(--c);box-shadow:0 0 0 3px color-mix(in srgb,var(--c) 18%,transparent)}",
+    ".form{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:18px;display:flex;flex-direction:column;gap:11px;margin-top:6px}.form h3{margin:0;font-size:15px;font-weight:700}.form p{margin:0;font-size:13px;color:var(--ink2)}.form .fld{display:flex;flex-direction:column;gap:5px}.form label{font-size:12px;font-weight:600}.form input,.form select{font:inherit;font-size:14px;padding:10px 12px;border:1px solid var(--border);border-radius:11px;outline:none;background:var(--surface);color:var(--ink);width:100%;appearance:auto}.form input:focus,.form select:focus{border-color:var(--c);box-shadow:0 0 0 3px color-mix(in srgb,var(--c) 18%,transparent)}",
     ".err{color:#dc2626;font-size:12px}",
     // Stepped pre-chat form: answered steps collapse into a quiet summary, and the
     // nav row keeps Back / "N of M" / Next on one line so the card height is stable
@@ -875,6 +875,12 @@
     bodyEl.appendChild(card);
 
     function label(f) { return f.label + (f.required ? "" : " (optional)"); }
+    /** Display text for a stored answer — resolves a select's option id to its name. */
+    function answerLabel(f, v) {
+      if (!Array.isArray(f.options)) return v;
+      for (var i = 0; i < f.options.length; i++) if (f.options[i].id === v) return f.options[i].name;
+      return v;
+    }
     /** Validate the CURRENT step. Returns an error string, or "" when valid. */
     function validate(f, v) {
       if (f.required && !v) return "This field is required.";
@@ -883,7 +889,7 @@
       return "";
     }
     function commit() {
-      var f = fields[step], inp = fld.querySelector("input"), v = (inp ? inp.value : "").trim();
+      var f = fields[step], inp = fld.querySelector("input,select"), v = (inp ? inp.value : "").trim();
       var err = validate(f, v);
       if (err) { errEl.textContent = err; errEl.style.display = ""; if (inp) inp.focus(); return false; }
       errEl.style.display = ""; errEl.style.display = "none";
@@ -902,7 +908,10 @@
           if (f.type === "email") pre.email = v;
           else if (f.type === "phone") pre.phone = v;
           else if (f.type === "name") pre.name = v;
-          else { pre.custom = pre.custom || {}; pre.custom[f.label] = v; }
+          // Keyed by the BOUND contact-field key when the admin picked one, so the
+          // answer lands in that exact field. `f.label` is the legacy fallback for
+          // widgets configured before the picker existed (the server slugifies it).
+          else { pre.custom = pre.custom || {}; pre.custom[f.key || f.label] = v; }
         }
       });
       S.preChat = pre; S.formDone = true;
@@ -920,17 +929,32 @@
         if (!answers[i]) continue;
         summary.appendChild(el("div", { class: "fsumrow" }, [
           el("span", { class: "k" }, fields[i].label),
-          el("span", { class: "v" }, answers[i]),
+          // A select answer is stored as the option ID (what the server needs) but
+          // must READ as the option's name.
+          el("span", { class: "v" }, answerLabel(fields[i], answers[i])),
         ]));
       }
       fld.innerHTML = "";
-      var inp = el("input", {
-        type: f.type === "email" ? "email" : f.type === "phone" ? "tel" : "text",
-        placeholder: f.label,
-        "aria-label": f.label,
-        // Let the browser autofill do the typing — this is the visitor's own data.
-        autocomplete: f.type === "email" ? "email" : f.type === "phone" ? "tel" : "name",
-      });
+      // A question bound to a SELECT contact field is a CHOICE, not free text —
+      // render its options (delivered live with the config) so the visitor can only
+      // give an answer the field actually accepts. Typing into a text box here meant
+      // an unrecognised answer resolved to nothing and was silently dropped.
+      var opts = Array.isArray(f.options) ? f.options : null;
+      var inp;
+      if (opts && opts.length) {
+        inp = el("select", { "aria-label": f.label });
+        inp.appendChild(el("option", { value: "" }, f.required ? "Choose one…" : "Choose one… (optional)"));
+        opts.forEach(function (o) { inp.appendChild(el("option", { value: o.id }, o.name)); });
+        if (answers[step]) inp.value = answers[step];
+      } else {
+        inp = el("input", {
+          type: f.type === "email" ? "email" : f.type === "phone" ? "tel" : "text",
+          placeholder: f.label,
+          "aria-label": f.label,
+          // Let the browser autofill do the typing — this is the visitor's own data.
+          autocomplete: f.type === "email" ? "email" : f.type === "phone" ? "tel" : "name",
+        });
+      }
       if (answers[step]) {
         inp.value = answers[step];
       } else if (f.type === "phone") {

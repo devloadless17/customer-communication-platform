@@ -26,6 +26,18 @@ const PreChatFieldSchema = z
     label: z.string().trim().min(1).max(60),
     type: z.enum(["text", "name", "email", "phone"]),
     required: z.boolean().default(false),
+    /**
+     * The workspace contact field this question writes to, by KEY — the same key
+     * `ContactFieldDefinition` uses. Present only on `text` questions (name/email/
+     * phone write the contact's own columns).
+     *
+     * Binding by key rather than inferring one from the label is what makes the
+     * wiring exact: the label is the QUESTION the visitor reads and can be
+     * reworded freely, while the key is the storage location and never moves.
+     * Inferring it meant a reworded question silently started a second field.
+     * Validated against real definitions on save (`assertContactFieldsExist`).
+     */
+    key: z.string().trim().min(1).max(60).optional(),
   })
   .strict();
 

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 
-import { Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 
 import {
@@ -71,6 +71,9 @@ function buildConfig(
         label: f.label,
         type: f.type,
         required: f.required,
+        // A key only means something on a custom (`text`) question — name/email/
+        // phone write the contact's own columns and must never carry one.
+        ...(f.type === "text" && f.key ? { key: f.key } : {}),
       }),
     );
   }
@@ -100,7 +103,37 @@ export class WebchatwidgetAdminService {
     return rows.map((r) => this.toView(r, r._count.conversations));
   }
 
+  /**
+   * Every pre-chat `key` must name a real contact field in THIS workspace.
+   *
+   * The point of binding by key is that the wiring is certain, so a key that
+   * doesn't resolve is a configuration error worth refusing rather than storing:
+   * a dangling one would silently mint a brand-new field (named after the
+   * question) the first time a visitor answered. Also blocks a key from another
+   * workspace — `key` arrives from client input.
+   */
+  private async assertContactFieldsExist(
+    workspaceId: string,
+    fields: { type: string; key?: string }[] | undefined,
+  ): Promise<void> {
+    const keys = [...new Set((fields ?? []).filter((f) => f.type === "text" && f.key).map((f) => f.key!))];
+    if (keys.length === 0) return;
+    const found = await this.db.contactFieldDefinition.findMany({
+      where: { workspaceId, key: { in: keys } },
+      select: { key: true },
+    });
+    const known = new Set(found.map((f) => f.key));
+    const missing = keys.filter((k) => !known.has(k));
+    if (missing.length > 0) {
+      throw new BadRequestException({
+        error: "unknown_contact_field",
+        detail: `No contact field named "${missing[0]}" exists. Create it in Settings → Contact fields first.`,
+      });
+    }
+  }
+
   async create(workspaceId: string, input: CreateWidgetInput): Promise<WidgetView> {
+    await this.assertContactFieldsExist(workspaceId, input.preChatFields);
     const widget = await this.db.webchatWidget.create({
       data: {
         workspaceId,
@@ -122,6 +155,7 @@ export class WebchatwidgetAdminService {
       include: { _count: { select: { conversations: true } } },
     });
     if (!existing) throw new NotFoundException({ error: "widget_not_found" });
+    await this.assertContactFieldsExist(workspaceId, input.preChatFields);
 
     const config = buildConfig(input, (existing.config ?? {}) as WebchatwidgetConfig);
     const updated = await this.db.webchatWidget.update({

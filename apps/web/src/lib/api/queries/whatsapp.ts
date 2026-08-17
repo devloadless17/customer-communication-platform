@@ -194,7 +194,16 @@ export interface WebchatWidgetView {
     headerTitle?: string;
     headerSubtitle?: string;
     suggestedQuestions?: string[];
-    preChatFields?: { id: string; label: string; type: "text" | "name" | "email" | "phone"; required: boolean }[];
+    preChatFields?: {
+      id: string;
+      label: string;
+      type: "text" | "name" | "email" | "phone";
+      required: boolean;
+      /** Workspace contact-field key the answer is saved to (`text` questions). */
+      key?: string;
+      /** Live options when `key` names a select field — server-attached, read-only. */
+      options?: { id: string; name: string }[];
+    }[];
     showBranding?: boolean;
     logoDataUrl?: string;
     agentAvatarDataUrl?: string;
