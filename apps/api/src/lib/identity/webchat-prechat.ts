@@ -156,13 +156,33 @@ export async function applyWebchatPreChatIdentity(
     // diverts the mappable ones; anything else reserved is dropped, not
     // stored under a colliding key.
     if (isReservedFieldKey(key) && !BUILTIN_FIELD_BY_SLUG[key]) continue;
-    const builtin = BUILTIN_FIELD_BY_SLUG[key];
-    if (builtin) {
-      // Known contact field → set it directly (skip if already that value).
-      if (contact[builtin] !== val) builtinPatch[builtin] = val.slice(0, 120);
-      continue;
-    }
     candidates.push({ key, label, val });
+  }
+  // A REAL definition outranks the alias map. Most alias keys (`first_name`,
+  // `location`, …) are reserved, so no definition can exist for them and the
+  // column always wins — but five are NOT reserved (`address`, `surname`,
+  // `first`, `last`, `lang`), so a workspace can legitimately create a custom
+  // field called "Address". Consulting the alias first sent that field's answers
+  // to `Contact.location` and left the field the admin created empty — a value
+  // stored somewhere nobody was looking. An explicitly created field is an
+  // explicit intent; only fall back to the column when no definition exists.
+  const definedKeys = new Set(
+    (
+      await db.contactFieldDefinition.findMany({
+        where: { workspaceId, key: { in: candidates.map((c) => c.key) } },
+        select: { key: true },
+      })
+    ).map((d) => d.key),
+  );
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    const candidate = candidates[i];
+    if (!candidate) continue;
+    const { key, val } = candidate;
+    const builtin = BUILTIN_FIELD_BY_SLUG[key];
+    if (!builtin || definedKeys.has(key)) continue;
+    // Known contact column → set it directly (skip if already that value).
+    if (contact[builtin] !== val) builtinPatch[builtin] = val.slice(0, 120);
+    candidates.splice(i, 1);
   }
   // A key that belongs to a SELECT-type definition must store an option ID, never
   // the visitor's raw text — an unresolvable value is skipped, the same lenient
