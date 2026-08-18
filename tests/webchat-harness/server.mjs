@@ -114,18 +114,18 @@ widget.on("connection", (socket) => {
   socket.on("visitor:message", (payload, ack) => {
     state.received.push(payload);
     if (state.ackMode === "silent") return;
-    if (state.ackMode === "rate_limited") return ack && ack({ ok: false, error: "rate_limited" });
-    if (state.ackMode === "error") return ack && ack({ ok: false, error: "failed" });
+    if (state.ackMode === "rate_limited") { if (ack) ack({ ok: false, error: "rate_limited" }); return; }
+    if (state.ackMode === "error") { if (ack) ack({ ok: false, error: "failed" }); return; }
     const m = { id: "m" + state.received.length, externalId: "widget:v:" + payload.clientMsgId,
       direction: "in", body: payload.body, status: "sent", createdAt: new Date().toISOString(),
       replyTo: payload.replyToExternalId ? { id: null, body: "" } : null };
     state.history.push(m);
-    ack && ack({ ok: true, id: m.id });
+    if (ack) ack({ ok: true, id: m.id });
     socket.emit("message", m);
   });
   socket.on("visitor:loadOlder", (_b, ack) => {
     const page = state.olderPages.shift();
-    ack && ack({ messages: (page && page.messages) || [], hasMore: state.olderPages.length > 0 });
+    if (ack) ack({ messages: (page && page.messages) || [], hasMore: state.olderPages.length > 0 });
   });
   socket.on("visitor:presence", (p) => state.presenceSeen.push(p));
   socket.on("visitor:typing", () => {});

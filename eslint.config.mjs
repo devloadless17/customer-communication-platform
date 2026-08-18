@@ -29,6 +29,13 @@ export default tseslint.config(
       // scope, not the Node/TS lint environment, so `eslint .` flags every
       // `document`/`window`/`self` as no-undef. Not app source — don't lint.
       "apps/web/public/**",
+      // Webchat harness CASES are page functions handed to Playwright's
+      // `run-code`, not modules: each file is a bare `async page => {…}`
+      // expression whose body runs in the BROWSER, so `eslint .` flags both the
+      // top-level expression and every `document`/`localStorage`. Same reason
+      // `apps/web/public/**` is ignored above. `server.mjs` beside them is
+      // ordinary Node and stays linted.
+      "tests/webchat-harness/cases/**",
       // Claude Code tooling, not app source. Persisted Workflow scripts (.mjs)
       // use runtime-injected globals (agent/parallel/log/phase) that aren't
       // real JS, so `eslint .` would flag them as no-undef. The committed
