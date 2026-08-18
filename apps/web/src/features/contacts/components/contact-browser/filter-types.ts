@@ -6,6 +6,11 @@ export type SourceFilter = "all" | ContactSource;
 /** Channel filter: "any" disables it; else one channel identity. */
 export type ChannelFilter = "any" | Channel;
 
+/** How you can reach a contact. "any" disables the gate.
+ *  The contacts directory defaults to "phone" — "everyone I can call" — while a
+ *  channel segment lifts it, and "email" is the shape an email campaign wants. */
+export type ReachFilter = "any" | "phone" | "email";
+
 /** 24h customer-service window filter. "any" = no filter. */
 export type WindowFilter = "any" | "open" | "closed";
 

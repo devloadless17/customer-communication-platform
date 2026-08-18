@@ -27,13 +27,14 @@ import { ActiveFilterChips } from "./contact-browser/active-filter-chips";
 import { ContactRowsSkeleton } from "./contact-browser/row-skeleton";
 import type {
   ChannelFilter,
+  ReachFilter,
   FieldFilter,
   SourceFilter,
   StageFilter,
   WindowFilter,
 } from "./contact-browser/filter-types";
 
-export type { ChannelFilter, FieldFilter, SourceFilter, StageFilter, WindowFilter };
+export type { ChannelFilter, FieldFilter, ReachFilter, SourceFilter, StageFilter, WindowFilter };
 
 /**
  * The one and only contact-browsing surface.
@@ -67,6 +68,14 @@ export interface ContactListFilters {
   sourceFilter: SourceFilter;
   /** Channel identity filter. "any" disables the filter. */
   channelFilter: ChannelFilter;
+  /**
+   * Reachability gate — "any" | "phone" | "email".
+   *
+   * The contacts PAGE defaults this to "phone" (the directory means "people I
+   * can call"); the picker leaves it "any", because narrowing an audience the
+   * user is building would drop recipients they never chose to exclude.
+   */
+  reachFilter: ReachFilter;
   /**
    * ONE account on that channel — a specific WhatsApp number, Page or IG
    * handle. `null` disables it. Answers "who writes to the Sales number",
@@ -110,6 +119,7 @@ export async function fetchContactsPage(
   if (!filters.groupByPerson && filters.accountFilter) {
     params.set("accountId", filters.accountFilter);
   }
+  if (filters.reachFilter !== "any") params.set("reach", filters.reachFilter);
   if (filters.windowFilter !== "any") params.set("window", filters.windowFilter);
   if (filters.tagIds.length > 0) params.set("tagIds", filters.tagIds.join(","));
   if (filters.stageFilter !== "any") params.set("stageId", filters.stageFilter);
@@ -168,6 +178,10 @@ export function matchesContactFiltersExceptWindow(
   ) {
     return false;
   }
+  // Same lockstep rule as the channel mirror above: a live `contact.updated`
+  // for someone the reach gate excludes must not re-appear in the list.
+  if (filters.reachFilter === "phone" && !contact.phoneNumber) return false;
+  if (filters.reachFilter === "email" && !contact.email) return false;
   if (filters.tagIds.length > 0) {
     const contactTagIds = contact.tagIds ?? [];
     if (!filters.tagIds.some((id) => contactTagIds.includes(id))) return false;
@@ -245,6 +259,8 @@ export interface UseContactListResult {
   accountFilter: string | null;
   setAccountFilter: (v: string | null) => void;
   setChannelFilter: (v: ChannelFilter) => void;
+  reachFilter: ReachFilter;
+  setReachFilter: (v: ReachFilter) => void;
   groupByPerson: boolean;
   setGroupByPerson: (v: boolean) => void;
   windowFilter: WindowFilter;
@@ -282,6 +298,12 @@ export function useContactList(opts?: {
   initialNextCursor?: string | null;
   initialTotalCount?: number | null;
   initialStageFilter?: StageFilter;
+  /** Reachability the list opens on. The contacts page passes "phone" (its
+   *  directory default); the picker omits it, so an audience is never narrowed
+   *  by a default the user didn't choose. */
+  initialReachFilter?: ReachFilter;
+  /** Channel segment the list opens on (from `?channel=`). */
+  initialChannelFilter?: ChannelFilter;
   /** Opt into numbered (offset) pagination: filter changes reset to page 1,
    *  `setPage` fetches that page (replacing rows, not appending), and
    *  `totalCount` refreshes every fetch. Default false = keyset/infinite-scroll
@@ -326,7 +348,15 @@ export function useContactList(opts?: {
   const [search, setSearch] = useState("");
   const [fieldFilter, setFieldFilter] = useState<FieldFilter | null>(null);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
-  const [channelFilter, setChannelFilter] = useState<ChannelFilter>("any");
+  const [channelFilter, setChannelFilter] = useState<ChannelFilter>(
+    opts?.initialChannelFilter ?? "any",
+  );
+  // Seeded, not hardcoded: the contacts page opens on "phone" (the directory),
+  // while the audience picker stays "any" so building an audience can't silently
+  // drop the people the page's default hides.
+  const [reachFilter, setReachFilter] = useState<ReachFilter>(
+    opts?.initialReachFilter ?? "any",
+  );
   const [accountFilter, setAccountFilter] = useState<string | null>(null);
   const [groupByPerson, setGroupByPerson] = useState(false);
   const [windowFilter, setWindowFilter] = useState<WindowFilter>("any");
@@ -364,7 +394,7 @@ export function useContactList(opts?: {
     const t = window.setTimeout(async () => {
       try {
         const page = await fetchContactsPage(
-          { search, fieldFilter, sourceFilter, channelFilter, accountFilter, windowFilter, tagIds, stageFilter, groupByPerson },
+          { search, fieldFilter, sourceFilter, channelFilter, reachFilter, accountFilter, windowFilter, tagIds, stageFilter, groupByPerson },
           null,
         );
         if (reqId.current !== my) return;
@@ -379,7 +409,7 @@ export function useContactList(opts?: {
     }, 250);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, fieldFilter, sourceFilter, channelFilter, accountFilter, windowFilter, tagKey, stageFilter, groupByPerson]);
+  }, [search, fieldFilter, sourceFilter, channelFilter, reachFilter, accountFilter, windowFilter, tagKey, stageFilter, groupByPerson]);
 
   // ── Numbered (offset) pagination effects — `paged` mode only ──────────────
   // A filter change resets to page 1 (page N of the old filter set is
@@ -393,7 +423,7 @@ export function useContactList(opts?: {
     }
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, fieldFilter, sourceFilter, channelFilter, accountFilter, windowFilter, tagKey, stageFilter, groupByPerson]);
+  }, [search, fieldFilter, sourceFilter, channelFilter, reachFilter, accountFilter, windowFilter, tagKey, stageFilter, groupByPerson]);
 
   // Fetch the current page whenever filters or the page number change. Debounce
   // ONLY the typed search (so keystrokes don't flood the API); page navigation
@@ -419,7 +449,7 @@ export function useContactList(opts?: {
     const t = window.setTimeout(async () => {
       try {
         const data = await fetchContactsPage(
-          { search, fieldFilter, sourceFilter, channelFilter, accountFilter, windowFilter, tagIds, stageFilter, groupByPerson },
+          { search, fieldFilter, sourceFilter, channelFilter, reachFilter, accountFilter, windowFilter, tagIds, stageFilter, groupByPerson },
           null,
           { page, take: pageSize },
         );
@@ -435,7 +465,7 @@ export function useContactList(opts?: {
     }, delay);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, fieldFilter, sourceFilter, channelFilter, accountFilter, windowFilter, tagKey, stageFilter, groupByPerson, page]);
+  }, [search, fieldFilter, sourceFilter, channelFilter, reachFilter, accountFilter, windowFilter, tagKey, stageFilter, groupByPerson, page]);
 
   function loadMore() {
     if (!nextCursor || loadingMore) return;
@@ -455,7 +485,7 @@ export function useContactList(opts?: {
     void (async () => {
       try {
         const page = await fetchContactsPage(
-          { search, fieldFilter, sourceFilter, channelFilter, accountFilter, windowFilter, tagIds, stageFilter, groupByPerson },
+          { search, fieldFilter, sourceFilter, channelFilter, reachFilter, accountFilter, windowFilter, tagIds, stageFilter, groupByPerson },
           fromCursor,
         );
         // superseded by a filter change (reqId) or a page-1 refetch (cursor)
@@ -485,13 +515,14 @@ export function useContactList(opts?: {
     fieldFilter,
     sourceFilter,
     channelFilter,
+    reachFilter,
     accountFilter,
     windowFilter,
     tagIds,
     stageFilter,
     groupByPerson,
   });
-  filtersRef.current = { search, fieldFilter, sourceFilter, channelFilter, accountFilter, windowFilter, tagIds, stageFilter, groupByPerson };
+  filtersRef.current = { search, fieldFilter, sourceFilter, channelFilter, reachFilter, accountFilter, windowFilter, tagIds, stageFilter, groupByPerson };
 
   // Public refetch — wired to the coalesced `contacts:bulk_updated` socket
   // event. Bulk paths (server-side bulk-tag etc.) don't send per-contact
@@ -550,6 +581,7 @@ export function useContactList(opts?: {
           filters.fieldFilter !== null ||
           filters.sourceFilter !== "all" ||
           filters.channelFilter !== "any" ||
+          filters.reachFilter !== "any" ||
           filters.windowFilter !== "any" ||
           filters.tagIds.length > 0 ||
           filters.stageFilter !== "any";
@@ -622,6 +654,8 @@ export function useContactList(opts?: {
     setSourceFilter,
     channelFilter,
     setChannelFilter,
+    reachFilter,
+    setReachFilter,
     accountFilter,
     setAccountFilter,
     groupByPerson,
@@ -653,6 +687,8 @@ export function ContactFilterBar({
   onSourceChange,
   channelFilter = "any",
   onChannelChange,
+  reachFilter = "any",
+  onReachChange,
   accountFilter = null,
   onAccountChange,
   accounts = [],
@@ -675,6 +711,9 @@ export function ContactFilterBar({
   onSourceChange: (v: SourceFilter) => void;
   channelFilter?: ChannelFilter;
   onChannelChange?: (v: ChannelFilter) => void;
+  reachFilter?: ReachFilter;
+  /** Omit to hide the reachability section (the picker does). */
+  onReachChange?: (v: ReachFilter) => void;
   /** ONE account on the channel. Omit `onAccountChange` to hide the section. */
   accountFilter?: string | null;
   onAccountChange?: (v: string | null) => void;
@@ -698,6 +737,7 @@ export function ContactFilterBar({
   const moreActive =
     sourceFilter !== "all" ||
     (Boolean(onChannelChange) && channelFilter !== "any") ||
+    (Boolean(onReachChange) && reachFilter !== "any") ||
     (Boolean(onAccountChange) && accountFilter !== null) ||
     (Boolean(onWindowChange) && windowFilter !== "any") ||
     fieldFilter !== null;
@@ -706,6 +746,7 @@ export function ContactFilterBar({
     onSearchChange("");
     onSourceChange("all");
     onChannelChange?.("any");
+    onReachChange?.("any");
     onAccountChange?.(null);
     onWindowChange?.("any");
     onStageFilterChange?.("any");
@@ -808,6 +849,8 @@ export function ContactFilterBar({
                 onSourceChange={onSourceChange}
                 channelFilter={channelFilter}
                 onChannelChange={onChannelChange}
+                reachFilter={reachFilter}
+                onReachChange={onReachChange}
                 accountFilter={accountFilter}
                 onAccountChange={onAccountChange}
                 accounts={accounts}
@@ -834,6 +877,8 @@ export function ContactFilterBar({
         onSourceChange={onSourceChange}
         channelFilter={channelFilter}
         onChannelChange={onChannelChange}
+        reachFilter={reachFilter}
+        onReachChange={onReachChange}
         windowFilter={windowFilter}
         onWindowChange={onWindowChange}
         stageFilter={stageFilter}

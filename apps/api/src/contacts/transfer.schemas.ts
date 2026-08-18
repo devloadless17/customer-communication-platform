@@ -35,6 +35,9 @@ export const ExportFiltersSchema = z.object({
   fieldMode: z.enum(["contains", "equals"]).optional(),
   source: z.string().max(40).optional(),
   channel: z.string().max(40).optional(),
+  // Exporting "current filters" must honour the reachability gate too, or the
+  // CSV silently contains people the list on screen was hiding.
+  reach: z.enum(["phone", "email"]).optional(),
   window: z.enum(["open", "closed"]).optional(),
   stageId: z.string().max(40).optional(),
   tagIds: z.array(z.string().max(40)).max(50).optional(),

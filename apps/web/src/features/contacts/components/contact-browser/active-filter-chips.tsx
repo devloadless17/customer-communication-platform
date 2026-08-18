@@ -1,6 +1,6 @@
 "use client";
 
-import { X } from "lucide-react";
+import { Mail, Phone, X } from "lucide-react";
 
 import { TagChip } from "@/features/tags/components/tag-chip";
 import { CHANNEL_LABEL, ChannelBadge } from "@/features/inbox/components/channel-badge";
@@ -11,6 +11,7 @@ import type { ContactFieldDefinition, ContactStage, Tag } from "@ccp/shared/type
 import type {
   ChannelFilter,
   FieldFilter,
+  ReachFilter,
   SourceFilter,
   StageFilter,
   WindowFilter,
@@ -56,6 +57,8 @@ export function ActiveFilterChips({
   sourceFilter,
   onSourceChange,
   channelFilter = "any",
+  reachFilter = "any",
+  onReachChange,
   onChannelChange,
   windowFilter,
   onWindowChange,
@@ -73,6 +76,8 @@ export function ActiveFilterChips({
   sourceFilter: SourceFilter;
   onSourceChange: (v: SourceFilter) => void;
   channelFilter?: ChannelFilter;
+  reachFilter?: ReachFilter;
+  onReachChange?: (v: ReachFilter) => void;
   onChannelChange?: (v: ChannelFilter) => void;
   windowFilter: WindowFilter;
   onWindowChange?: (v: WindowFilter) => void;
@@ -101,6 +106,7 @@ export function ActiveFilterChips({
   const hasAny =
     sourceFilter !== "all" ||
     channelFilter !== "any" ||
+    reachFilter !== "any" ||
     windowFilter !== "any" ||
     stageFilter !== "any" ||
     tagIds.length > 0 ||
@@ -122,6 +128,24 @@ export function ActiveFilterChips({
           leading={<ChannelBadge channel={channelFilter} className="size-3 shrink-0" />}
         >
           {CHANNEL_LABEL[channelFilter]}
+        </FilterChip>
+      )}
+
+      {/* The contacts page DEFAULTS to "Has phone". Rendering it as an ordinary
+          removable chip is what stops that default from being a mystery — the
+          reason a contact is missing is on screen, and one click undoes it. */}
+      {reachFilter !== "any" && onReachChange && (
+        <FilterChip
+          onRemove={() => onReachChange("any")}
+          leading={
+            reachFilter === "phone" ? (
+              <Phone className="size-3 shrink-0" />
+            ) : (
+              <Mail className="size-3 shrink-0" />
+            )
+          }
+        >
+          {reachFilter === "phone" ? "Has phone" : "Has email"}
         </FilterChip>
       )}
 

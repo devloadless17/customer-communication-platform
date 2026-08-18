@@ -130,6 +130,12 @@ export class ContactsController {
     return { count };
   }
 
+  /** Badge counts for the contacts navigation — one scan, see countContactSegments. */
+  @Get("segment-counts")
+  async segmentCounts(@CurrentSession() session: ApiSession) {
+    return this.contacts.segmentCounts(session.workspaceId);
+  }
+
   /**
    * Contact avatar — authenticated SAME-ORIGIN stream of the captured social
    * profile picture (Messenger/Instagram). The UI renders

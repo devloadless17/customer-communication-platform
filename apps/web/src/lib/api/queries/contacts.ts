@@ -7,6 +7,7 @@ import type {
   ListContactsOpts,
 } from "@ccp/shared/dtos";
 import type {
+  Channel,
   Contact,
   ContactListItem,
   CursorPage,
@@ -39,8 +40,23 @@ export async function listContacts(
       tagIds: opts.tagIds && opts.tagIds.length > 0 ? opts.tagIds.join(",") : undefined,
       window: opts.window,
       stageId: opts.stageId,
+      // Segment params: which channel, and how you can reach them. The contacts
+      // page SSR-seeds page 1 with these, so they must ride the same request the
+      // client will repeat — otherwise the first paint shows a different set
+      // than the first refetch.
+      channel: opts.channel,
+      reach: opts.reach,
     },
   });
+}
+
+/** Directory + per-channel totals for the contacts navigation badges. */
+export async function getContactSegmentCounts(): Promise<{
+  withPhone: number;
+  withEmail: number;
+  byChannel: Partial<Record<Channel, number>>;
+}> {
+  return api("/api/contacts/segment-counts");
 }
 
 export async function countContacts(audience: {

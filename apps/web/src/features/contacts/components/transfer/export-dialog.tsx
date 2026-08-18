@@ -19,6 +19,7 @@ export interface ExportFilters {
   fieldMode?: "contains" | "equals";
   source?: string;
   channel?: string;
+  reach?: "phone" | "email";
   window?: "open" | "closed";
   stageId?: string;
   tagIds?: string[];

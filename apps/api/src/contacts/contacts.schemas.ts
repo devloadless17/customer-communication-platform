@@ -101,6 +101,10 @@ export const ListContactsQuerySchema = z.object({
   tagIds: z.string().optional(),
   /** Filter to one channel (whatsapp / messenger / instagram). */
   channel: zLiveChannel().optional().catch(undefined),
+  /** Reachability gate: "phone" = has a phone number, "email" = has an email.
+   *  Absent = no gate. Orthogonal to `channel`, so the contacts directory is
+   *  `reach=phone` and "Instagram people I can email" is both together. */
+  reach: z.enum(["phone", "email"]).optional().catch(undefined),
   /** Filter to ONE account on that channel (a specific WhatsApp number, Page
    *  or IG handle). Matched through the contact's conversation. */
   accountId: z.string().min(1).optional().catch(undefined),
@@ -257,6 +261,9 @@ export const BulkFilterSchema = z.object({
   // Exactly the same hazard one level down: scoped to the Sales number, "select
   // all matching" must not reach the Support number's contacts.
   accountId: z.string().min(1).optional(),
+  // And again for reachability: the contacts page defaults to "has phone", so a
+  // bulk op launched from it must not reach the people that default hid.
+  reach: z.enum(["phone", "email"]).optional(),
 });
 export type BulkFilterInput = z.infer<typeof BulkFilterSchema>;
 

@@ -13,6 +13,7 @@ import { getCountryFromPhone } from "@ccp/shared/utils";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
 import {
   countAudienceContacts,
+  countContactSegments,
   directoryContactWhere,
   ensureDefaultStage,
   listContacts,
@@ -121,6 +122,7 @@ export class ContactsService {
       source: query.source,
       tagIds,
       channel: query.channel,
+      reach: query.reach,
       accountId: query.accountId,
       window: query.window,
       stageId: query.stageId,
@@ -877,6 +879,11 @@ export class ContactsService {
     return this.db.contact.count({
       where: { workspaceId, deletedAt: null, ...directoryContactWhere },
     });
+  }
+
+  /** Badge counts for the contacts navigation (directory-scoped, one scan). */
+  segmentCounts(workspaceId: string) {
+    return countContactSegments(workspaceId);
   }
 
   /** Lightweight id→display lookup for picker chips. Cross-team ids dropped. */

@@ -10,10 +10,7 @@ import type {
   TagColor,
 } from "@ccp/shared/types";
 
-import {
-  EPHEMERAL_CONTACT_CHANNELS,
-  isEphemeralChannel,
-} from "@ccp/shared/providers/capabilities";
+import { EPHEMERAL_CONTACT_CHANNELS } from "@ccp/shared/providers/capabilities";
 
 import { clampTake, normalizeCustomFields, siblingChannelsByCustomer } from "./_shared";
 import { encodeContactCursor, parseContactCursor } from "./_cursors";
@@ -70,11 +67,12 @@ export type { ListContactsOpts };
  * `opts` the list query uses. The cursor clause is intentionally NOT here: the
  * filter set is page-position-independent.
  *
- * Anonymous ephemeral contacts (website-widget visitors with no phone/email) are
- * excluded by default — see `DIRECTORY_CONTACT_SQL`. Selecting that channel
- * EXPLICITLY in the filter opts back in, so the "Website widget" view still works;
- * because the opt-in lives here, the bulk path expands to exactly the same set the
- * user is looking at either way.
+ * Anonymous ephemeral contacts (website-widget visitors with no phone AND no
+ * email) are excluded from EVERY view — see `DIRECTORY_CONTACT_SQL`. Selecting
+ * the website channel used to opt back in and list them; it no longer does,
+ * because a browser session nobody can contact again is not a directory entry.
+ * They remain full-quality in the inbox, and the moment one gives a phone or an
+ * email they are promoted here automatically (membership is derived, not stored).
  */
 export function buildContactFilterWhere(
   workspaceId: string,
@@ -84,6 +82,7 @@ export function buildContactFilterWhere(
   const fieldFilter = opts.fieldFilter;
   const source = opts.source;
   const channel = opts.channel;
+  const reach = opts.reach;
   const accountId = opts.accountId;
   const windowFilter = opts.window;
   const stageFilter = opts.stageId;
@@ -92,10 +91,17 @@ export function buildContactFilterWhere(
   return Prisma.sql`
     c."workspaceId" = ${workspaceId}
     AND c."deletedAt" IS NULL
+    AND ${DIRECTORY_CONTACT_SQL}
     ${
-      channel && isEphemeralChannel(channel)
-        ? Prisma.empty // explicit opt-in view: show anonymous visitors too
-        : Prisma.sql`AND ${DIRECTORY_CONTACT_SQL}`
+      /* Reachability gate — "who can I phone", "who can I email". Deliberately
+         NOT defaulted here: this builder also serves the CSV export runner and
+         the select-all-matching bulk path, so a default at this level would
+         narrow both silently. The contacts page passes it explicitly. */
+      reach === "phone"
+        ? Prisma.sql`AND c."phoneNumber" IS NOT NULL`
+        : reach === "email"
+          ? Prisma.sql`AND c.email IS NOT NULL`
+          : Prisma.empty
     }
     ${
       /* The customFields::text arm serves text-field values (and raw option
@@ -658,6 +664,53 @@ export async function listContactFieldDefinitions(
 /** Total number of (non-deleted) contacts in a team. */
 export async function countContacts(workspaceId: string): Promise<number> {
   return db.contact.count({ where: { workspaceId, deletedAt: null } });
+}
+
+/** Per-channel directory totals + how many of each are reachable which way. */
+export interface ContactSegmentCounts {
+  /** Contacts with a phone number, any channel — the contacts directory. */
+  withPhone: number;
+  /** Contacts with an email, any channel. */
+  withEmail: number;
+  /** Directory contacts on each channel, whatever their reachability. */
+  byChannel: Partial<Record<Channel, number>>;
+}
+
+/**
+ * Counts for the contacts navigation, in ONE scan.
+ *
+ * Every badge the page shows comes from this: "All contacts" is `withPhone`, each
+ * channel segment is its `byChannel` entry. Scoped to the directory predicate, so
+ * an anonymous website visitor is counted nowhere — the same rule the lists use,
+ * or a badge would promise rows the list refuses to show.
+ *
+ * Deliberately NOT filter-scoped (no search/tag/stage): these label a fixed set of
+ * destinations in the sidebar, and a count that shifted with the current search
+ * would read as a bug rather than as information.
+ */
+export async function countContactSegments(workspaceId: string): Promise<ContactSegmentCounts> {
+  const rows = await db.$queryRaw<
+    Array<{ channel: Channel; total: bigint; with_phone: bigint; with_email: bigint }>
+  >`
+    SELECT c."identityChannel"                                          AS channel,
+           COUNT(*)::bigint                                             AS total,
+           COUNT(*) FILTER (WHERE c."phoneNumber" IS NOT NULL)::bigint  AS with_phone,
+           COUNT(*) FILTER (WHERE c.email IS NOT NULL)::bigint          AS with_email
+    FROM "Contact" c
+    WHERE c."workspaceId" = ${workspaceId}
+      AND c."deletedAt" IS NULL
+      AND ${DIRECTORY_CONTACT_SQL}
+    GROUP BY 1
+  `;
+  const byChannel: Partial<Record<Channel, number>> = {};
+  let withPhone = 0;
+  let withEmail = 0;
+  for (const r of rows) {
+    byChannel[r.channel] = Number(r.total);
+    withPhone += Number(r.with_phone);
+    withEmail += Number(r.with_email);
+  }
+  return { withPhone, withEmail, byChannel };
 }
 
 /**

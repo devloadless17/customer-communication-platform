@@ -60,6 +60,8 @@ import { getClientSocket } from "@/lib/socket-client";
 import {
   ContactFilterBar,
   useContactList,
+  type ChannelFilter,
+  type ReachFilter,
   type StageFilter,
 } from "@/features/contacts/components/contact-browser";
 import { SelectAllRow } from "@/features/contacts/components/contact-browser/select-all-row";
@@ -134,6 +136,8 @@ export function ContactsClient({
   initialTags,
   initialStages,
   initialStageFilter,
+  initialChannelFilter,
+  initialReachFilter,
   canManageFields,
   canManageStages,
   canDeleteContacts,
@@ -151,6 +155,10 @@ export function ContactsClient({
   initialTags: Tag[];
   initialStages: ContactStage[];
   initialStageFilter: StageFilter;
+  /** Channel segment from the URL (`?channel=`). "any" = the directory. */
+  initialChannelFilter: ChannelFilter;
+  /** Reachability the page opens on — "phone" for the directory. */
+  initialReachFilter: ReachFilter;
   canManageFields: boolean;
   canManageStages: boolean;
   canDeleteContacts: boolean;
@@ -164,6 +172,8 @@ export function ContactsClient({
     initialNextCursor,
     initialTotalCount,
     initialStageFilter,
+    initialChannelFilter,
+    initialReachFilter,
     paged: true,
     pageSize: CONTACTS_PAGE_SIZE,
   });
@@ -537,6 +547,7 @@ export function ContactsClient({
       stageId?: string;
       channel?: Channel;
       accountId?: string;
+      reach?: "phone" | "email";
     } = {};
     if (list.search.trim()) f.search = list.search.trim();
     if (list.fieldFilter) {
@@ -555,6 +566,10 @@ export function ContactsClient({
     if (!list.groupByPerson && list.channelFilter !== "any") f.channel = list.channelFilter;
     // Same person-mode carve-out as `channel`: a person spans accounts.
     if (!list.groupByPerson && list.accountFilter) f.accountId = list.accountFilter;
+    // Reachability applies in BOTH modes (a person rolls up contacts, but the
+    // gate is on the row the server matches), and it is the page's DEFAULT — so
+    // omitting it would expand a bulk op to the people the view is hiding.
+    if (list.reachFilter !== "any") f.reach = list.reachFilter;
     return f;
   }, [
     list.search,
@@ -564,6 +579,7 @@ export function ContactsClient({
     list.tagIds,
     list.stageFilter,
     list.channelFilter,
+    list.reachFilter,
     list.accountFilter,
     list.groupByPerson,
   ]);
@@ -670,7 +686,11 @@ export function ContactsClient({
           sourceFilter={list.sourceFilter}
           onSourceChange={list.setSourceFilter}
           channelFilter={list.channelFilter}
-          onChannelChange={list.setChannelFilter}
+          // Inside a channel segment the scope IS the channel, so a channel
+          // radio there would only restate it — the sub-sidebar owns that choice.
+          onChannelChange={initialChannelFilter === "any" ? list.setChannelFilter : undefined}
+          reachFilter={list.reachFilter}
+          onReachChange={list.setReachFilter}
           accountFilter={list.accountFilter}
           // Person mode rolls a customer UP across their channel-contacts, so
           // scoping to one account would return a subset of the people on
@@ -902,6 +922,7 @@ export function ContactsClient({
             search: list.search || undefined,
             source: list.sourceFilter === "all" ? undefined : list.sourceFilter,
             channel: list.channelFilter === "any" ? undefined : list.channelFilter,
+            reach: list.reachFilter === "any" ? undefined : list.reachFilter,
             window: list.windowFilter === "any" ? undefined : list.windowFilter,
             // "none" is a REAL filter (contacts with no stage) — only "any" opts out.
             stageId: list.stageFilter === "any" ? undefined : list.stageFilter,

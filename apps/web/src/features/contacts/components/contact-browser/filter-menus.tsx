@@ -13,6 +13,7 @@ import type { ContactStage, ContactFieldDefinition } from "@ccp/shared/types";
 import type {
   ChannelFilter,
   FieldFilter,
+  ReachFilter,
   SourceFilter,
   StageFilter,
   WindowFilter,
@@ -117,6 +118,8 @@ export function MoreFilterMenu({
   onSourceChange,
   channelFilter = "any",
   onChannelChange,
+  reachFilter = "any",
+  onReachChange,
   accountFilter = null,
   onAccountChange,
   accounts = [],
@@ -131,6 +134,10 @@ export function MoreFilterMenu({
   channelFilter?: ChannelFilter;
   /** Omit to hide the channel section (e.g. surfaces scoped to one channel). */
   onChannelChange?: (v: ChannelFilter) => void;
+  reachFilter?: ReachFilter;
+  /** Omit to hide the reachability section (e.g. the audience picker, which must
+   *  not narrow the set the user is assembling). */
+  onReachChange?: (v: ReachFilter) => void;
   /** ONE account on the channel — a specific number / Page / handle. */
   accountFilter?: string | null;
   /** Omit to hide the account section. */
@@ -162,6 +169,24 @@ export function MoreFilterMenu({
       >
         Added by me
       </RadioRow>
+
+      {/* HOW you can contact them — the dimension a campaign is built on. The
+          contacts page opens on "Has phone", which is why this reads as a normal
+          filter (and shows a removable chip) rather than a hidden rule. */}
+      {onReachChange && (
+        <>
+          <MenuLabel>Reachable by</MenuLabel>
+          <RadioRow active={reachFilter === "any"} onClick={() => onReachChange("any")}>
+            Any
+          </RadioRow>
+          <RadioRow active={reachFilter === "phone"} onClick={() => onReachChange("phone")}>
+            Has phone number
+          </RadioRow>
+          <RadioRow active={reachFilter === "email"} onClick={() => onReachChange("email")}>
+            Has email address
+          </RadioRow>
+        </>
+      )}
 
       {onChannelChange && (
         <>

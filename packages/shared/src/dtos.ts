@@ -546,6 +546,21 @@ export interface ListContactsOpts {
   /** Filter to one channel identity (whatsapp / messenger / instagram). */
   channel?: Channel;
   /**
+   * Keep only contacts you can reach a given WAY — `phone` = has a phone number,
+   * `email` = has an email. Absent = no reachability gate.
+   *
+   * Orthogonal to `channel` on purpose, so the two compose: the contacts
+   * directory is `reach: "phone"` with no channel ("everyone I can call"), while
+   * "Instagram people I can email" is `channel: "instagram", reach: "email"` —
+   * the shapes a campaign is actually built from.
+   *
+   * DELIBERATELY has no default here. This opt feeds the shared filter builder,
+   * which also serves CSV export and the select-all-matching bulk path; a
+   * default applied at this level would silently narrow both. The contacts PAGE
+   * supplies the default, and it renders as a visible, removable chip.
+   */
+  reach?: "phone" | "email";
+  /**
    * Filter to ONE account on that channel — "who writes to the Sales number".
    * A workspace can hold several numbers / Pages / handles per channel, so
    * `channel` alone cannot express this; the inbox has had the same filter for

@@ -18,6 +18,7 @@ export {
   CONTACTS_PAGE,
   DIRECTORY_CONTACT_SQL,
   buildContactFilterWhere,
+  countContactSegments,
   countContacts,
   directoryContactWhere,
   listContactFieldDefinitions,
@@ -26,7 +27,7 @@ export {
   lookupContacts,
   resolveContactIdsByFilter,
 } from "./contacts";
-export type { ListContactsOpts } from "./contacts";
+export type { ContactSegmentCounts, ListContactsOpts } from "./contacts";
 
 export {
   getPlatformAnalytics,

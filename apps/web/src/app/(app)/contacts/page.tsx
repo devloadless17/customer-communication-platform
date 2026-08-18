@@ -8,7 +8,13 @@ import {
 } from "@/lib/api/queries";
 
 import { ContactsClient } from "@/features/contacts/components/contacts-client";
-import type { StageFilter } from "@/features/contacts/components/contact-browser";
+import type {
+  ChannelFilter,
+  ReachFilter,
+  StageFilter,
+} from "@/features/contacts/components/contact-browser";
+import { isChannelLive } from "@ccp/shared/providers/capabilities";
+import type { Channel } from "@ccp/shared/types";
 
 export const metadata = {
   title: "Contacts",
@@ -21,6 +27,13 @@ export const metadata = {
  * `?stage=<id|none>` seeds the stage filter — the settings page links here
  * with that query string to "show me everyone in this stage" before a
  * potential bulk-move.
+ *
+ * `?channel=` + `?reach=` seed the CONTACT SEGMENTS. With neither, the page
+ * opens on the directory — everyone with a phone number, whatever channel they
+ * came from — because that is what "a contact" means here: someone you can call.
+ * A channel segment (`?channel=instagram&reach=any`) lifts that gate to show
+ * everyone on that channel, phones and emails alike, which is how you reach the
+ * people who will never have a phone number on file.
  */
 export default async function ContactsPage({
   searchParams,
@@ -35,6 +48,15 @@ export default async function ContactsPage({
     user.role === "agent" && team.agentConversationVisibility === "assigned";
   const params = await searchParams;
   const stageParam = typeof params.stage === "string" ? params.stage : undefined;
+  const channelParam = typeof params.channel === "string" ? params.channel : undefined;
+  const channelFilter: ChannelFilter =
+    channelParam && isChannelLive(channelParam as Channel) ? (channelParam as Channel) : "any";
+  // Default "phone" — the directory. A segment link passes `reach=any` to lift it.
+  const reachParam = typeof params.reach === "string" ? params.reach : undefined;
+  const reachFilter: ReachFilter =
+    reachParam === "any" || reachParam === "email" || reachParam === "phone"
+      ? reachParam
+      : "phone";
 
   const [page, fieldsAndBuiltins, tags, stages] = await Promise.all([
     // Seed page 1 in NUMBERED (offset) mode so the SSR rows match what the
@@ -43,6 +65,8 @@ export default async function ContactsPage({
     // `page`/`take` must match CONTACTS_PAGE_SIZE in contacts-client.tsx.
     listContacts({
       stageId: stageParam === "none" ? "none" : stageParam || undefined,
+      ...(channelFilter !== "any" ? { channel: channelFilter } : {}),
+      ...(reachFilter !== "any" ? { reach: reachFilter } : {}),
       page: 1,
       take: 25,
     }),
@@ -67,7 +91,7 @@ export default async function ContactsPage({
   // sidebar appears to do nothing.
   return (
     <ContactsClient
-      key={resolvedStageFilter}
+      key={`${resolvedStageFilter}:${channelFilter}:${reachFilter}`}
       initialItems={page.items}
       initialNextCursor={page.nextCursor}
       initialTotalCount={page.totalCount ?? null}
@@ -76,6 +100,8 @@ export default async function ContactsPage({
       initialTags={tags}
       initialStages={stages}
       initialStageFilter={resolvedStageFilter}
+      initialChannelFilter={channelFilter}
+      initialReachFilter={reachFilter}
       canManageFields={permissions["contactFields:manage"]}
       canManageStages={permissions["stages:manage"]}
       canDeleteContacts={permissions["contacts:delete"]}
