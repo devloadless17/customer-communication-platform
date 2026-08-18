@@ -330,6 +330,20 @@
     ".pills{display:flex;flex-wrap:wrap;gap:7px;margin-top:8px}.pill{background:var(--surface);color:var(--c);border:1px solid color-mix(in srgb,var(--c) 22%,var(--border));border-radius:9999px;padding:8px 15px;font-size:13px;font-weight:550;letter-spacing:-.004em;cursor:pointer;transition:.16s ease;box-shadow:0 1px 2px rgba(16,24,40,.04)}.pill:hover{background:var(--c);color:var(--ct);border-color:var(--c)}",
     ".sys{align-self:center;font-size:12.5px;line-height:1.5;color:var(--ink2);background:color-mix(in srgb,var(--ink2) 8%,transparent);border-radius:13px;padding:8px 14px;text-align:center;margin:8px 0;max-width:90%}",
     ".sys.closed{display:flex;flex-direction:column;align-items:center;gap:8px;max-width:88%}",
+    // Loading skeleton. Tinted from --ink2 so it inherits light/dark automatically,
+    // and the sweep is a background-position animation (compositor-friendly, no
+    // layout work) rather than an opacity pulse on three separate nodes.
+    ".skel{display:flex;flex-direction:column;gap:12px;padding-top:4px}",
+    // `width`, not `max-width`: the bubble widths are percentages, and inside a
+    // shrink-to-fit row they would resolve against a container sized by its own
+    // content — i.e. to zero, leaving only the avatars visible.
+    ".skrow{display:flex;align-items:flex-end;gap:8px;width:86%}.skrow.out{align-self:flex-end;flex-direction:row-reverse}.skrow.in{align-self:flex-start}",
+    ".skav{width:28px;height:28px;border-radius:9999px;flex:0 0 auto}",
+    ".skb{height:38px;border-radius:17px}",
+    ".skav,.skb{background:color-mix(in srgb,var(--ink2) 13%,transparent)}",
+    reduceMotion
+      ? ""
+      : ".skav,.skb{background-image:linear-gradient(90deg,transparent 0%,color-mix(in srgb,var(--ink2) 9%,transparent) 50%,transparent 100%);background-size:200% 100%;animation:skw 1.4s ease-in-out infinite}@keyframes skw{from{background-position:150% 0}to{background-position:-50% 0}}",
     // End-of-session state: what happened, a rule, and the one way forward.
     ".ended{margin-top:auto;padding-top:14px;border-top:1px solid var(--border);display:flex;flex-direction:column;align-items:center;gap:11px}",
     ".ended .em{font-size:13.5px;line-height:1.5;color:var(--ink2);text-align:center;letter-spacing:-.004em}",
@@ -743,17 +757,41 @@
     scrollToBottom(false);
   }
   if (vv) { vv.addEventListener("resize", syncViewport); vv.addEventListener("scroll", syncViewport); }
-  // First-open placeholder: until `history` decides the view, the body is empty and
-  // the composer hidden — a blank white panel that reads as broken while the socket
-  // connects. One quiet "Loading…" pill fills that gap; removed the moment the real
-  // view (form / welcome / thread) renders, or on a terminal failure.
+  /**
+   * Skeleton shown until `history` decides the real view (thread, welcome, or
+   * pre-chat form).
+   *
+   * The panel restores OPEN across a refresh, so between first paint and the
+   * socket's first frame the body is empty and the composer is hidden — a tall
+   * white void. A one-line "Loading…" chip technically filled it but still read
+   * as blank: a single muted string in a 500px column is an apology, not a state.
+   * Placeholder rows in the shape of real messages read as "your conversation is
+   * coming", occupy the space honestly, and — because the theme cache has already
+   * painted the org's colours — arrive fully branded on the very first frame.
+   *
+   * Deliberately shaped like MESSAGES: the panel only auto-opens for someone who
+   * left it open, which overwhelmingly means a returning visitor with a thread.
+   */
   var loadEl = null;
   function showLoading() {
     if (loadEl || S.viewInit || S.fatal) return;
-    loadEl = el("div", { class: "sys" }, "Loading…");
+    loadEl = el("div", { class: "skel", "aria-hidden": "true" });
+    // in / out / in — the rhythm of a real exchange, in descending prominence.
+    [["in", 62], ["in", 44], ["out", 52]].forEach(function (row) {
+      var side = row[0], w = row[1];
+      var r = el("div", { class: "skrow " + side });
+      if (side === "in") r.appendChild(el("div", { class: "skav" }));
+      r.appendChild(el("div", { class: "skb", style: "width:" + w + "%" }));
+      loadEl.appendChild(r);
+    });
     bodyEl.appendChild(loadEl);
+    // Announce it for screen readers, which can't see a shimmer.
+    bodyEl.setAttribute("aria-busy", "true");
   }
-  function hideLoading() { if (loadEl) { if (loadEl.parentNode) loadEl.parentNode.removeChild(loadEl); loadEl = null; } }
+  function hideLoading() {
+    if (loadEl) { if (loadEl.parentNode) loadEl.parentNode.removeChild(loadEl); loadEl = null; }
+    bodyEl.removeAttribute("aria-busy");
+  }
   function openPanel() {
     if (INLINE) return;
     // Opening the chat is the moment a socket is actually needed (see boot()).
@@ -2103,6 +2141,9 @@
     });
     socket.on("ready", onReady);
     socket.on("history", function (p) {
+      // Before any row renders: messages are appended ahead of initView(), so a
+      // skeleton torn down later would sit above the real thread for a frame.
+      hideLoading();
       var msgs = (p && p.messages) || [];
       // "load earlier" availability travels with every history batch.
       if (!S.oldestCursor && msgs.length) S.oldestCursor = { ts: msgs[0].createdAt, id: msgs[0].id };
