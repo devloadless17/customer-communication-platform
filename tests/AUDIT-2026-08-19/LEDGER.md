@@ -35,9 +35,50 @@ Resume state: if a session is cut, continue from the first section below not mar
 | Wave 4 (U13, U14) + S1/S4/S9..S13 | pending |
 | Low-findings pass (97 collected) | DONE — committed 1ecec952 |
 | S11 coverage-manifest diff | DONE — 792/1103 files explicitly attested by wave reviewers; **311 never opened**. Follow-up pass reviewed all of them (337 files incl. corroboration), 253 clean, 51 findings, 15 CONFIRMED. Coverage is now provable. |
-| Coverage-gap fixes | RUNNING (wf_7fc56d9a-cca) |
+| Coverage-gap fixes | COMMITTED (b5a634ae, 4f6c7d52, 8fc1a0d9, 6f02970a) — gates green, 1560 tests |
+| Live phase: batched e2e | RUN 1 DONE — **592 passed / 11 failed**. Green: batches 0,1,2,6,7. Failed: 3,4,5,8. |
+| Live phase: rerun of failing batches | **INCOMPLETE — RESUME HERE.** The batch-3 rerun was ABORTED mid-flight by the session shutdown (its "25 failed / 6 passed" is the teardown killing the stack — NOT a result, ignore it). Batches 4, 5, 8 never re-ran. Start the reruns from scratch. |
+| Memory | `full-system-audit-2026-08-19.md` written + indexed |
 | Live phase 1–8 | pending |
-| Final gate chain | pending |
+| Final gate chain | pending (re-run `pnpm check` + api vitest before finishing — both were green at 6f02970a) |
+
+## ▶ HOW TO RESUME (next session, start here)
+
+Working tree is clean at `6f02970a` + the two audit docs. Nothing is pushed. All static gates
+were green at that commit: `pnpm check` exit 0, api vitest 148 files / 1560 tests, both apps
+typecheck clean.
+
+**The only open question is the 11 e2e failures.** They are NOT yet attributed. Re-run each
+failing batch ALONE on a fresh stack (this is the documented way to separate the box from the
+code — see the header of `scripts/e2e-batched.mjs`):
+
+```
+node scripts/e2e-batched.mjs --only 3   # availability-work-hours "Settings → Team UI" ×4
+node scripts/e2e-batched.mjs --only 4   # calls panel ×1, platform ×2
+node scripts/e2e-batched.mjs --only 5   # webchatwidget ×3
+node scripts/e2e-batched.mjs --only 8   # contact-select-fields "filter by option" ×1
+```
+
+Evidence so far that they are ENVIRONMENTAL (not yet proof):
+- every failure is an 8–10s timeout or "element(s) not found", never an assertion mismatch;
+- they scatter across settings / calls / platform / webchat, which no single commit touches;
+- batch 6 (146 tests) and batch 7 (188 tests) ran clean immediately after a stack restart;
+- `next-server` sits at 2.8–3.1 GB RSS on a 5.9 GB box, leaving <200 MB free during the
+  failing batches. `--max-old-space-size=1400` caps V8 old space, NOT total RSS.
+- Static checks on the prime suspect came back clean: `/settings/members`'s new
+  `organizationName` prop is a typed `string` defaulting to `""` (cannot throw), the
+  `OrgNameCard`→`WorkspaceNameCard` rename left zero dangling refs, and the work-hours
+  card's `canManage` gating was untouched.
+
+**Treat `contact-select-fields › browser: filter by option` (batch 8) as the highest-priority
+one.** That spec had NEVER been executed by this gate before today's fix, so unlike the others
+it has no history of passing here — it could be a genuine bug that the gate's blind spot hid.
+
+If a failure reproduces on a fresh stack: it is real, fix it. If all pass: record them as
+environmental in this ledger and the program is DONE apart from the final gate chain.
+
+Still not run at all (optional, lower value than the above): `pnpm test:e2e:meta` (mock Graph)
+and `pnpm test:e2e:multiaccount`.
 
 ## Gate history
 - 2026-08-19 post-Wave-1-fixes: `pnpm check` exit 0; api vitest 1559/1559; partial-index tripwire green.
