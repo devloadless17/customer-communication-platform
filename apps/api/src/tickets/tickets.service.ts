@@ -558,7 +558,17 @@ export class TicketsService {
       targetWorkspaceId: body.targetWorkspaceId,
       cause: body.cause,
     });
-    if (outcome.ok) return { ticket: outcome.ticket };
+    // Re-map for the CALLER's workspace, exactly as `update()` does and for the
+    // same reason: `shareTicket` returns the domain's owner-shaped ticket
+    // (that is what the EVENT must carry — fanout re-maps it per guest). A
+    // GUEST may escalate onward, and handing it back verbatim gave that guest
+    // the OWNER's `conversationId` and `contactId` — the two things §2 keeps
+    // private across the seam — plus an owner-shaped `sharing.role` that flips
+    // their page into owner mode.
+    if (outcome.ok) {
+      const mine = await getTicket(this.db, workspaceId, id);
+      return { ticket: mine ?? outcome.ticket };
+    }
     switch (outcome.reason) {
       case "already_shared":
         // 409: the STATE refused this, not the input — that workspace already
@@ -802,7 +812,17 @@ export class TicketsService {
       actor: { ...actor, workspaceId },
       conversationId: started.conversationId,
     });
-    if (outcome.ok) return { ticket: outcome.ticket, conversationId: started.conversationId };
+    // Same per-caller re-map as `escalate`/`update`: only a GUEST reaches this
+    // route, and `bindGuestConversation` returns the owner-shaped ticket the
+    // event carries. `started.conversationId` is the guest's OWN thread, which
+    // is theirs to see; the ticket around it must not carry the owner's.
+    if (outcome.ok) {
+      const mine = await getTicket(this.db, workspaceId, id);
+      return {
+        ticket: mine ?? outcome.ticket,
+        conversationId: started.conversationId,
+      };
+    }
     if (outcome.reason === "already_bound") {
       // A double-click raced us — the thread exists and the share is bound;
       // hand back the current state instead of an error.

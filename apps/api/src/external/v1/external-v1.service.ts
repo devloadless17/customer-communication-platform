@@ -12,10 +12,13 @@ import { Prisma } from "@prisma/client";
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   HttpException,
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
+
+import { isProvablyNotSent, normalizeMetaSendError } from "@/lib/providers/meta";
 
 import { ContactFieldsService } from "@/workspace-settings/contact-fields/contact-fields.service";
 import type {
@@ -241,9 +244,38 @@ export class ExternalV1Service {
       await this.idem.complete(workspaceId, apiKeyId, idempotencyKey, result);
       return result;
     } catch (err) {
-      await this.idem.release(workspaceId, apiKeyId, idempotencyKey);
+      // OUTBOUND-1, the same rule the send paths in ExternalV1MessagingService
+      // apply: release the claim ONLY when the work provably had no billable
+      // effect. `refuseStaleOnAmbiguity` covers a CRASH (the pending row goes
+      // stale and is refused), but an error thrown after the provider accepted
+      // — a Meta 5xx, a DB failure past the send, a timeout — used to land here
+      // and clear the row, so a same-key retry re-sent a billed message. A
+      // reversible route keeps the old behavior: releasing is what lets a
+      // corrected retry reuse the key.
+      if (!opts?.irreversible || this.isProvablyNoEffect(err)) {
+        await this.idem.release(workspaceId, apiKeyId, idempotencyKey);
+      }
       throw err;
     }
+  }
+
+  /**
+   * Did this failure provably happen BEFORE anything billable left the box?
+   *
+   * Meta's own answer first (a <500 rejection or a rate-limit means Meta never
+   * processed it), then the validation classes every irreversible route raises
+   * ahead of its provider call / enqueue. Anything else — a 5xx, a transport
+   * timeout, a DB error past the send — is AMBIGUOUS and keeps the claim, so
+   * the partner gets 409 `idempotency_ambiguous` and must use a fresh key to
+   * deliberately send again.
+   */
+  private isProvablyNoEffect(err: unknown): boolean {
+    if (isProvablyNotSent(normalizeMetaSendError(err))) return true;
+    return (
+      err instanceof BadRequestException ||
+      err instanceof NotFoundException ||
+      err instanceof ForbiddenException
+    );
   }
 
   /**
