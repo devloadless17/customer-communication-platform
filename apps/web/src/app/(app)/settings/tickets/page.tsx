@@ -22,6 +22,6 @@ export const metadata = {
 export default async function TicketSettingsPage() {
   const { user } = await getSession();
   if (user.role !== "admin") redirect("/tickets");
-  const { settings, policies, fields } = await getTicketSettings();
-  return <TicketSettingsClient settings={settings} policies={policies} fields={fields} />;
+  const { policies, fields } = await getTicketSettings();
+  return <TicketSettingsClient policies={policies} fields={fields} />;
 }

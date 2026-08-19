@@ -139,22 +139,22 @@ export async function listEscalationTargets(): Promise<Array<{ id: string; name:
   return workspaces;
 }
 
-/** Ticketing configuration for the settings page, in one round-trip. */
+/**
+ * Ticketing configuration for the settings page, in one round-trip.
+ *
+ * The workspace-level settings endpoint is deliberately NOT fetched: every
+ * setting it carried has been retired (see TicketSettingsSchema), so it returns
+ * an empty object and the page would pay a round-trip for nothing.
+ */
 export async function getTicketSettings(): Promise<{
-  settings: TicketSettingsView;
   policies: TicketSlaPolicy[];
   fields: TicketFieldDefinition[];
 }> {
-  const [settings, sla, fieldsRes] = await Promise.all([
-    api<TicketSettingsView>("/api/workspace/tickets/settings"),
+  const [sla, fieldsRes] = await Promise.all([
     api<{ policies: TicketSlaPolicy[] }>("/api/workspace/tickets/sla"),
     api<{ fields: TicketFieldDefinition[] }>("/api/workspace/tickets/fields"),
   ]);
-  return { settings, policies: sla.policies, fields: fieldsRes.fields };
-}
-
-export interface TicketSettingsView {
-  ticketCloseConversationOnLastSolved: boolean;
+  return { policies: sla.policies, fields: fieldsRes.fields };
 }
 
 export async function listTags(): Promise<Tag[]> {

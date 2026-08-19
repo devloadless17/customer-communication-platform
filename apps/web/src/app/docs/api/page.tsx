@@ -2086,9 +2086,17 @@ export default function ApiDocsPage() {
           are in-app multipart only. Scope <code>write:tickets</code>.
         </Endpoint>
         <Endpoint method="GET|PATCH" path="/api/external/v1/tickets-settings">
-          <code>ticketCloseConversationOnLastSolved</code>. <code>PATCH</code> the same
-          path to change it (<code>admin:settings</code>). Scope{" "}
-          <code>read:tickets</code>.
+          Workspace-level ticket settings. Currently <strong>empty</strong>: every
+          setting it carried has been retired, so <code>GET</code> returns{" "}
+          <code>{"{}"}</code> and <code>PATCH</code> (<code>admin:settings</code>) is a
+          validated no-op — an integration still sending a retired key gets a success,
+          not a 400. Scope <code>read:tickets</code>.
+          <br />
+          <code>ticketCloseConversationOnLastSolved</code> is <strong>retired</strong> as
+          of 2026-08-19. Closing a conversation is the agent&apos;s judgement that they
+          are done with the CUSTOMER, which is a different question from whether the work
+          items are finished — deriving one from the other hid threads people were still
+          writing in.
           <br />
           <code>ticketReopenWindowHours</code> is <strong>retired</strong> as of
           2026-08-01. Nothing opens or reopens a ticket but a person raising one, so a

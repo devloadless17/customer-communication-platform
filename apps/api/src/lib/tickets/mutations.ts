@@ -1074,41 +1074,13 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
     console.warn("[tickets] notification fan-out failed:", err instanceof Error ? err.message : err);
   });
 
-  // `Workspace.ticketCloseConversationOnLastSolved`: solving the LAST active
-  // ticket closes the thread. Detached, best-effort, and AFTER the ticket tx
-  // (a close failure must not fail the solve). Applies to every solve path —
-  // agent, workflow set_ticket_status, /v1 — because this is the one write
-  // path they all share. Dynamic import: conversations/mutations already
-  // imports this module (fillActiveTicketAssignee), so a static back-import
-  // would be a cycle.
-  // (`conversationId` null = a guest's unbound view — no thread to close.)
-  const closableConversationId = result.ticket.conversationId;
-  // The setting, the conversation and the pill all belong to the OWNER.
-  const ownerWorkspaceId = existing.workspaceId;
-  if (result.action === "solved" && result.openTicketCount === 0 && closableConversationId) {
-    void (async () => {
-      const ws = await sharedDb.workspace.findUnique({
-        where: { id: ownerWorkspaceId },
-        select: { ticketCloseConversationOnLastSolved: true },
-      });
-      if (!ws?.ticketCloseConversationOnLastSolved) return;
-      const { setConversationStatus } = await import("@/lib/conversations/mutations");
-      const { publish } = await import("@/lib/events/bus");
-      await setConversationStatus({
-        db: sharedDb,
-        publish,
-        workspaceId: ownerWorkspaceId,
-        conversationId: closableConversationId,
-        status: "closed",
-        changedByUserId: args.actor.userId ?? null,
-      });
-    })().catch((err) => {
-      console.warn(
-        `[tickets] close-on-last-solved failed for conversation ${result.ticket.conversationId}:`,
-        err instanceof Error ? err.message : err,
-      );
-    });
-  }
+  // NOTE: solving the last ticket does NOT close the conversation. Closing a
+  // thread is an AGENT's judgement that they are done with the customer, and
+  // that is a different question from whether the work items are finished — a
+  // customer is frequently still writing while the last ticket is solved.
+  // Deriving one from the other hid live threads, so the setting that did it
+  // (`Workspace.ticketCloseConversationOnLastSolved`) was removed 2026-08-19
+  // rather than left off-by-default as a trap.
 
   return {
     ok: true,

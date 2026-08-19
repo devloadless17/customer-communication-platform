@@ -5,13 +5,11 @@ import { Loader2, Plus, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Switch } from "@/components/ui/switch";
 import { PageHeader } from "@/components/layouts/page-header";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { toast } from "@/lib/toast";
-import type { TicketSettingsView } from "@/lib/api/queries";
 import {
   TICKET_PRIORITIES,
   type TicketFieldDefinition,
@@ -20,11 +18,9 @@ import {
 } from "@ccp/shared/tickets/types";
 
 export function TicketSettingsClient({
-  settings,
   policies,
   fields,
 }: {
-  settings: TicketSettingsView;
   policies: TicketSlaPolicy[];
   fields: TicketFieldDefinition[];
 }) {
@@ -55,11 +51,10 @@ export function TicketSettingsClient({
     <div className="flex flex-col gap-6">
       <PageHeader
         title="Tickets"
-        description="How a solved ticket affects its conversation, and what each priority promises."
+        description="What each priority promises, and the fields every ticket carries. Tickets are raised deliberately — by an agent from the inbox or by a workflow — and never open, reopen or close a conversation on their own: closing a thread is the agent's call when they are done with the customer."
         action={saving ? <Loader2 aria-hidden className="size-4 animate-spin" /> : undefined}
       />
 
-      <Behaviour settings={settings} onSave={save} />
       <SlaPolicies policies={policies} onSave={save} />
       <CustomFields fields={fields} onSave={save} />
     </div>
@@ -67,40 +62,6 @@ export function TicketSettingsClient({
 }
 
 type Saver = (path: string, init: RequestInit) => Promise<void>;
-
-function Behaviour({ settings, onSave }: { settings: TicketSettingsView; onSave: Saver }) {
-  const patch = (body: Record<string, unknown>) =>
-    onSave("/api/workspace/tickets/settings", { method: "PATCH", body: JSON.stringify(body) });
-
-  return (
-    <section className="rounded-xl border bg-card p-4">
-      <h2 className="text-sm font-semibold">How tickets open</h2>
-      <p className="mb-3 mt-0.5 text-2xs text-muted-foreground">
-        A ticket is always raised deliberately — by an agent from the inbox
-        (&ldquo;Raise a ticket&rdquo;) or by a workflow. Incoming messages never
-        open one on their own; the inbox already tracks every conversation.
-      </p>
-      <p className="mb-3 text-2xs text-muted-foreground">
-        A customer&apos;s follow-up never reopens a solved ticket — solved means the
-        customer got their answer. A genuinely new issue gets a new ticket somebody
-        chooses to raise; a person may still reopen one deliberately.
-      </p>
-
-      <Row
-        title="Close the conversation when its last ticket is solved"
-        hint="Off by default: conversation status and ticket status are deliberately independent, so closing work doesn't hide a thread the customer may still be writing in."
-      >
-        <Switch
-          checked={settings.ticketCloseConversationOnLastSolved}
-          onCheckedChange={(v) => void patch({ ticketCloseConversationOnLastSolved: v })}
-          // Same as the input above — the Row title is not associated, so this
-          // switch announced as an unnamed "switch, off".
-          aria-label="Close the conversation when its last ticket is solved"
-        />
-      </Row>
-    </section>
-  );
-}
 
 function SlaPolicies({ policies, onSave }: { policies: TicketSlaPolicy[]; onSave: Saver }) {
   const byPriority = new Map(policies.map((p) => [p.priority, p]));
@@ -281,22 +242,3 @@ function CustomFields({
   );
 }
 
-function Row({
-  title,
-  hint,
-  children,
-}: {
-  title: string;
-  hint: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex items-start gap-4 border-b py-3 last:border-0 last:pb-0">
-      <div className="min-w-0 flex-1">
-        <div className="text-xs font-medium">{title}</div>
-        <p className="mt-0.5 text-2xs text-muted-foreground">{hint}</p>
-      </div>
-      <div className="shrink-0 pt-0.5">{children}</div>
-    </div>
-  );
-}

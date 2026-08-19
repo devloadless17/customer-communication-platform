@@ -748,11 +748,20 @@ model Workspace {
   // workspaces once chose, dropping a column silently destroys any raw index
   // keyed on it (§18), and nothing reads it. Do not re-wire it.
   ticketReopenWindowHours             Int     @default(72)
-  // Close the CONVERSATION when its last non-terminal ticket is solved.
-  // OFF by default and deliberately so: conversation status and ticket status
-  // are decoupled, because coupling them in both directions is exactly the
-  // recursive event chain §18 forbids. When on, the write is a one-way,
-  // idempotent CAS (ticket → conversation, never back).
+  // RETIRED 2026-08-19. Closed the CONVERSATION when its last non-terminal
+  // ticket was solved.
+  //
+  // Removed rather than left off-by-default: closing a thread is an AGENT's
+  // judgement that they are done with the CUSTOMER, and that is a different
+  // question from whether the work items are finished — a customer is often
+  // still writing when the last ticket is solved, and deriving one state from
+  // the other hid live threads. Conversation status and ticket status stay
+  // decoupled, which is also what keeps them out of the recursive event chain
+  // §18 forbids.
+  //
+  // The column stays for the same reason as `ticketReopenWindowHours` above:
+  // dropping a column silently destroys any raw index keyed on it (§18), and
+  // nothing reads this one. Do not re-wire it.
   ticketCloseConversationOnLastSolved Boolean @default(false)
 
   // Users + invites belong to the ORGANIZATION now, not the workspace.

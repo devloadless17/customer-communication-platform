@@ -180,17 +180,21 @@ export const UpdateTicketFieldSchema = z.object({
 export type UpdateTicketFieldInput = z.infer<typeof UpdateTicketFieldSchema>;
 
 /**
- * `ticketReopenWindowHours` is RETIRED (2026-08-01): nothing opens or reopens a
- * ticket but a person raising one. Zod strips unknown keys, so an integration
- * still sending it gets a successful no-op rather than a 400; the column stays
- * unread for the same reason.
+ * Workspace-level ticket settings — currently EMPTY, and deliberately kept as a
+ * surface rather than deleted.
+ *
+ * Two settings have been retired here, both for the same reason: they derived a
+ * conversation's state from its tickets, which are independent questions.
+ *   - `ticketReopenWindowHours` (2026-08-01) — nothing opens or reopens a ticket
+ *     but a person raising one.
+ *   - `ticketCloseConversationOnLastSolved` (2026-08-19) — closing a thread is an
+ *     agent's judgement that they are done with the CUSTOMER; the last ticket
+ *     being solved does not mean the customer stopped writing.
+ *
+ * Zod strips unknown keys, so an integration still sending either gets a
+ * successful no-op rather than a 400.
  */
-export const TicketSettingsSchema = z.object({
-  /** Solving the LAST active ticket on a thread closes the conversation.
-   *  Off by default — conversation status and ticket status are deliberately
-   *  independent. */
-  ticketCloseConversationOnLastSolved: z.boolean().optional(),
-});
+export const TicketSettingsSchema = z.object({});
 export type TicketSettingsInput = z.infer<typeof TicketSettingsSchema>;
 
 /** An internal note on a ticket. Never reaches the customer. */

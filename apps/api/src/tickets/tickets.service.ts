@@ -1007,22 +1007,20 @@ export class TicketsService {
   // ---- Settings: workspace-level ticket behaviour ----
 
   async getSettings(workspaceId: string): Promise<TicketSettingsInput> {
-    const ws = await this.db.workspace.findUniqueOrThrow({
-      where: { id: workspaceId },
-      select: { ticketCloseConversationOnLastSolved: true },
-    });
-    return ws;
+    // Nothing configurable today (see TicketSettingsSchema). The workspace is
+    // still resolved so a bad id 404s rather than silently returning {}.
+    await this.db.workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { id: true } });
+    return {};
   }
 
   async updateSettings(
     workspaceId: string,
     body: TicketSettingsInput,
   ): Promise<TicketSettingsInput> {
-    const ws = await this.db.workspace.update({
-      where: { id: workspaceId },
-      data: body,
-      select: { ticketCloseConversationOnLastSolved: true },
-    });
-    return ws;
+    // Every key is retired, and Zod has already stripped them — so this is a
+    // validated no-op that keeps integrations working instead of 400ing.
+    void body;
+    await this.db.workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { id: true } });
+    return {};
   }
 }
