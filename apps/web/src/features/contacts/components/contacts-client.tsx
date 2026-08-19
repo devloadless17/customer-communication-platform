@@ -477,7 +477,7 @@ export function ContactsClient({
     const ok = await confirm({
       title: "Delete contact?",
       description:
-        "This also removes their conversations, messages, and notes. This can't be undone.",
+        "This removes the contact from your directory and audience lists. Their conversation history stays in the inbox, and they'll reappear here if they message you again.",
       confirmLabel: "Delete",
       destructive: true,
     });
@@ -1007,19 +1007,21 @@ export function ContactsClient({
         }}
         onDelete={async () => {
           // Delete stays bound to the loaded selection — it NEVER enters
-          // all-matching/filter mode (a deliberate safety limit: a filter-wide
-          // purge can't go through, since WhatsApp history is unrecoverable).
+          // all-matching/filter mode (a deliberate safety limit: the server
+          // soft-deletes, but a filter-wide sweep would silently empty
+          // audience lists mid-campaign).
           const ids = Array.from(selectedIds);
           if (ids.length === 0) return;
-          // Meta Cloud has no history sync, so deleted WhatsApp history is
-          // unrecoverable. For large blast radius (>25) require typing DELETE
-          // so a big purge can't go through on the same reflexive click as a
+          // Soft-delete on the server (threads survive; a contact returns on
+          // their next message), but bulk removal still drains the directory
+          // and audience lists — for large blast radius (>25) require typing
+          // DELETE so it can't go through on the same reflexive click as a
           // single-row delete.
           const requireTyped = ids.length > 25;
           const ok = await confirm({
             title: `Delete ${ids.length} contact${ids.length === 1 ? "" : "s"}?`,
             description:
-              "This also removes their conversations, messages, and notes. WhatsApp history can't be recovered. This can't be undone.",
+              "This removes them from your directory and audience lists. Conversation history stays in the inbox, and a contact reappears here if they message you again.",
             confirmLabel: "Delete",
             destructive: true,
             ...(requireTyped
@@ -1456,7 +1458,6 @@ const ContactRow = memo(function ContactRow({
 async function safeReadError(res: Response): Promise<string> {
   try {
     const json = (await res.json()) as { error?: string; detail?: string };
-    if (json.detail) return `${json.error ?? "error"}: ${json.detail}`;
     return apiErrorMessageFrom(json, `HTTP ${res.status}`);
   } catch {
     return `HTTP ${res.status}`;

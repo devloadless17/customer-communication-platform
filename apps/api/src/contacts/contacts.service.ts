@@ -858,6 +858,10 @@ export class ContactsService {
       stageId: filter.stageId,
       channel: filter.channel,
       accountId: filter.accountId,
+      // Reachability gate — the contacts page defaults to "has phone", so a
+      // filter-mode bulk op launched from it must not expand to the people
+      // that default hid (the where-builder deliberately doesn't default it).
+      reach: filter.reach,
     };
   }
 

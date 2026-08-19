@@ -147,25 +147,32 @@ export async function applyContactShareFromReply(
     { trustEmailAsStrongKey: true },
   );
   if (adoptedCustomerId && adoptedCustomerId !== contact.customerId) {
-    await db.contact.update({
-      where: { id: contact.id },
-      data: { customerId: adoptedCustomerId, version: { increment: 1 } },
-    });
-    // The customer it used to sit alone under is now childless — reap it. The
-    // `contacts: none` guard makes this safe when the old customer still owns
-    // other channel contacts (a real merge target), in which case we leave it.
-    if (contact.customerId) {
-      const reaped = await db.customer.deleteMany({
-        where: { id: contact.customerId, workspaceId, contacts: { none: {} } },
+    // ONE transaction for re-point + reap + memory adoption, exactly like the
+    // sibling in bsuid-reconcile.ts: on the bare client, a crash between the
+    // Customer delete and the adopt strands the person-level memories forever
+    // (`AiCustomerMemory.customerId` is a soft pointer with no FK and no
+    // sweeper — the exact hole customer-memory-adopt.ts exists to close).
+    await db.$transaction(async (tx) => {
+      await tx.contact.update({
+        where: { id: contact.id },
+        data: { customerId: adoptedCustomerId, version: { increment: 1 } },
       });
-      // Person-level AI memories are a soft pointer — carry them to the person
-      // who absorbed this one, or a routine merge silently erases them
-      // (lib/ai/customer-memory-adopt.ts). Only when the reap actually fired:
-      // a still-inhabited customer keeps its own memories.
-      if (reaped.count > 0) {
-        await adoptCustomerMemories(db, workspaceId, contact.customerId, adoptedCustomerId);
+      // The customer it used to sit alone under is now childless — reap it. The
+      // `contacts: none` guard makes this safe when the old customer still owns
+      // other channel contacts (a real merge target), in which case we leave it.
+      if (contact.customerId) {
+        const reaped = await tx.customer.deleteMany({
+          where: { id: contact.customerId, workspaceId, contacts: { none: {} } },
+        });
+        // Person-level AI memories are a soft pointer — carry them to the person
+        // who absorbed this one, or a routine merge silently erases them
+        // (lib/ai/customer-memory-adopt.ts). Only when the reap actually fired:
+        // a still-inhabited customer keeps its own memories.
+        if (reaped.count > 0) {
+          await adoptCustomerMemories(tx, workspaceId, contact.customerId, adoptedCustomerId);
+        }
       }
-    }
+    });
   }
 
   // The row just changed (a phone/email landed, possibly a cross-channel merge)

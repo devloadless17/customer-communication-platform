@@ -164,6 +164,9 @@ export class ContactTransferController {
 
   @Get("transfers/:id/errors")
   @RequireCapability("contacts:import")
+  // The error report carries the rejected rows verbatim — bulk contact PII,
+  // the same boundary as the download route above.
+  @DenyRestrictedViewer()
   async errors(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
@@ -220,6 +223,9 @@ export class ContactTransferController {
    */
   @Get("export")
   @RequireCapability("contacts:export")
+  // Same boundary as startExport/download: legacy or not, this hands out the
+  // whole book.
+  @DenyRestrictedViewer()
   async legacyExport(
     @CurrentSession() session: ApiSession,
     @Query("format") formatRaw: string | undefined,

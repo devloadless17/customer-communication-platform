@@ -554,6 +554,9 @@ function buildRow(
   const phone = normalizePhoneE164(phoneRaw, defaultCountry);
   if (!phone) {
     return {
+      // This lands in the per-row import report the UI renders verbatim —
+      // the sentence IS the value.
+      // error-key-checker: column-not-envelope
       error: `invalid phone number "${phoneRaw}" — include the country code, e.g. 15551234567`,
     };
   }
