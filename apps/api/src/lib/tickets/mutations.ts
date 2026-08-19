@@ -625,6 +625,15 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
   // (one ticket, one truth) except for the two dimensions that are per-side:
   // the assignee and the team queue.
   const isGuest = existing.workspaceId !== args.workspaceId;
+  // WHOSE assignee "the previous one" is. A guest's person lives on its own
+  // TicketShare row, so comparing an incoming assignee against the ticket's
+  // column (the OWNER's roster) made a guest re-asserting its CURRENT assignee
+  // — a /v1 full-state sync, any PATCH echoing current state — look like a
+  // fresh assignment: a spurious `assigned` audit row and a duplicate bell
+  // entry, every time. Same fix the owner side got at the derive/notify sites.
+  const prevAssignee = isGuest
+    ? existing.shares[0]?.assignedUserId ?? null
+    : existing.assignedUserId;
   // TAGS are the OWNER's vocabulary. `tags: { set }` replaces the whole list,
   // and a guest's ids resolve against a different catalogue — so a guest
   // submitting the tag editor scoped every id away, wrote an empty set, and
@@ -902,7 +911,7 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
     }
 
     const ticket = await readTicket(tx, existing.id);
-    const action = deriveAction(existing.status, statusMoves ? finalStatus : null, args, existing.assignedUserId);
+    const action = deriveAction(existing.status, statusMoves ? finalStatus : null, args, prevAssignee);
 
     // Tag edits earn their own timeline verbs — the generic `field_changed`
     // used to swallow them, leaving "something changed" where the reader needs
@@ -1034,10 +1043,11 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
     // hourly sync wrote another identical "assigned this ticket to you" row
     // (audit 2026-08-10). The UI and workflow steps already no-op'd on their
     // side; this closes the API path at the write site.
-    if (args.assignedUserId && args.assignedUserId !== existing.assignedUserId) {
-      // The assignee is on the OWNER's roster (a guest's person is their
-      // share's `assignedUserId`), so take their placement from the audience —
-      // it is the one thing that knows which bell each person reads.
+    if (args.assignedUserId && args.assignedUserId !== prevAssignee) {
+      // Compared against the CALLER's side (`prevAssignee`): a guest's person
+      // is their share's `assignedUserId`, so the ticket's column would call
+      // every guest re-assert news. Placement comes from the audience — it is
+      // the one thing that knows which bell each person reads.
       const assignee = audience.recipients.find((r) => r.userId === args.assignedUserId);
       if (assignee) {
         await notifyUsers(sharedDb, {

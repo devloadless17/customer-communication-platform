@@ -244,12 +244,18 @@ export const UpdateTicketViewSchema = z
 export type UpdateTicketViewInput = z.infer<typeof UpdateTicketViewSchema>;
 
 /**
- * Attachment limits. Deliberately far below the 100 MiB message-media ceiling:
- * a ticket file is evidence (a screenshot, an invoice, a form), the buffer is
- * held in memory, and the per-ticket count is capped too — see
- * MAX_TICKET_ATTACHMENTS.
+ * Attachment limits. Deliberately far below the 100 MiB message-media ceiling
+ * (which streams to a temp file): a ticket file is evidence — a screenshot, an
+ * invoice, a form — and it is buffered in MEMORY, so these two constants
+ * multiply into pinned heap. The math is the cap: `MAX_FILES_PER_REQUEST ×
+ * TICKET_ATTACHMENT_MAX_BYTES` = 50 MiB per in-flight request, against an api
+ * heap of 2 GiB (~75% of the service's 3 GiB mem_limit). At the previous 25 MiB
+ * per file one request pinned 125 MiB, and a handful of concurrent uploads
+ * walked into that ceiling. Raising either constant means moving these routes
+ * to multer's `diskStorage` first, as every other upload route here already does.
+ * The per-TICKET total is capped separately — see MAX_TICKET_ATTACHMENTS.
  */
-export const TICKET_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+export const TICKET_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
 /** Per REQUEST, not per ticket — one comment carries a few files at most. */
 export const MAX_FILES_PER_REQUEST = 5;
 

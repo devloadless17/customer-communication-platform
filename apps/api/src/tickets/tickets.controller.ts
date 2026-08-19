@@ -209,6 +209,11 @@ export class TicketsController {
    *
    * Multipart so a reply can carry its evidence; the files are filed against
    * the message and render with it. `clientTempId` makes a retry idempotent.
+   *
+   * `memoryStorage` (unlike the 100 MiB message-media route, which streams to a
+   * temp file): the two constants below bound what one request can pin on the
+   * heap, and their product is the budget documented on
+   * TICKET_ATTACHMENT_MAX_BYTES. Read that before raising either.
    */
   @Post(":id/thread")
   @UseInterceptors(
@@ -248,6 +253,9 @@ export class TicketsController {
    * Attach files to a ticket directly (the raise dialog posts here right after
    * creating the ticket, so a picked file survives even if the ticket's own
    * create is what fails).
+   *
+   * Same buffered-in-memory budget as the thread route above — see
+   * TICKET_ATTACHMENT_MAX_BYTES.
    */
   @Post(":id/attachments")
   @UseInterceptors(

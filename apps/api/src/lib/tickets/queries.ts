@@ -1,6 +1,7 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 
 import { ticketAccessWhere, ticketByIdWhere } from "./access";
+import { maskPhoneLikeName } from "@/lib/external-shapes";
 import { OPERATOR_DISPLAY_NAME, operatorActorIds } from "@/lib/workspaces/operator-mask";
 
 import type {
@@ -181,7 +182,9 @@ export const TICKET_SELECT = {
   createdAt: true,
   updatedAt: true,
   lastActivityAt: true,
-  contact: { select: { name: true } },
+  // `phoneNumber` is never emitted on the DTO — it is read solely so
+  // `maskContactPii` can tell a real name from the phone-number fallback.
+  contact: { select: { name: true, phoneNumber: true } },
   assignedUser: { select: { name: true } },
   resolvedBy: { select: { name: true } },
   tags: { select: { id: true, name: true, color: true } },
@@ -290,19 +293,31 @@ function mapSharing(t: TicketRow, viewerWorkspaceId: string): TicketSharingInfo 
  *     them request another workspace's conversation.
  *   - `contactId`/`contactName` — a guest gets the frozen snapshot's name, not
  *     a live pointer into the owner's directory.
+ *
+ * `maskContactPii` is the `/v1` `read:contacts` gate, off for every in-app
+ * caller. A contact created without a profile name has `name = phoneNumber`, so
+ * `contactName` returns the raw phone verbatim — which a `read:tickets`-only key
+ * must not receive (the same reason `redactExternalContactPii` masks it on the
+ * conversation/message reads).
  */
-export function mapTicket(t: TicketRow, viewerWorkspaceId: string): Ticket {
+export function mapTicket(
+  t: TicketRow,
+  viewerWorkspaceId: string,
+  maskContactPii = false,
+): Ticket {
   const isOwner = t.workspaceId === viewerWorkspaceId;
   const myShare = isOwner
     ? undefined
     : t.shares.find((s) => s.guestWorkspaceId === viewerWorkspaceId);
   const snapshot = myShare ? asContactSnapshot(myShare.contactSnapshot) : null;
+  const contactName = (isOwner ? t.contact?.name : snapshot?.name) ?? "Unknown";
+  const contactPhone = (isOwner ? t.contact?.phoneNumber : snapshot?.phoneNumber) ?? null;
   return {
     id: t.id,
     number: t.number,
     conversationId: isOwner ? t.conversationId : (myShare?.guestConversationId ?? null),
     contactId: isOwner ? t.contactId : null,
-    contactName: (isOwner ? t.contact?.name : snapshot?.name) ?? "Unknown",
+    contactName: maskContactPii ? maskPhoneLikeName(contactName, contactPhone) : contactName,
     channel: t.channel,
     subject: t.subject,
     description: t.description,
@@ -537,6 +552,8 @@ export interface ListTicketsFilters {
    */
   cursor?: { activityAt: Date; id: string };
   limit?: number;
+  /** `/v1` `read:contacts` gate — see `mapTicket`. Off for in-app callers. */
+  maskContactPii?: boolean;
 }
 
 /**
@@ -709,7 +726,7 @@ export async function listTickets(
     tickets: await maskTicketNames(
       db,
       workspaceId,
-      page.map((row) => mapTicket(row, workspaceId)),
+      page.map((row) => mapTicket(row, workspaceId, filters.maskContactPii)),
     ),
     nextCursor: last ? { activityAt: last.lastActivityAt.toISOString(), id: last.id } : null,
     unreadTicketIds,
@@ -720,13 +737,17 @@ export async function getTicket(
   db: Db,
   workspaceId: string,
   id: string,
+  /** `/v1` `read:contacts` gate — see `mapTicket`. Off for in-app callers. */
+  maskContactPii = false,
 ): Promise<Ticket | null> {
   const row = await db.ticket.findFirst({
     where: ticketByIdWhere(workspaceId, id),
     select: TICKET_SELECT,
   });
   if (!row) return null;
-  const [masked] = await maskTicketNames(db, workspaceId, [mapTicket(row, workspaceId)]);
+  const [masked] = await maskTicketNames(db, workspaceId, [
+    mapTicket(row, workspaceId, maskContactPii),
+  ]);
   return masked ?? null;
 }
 

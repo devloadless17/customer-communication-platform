@@ -51,6 +51,14 @@ import {
  *  reachable through the status filter. */
 const BOARD_COLUMNS: TicketStatus[] = ["new", "open", "pending", "on_hold", "solved"];
 
+/** The list envelope. `nextCursor` is `{ activityAt, id }` — keyed on
+ *  `lastActivityAt`, which is what the board orders by (§18). */
+type ListEnvelope = {
+  tickets: Ticket[];
+  nextCursor?: { activityAt: string; id: string } | null;
+  unreadTicketIds?: string[];
+};
+
 const PRIORITY_CLASSES: Record<TicketPriority, string> = {
   low: "text-muted-foreground",
   normal: "text-foreground",
@@ -76,6 +84,12 @@ export function TicketsBoardClient({
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [counts, setCounts] = useState<TicketCounts | null>(null);
   const [loading, setLoading] = useState(true);
+  /** The keyset cursor for the NEXT page, or null when the board holds every
+   *  ticket matching the current filter. The list API caps a page at 50 for the
+   *  WHOLE query, not per column, so without this a workspace past 50 active
+   *  tickets simply could not reach the rest. */
+  const [nextCursor, setNextCursor] = useState<{ activityAt: string; id: string } | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   // Priority stays LOCAL (a quick narrowing you toggle while working a view);
   // the view itself is URL state, owned by the sidebar, so it is linkable and
   // survives a refresh.
@@ -151,9 +165,13 @@ export function TicketsBoardClient({
     try {
       const res = await apiFetch(`/api/tickets?${query.toString()}`);
       if (!res.ok) throw new Error("Couldn't load tickets");
-      const body = (await res.json()) as { tickets: Ticket[]; unreadTicketIds?: string[] };
+      const body = (await res.json()) as ListEnvelope;
       if (token !== requestToken.current) return;
       setTickets(body.tickets);
+      // Back to page one. A live reload converges on the server's first page —
+      // pages the user had walked to are re-fetched on demand, which is the
+      // simpler contract than replaying N requests to rebuild them.
+      setNextCursor(body.nextCursor ?? null);
       // Carried in the ENVELOPE, not on the Ticket DTO: `ticket:changed`
       // broadcasts one Ticket to a whole workspace room, so a per-user field on
       // it would show everyone the reader's own badge.
@@ -164,6 +182,48 @@ export function TicketsBoardClient({
       setLoading(false);
     }
   }, [query]);
+
+  /**
+   * The next keyset page, appended.
+   *
+   * Board-wide rather than per column: the server pages one ordered query, so a
+   * column cannot be extended on its own. The token is READ, not bumped — a
+   * filter change mid-flight must discard this page rather than append it to a
+   * board it doesn't belong to. Ids are de-duped because the board reorders by
+   * last activity, so a card that moved between the two requests can arrive
+   * twice.
+   */
+  const loadMore = useCallback(async () => {
+    if (!nextCursor) return;
+    const token = requestToken.current;
+    setLoadingMore(true);
+    try {
+      const p = new URLSearchParams(query.toString());
+      p.set("cursorActivityAt", nextCursor.activityAt);
+      p.set("cursorId", nextCursor.id);
+      const res = await apiFetch(`/api/tickets?${p.toString()}`);
+      if (!res.ok) throw new Error("Couldn't load more tickets");
+      const body = (await res.json()) as ListEnvelope;
+      if (token !== requestToken.current) return;
+      setTickets((prev) => {
+        const held = new Set(prev.map((t) => t.id));
+        const fresh = body.tickets.filter((t) => !held.has(t.id));
+        return fresh.length === 0 ? prev : [...prev, ...fresh];
+      });
+      setUnreadIds((prev) => {
+        const ids = body.unreadTicketIds ?? [];
+        if (ids.every((id) => prev.has(id))) return prev;
+        const next = new Set(prev);
+        for (const id of ids) next.add(id);
+        return next;
+      });
+      setNextCursor(body.nextCursor ?? null);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't load more tickets");
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [query, nextCursor]);
 
   const loadCounts = useCallback(async () => {
     try {
@@ -679,22 +739,44 @@ export function TicketsBoardClient({
       ) : tickets.length === 0 ? (
         <EmptyBoard />
       ) : (
-        <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto pb-2">
-          {columns.map((status) => (
-            <Column
-              key={status}
-              status={status}
-              tickets={byStatus.get(status) ?? []}
-              busyId={busyId}
-              unreadIds={unreadIds}
-              users={users}
-              onMove={move}
-              onDropTicket={dropTicket}
-              selected={selected}
-              onToggleSelected={toggleSelected}
-            />
-          ))}
-        </div>
+        <>
+          <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto pb-2">
+            {columns.map((status) => (
+              <Column
+                key={status}
+                status={status}
+                tickets={byStatus.get(status) ?? []}
+                hasMore={nextCursor !== null}
+                busyId={busyId}
+                unreadIds={unreadIds}
+                users={users}
+                onMove={move}
+                onDropTicket={dropTicket}
+                selected={selected}
+                onToggleSelected={toggleSelected}
+              />
+            ))}
+          </div>
+          {/* Paging is board-wide because the server pages ONE ordered query,
+              not five columns — so the control sits under the board rather than
+              inside a column, where it would read as "more solved tickets". */}
+          {nextCursor ? (
+            <div className="mt-2 flex shrink-0 items-center justify-center gap-3">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={loadingMore || loading}
+                onClick={() => void loadMore()}
+              >
+                {loadingMore ? <Loader2 aria-hidden className="size-3.5 animate-spin" /> : null}
+                Load more
+              </Button>
+              <span className="text-2xs text-muted-foreground">
+                {tickets.length} loaded — more match this filter
+              </span>
+            </div>
+          ) : null}
+        </>
       )}
     </div>
   );
@@ -746,6 +828,7 @@ const DND_MIME = "application/x-ccp-ticket";
 function Column({
   status,
   tickets,
+  hasMore,
   busyId,
   unreadIds,
   users,
@@ -756,6 +839,10 @@ function Column({
 }: {
   status: TicketStatus;
   tickets: Ticket[];
+  /** Whether the board still has unfetched pages. The count below is then what
+   *  is LOADED, not the column's total — a bare number would claim a backlog
+   *  figure no client-side page can know. */
+  hasMore: boolean;
   busyId: string | null;
   /** Which cards carry an unread thread reply for this viewer. */
   unreadIds: Set<string>;
@@ -801,7 +888,13 @@ function Column({
         <h2 className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
           {TICKET_STATUS_LABELS[status]}
         </h2>
-        <span className="text-2xs tabular-nums text-muted-foreground">{tickets.length}</span>
+        <span
+          className="text-2xs tabular-nums text-muted-foreground"
+          title={hasMore ? "Loaded so far — load more to see the rest" : undefined}
+        >
+          {tickets.length}
+          {hasMore ? "+" : ""}
+        </span>
       </header>
       <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
         {tickets.map((t) => (

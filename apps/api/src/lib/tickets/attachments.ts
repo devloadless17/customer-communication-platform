@@ -82,6 +82,8 @@ export async function addTicketAttachment(
     },
   });
   if (!ticket) return { ok: false, reason: "ticket_not_found" };
+  // Fast path only — refuse before spending an upload on a file we would drop.
+  // The authoritative check is under the lock in the transaction below.
   if (ticket._count.attachments >= MAX_TICKET_ATTACHMENTS) {
     return { ok: false, reason: "too_many_attachments" };
   }
@@ -114,6 +116,16 @@ export async function addTicketAttachment(
   }
 
   const attachment = await db.$transaction(async (tx) => {
+    // The cap, authoritatively. The count above is read before the upload, so
+    // two files racing each other both saw room and both landed — the cap is a
+    // check-then-write like every other one here (workspace seats, org
+    // workspaces), and gets the same treatment: re-checked INSIDE the
+    // transaction against a locked ticket row, so the loser is refused rather
+    // than overshooting.
+    await tx.$queryRaw`SELECT id FROM "Ticket" WHERE id = ${ticket.id} FOR UPDATE`;
+    const held = await tx.ticketAttachment.count({ where: { ticketId: ticket.id } });
+    if (held >= MAX_TICKET_ATTACHMENTS) return null;
+
     const row = await tx.ticketAttachment.create({
       data: {
         // The UPLOADER's workspace — attribution on a shared ticket ("added by
@@ -174,6 +186,12 @@ export async function addTicketAttachment(
     }
     return row;
   });
+  if (!attachment) {
+    // Lost the race under the lock: drop the bytes we just wrote rather than
+    // leaving an orphan for the weekly sweeper to find.
+    await blobStorage.delete(blob.key);
+    return { ok: false, reason: "too_many_attachments" };
+  }
   kickOutbox();
 
   // The BELL — "adding a file to this ticket must notify who raised it".

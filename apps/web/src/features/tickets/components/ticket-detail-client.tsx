@@ -252,6 +252,14 @@ export function TicketDetailClient({
    * arrives while this page sits in a background tab must not clear a badge for
    * something nobody looked at. So: on mount, whenever the tab becomes visible,
    * and on each arriving reply while visible.
+   *
+   * Called UNCONDITIONALLY, not only when there is an unread reply: the server
+   * route clears the thread marker AND this ticket's unread bell rows together
+   * ("opening the ticket means you have seen everything about it" —
+   * lib/tickets/thread.ts). Gating it on `seedUnread` meant an assignment,
+   * escalation or status-change notification survived opening the very ticket it
+   * pointed at, so the bell badge and the rail dot disagreed until "Mark all
+   * read".
    */
   useEffect(() => {
     const socket = getClientSocket();
@@ -259,8 +267,8 @@ export function TicketDetailClient({
 
     const markRead = async () => {
       if (document.visibilityState !== "visible") return;
-      // Nothing to clear until a reply we haven't read exists — a POST per
-      // visibility flip on a quiet ticket is pure noise.
+      // Once per opened ticket — reset only by an arriving reply below, so a
+      // visibility flip on a ticket nothing happened on is not a POST.
       if (cleared) return;
       cleared = true;
       try {
@@ -313,13 +321,13 @@ export function TicketDetailClient({
     socket.on("ticket:thread:message", onMessage);
     socket.on("connect", onReconnect);
     document.addEventListener("visibilitychange", onVisible);
-    if (seedUnread) void markRead();
+    void markRead();
     return () => {
       socket.off("ticket:thread:message", onMessage);
       socket.off("connect", onReconnect);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [seed.id, viewerWorkspaceId, seedUnread, viewerUserId, reload]);
+  }, [seed.id, viewerWorkspaceId, viewerUserId, reload]);
 
   const patch = async (body: Record<string, unknown>) => {
     setBusy(true);

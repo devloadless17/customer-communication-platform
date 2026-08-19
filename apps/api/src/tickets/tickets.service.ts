@@ -151,6 +151,8 @@ export class TicketsService {
     viewerUserId: string,
     query: ListTicketsQuery,
     viewer?: ConversationViewer,
+    /** `/v1` `read:contacts` gate — see `mapTicket`. Off for in-app callers. */
+    maskContactPii?: boolean,
   ): Promise<{
     tickets: Ticket[];
     nextCursor: { activityAt: string; id: string } | null;
@@ -191,6 +193,7 @@ export class TicketsService {
     return listTickets(this.db, workspaceId, {
       ...(viewFilters ? ticketViewToFilters(viewFilters, viewerUserId) : {}),
       ...this.filters(query),
+      ...(maskContactPii ? { maskContactPii: true } : {}),
       ...(assignedUserId !== undefined ? { assignedUserId } : {}),
       ...(assignedTeamId !== undefined ? { assignedTeamId } : {}),
       ...(restrictedTo ? { restrictToConversationsAssignedTo: restrictedTo } : {}),
@@ -251,6 +254,8 @@ export class TicketsService {
     id: string,
     viewer?: ConversationViewer,
     viewerUserId?: string,
+    /** `/v1` `read:contacts` gate — see `mapTicket`. Off for in-app callers. */
+    maskContactPii?: boolean,
   ): Promise<{
     ticket: Ticket;
     events: TicketEvent[];
@@ -260,7 +265,7 @@ export class TicketsService {
     threadUnreadSinceMessageId: string | null;
   }> {
     await this.assertVisible(viewer, id);
-    const ticket = await getTicket(this.db, workspaceId, id);
+    const ticket = await getTicket(this.db, workspaceId, id, maskContactPii);
     if (!ticket) throw new NotFoundException({ error: "ticket_not_found" });
     const [events, thread, notes, anchor] = await Promise.all([
       listTicketEvents(this.db, workspaceId, id),
