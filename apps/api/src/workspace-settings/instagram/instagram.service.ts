@@ -15,6 +15,10 @@ import {
 import { recentWebhookRejection } from "@/lib/providers/channel-health";
 import { getMetaConnection } from "@/lib/providers/meta-connection";
 import { assertChannelDisconnectConfirmed } from "@/lib/providers/assert-channel-disconnect";
+import {
+  enqueuePendingRelease,
+  resolvePendingRelease,
+} from "@/lib/sweepers/subscription-release-retry";
 import { scrubViewReferences } from "@/lib/inbox-views/scrub";
 
 import { getInstagramSendConfig } from "@/lib/providers/instagram-config";
@@ -644,7 +648,8 @@ export class InstagramService {
    * Best-effort `DELETE /{page-id}/subscribed_apps` for every Page this channel
    * held. KEPT when the Messenger channel still uses that Page: the subscription
    * is one shared union of fields across both channels (see meta-page-subscription
-   * property 1), so releasing it would take Messenger's inbound dark. Never throws.
+   * property 1), so releasing it would take Messenger's inbound dark. Never throws;
+   * a failed DELETE leaves a `PendingSubscriptionRelease` IOU for the retry sweeper.
    */
   private async releasePages(
     workspaceId: string,
@@ -653,21 +658,57 @@ export class InstagramService {
     const seen = new Set<string>();
     for (const row of rows) {
       const pageId = ((row.config ?? {}) as InstagramChannelConfig).pageId;
-      const cipher = ((row.secrets ?? {}) as InstagramChannelSecrets).igAccessToken;
+      const secrets = (row.secrets ?? {}) as InstagramChannelSecrets;
+      const cipher = secrets.igAccessToken;
       if (!pageId || !cipher || seen.has(pageId)) continue;
       seen.add(pageId);
       const token = this.tryDecrypt(cipher, "igAccessToken");
       if (!token) continue;
+      // GLOBAL, and deliberately not workspace-scoped — same rule as the
+      // per-account path and the Messenger twin: a Page subscription is an
+      // APP-level object, so releasing it takes inbound dark for EVERY
+      // workspace on that Page. A workspace-scoped count let one tenant's
+      // disconnect silently stop a sibling tenant's messages. This workspace's
+      // rows are already deleted above, so the count sees the post-delete world.
       const stillInUse =
         (await this.db.channelConnection.count({
-          where: { workspaceId, channel: "messenger", config: { path: ["pageId"], equals: pageId } },
+          where: {
+            channel: { in: ["messenger", "instagram"] },
+            config: { path: ["pageId"], equals: pageId },
+          },
         })) > 0;
-      const res = await releasePageSubscription(pageId, token, GRAPH_VERSION, { stillInUse });
-      if (!res.ok) {
+      // Sign the DELETE with `appsecret_proof`. A customer app with "Require app
+      // secret" ON rejects the unsigned call outright, so an unsigned release
+      // releases NOTHING and Meta keeps delivering — the row's own secret first,
+      // then the workspace's shared app, the same order the per-account path
+      // resolves them in (channel-accounts.service.ts).
+      const appSecret =
+        this.tryDecrypt(secrets.appSecret ?? null, "appSecret") ??
+        (await getMetaConnection(workspaceId))?.appSecret ??
+        undefined;
+      // IOU only when the call will actually DELETE — a kept (still-in-use)
+      // subscription owes Meta nothing. Written BEFORE the attempt, settled on
+      // success, otherwise owned by the subscription-release-retry sweeper.
+      const pendingId = stillInUse
+        ? null
+        : await enqueuePendingRelease({
+            workspaceId,
+            channel: CHANNEL,
+            externalObjectId: pageId,
+            secrets: {
+              accessToken: cipher,
+              ...(secrets.appSecret ? { appSecret: secrets.appSecret } : {}),
+            },
+          });
+      const res = await releasePageSubscription(pageId, token, GRAPH_VERSION, {
+        stillInUse,
+        ...(appSecret ? { appSecret } : {}),
+      });
+      if (res.ok) await resolvePendingRelease(pendingId);
+      else
         this.logger.warn(
-          `[${workspaceId}] could not release page subscription for page=${pageId}: ${res.error}`,
+          `[${workspaceId}] could not release page subscription for page=${pageId} (retry sweeper owns it): ${res.error}`,
         );
-      }
     }
   }
 }

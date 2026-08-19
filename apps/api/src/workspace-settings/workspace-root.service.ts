@@ -1,9 +1,17 @@
 import { BadRequestException, Injectable, InternalServerErrorException, Logger, NotFoundException } from "@nestjs/common";
 import type { AiHandoffAction, FirstTouchGreeter, Prisma } from "@prisma/client";
+import type { Channel } from "@ccp/shared/types";
 
 import { blobStorage } from "@/lib/blob-storage";
 import { avatarObjectKey, contactAvatarObjectKey } from "@/lib/blob-storage/avatar";
+import { decryptSecret } from "@/lib/crypto/envelope";
 import { invalidateProviderConfig } from "@/lib/providers/config";
+import { releasePageSubscription } from "@/lib/providers/meta-page-subscription";
+import { releaseWabaSubscription } from "@/lib/providers/meta-waba-subscription";
+import {
+  enqueuePendingRelease,
+  resolvePendingRelease,
+} from "@/lib/sweepers/subscription-release-retry";
 
 import { SessionInvalidationService } from "../auth/session-invalidation.service";
 import { DbService } from "../db/db.service";
@@ -25,8 +33,28 @@ import { EventBus } from "../events/event-bus.module";
  *
  * Blob cleanup is best-effort: a partial R2 failure leaves orphan
  * files but does NOT block the DB delete. Orphans cost storage, not
- * correctness.
+ * correctness. The same posture covers the Meta webhook-subscription
+ * releases (`releaseSubscriptions`), with a retry ledger behind them.
  */
+
+/** Same default every Meta caller uses; the Graph version is a non-secret env. */
+const GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v26.0";
+
+/**
+ * One Meta object whose webhook subscription this workspace owns, snapshotted
+ * BEFORE the cascade — the connection rows, the WABA and the shared Meta app
+ * all die with the workspace, and the release needs all three.
+ */
+interface SubscriptionReleaseTarget {
+  channel: Channel;
+  /** What the subscription actually lives on: the WABA id, or the Page id. */
+  externalObjectId: string;
+  /** Envelope ciphertexts: the token the DELETE authenticates with, and the app
+   *  secret that signs it (the row's own, else the workspace's shared app). */
+  accessTokenCipher: string;
+  appSecretCipher: string | null;
+}
+
 @Injectable()
 export class WorkspaceRootService {
   private readonly logger = new Logger(WorkspaceRootService.name);
@@ -284,6 +312,151 @@ export class WorkspaceRootService {
     ].filter((k): k is string => typeof k === "string" && k.length > 0);
   }
 
+  /**
+   * Everything the post-cascade subscription releases need, read while the rows
+   * still exist.
+   *
+   * Deduped per Meta OBJECT, not per account: several numbers share one WABA and
+   * both social channels can share one Page, and the subscription is one per
+   * object. Any row's credentials authenticate the object's release.
+   */
+  private async collectSubscriptionReleases(
+    workspaceId: string,
+  ): Promise<SubscriptionReleaseTarget[]> {
+    const [rows, sharedApp] = await Promise.all([
+      this.db.channelConnection.findMany({
+        where: { workspaceId },
+        select: {
+          channel: true,
+          config: true,
+          secrets: true,
+          wabaAccount: { select: { externalWabaId: true } },
+        },
+        orderBy: { createdAt: "asc" },
+      }),
+      this.db.metaConnection.findUnique({ where: { workspaceId }, select: { secrets: true } }),
+    ]);
+    const sharedAppSecretCipher =
+      (sharedApp?.secrets as { appSecret?: string } | null)?.appSecret ?? null;
+
+    const targets: SubscriptionReleaseTarget[] = [];
+    const seen = new Set<string>();
+    for (const row of rows) {
+      // Each channel names its token differently in `secrets`: WhatsApp
+      // `accessToken`, Messenger `pageAccessToken`, Instagram `igAccessToken`
+      // (which holds a PAGE token — Instagram subscribes through the Page).
+      const secrets = (row.secrets ?? {}) as {
+        accessToken?: string;
+        pageAccessToken?: string;
+        igAccessToken?: string;
+        appSecret?: string;
+      };
+      const accessTokenCipher =
+        secrets.accessToken ?? secrets.pageAccessToken ?? secrets.igAccessToken ?? null;
+      if (!accessTokenCipher) continue;
+      const externalObjectId =
+        row.channel === "whatsapp"
+          ? (row.wabaAccount?.externalWabaId ?? null)
+          : ((row.config ?? {}) as { pageId?: string }).pageId ?? null;
+      if (!externalObjectId || seen.has(externalObjectId)) continue;
+      seen.add(externalObjectId);
+      targets.push({
+        channel: row.channel,
+        externalObjectId,
+        accessTokenCipher,
+        appSecretCipher: secrets.appSecret ?? sharedAppSecretCipher,
+      });
+    }
+    return targets;
+  }
+
+  /**
+   * Tell Meta to stop delivering this (now-deleted) workspace's webhooks.
+   *
+   * The per-account removal and the channel-wide disconnects both release;
+   * deleting the WORKSPACE — the most complete removal there is — never did, so
+   * Meta kept POSTing a churned customer's message content at ingest forever.
+   * It is dropped as `unknown_account`, but "we drop it" is not "we don't
+   * receive it".
+   *
+   * Runs AFTER the cascade so the "is anything still using this object?" counts
+   * see the post-delete world, and best-effort throughout: a Graph failure must
+   * never turn a completed delete into an error. A failure instead writes the
+   * `PendingSubscriptionRelease` IOU with a NULL workspaceId — the FK is SetNull
+   * for exactly this path, since the workspace the IOU is owed for is the one
+   * that just went away.
+   */
+  private async releaseSubscriptions(
+    label: string,
+    targets: SubscriptionReleaseTarget[],
+  ): Promise<void> {
+    for (const target of targets) {
+      // DELIBERATELY NOT workspace-scoped: `DELETE /{object}/subscribed_apps`
+      // removes the APP's subscription outright, and the same Page can be
+      // connected in a sibling workspace under the same Meta app — releasing it
+      // would take that tenant's inbound dark over a delete it had nothing to do
+      // with. (The WhatsApp half needs no equivalent for correctness, since
+      // `externalWabaId` is globally unique, but the question is the same one.)
+      const stillInUse =
+        target.channel === "whatsapp"
+          ? (await this.db.channelConnection.count({
+              where: {
+                channel: "whatsapp",
+                wabaAccount: { externalWabaId: target.externalObjectId },
+              },
+            })) > 0
+          : (await this.db.channelConnection.count({
+              where: {
+                channel: { in: ["messenger", "instagram"] },
+                config: { path: ["pageId"], equals: target.externalObjectId },
+              },
+            })) > 0;
+      if (stillInUse) continue;
+
+      let accessToken: string;
+      try {
+        accessToken = decryptSecret(target.accessTokenCipher);
+      } catch {
+        continue; // undecryptable — nothing we can authenticate with
+      }
+      let appSecret: string | undefined;
+      if (target.appSecretCipher) {
+        try {
+          appSecret = decryptSecret(target.appSecretCipher);
+        } catch {
+          /* undecryptable — attempt unsigned rather than not at all */
+        }
+      }
+
+      const pendingId = await enqueuePendingRelease({
+        workspaceId: null,
+        channel: target.channel,
+        externalObjectId: target.externalObjectId,
+        secrets: {
+          accessToken: target.accessTokenCipher,
+          ...(target.appSecretCipher ? { appSecret: target.appSecretCipher } : {}),
+        },
+      });
+      const released =
+        target.channel === "whatsapp"
+          ? await releaseWabaSubscription(
+              target.externalObjectId,
+              accessToken,
+              GRAPH_VERSION,
+              appSecret,
+            )
+          : await releasePageSubscription(target.externalObjectId, accessToken, GRAPH_VERSION, {
+              stillInUse: false,
+              ...(appSecret ? { appSecret } : {}),
+            });
+      if (released.ok) await resolvePendingRelease(pendingId);
+      else
+        this.logger.warn(
+          `[${label}] ${target.channel} subscription release failed on ${target.externalObjectId} (retry sweeper owns it): ${released.error}`,
+        );
+    }
+  }
+
   private async collectContactAvatarKeys(workspaceId: string): Promise<string[]> {
     const keys: string[] = [];
     const PAGE = 1_000;
@@ -305,16 +478,18 @@ export class WorkspaceRootService {
   }
 
   async destroy(workspaceId: string, label: string): Promise<void> {
-    // Snapshot blob keys + member ids BEFORE the cascade nukes the rows.
-    // Blob keys feed post-delete cleanup; member ids feed the explicit
-    // socket kick (the cascade clears their Session rows but already-
-    // connected sockets stay live until kicked).
-    const [messageBlobKeys, contactAvatarKeys, transferKeys, callArtifactKeys, aiArtifactKeys, teamMembers] = await Promise.all([
+    // Snapshot blob keys + member ids + subscription credentials BEFORE the
+    // cascade nukes the rows. Blob keys feed post-delete cleanup; member ids
+    // feed the explicit socket kick (the cascade clears their Session rows but
+    // already-connected sockets stay live until kicked); the release targets
+    // carry the Meta ids and ciphertexts that die with the connection rows.
+    const [messageBlobKeys, contactAvatarKeys, transferKeys, callArtifactKeys, aiArtifactKeys, releaseTargets, teamMembers] = await Promise.all([
       this.collectMessageBlobKeys(workspaceId),
       this.collectContactAvatarKeys(workspaceId),
       this.collectTransferArtifactKeys(workspaceId),
       this.collectCallArtifactKeys(workspaceId),
       this.collectAiArtifactKeys(workspaceId),
+      this.collectSubscriptionReleases(workspaceId),
       this.db.user.findMany({ where: { workspaceMemberships: { some: { workspaceId } } }, select: { id: true, avatarUrl: true } }),
     ]);
     const blobKeys = messageBlobKeys
@@ -371,6 +546,17 @@ export class WorkspaceRootService {
     }
 
     invalidateProviderConfig(workspaceId);
+
+    // Release the Meta webhook subscriptions this workspace held — see
+    // releaseSubscriptions. Best-effort by contract, and the IOU behind it means
+    // a Graph blip is retried rather than lost.
+    await this.releaseSubscriptions(label, releaseTargets).catch((err) => {
+      this.logger.warn(
+        `[${label}] releasing webhook subscriptions failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
 
     // Revoke each member through the unified path so the per-process
     // session cache is busted alongside the socket kick. The cascade

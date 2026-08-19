@@ -21,6 +21,11 @@ import type { Prisma } from "@prisma/client";
  * BEFORE the inline attempt and deleted on success, so a failure leaves a
  * durable IOU this sweeper settles.
  *
+ * A row OUTLIVES the workspace it was owed for (`workspaceId` is nullable,
+ * SetNull): deleting a workspace or an organization is the loudest case of an
+ * owed release, and a cascading FK would have destroyed the IOU for exactly
+ * the tenant nobody is left to notice.
+ *
  * Retry discipline mirrors outbound webhooks: exponential backoff, a loud
  * give-up at 7 attempts (the worst case is the documented status quo ante).
  * Before each retry the sweeper re-checks whether any ACTIVE connection uses
@@ -49,7 +54,12 @@ export interface PendingReleaseSecrets {
  * failed) degrades to the pre-2026-08-13 behavior — one inline attempt.
  */
 export async function enqueuePendingRelease(args: {
-  workspaceId: string;
+  /**
+   * `null` when the workspace itself was just deleted — the FK is SetNull for
+   * exactly that case, so the IOU survives the tenant it was owed for. Every
+   * credential the retry needs is copied into `secrets` below.
+   */
+  workspaceId: string | null;
   channel: Channel;
   externalObjectId: string;
   secrets: PendingReleaseSecrets;
@@ -115,7 +125,7 @@ export function stopSubscriptionReleaseRetrySweeper(): void {
 
 /** Is the WABA/Page in active use again? Then the release is moot. */
 async function objectBackInUse(
-  workspaceId: string,
+  workspaceId: string | null,
   channel: Channel,
   externalObjectId: string,
 ): Promise<boolean> {
@@ -123,7 +133,10 @@ async function objectBackInUse(
     return (
       (await db.channelConnection.count({
         where: {
-          workspaceId,
+          // Null = the workspace was deleted with the account, so ask the
+          // question globally. `externalWabaId` is globally unique, which is
+          // what makes the unscoped read answer the same question.
+          ...(workspaceId ? { workspaceId } : {}),
           channel: "whatsapp",
           isActive: true,
           wabaAccount: { externalWabaId: externalObjectId },
@@ -131,11 +144,14 @@ async function objectBackInUse(
       })) > 0
     );
   }
-  // Social: the Page is shared by messenger AND instagram — either keeps it.
+  // Social: the Page is shared by messenger AND instagram — either keeps it,
+  // and so does a SIBLING WORKSPACE connected to the same Page, because the
+  // subscription this release would delete is the APP's, not the workspace's.
+  // Same reasoning (and the same deliberate absence of workspaceId) as
+  // `releaseSubscription` in channel-accounts.service.ts.
   return (
     (await db.channelConnection.count({
       where: {
-        workspaceId,
         channel: { in: ["messenger", "instagram"] },
         isActive: true,
         config: { path: ["pageId"], equals: externalObjectId },
@@ -175,8 +191,10 @@ export async function sweepSubscriptionReleasesOnce(): Promise<void> {
           appSecret = undefined;
         }
       }
-      if (!appSecret) {
-        // Same fallback the inline path uses: the workspace's shared app.
+      if (!appSecret && row.workspaceId) {
+        // Same fallback the inline path uses: the workspace's shared app. A null
+        // workspace has no row to read — the enqueuer copied the shared app's
+        // ciphertext into the ledger for exactly that case.
         appSecret = (await getMetaConnection(row.workspaceId))?.appSecret ?? undefined;
       }
       const result = !accessToken
@@ -201,7 +219,7 @@ export async function sweepSubscriptionReleasesOnce(): Promise<void> {
         // operator should know the DELETE never landed.
         console.error(
           `[subscription-release-retry] GIVING UP after ${attempts} attempts — could not release ` +
-            `${row.channel} subscription on ${row.externalObjectId} (workspace ${row.workspaceId}): ${result.error}. ` +
+            `${row.channel} subscription on ${row.externalObjectId} (workspace ${row.workspaceId ?? "deleted"}): ${result.error}. ` +
             "Meta will keep delivering this object's webhooks; remove the app's subscription in the Meta dashboard.",
         );
         await db.pendingSubscriptionRelease.delete({ where: { id: row.id } }).catch(() => undefined);

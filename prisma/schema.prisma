@@ -1096,8 +1096,15 @@ model ChannelConnection {
 /// "does any active connection still use this WABA/Page" before each retry, so
 /// a reconnect that raced the removal makes the row moot rather than released.
 model PendingSubscriptionRelease {
-  id          String @id @default(cuid())
-  workspaceId String
+  id String @id @default(cuid())
+  // NULLABLE, and the FK is SetNull rather than Cascade: the loudest case of an
+  // owed release is a WORKSPACE (or organization) delete, and that IOU is
+  // written for the workspace that just went away. Cascade would take the row
+  // with it — the customer is gone and Meta keeps POSTing their message content
+  // forever, the exact failure the ledger exists to end. The sweeper treats a
+  // null as "no workspace to re-check or fall back to" and works off the
+  // ciphertexts copied into `secrets`.
+  workspaceId String?
 
   channel Channel
   // The Meta object the subscription lives on: the WABA id (whatsapp) or the
@@ -1116,7 +1123,7 @@ model PendingSubscriptionRelease {
   nextAttemptAt DateTime @default(now())
   createdAt     DateTime @default(now())
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
 
   // The sweeper's pickup scan.
   @@index([nextAttemptAt])
@@ -2244,6 +2251,14 @@ model Conversation {
   // so the partner flow gates on it. NOT a workflow trigger.
   aiEnabled            Boolean            @default(true)
   unreadCount          Int                @default(0)
+  // NO DRIFT SWEEPER, deliberately (§7's "each one that CAN be recomputed has
+  // one" reads as universal, so the exemption is written where the columns
+  // are): these three are maintained inline, in the same transaction as the
+  // message that moves them, and the NEXT message on the thread recomputes
+  // them from scratch. The only staleness reachable is a cascade-deleted last
+  // message, and a stale preview line is cosmetic — nothing routes, bills or
+  // counts off it. `unreadCount` above is exempt for a different reason (no
+  // read watermark exists to reconcile against — see §7).
   lastMessageAt        DateTime           @default(now())
   lastMessagePreview   String             @default("")
   // Direction of the message behind `lastMessagePreview` — drives the inbox
@@ -4360,20 +4375,6 @@ model TicketNumberCounter {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 }
 
-// The cross-workspace escalation bridge: agent X in workspace A can't answer,
-// so their ticket is REFERRED to a sibling workspace in the same organization.
-// The escalation creates a twin ticket over there (own number, own board card,
-// own assignee, that workspace's own SLA) carrying a contact SNAPSHOT — never a
-// live join into A's directory — and this row links the pair. Everything the
-// two sides share travels as MIRRORED TicketEvent rows (one per side, each
-// workspace-scoped to its own ticket), so no read path ever crosses the
-// boundary. Tickets themselves still never cross workspaces.
-//
-// TENANCY EXCEPTION: this is deliberately the only row in the schema that
-// spans two workspaces, so it carries no single workspaceId. It must ONLY be
-// reached through a workspace-scoped query on one of its two tickets (or its
-// source/target workspace columns) — never by a bare id from request input.
-// Allowlisted in scripts/check-prisma-fields.mjs.
 // A ticket SHARE — the grant that lets a sibling workspace work the SAME
 // ticket. A ticket is the way two departments talk about one customer's issue,
 // so there is exactly ONE ticket row: one number, one status, one priority, one
@@ -5020,7 +5021,9 @@ model TeamChannel {
   // Denormalized for cheap list rendering. Kept in sync by the message-send
   // route; reads never have to join through TeamChannelMessage to render the
   // sidebar. Best-effort consistency — a race that leaves these slightly
-  // stale is fine; the next message corrects them.
+  // stale is fine; the next message corrects them. No drift sweeper for the
+  // same reason as Conversation.lastMessagePreview: inline-maintained,
+  // self-healing on the next message, and cosmetic when stale.
   lastMessageAt      DateTime              @default(now())
   lastMessagePreview String                @default("")
 
@@ -5130,7 +5133,10 @@ model TeamChannelMessage {
   // Always null/0 on reply rows. The reply route increments threadReplyCount
   // and updates threadLastReplyAt on the parent in the same transaction as
   // the insert, so the channel feed can render "12 replies · 2m ago" without
-  // a COUNT().
+  // a COUNT(). No drift sweeper (§7 exemption, stated here where the columns
+  // are): both move in the reply's own transaction, and the only way to strand
+  // them is deleting replies out from under a root — a stale "12 replies" label
+  // that the next reply corrects, with nothing downstream reading it.
   threadReplyCount  Int       @default(0)
   threadLastReplyAt DateTime?
 
