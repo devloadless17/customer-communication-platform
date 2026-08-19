@@ -1,6 +1,7 @@
 import { BadRequestException, Body, Controller, Delete, Get, Headers, Param, Patch, Post, Query, UseGuards } from "@nestjs/common";
 
 import { RateLimit } from "@/common/rate-limit.interceptor";
+import { hasScope } from "@ccp/shared/api-keys/scopes";
 
 import { ApiKeyGuard } from "../../auth/api-key.guard";
 import type { ApiKeyContext } from "../../auth/api-key.guard";
@@ -83,7 +84,16 @@ export class ExternalV1TicketsController {
           "Unread is per-agent and an API key has no agent identity, so this filter cannot be answered.",
       });
     }
-    return this.tickets.list(auth.workspaceId, "", query);
+    // Identity is gated on `read:contacts`, like every other external read: a
+    // contact with no profile name carries `name = phoneNumber`, so an
+    // unmasked board is a directory harvest for a `read:tickets`-only key.
+    return this.tickets.list(
+      auth.workspaceId,
+      "",
+      query,
+      undefined,
+      !hasScope(auth.scopes, "read:contacts"),
+    );
   }
 
   @Get("tickets/counts")
@@ -156,7 +166,14 @@ export class ExternalV1TicketsController {
   @Get("tickets/:id")
   @RequireScope("read:tickets")
   async getTicket(@CurrentApiKey() auth: ApiKeyContext, @Param("id") id: string) {
-    return this.tickets.get(auth.workspaceId, id);
+    // Same `read:contacts` gate as the board above.
+    return this.tickets.get(
+      auth.workspaceId,
+      id,
+      undefined,
+      undefined,
+      !hasScope(auth.scopes, "read:contacts"),
+    );
   }
 
   @Post("tickets")

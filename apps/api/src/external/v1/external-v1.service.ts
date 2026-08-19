@@ -778,6 +778,13 @@ export class ExternalV1Service {
         workspaceId,
         deletedAt: null,
         ...(q.stageId ? { stageId: q.stageId } : {}),
+        ...(q.channel ? { identityChannel: q.channel } : {}),
+        // Reachability gate — same semantics as `buildContactFilterWhere`'s
+        // `reach` arm, and absent means NO gate here too (never defaulted:
+        // reach is orthogonal to channel, and defaulting would silently hide
+        // every social-only contact from a partner's list).
+        ...(q.reach === "phone" ? { phoneNumber: { not: null } } : {}),
+        ...(q.reach === "email" ? { email: { not: null } } : {}),
         ...(tagIds.length > 0 ? { tags: { some: { id: { in: tagIds } } } } : {}),
         // Both the directory predicate and the search clause are OR nodes, so they
         // must be AND-composed — spreading both at this level would leave only the
@@ -1745,7 +1752,12 @@ export class ExternalV1Service {
       apiKeyId,
       idempotencyKey,
       "start_contact_import",
-      { uploadKey: input.uploadKey, mode: input.mode },
+      // Fingerprint the WHOLE parsed input, like createBroadcast. The old
+      // { uploadKey, mode } shape ignored `mapping`, `tagMode`, `format` and
+      // `fireAutomations`, so a partner who fixed a wrong column mapping and
+      // re-POSTed with the same key got a silent replay of the OLD job id and
+      // believed the corrected import ran.
+      input,
       () =>
         this.transfers.startImport({
           workspaceId,
@@ -2285,7 +2297,11 @@ export class ExternalV1Service {
       apiKeyId,
       idempotencyKey,
       "POST /v1/workflows/:id/trigger",
-      { workflowId, contactId: input.contactId },
+      // Fingerprint the WHOLE parsed input, like createBroadcast. The old
+      // { workflowId, contactId } shape ignored `conversationId` and
+      // `metadata` — and metadata feeds workflow variables that can reach the
+      // BODY of a billed send, so a corrected retry must 422, not replay.
+      { workflowId, ...input },
       async () => {
         // `null` actor — an integration is not a person; the dispatcher
         // records the run as system-triggered.

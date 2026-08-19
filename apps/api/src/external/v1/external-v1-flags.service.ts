@@ -20,6 +20,7 @@ import {
 } from "@/lib/message-flags/mutations";
 import { flagCounts, listFlagDefinitions, listFlags } from "@/lib/message-flags/queries";
 import { MessageFlagsCatalogService } from "@/workspace-settings/message-flags/message-flags-catalog.service";
+import { hasScope } from "@ccp/shared/api-keys/scopes";
 import type {
   ExternalCreateFlagDefinitionInput,
   ExternalListFlagsQueryInput,
@@ -81,11 +82,20 @@ export class ExternalV1FlagsService {
     return { ok: true };
   }
 
+  /**
+   * `scopes` gates the two fields the queue row carries beyond the flag itself:
+   * the contact's identity (`read:contacts` — it falls back to the raw phone
+   * number) and the flagged message's text (`read:messages`). Without them a
+   * `read:flags`-only key was a side door onto both.
+   */
   async list(
     workspaceId: string,
     query: ExternalListFlagsQueryInput,
+    scopes: readonly string[],
   ): Promise<{ items: MessageFlagQueueItem[]; nextCursor: string | null }> {
     return listFlags(this.db, workspaceId, {
+      ...(hasScope(scopes, "read:contacts") ? {} : { maskContactPii: true }),
+      ...(hasScope(scopes, "read:messages") ? {} : { omitMessageExcerpt: true }),
       ...(query.status?.length ? { statuses: query.status as MessageFlagStatus[] } : {}),
       ...(query.definitionId?.length ? { definitionIds: query.definitionId } : {}),
       ...(query.assignedTo ? { assignedToId: query.assignedTo } : {}),

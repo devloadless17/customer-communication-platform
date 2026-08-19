@@ -2,6 +2,8 @@ import { z } from "zod";
 
 import { TAG_COLORS } from "@ccp/shared/types";
 
+import { zLiveChannel } from "@/common/channel-schema";
+
 // Shared limits — declared at the top so every schema below can reference
 // them (was previously declared mid-file which broke after the top-level
 // send-message schema started using MAX_TEXT).
@@ -382,6 +384,19 @@ export const ListContactsQuerySchema = z.object({
    * leak whether the id exists.
    */
   accountId: z.string().min(1).optional(),
+  /**
+   * Filter to one channel (whatsapp / messenger / instagram / webchatwidget) —
+   * parity with the contacts browser's channel segment (§12). Derived from
+   * `LIVE_CHANNELS`, so a newly-shipped channel is accepted here at once.
+   */
+  channel: zLiveChannel().optional(),
+  /**
+   * Reachability gate: "phone" = has a phone number, "email" = has an email.
+   * Absent = NO gate — orthogonal to `channel`, never defaulted (the directory
+   * page passes `reach=phone` explicitly; defaulting it here would silently
+   * hide every social-only contact from a partner's list).
+   */
+  reach: z.enum(["phone", "email"]).optional(),
   /** Comma-separated tag id list, ANY-match. */
   tagIds: z.string().optional(),
   cursor: z.string().optional(),

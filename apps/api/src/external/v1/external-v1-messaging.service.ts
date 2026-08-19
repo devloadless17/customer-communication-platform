@@ -55,6 +55,10 @@ import {
   ConversationSendRateLimitedError,
 } from "@/lib/messaging/conversation-send-budget";
 import { getProviderBinding } from "@/lib/providers";
+import {
+  clearChannelNeedsReconnect,
+  flagChannelNeedsReconnect,
+} from "@/lib/providers/channel-health";
 import { resolveOutboundAccountId } from "@/lib/conversations/account";
 import {
   NoChannelDestinationError,
@@ -249,12 +253,10 @@ export class ExternalV1MessagingService {
         workspaceId,
         apiKeyId,
         idempotencyKey,
-        this.idem.fingerprint("assign", {
-          conversationId,
-          assignedUserId: input.assignedUserId ?? null,
-          autoAssign: input.autoAssign === true,
-          policyId: input.policyId ?? null,
-        }),
+        // Fingerprint the WHOLE parsed input — the narrow shape dropped
+        // `overwrite` (which flips onlyIfUnassigned) and `silent`, so a
+        // corrected retry replayed the old response instead of 422-ing.
+        this.idem.fingerprint("assign", { conversationId, ...input }),
       );
       if (claim.kind === "replay") return claim.result;
     }
@@ -820,6 +822,9 @@ export class ExternalV1MessagingService {
         channelConnectionId: true,
         // Status drives the deferred reopen below (reopenIfClosed path only).
         status: true,
+        // Monotonic-timestamp clamp below — the outbound must sort strictly
+        // after the inbound it answers.
+        lastMessageAt: true,
         aiEnabled: true,
         contact: {
           select: {
@@ -1003,6 +1008,16 @@ export class ExternalV1MessagingService {
       // billed message; the partner gets 409 (in-flight, then ambiguous) and
       // must use a fresh key to deliberately resend.
       const normalized = normalizeMetaSendError(err);
+      // Graph 190 (token expired/revoked) → flag the SENDING account, so an
+      // API-only workspace's dead credential raises the same reconnect banner
+      // an interactive send would (parity with sendTextInternal).
+      if (normalized?.code === "auth_expired") {
+        void flagChannelNeedsReconnect(
+          workspaceId,
+          conversation.channel,
+          conversation.channelConnectionId,
+        );
+      }
       const provablyNotSent =
         err instanceof ProviderNotConfiguredError || isProvablyNotSent(normalized);
       if (idempotencyKey && provablyNotSent) {
@@ -1033,6 +1048,23 @@ export class ExternalV1MessagingService {
       });
     }
 
+    // Send worked → the token is healthy; self-heal a stale reconnect banner,
+    // scoped to the account that sent (a sibling's flag may be real — see
+    // channel-health.ts).
+    void clearChannelNeedsReconnect(
+      workspaceId,
+      conversation.channel,
+      conversation.channelConnectionId,
+    );
+
+    // Force the outbound strictly later than the thread's most recent message.
+    // Meta's inbound timestamps are second-precision, so an API auto-reply
+    // inside the same wall-clock second otherwise sorts ABOVE the inbound it
+    // answers (inbox sorts `timestamp ASC`). Same clamp as sendTextInternal.
+    const lastTs = conversation.lastMessageAt ?? null;
+    const messageTimestamp =
+      lastTs && lastTs >= send.timestamp ? new Date(lastTs.getTime() + 1) : send.timestamp;
+
     const created = await createOutboundMessageIdempotent({
       workspaceId,
       conversationId,
@@ -1043,7 +1075,7 @@ export class ExternalV1MessagingService {
       channel: provider,
       status: "sent",
       rawPayload: { sentVia: "api/external/v1", apiKeyId } as Prisma.InputJsonValue,
-      timestamp: send.timestamp,
+      timestamp: messageTimestamp,
       ...(replyToMessageId ? { replyToMessageId } : {}),
     });
 
@@ -1059,7 +1091,7 @@ export class ExternalV1MessagingService {
       channel: provider,
       status: "sent",
       rawPayload: { sentVia: "api/external/v1", apiKeyId },
-      timestamp: send.timestamp.toISOString(),
+      timestamp: messageTimestamp.toISOString(),
       ...(replyToMessageId ? { replyToMessageId } : {}),
     };
     // Strict-monotonic bump + atomic message.sent publish, unified in
@@ -1070,7 +1102,7 @@ export class ExternalV1MessagingService {
     // last hand-rolled copy through the canonical commit.
     await commitOutboundSend({
       conversationId,
-      bumpTimestamp: send.timestamp,
+      bumpTimestamp: messageTimestamp,
       preview,
       event: {
         type: "message.sent",

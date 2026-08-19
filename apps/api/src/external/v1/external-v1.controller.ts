@@ -1544,7 +1544,10 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Body(zBody(ExternalCallButtonSchema)) body: ExternalCallButtonInput,
     @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    // Billable message ⇒ same chain-depth ceiling as every other /v1 send.
+    guardChainDepth(xCcpDepth);
     return this.api.sendCallButton(
       auth.workspaceId,
       auth.apiKeyId,

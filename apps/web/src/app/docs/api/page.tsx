@@ -206,7 +206,16 @@ export default function ApiDocsPage() {
           <strong> Browsing</strong>:{" "}
           <code>?search=</code> for fuzzy across name / phone / email,{" "}
           <code>?stageId=</code>, <code>?tagIds=</code>,{" "}
-          <code>?accountId=</code>, <code>?cursor=</code>, <code>?limit=</code>.
+          <code>?accountId=</code>, <code>?channel=</code>, <code>?reach=</code>,{" "}
+          <code>?cursor=</code>, <code>?limit=</code>.
+          <br />
+          <code>?channel=</code> narrows to one channel (<code>whatsapp</code>,{" "}
+          <code>messenger</code>, <code>instagram</code>,{" "}
+          <code>webchatwidget</code>). <code>?reach=phone</code> returns only
+          people who have a phone number, <code>?reach=email</code> only those
+          with an email. The two are <strong>orthogonal</strong> — combine them
+          for &quot;Instagram people I can email&quot;. Omitting{" "}
+          <code>reach</code> applies no gate at all.
           <br />
           Every contact row carries <code>channelConnectionId</code> — which of
           your accounts that person&apos;s thread is on — so a partner can route

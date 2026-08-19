@@ -31,7 +31,7 @@ export class ExternalV1FlagsController {
     @CurrentApiKey() auth: ApiKeyContext,
     @Query(zQuery(ExternalListFlagsQuerySchema)) query: ExternalListFlagsQueryInput,
   ) {
-    return this.flags.list(auth.workspaceId, query);
+    return this.flags.list(auth.workspaceId, query, auth.scopes);
   }
 
   /** Static segments before the `:flagId` routes below. */
