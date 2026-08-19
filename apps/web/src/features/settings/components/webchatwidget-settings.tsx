@@ -6,6 +6,8 @@ import { Check, Copy, ExternalLink, Plus, Trash2 } from "lucide-react";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { apiErrorMessage } from "@ccp/shared/api/error-message";
 import { PageHeader } from "@/components/layouts/page-header";
+import { ImageCropDialog } from "./image-crop-dialog";
+import { cn } from "@ccp/shared/utils";
 import type { WebchatWidgetView } from "@/lib/api/queries";
 import type { ContactFieldDefinition } from "@ccp/shared/types";
 import { PRECHAT_BUILTIN_TARGETS } from "@ccp/shared/contacts/prechat-targets";
@@ -389,7 +391,7 @@ function Editor({
           <Section title="Branding">
             <div className="grid grid-cols-2 gap-4">
               <ImageUpload label="Logo" value={c.logoDataUrl} maxKb={64} onChange={(v) => onConfig({ logoDataUrl: v })} />
-              <ImageUpload label="Agent avatar" value={c.agentAvatarDataUrl} maxKb={40} onChange={(v) => onConfig({ agentAvatarDataUrl: v })} />
+              <ImageUpload label="Agent avatar" shape="circle" value={c.agentAvatarDataUrl} maxKb={40} onChange={(v) => onConfig({ agentAvatarDataUrl: v })} />
             </div>
           </Section>
           )}
@@ -831,64 +833,74 @@ function CopyBox({ title, hint, code }: { title: string; hint: string; code: str
 }
 
 /**
- * Downscale a picked image to a small square data URL BEFORE storing.
+ * Upload → FRAME → store.
  *
- * These data URLs ride in the config payload delivered to EVERY visitor on every
- * page load, so an un-optimised photo would make the customer's whole site heavier
- * for no visible benefit (the logo renders at ~28px, the avatar at ~28px). Drawing
- * to a small canvas and re-encoding as WebP typically turns a 40–64 KB upload into
- * a few KB. Enforced here so the config stays tiny regardless of what's uploaded.
+ * The framing step is not decoration: the widget draws these into a fixed square
+ * with `object-fit: cover`, so without it a wide logo is centre-cropped by the
+ * browser and the uploader never gets a say in which part survives. Cropping to
+ * a square here makes `cover` a no-op, so the settings preview and the customer's
+ * view are the same picture.
  */
-async function downscaleImage(file: File, maxPx: number): Promise<string> {
-  const bitmap = await createImageBitmap(file);
-  const scale = Math.min(1, maxPx / Math.max(bitmap.width, bitmap.height));
-  const w = Math.max(1, Math.round(bitmap.width * scale));
-  const h = Math.max(1, Math.round(bitmap.height * scale));
-  const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("no 2d context");
-  ctx.drawImage(bitmap, 0, 0, w, h);
-  bitmap.close?.();
-  // WebP where supported (much smaller), else JPEG. PNG only if the source had
-  // transparency worth keeping — but a chat avatar/logo at this size rarely does,
-  // and JPEG/WebP keep it tiny.
-  const webp = canvas.toDataURL("image/webp", 0.85);
-  return webp.startsWith("data:image/webp") ? webp : canvas.toDataURL("image/jpeg", 0.85);
-}
-
-/** Upload a small image → downscaled data URL (no server infra). */
-function ImageUpload({ label, value, maxKb, onChange }: { label: string; value?: string; maxKb: number; onChange: (v: string) => void }) {
+function ImageUpload({
+  label,
+  value,
+  maxKb,
+  shape = "rounded",
+  onChange,
+}: {
+  label: string;
+  value?: string;
+  maxKb: number;
+  /** How this image is masked where it renders — the crop stage mirrors it. */
+  shape?: "circle" | "rounded";
+  onChange: (v: string) => void;
+}) {
   const [err, setErr] = useState<string | null>(null);
-  async function pick(file: File) {
-    setErr(null);
-    if (!/^image\//.test(file.type)) return setErr("Images only");
-    // Guard the SOURCE size loosely (a 20MB upload shouldn't be decoded), but the
-    // stored size is governed by the downscale, not this.
-    if (file.size > 8 * 1024 * 1024) return setErr("Image too large");
-    try {
-      // Logo shows a touch larger than the avatar; both are tiny on screen.
-      const out = await downscaleImage(file, maxKb >= 64 ? 192 : 128);
-      if (out.length > maxKb * 1024 * 1.4) return setErr("Couldn't compress that image enough — try a simpler one");
-      onChange(out);
-    } catch {
-      setErr("Couldn't read that image");
-    }
-  }
+  const [pending, setPending] = useState<File | null>(null);
   return (
     <div className="flex flex-col gap-1.5">
       <span className="text-2xs font-medium text-muted-foreground">{label}</span>
       <div className="flex items-center gap-2">
         {value ? (
+          // Previewed in the shape it actually renders in, so the framing choice
+          // is checkable without opening the widget.
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={value} alt="" className="size-9 shrink-0 rounded-lg border object-cover" />
+          <img
+            src={value}
+            alt=""
+            className={cn(
+              "size-9 shrink-0 border object-cover",
+              shape === "circle" ? "rounded-full" : "rounded-lg",
+            )}
+          />
         ) : (
-          <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border bg-muted text-2xs text-muted-foreground">—</div>
+          <div
+            className={cn(
+              "flex size-9 shrink-0 items-center justify-center border bg-muted text-2xs text-muted-foreground",
+              shape === "circle" ? "rounded-full" : "rounded-lg",
+            )}
+          >
+            —
+          </div>
         )}
         <label className="cursor-pointer rounded-lg border px-2.5 py-1.5 text-xs transition hover:bg-muted">
-          Upload
-          <input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) pick(f); e.target.value = ""; }} />
+          {value ? "Replace" : "Upload"}
+          <input
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = "";
+              setErr(null);
+              if (!f) return;
+              if (!/^image\//.test(f.type)) return setErr("Images only");
+              // Guard the SOURCE loosely — a 20MB upload shouldn't be decoded.
+              // The STORED size is governed by the crop's output, not this.
+              if (f.size > 8 * 1024 * 1024) return setErr("Image too large");
+              setPending(f);
+            }}
+          />
         </label>
         {value && (
           <button onClick={() => onChange("")} className="text-xs text-muted-foreground hover:text-destructive">
@@ -897,6 +909,22 @@ function ImageUpload({ label, value, maxKb, onChange }: { label: string; value?:
         )}
       </div>
       {err && <span className="text-2xs text-destructive">{err}</span>}
+      {pending && (
+        <ImageCropDialog
+          file={pending}
+          shape={shape}
+          title={`Position your ${label.toLowerCase()}`}
+          // The logo shows a touch larger than the avatar; both are tiny on
+          // screen, and the cap keeps the config light for every visitor.
+          outPx={maxKb >= 64 ? 192 : 128}
+          maxBytes={maxKb * 1024 * 1.4}
+          onCancel={() => setPending(null)}
+          onApply={(dataUrl) => {
+            setPending(null);
+            onChange(dataUrl);
+          }}
+        />
+      )}
     </div>
   );
 }
