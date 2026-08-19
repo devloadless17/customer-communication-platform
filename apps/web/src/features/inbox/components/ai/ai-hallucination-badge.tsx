@@ -12,6 +12,16 @@ import { getClientSocket } from "@/lib/socket-client";
  * show). Only ever non-null for an AI-authored reply scored at/above
  * HALLUCINATION_FLAG_THRESHOLD server-side (lib/ai/hallucination.ts); a
  * human-sent message always renders nothing.
+ *
+ * Deliberately NOT wired to `useSocketReconnect` (§10 convergence), unlike the
+ * other AI panels: this mounts once per OUTBOUND bubble and the thread isn't
+ * virtualized, so a reconnect would fire one GET per rendered outbound message
+ * — hundreds in a scrolled-back thread, straight into the 300/min rate limit.
+ * It converges without one: the flag is written synchronously at send time, so
+ * any bubble mounting after the message exists reads the true value, and a
+ * message that arrives during the gap mounts a fresh badge that fetches. The
+ * per-conversation rollup (AiConversationPanel's "AI Reliability") does
+ * refetch on reconnect and lists every flagged message in the chat.
  */
 interface Flag {
   risk: number;

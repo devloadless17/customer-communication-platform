@@ -1,7 +1,9 @@
 import { Injectable, type OnModuleDestroy, type OnModuleInit } from "@nestjs/common";
 
 import { SubscriberPriority } from "@/lib/events/bus";
+import { TtlCache } from "@/lib/providers/config-cache";
 import { webchatwidgetShowsAgentName } from "@/lib/providers/webchatwidget-config";
+import { resolveActorDisplayName } from "@/lib/workspaces/operator-mask";
 
 import { DbService } from "../db/db.service";
 import { EventBus } from "../events/event-bus.module";
@@ -9,6 +11,11 @@ import { WebchatwidgetGateway } from "./webchatwidget.gateway";
 import { frameFromMessage } from "./webchatwidget-frame";
 
 const CHANNEL = "webchatwidget";
+
+/** Sender names go to a STRANGER'S browser, so the cache is short-lived rather
+ *  than grow-only: a renamed agent must stop showing their old name to website
+ *  visitors within a minute, not at the next process boot. */
+const NAME_TTL_MS = 60_000;
 
 /** Was this outbound written by the AI assistant? The native orchestrator + the
  *  accepted-suggestion path both stamp `rawPayload.sentVia = "ai-assistant/…"`
@@ -37,10 +44,11 @@ function isAiSend(rawPayload: Record<string, unknown> | undefined): boolean {
 @Injectable()
 export class WebchatwidgetDeliveryService implements OnModuleInit, OnModuleDestroy {
   private offs: Array<() => void> = [];
-  // userId → display name. Grow-only, tiny (team size); names change rarely and
-  // a stale one self-heals on the next process boot. Keeps the realtime frame off
-  // a DB read per agent message once warm.
-  private readonly nameCache = new Map<string, string>();
+  // `<workspaceId>::<userId>` → display name (`""` = no name / unknown user).
+  // Keyed by workspace because the operator mask below is workspace-relative:
+  // the same superAdmin is "Support" in a tenant's workspace and their real
+  // self in their own. Bounded + TTL'd (see NAME_TTL_MS) rather than grow-only.
+  private readonly nameCache = new TtlCache<string>(NAME_TTL_MS, 5_000);
 
   constructor(
     private readonly bus: EventBus,
@@ -48,13 +56,18 @@ export class WebchatwidgetDeliveryService implements OnModuleInit, OnModuleDestr
     private readonly gateway: WebchatwidgetGateway,
   ) {}
 
-  private async nameFor(userId: string): Promise<string | null> {
-    const hit = this.nameCache.get(userId);
-    if (hit !== undefined) return hit;
+  /**
+   * The name that reaches the END CUSTOMER's browser, so it goes through the
+   * operator mask (CLAUDE.md §18): a platform operator working a tenant's
+   * inbox renders as "Support", never under their real name.
+   */
+  private async nameFor(workspaceId: string, userId: string): Promise<string | null> {
+    const key = `${workspaceId}::${userId}`;
+    const hit = this.nameCache.get(key);
+    if (hit !== undefined) return hit || null;
     try {
-      const u = await this.db.user.findUnique({ where: { id: userId }, select: { name: true } });
-      const name = u?.name ?? "";
-      this.nameCache.set(userId, name);
+      const name = (await resolveActorDisplayName(this.db, userId, [workspaceId])) ?? "";
+      this.nameCache.set(key, name);
       return name || null;
     } catch {
       return null;
@@ -89,7 +102,7 @@ export class WebchatwidgetDeliveryService implements OnModuleInit, OnModuleDestr
           // widget's frames never carry the name at all (not merely hidden client-side).
           const senderName =
             e.senderUserId && (await webchatwidgetShowsAgentName(e.conversationId))
-              ? await this.nameFor(e.senderUserId)
+              ? await this.nameFor(e.workspaceId, e.senderUserId)
               : null;
           const ai = isAiSend(e.message.rawPayload);
           this.gateway.deliverToVisitor(

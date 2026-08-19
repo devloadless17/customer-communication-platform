@@ -7,10 +7,16 @@ import type { AiConfigRow } from "./runtime-config";
 import { renderTts } from "./voice";
 
 /**
- * Outbound delivery for a reply, honoring the 4 channel modes and always
- * preserving the canonical TEXT. Voice is synthesized from `ttsText` (Arabic
- * script for Lebanese) and delivered via sendMediaInternal; ANY TTS/media
- * failure falls back to sending the text (correction #12).
+ * Outbound delivery for a reply, honoring the 4 channel modes and the two voice
+ * guards the admin sets (`maxVoiceDurationSec`, `voiceTextFallback`). Voice is
+ * synthesized from `ttsText` (Arabic script for Lebanese) and delivered via
+ * sendMediaInternal; any TTS/media failure — or a reply longer than the
+ * duration cap — falls back to sending the text (correction #12), unless the
+ * workspace turned that fallback off.
+ *
+ * The AGENT path (sendSuggestionAsVoice, "Send as voice" on a draft) is
+ * deliberately outside both guards: a person chose that channel for that
+ * message, and its text fallback is what makes the click always deliver.
  *
  * Dedup: the voice blob uses a DETERMINISTIC key (one per inbound message), so
  * a retry overwrites rather than orphaning; the orchestrator's automation claim
@@ -50,6 +56,20 @@ function channelPlan(
   }
 }
 
+/**
+ * Rough spoken length of a reply, in seconds. An ESTIMATE on purpose: neither
+ * TTS backend reports a duration and decoding the mp3 to measure one would cost
+ * more than the guard is worth. `maxVoiceDurationSec` exists to stop a runaway
+ * multi-minute voice note, and a rate-based estimate does that — replies are
+ * 1-3 sentences by prompt design, so the cap only ever trips on the outliers it
+ * was set for. ~15 chars/sec is ordinary conversational speech (~150 wpm) and
+ * holds close enough for Arabic script and Latin alike.
+ */
+const SPEECH_CHARS_PER_SEC = 15;
+export function estimatedSpeechSeconds(text: string): number {
+  return text.trim().length / SPEECH_CHARS_PER_SEC;
+}
+
 export function draftAudioKey(workspaceId: string, inboundMessageId: string): string {
   return `ai-voice-draft/${workspaceId}/${inboundMessageId}.mp3`;
 }
@@ -79,9 +99,16 @@ export async function deliverReply(args: DeliverArgs): Promise<DeliverResult> {
   const result: DeliverResult = { usedVoice: false, voiceFellBackToText: false };
 
   if (plan.voice) {
+    const spoken = (payload.ttsText || payload.replyText).trim();
     try {
+      // Refuse rather than truncate: a voice note cut mid-sentence is a worse
+      // answer than the same reply delivered as text, and refusing before the
+      // render also skips paying for TTS we would not send.
+      if (estimatedSpeechSeconds(spoken) > config.maxVoiceDurationSec) {
+        throw new Error("voice_over_max_duration");
+      }
       const rendered = await renderTts({
-        text: payload.ttsText || payload.replyText,
+        text: spoken,
         voiceId: config.voiceId,
         speed: config.voiceSpeed,
         instructions: voiceInstructions(config),
@@ -98,10 +125,20 @@ export async function deliverReply(args: DeliverArgs): Promise<DeliverResult> {
       });
       result.voiceMessageId = sent.messageId;
       result.usedVoice = true;
-    } catch {
-      // TTS or media send failed → guarantee a text reply instead.
-      result.voiceFellBackToText = true;
-      plan.text = true;
+    } catch (err) {
+      // Voice could not be produced (TTS/media failure, or over the duration
+      // cap). `voiceTextFallback` — an admin-set switch — decides what happens
+      // next: on (the default) substitutes the canonical text, off means the
+      // workspace does NOT want a text message the customer never asked for, so
+      // a voice-only mode delivers nothing and the orchestrator audits the
+      // failure instead of silently switching channel. A mode that was already
+      // sending text (text_and_voice) still sends it either way.
+      if (config.voiceTextFallback) {
+        result.voiceFellBackToText = true;
+        plan.text = true;
+      } else if (!plan.text) {
+        throw err;
+      }
     }
   }
 

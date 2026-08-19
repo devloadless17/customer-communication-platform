@@ -72,9 +72,22 @@ export async function persistSuggestion(args: PersistSuggestionArgs) {
   return created;
 }
 
+/**
+ * A pending draft is only offerable while it is UNEXPIRED. A draft answers one
+ * message at one moment; a day later the thread has moved on, so serving it
+ * would put stale text in front of an agent one click from the customer. Every
+ * read of a pending draft (here, the inbox overview) and the accept CAS in
+ * AiInboxService compose this clause — expiry that nothing reads is not a TTL.
+ * Expired rows are left in place (they are the Regenerate history); reaping
+ * them is a follow-up sweeper, not this gate.
+ */
+export function unexpiredPendingWhere(now = new Date()) {
+  return { state: "pending" as const, expiresAt: { gt: now } };
+}
+
 export async function getPendingSuggestion(workspaceId: string, conversationId: string) {
   return db.aiReplySuggestion.findFirst({
-    where: { workspaceId, conversationId, state: "pending" },
+    where: { workspaceId, conversationId, ...unexpiredPendingWhere() },
     orderBy: { createdAt: "desc" },
   });
 }

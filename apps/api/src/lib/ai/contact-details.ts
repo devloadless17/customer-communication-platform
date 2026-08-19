@@ -1,4 +1,7 @@
 import { db } from "@/lib/db";
+import { publish } from "@/lib/events/bus";
+import { toContactWire } from "@/lib/queries/_shared";
+import { workflowContactSnapshot } from "@/lib/workflows/events";
 
 /**
  * Filling in the contact details the assistant is missing — today, the email
@@ -85,7 +88,37 @@ export async function captureCustomerEmail(
     where: { id: conv.contactId, workspaceId, email: null },
     data: { email },
   });
-  return res.count > 0 ? email : null;
+  if (res.count === 0) return null;
+
+  // Announce the change — same publish the PATCH route, the contact-share chip
+  // and the webchat pre-chat form use, so the contact panel, the contacts list
+  // and every subscribed partner see the address without a refetch.
+  //
+  // Best-effort: this runs after the assistant's reply has committed, and a
+  // publish failure must never cost us the captured address.
+  try {
+    const fresh = await db.contact.findUnique({
+      where: { id: conv.contactId },
+      include: { tags: { select: { id: true } } },
+    });
+    if (fresh) {
+      await publish({
+        type: "contact.updated",
+        workspaceId,
+        contact: toContactWire(fresh),
+        previousStageId: fresh.stageId,
+        fieldChanges: [],
+        changedByUserId: null,
+        workflowContact: workflowContactSnapshot(fresh),
+      });
+    }
+  } catch (err) {
+    console.error(
+      `[ai/contact-details] publish(contact.updated) failed for team=${workspaceId} contact=${conv.contactId}:`,
+      err,
+    );
+  }
+  return email;
 }
 
 /**

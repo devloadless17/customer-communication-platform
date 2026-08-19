@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { useSocketReconnect } from "@/hooks/use-socket-reconnect";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { getClientSocket } from "@/lib/socket-client";
 
@@ -87,6 +88,12 @@ export function AiConversationPanel({ conversationId }: { conversationId: string
   useEffect(() => {
     void load();
   }, [load]);
+
+  // §10 convergence: memory / summary / flag frames are sparse, so one missed
+  // during a drop past the socket recovery window leaves the panel showing a
+  // superseded brief for as long as the thread stays open. The date-range
+  // result below is agent-driven and deliberately left alone.
+  useSocketReconnect(load);
 
   // Realtime: refetch when the system updates this conversation's summary, the
   // customer's memory, or flags a newly-sent AI reply as a hallucination risk

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { useSocketReconnect } from "@/hooks/use-socket-reconnect";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { getClientSocket } from "@/lib/socket-client";
 
@@ -33,6 +34,12 @@ export function AiTranscript({ messageId }: { messageId: string }) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // §10 convergence: a transcription fires exactly one `ai:transcription` frame
+  // per voice note, so missing it during a drop past the socket recovery window
+  // hides the transcript for good. Bounded fan-out — this only mounts on
+  // INBOUND audio bubbles.
+  useSocketReconnect(load);
 
   // Realtime: transcription completed/failed (ai.transcription_changed).
   useEffect(() => {

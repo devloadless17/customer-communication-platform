@@ -28,18 +28,35 @@ export interface ConversationHallucinationSummary {
   flagged: FlaggedMessage[];
 }
 
+/**
+ * How far back the rollup looks. AiMessageMetadata carries only a scalar
+ * `messageId` (no `conversation` relation to filter through — see the note on
+ * assertMessageVisible in ai-inbox.service.ts), so the scope is an IN list of
+ * message ids, and that list has to be BOUNDED: this runs on every AI-panel
+ * hydrate and every suggestion frame, and an unbounded one loaded every id in
+ * a year-old thread to score a handful of AI replies. Outbound only — metadata
+ * is written by the reply paths, which only ever author outbound rows. The
+ * window is served by the ([conversationId, timestamp desc, id desc]) index.
+ */
+const SCAN_MESSAGES = 300;
+/** The panel lists these; a runaway thread must not ship hundreds of rows. */
+const MAX_FLAGGED = 25;
+
 export async function getConversationHallucinationSummary(
   workspaceId: string,
   conversationId: string,
 ): Promise<ConversationHallucinationSummary> {
   const messages = await db.message.findMany({
-    where: { workspaceId, conversationId },
+    where: { workspaceId, conversationId, direction: "out" },
+    orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+    take: SCAN_MESSAGES,
     select: { id: true },
   });
   if (!messages.length) return { ratePercent: null, scoredCount: 0, flagged: [] };
 
   const rows = await db.aiMessageMetadata.findMany({
     where: {
+      workspaceId,
       messageId: { in: messages.map((m) => m.id) },
       aiGenerated: true,
       hallucinationRisk: { not: null },
@@ -55,7 +72,8 @@ export async function getConversationHallucinationSummary(
       messageId: r.messageId,
       risk: r.hallucinationRisk ?? 0,
       notes: r.hallucinationNotes,
-    }));
+    }))
+    .slice(0, MAX_FLAGGED);
 
   return {
     ratePercent: Math.round((sum / rows.length) * 100),

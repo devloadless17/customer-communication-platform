@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { useSocketReconnect } from "@/hooks/use-socket-reconnect";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { BROWSER_API_BASE } from "@/lib/api/browser-base";
 import { getClientSocket } from "@/lib/socket-client";
@@ -32,18 +33,33 @@ export function AiSuggestionBar({ conversationId }: { conversationId: string }) 
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [showSources, setShowSources] = useState(false);
+  // Mirrors the rendered draft's id so `load` can tell "same draft, re-read"
+  // from "a different draft arrived" without depending on `sugg`.
+  const suggIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    suggIdRef.current = sugg?.id ?? null;
+  }, [sugg]);
 
   const load = useCallback(async () => {
     const res = await apiFetch(`/api/ai-assistant/conversations/${conversationId}/overview`);
     if (!res.ok) return;
     const data = (await res.json()) as { suggestion?: Suggestion | null };
-    setSugg(data.suggestion ?? null);
-    setText(data.suggestion?.text ?? "");
+    const next = data.suggestion ?? null;
+    // Re-seed the textarea only for a DIFFERENT draft: a re-read of the draft
+    // already open (socket frame, reconnect convergence) must not discard the
+    // agent's in-progress edit.
+    if (next?.id !== suggIdRef.current) setText(next?.text ?? "");
+    setSugg(next);
   }, [conversationId]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  // §10 convergence: an `ai:suggestion` frame missed during a drop past the
+  // socket recovery window leaves a stale draft above the composer — the agent
+  // would send, or reject, something the server no longer holds.
+  useSocketReconnect(load);
 
   // Realtime: a new/updated/resolved draft (ai.suggestion_changed).
   useEffect(() => {

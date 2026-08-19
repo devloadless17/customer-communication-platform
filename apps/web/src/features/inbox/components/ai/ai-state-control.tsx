@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { useSocketReconnect } from "@/hooks/use-socket-reconnect";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { getClientSocket } from "@/lib/socket-client";
 
@@ -59,6 +60,11 @@ export function AiStateControl({
   useEffect(() => {
     void load();
   }, [load]);
+
+  // §10 convergence: `ai:state` is a rare frame with nothing steady behind it,
+  // so one missed during a drop past the socket recovery window would leave the
+  // chip (and the header's "AI Agent" assignee label) wrong until a refresh.
+  useSocketReconnect(load);
 
   // Realtime: reflect state changes made elsewhere (ai.state_changed).
   useEffect(() => {
