@@ -76,8 +76,16 @@ export function StageFilterMenu({
     () => [...stages].sort((a, b) => a.position - b.position),
     [stages],
   );
+  // Height-capped + scrollable, matching the tag menu next door. These lists
+  // are unbounded by construction — the stage catalog grows, and the More
+  // menu renders a block per SELECT field (label + Any + one row per
+  // option). Past the viewport the lower rows became unreachable: the
+  // popover ran off-screen with nothing to scroll, so a workspace with a
+  // couple of dropdown fields could not click its own filters. (Audit
+  // 2026-08-19 — the e2e that catches this had never been run by the
+  // batched gate, so nothing reported it.)
   return (
-    <div className="w-56 py-1">
+    <div className="flex max-h-75 w-56 flex-col overflow-y-auto py-1">
       <RadioRow active={value === "any"} onClick={() => onChange("any")}>
         Any stage
       </RadioRow>
@@ -151,8 +159,16 @@ export function MoreFilterMenu({
   onFieldChange: (v: FieldFilter | null) => void;
   fieldDefinitions: ContactFieldDefinition[];
 }) {
+  // Height-capped + scrollable, matching the tag menu next door. These lists
+  // are unbounded by construction — the stage catalog grows, and the More
+  // menu renders a block per SELECT field (label + Any + one row per
+  // option). Past the viewport the lower rows became unreachable: the
+  // popover ran off-screen with nothing to scroll, so a workspace with a
+  // couple of dropdown fields could not click its own filters. (Audit
+  // 2026-08-19 — the e2e that catches this had never been run by the
+  // batched gate, so nothing reported it.)
   return (
-    <div className="w-64 py-1">
+    <div className="flex max-h-75 w-64 flex-col overflow-y-auto py-1">
       <MenuLabel>Source</MenuLabel>
       <RadioRow active={sourceFilter === "all"} onClick={() => onSourceChange("all")}>
         Everyone
