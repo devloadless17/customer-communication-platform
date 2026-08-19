@@ -59,6 +59,14 @@ import type { Channel } from "@ccp/shared/types";
 const CALL_PERMISSION_REQUEST_BODY =
   "We'd like to call you to help with your request. Allow calls from us?";
 
+/**
+ * How long after a call ends its own agent may still push the in-app
+ * recording. Wide enough for the browser's teardown upload (three retries) to
+ * survive a terminate webhook that beat it and a slow multipart on a long
+ * call; short enough that a finished call is not an open upload target.
+ */
+const INAPP_RECORDING_UPLOAD_WINDOW_MS = 10 * 60 * 1000;
+
 import {
   conversationRelationWhere,
   visibilityWhere,
@@ -1279,6 +1287,14 @@ export class CallsService {
    * additionally gated on the number's artifact mode actually being "inapp" —
    * a browser can never push audio onto a call whose admin didn't choose
    * in-app recording.
+   *
+   * OWNERSHIP + LIFECYCLE are the real gates, and both are load-bearing. The
+   * capability + workspace pair alone let ANY calls-capable session attach an
+   * arbitrary audio file to ANY call in the workspace — including one that
+   * ended weeks ago — and the bytes would be remuxed, transcribed and
+   * published onto the thread as that call's recording. So the uploader must
+   * be the agent ON the call (mirrors completeAccept), and the call must still
+   * be live or inside the finalisation window.
    */
   async uploadInAppRecording(
     session: ApiSession,
@@ -1299,10 +1315,35 @@ export class CallsService {
         id: true,
         workspaceId: true,
         channel: true,
+        status: true,
+        endedAt: true,
+        answeredByUserId: true,
+        initiatedByUserId: true,
         conversation: { select: { channelConnectionId: true } },
       },
     });
     if (!call) throw new NotFoundException({ error: "call_not_found" });
+    // The agent whose browser is recording: the answerer on an inbound call,
+    // the placer on an outbound one. Neither set ⇒ nobody owns the media leg,
+    // so there is no legitimate uploader.
+    const recordingAgentId = call.answeredByUserId ?? call.initiatedByUserId;
+    if (!recordingAgentId || recordingAgentId !== session.userId) {
+      throw new ForbiddenException({ error: "forbidden" });
+    }
+    // Live, or finishing. The final upload fires at teardown and can land
+    // AFTER the terminate webhook (it retries three times, and a long call is
+    // a slow multipart), so a live-only gate would drop exactly the upload
+    // that triggers the remux + transcription. Past the window it is no
+    // longer a call in progress — it is a file being attached to history, and
+    // the recovery sweeper owns anything left unfinished.
+    const live =
+      call.status === CallStatus.ringing || call.status === CallStatus.in_progress;
+    const finalising =
+      call.endedAt !== null &&
+      Date.now() - call.endedAt.getTime() <= INAPP_RECORDING_UPLOAD_WINDOW_MS;
+    if (!live && !finalising) {
+      throw new ConflictException({ error: "call_not_live" });
+    }
     const policies = await this.callArtifactPolicies(
       session.workspaceId,
       call.channel,
@@ -1875,6 +1916,7 @@ export class CallsService {
     await this.db.contact.updateMany({
       where: {
         id: call.conversation.contactId,
+        workspaceId: session.workspaceId,
         OR: [{ lastInboundAt: null }, { lastInboundAt: { lt: answeredAt } }],
       },
       data: { lastInboundAt: answeredAt },

@@ -451,8 +451,14 @@ export class ChannelsService {
       });
     }
     // FK cascades take care of messages / mentions / reactions / pins /
-    // receipts in one shot — single DELETE.
-    await this.db.teamChannel.delete({ where: { id: channelId } });
+    // receipts in one shot — single DELETE. Workspace-scoped like every other
+    // write here (§7): the read above already proved ownership, but the one
+    // destructive statement in team chat must not be a single dropped line
+    // away from deleting a sibling tenant's channel.
+    const removed = await this.db.teamChannel.deleteMany({
+      where: { id: channelId, workspaceId },
+    });
+    if (removed.count === 0) throw new NotFoundException({ error: "channel_not_found" });
     await this.bus.publish({
       type: "team.catalog_changed",
       workspaceId,

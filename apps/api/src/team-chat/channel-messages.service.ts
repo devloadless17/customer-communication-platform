@@ -7,6 +7,8 @@ import {
   UnprocessableEntityException,
 } from "@nestjs/common";
 
+import { randomUUID } from "node:crypto";
+
 import { parseMentions } from "@ccp/shared/team-chat/mentions";
 import {
   canDeleteMessage,
@@ -800,7 +802,14 @@ export class ChannelMessagesService {
         // media for consistency.
         direction: "out",
         conversationId: channelId,
-        externalId: args.clientTempId ?? `chan_${channelId}`,
+        // The blob key is derived from this (`buildKey`: the last 48 chars,
+        // per workspace + month), so it MUST be minted here and never taken
+        // from the client. `clientTempId` alone carried no channel or author,
+        // so two uploads sharing one — a client that reuses its counter, or a
+        // crafted one — overwrote each other's object in place, silently
+        // swapping the file behind a committed message. `clientTempId` stays
+        // what it always was: the send-idempotency key on the row.
+        externalId: `chan_${channelId}_${userId}_${randomUUID()}`,
         originalFilename: args.file.filename,
       },
     });
@@ -878,11 +887,12 @@ export class ChannelMessagesService {
       });
     } catch (err) {
       // Idempotent retry: a prior media send with this clientTempId already
-      // committed. The blob layer keys uploads by customId (= clientTempId), so
-      // a retry's re-upload 409s and RESOLVES to the original blob instead of
-      // creating an orphan — `saved.key` here IS the original's key, so there is
-      // nothing to clean up (deleting it would destroy the live message's
-      // media). Just return the original instead of inserting a duplicate.
+      // committed. The blob key is minted per REQUEST (see the upload above),
+      // so this attempt's object is a fresh one the committed message doesn't
+      // reference — left for the blob-orphan sweeper rather than deleted here,
+      // because a key we merely believe to be unreferenced is exactly how live
+      // media has been destroyed before. Return the original instead of
+      // inserting a duplicate.
       const dedup =
         args.clientTempId && isP2002(err)
           ? await this.dedupCommittedSend(workspaceId, userId, channelId, args.clientTempId)
@@ -978,8 +988,8 @@ export class ChannelMessagesService {
     const parsed = parseMentions(body);
     const ids = Array.from(new Set(parsed.map((m) => m.userId)));
     if (ids.length === 0) return [];
-    const channel = await this.db.teamChannel.findUnique({
-      where: { id: channelId },
+    const channel = await this.db.teamChannel.findFirst({
+      where: { id: channelId, workspaceId },
       select: { isDefault: true },
     });
     const isDefault = channel?.isDefault ?? false;

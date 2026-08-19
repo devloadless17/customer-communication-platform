@@ -34,8 +34,30 @@ import { FFMPEG_WAIT_OUTBOUND_MS, withFfmpegSlot } from "./ffmpeg-slots";
  * dev, `sudo apt install ffmpeg` (the api runs on the host outside the container).
  */
 
+/** Ceiling for a VOICE-NOTE pass — seconds of audio, so anything slower than
+ *  this is a stuck process rather than a slow encode. */
 const TRANSCODE_TIMEOUT_MS = 20_000;
 const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Ceiling for the CALL-RECORDING passes (the full libopus re-encode, the
+ * stereo split, loudnorm, and the analysis probes).
+ *
+ * A call is minutes to an hour of audio, not a ten-second voice note, so the
+ * voice-note budget above was killing exactly the long calls — and both
+ * artifacts with it: no OGG (the raw browser container survives, but only
+ * because the remux failure is caught) and, worse, no transcript, from bytes
+ * that exist nowhere else. Scaled by input size so a short call keeps a tight
+ * ceiling, and clamped so a huge one still can't hold an ffmpeg slot forever.
+ */
+const CALL_TRANSCODE_MS_PER_MB = 8_000;
+const CALL_TRANSCODE_MIN_MS = 60_000;
+const CALL_TRANSCODE_MAX_MS = 10 * 60_000;
+
+function callTranscodeTimeoutMs(input: Uint8Array): number {
+  const scaled = (input.byteLength / (1024 * 1024)) * CALL_TRANSCODE_MS_PER_MB;
+  return Math.min(CALL_TRANSCODE_MAX_MS, Math.max(CALL_TRANSCODE_MIN_MS, Math.round(scaled)));
+}
 
 /**
  * iOS voice-note playback fix — ON by default (user's choice 2026-05-26: "set
@@ -107,16 +129,20 @@ export async function transcodeToOggOpus(
 export async function transcodeCallRecordingToOgg(
   input: Uint8Array,
 ): Promise<Uint8Array<ArrayBuffer>> {
-  return transcode(input, [
-    "-map_metadata", "-1",
-    "-vn",
-    "-ac", "2",
-    "-ar", "48000",
-    "-c:a", "libopus",
-    "-b:a", "48k",
-    "-f", "ogg",
-    "pipe:1",
-  ]);
+  return transcode(
+    input,
+    [
+      "-map_metadata", "-1",
+      "-vn",
+      "-ac", "2",
+      "-ar", "48000",
+      "-c:a", "libopus",
+      "-b:a", "48k",
+      "-f", "ogg",
+      "pipe:1",
+    ],
+    callTranscodeTimeoutMs(input),
+  );
 }
 
 /** One side of the stereo call master, ready for a speech model. */
@@ -207,10 +233,11 @@ export async function extractCallChannels(
  */
 async function channelsAreIdentical(input: Uint8Array): Promise<boolean> {
   try {
-    const stderr = await runFfmpegStderr(input, [
-      "-af", "pan=mono|c0=c0-c1,volumedetect",
-      "-f", "null", "-",
-    ]);
+    const stderr = await runFfmpegStderr(
+      input,
+      ["-af", "pan=mono|c0=c0-c1,volumedetect", "-f", "null", "-"],
+      callTranscodeTimeoutMs(input),
+    );
     const m = /mean_volume:\s*(-?[\d.]+) dB/.exec(stderr);
     return m ? Number(m[1]) < -80 : false;
   } catch {
@@ -225,15 +252,20 @@ async function extractOneChannel(
 ): Promise<CallChannelAudio> {
   // `pan=mono|c0=c0+c1` sums the legs (the playback mix); `c0=cN` isolates one.
   const pan = channel === "mix" ? "pan=mono|c0=0.5*c0+0.5*c1" : `pan=mono|c0=c${channel}`;
-  const raw = await transcodeToFile(input, `ch${channel}.wav`, [
-    "-map_metadata", "-1",
-    "-vn",
-    "-filter_complex", `[0:a]${pan}[a]`,
-    "-map", "[a]",
-    "-ar", "16000",
-    "-c:a", "pcm_s16le",
-    "-f", "wav",
-  ]);
+  const raw = await transcodeToFile(
+    input,
+    `ch${channel}.wav`,
+    [
+      "-map_metadata", "-1",
+      "-vn",
+      "-filter_complex", `[0:a]${pan}[a]`,
+      "-map", "[a]",
+      "-ar", "16000",
+      "-c:a", "pcm_s16le",
+      "-f", "wav",
+    ],
+    callTranscodeTimeoutMs(input),
+  );
   const { meanVolumeDb, speechSeconds } = await analyseChannel(raw);
 
   // Only normalise a channel that actually carries speech. Running loudness
@@ -250,15 +282,20 @@ async function extractOneChannel(
     // target gives the model comparable input on either side. Single-pass
     // loudnorm: the two-pass version needs a measurement round-trip for a
     // precision nothing here depends on.
-    const normalised = await transcodeToFile(raw, `ch${channel}-n.wav`, [
-      "-map_metadata", "-1",
-      "-vn",
-      "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
-      "-ar", "16000",
-      "-ac", "1",
-      "-c:a", "pcm_s16le",
-      "-f", "wav",
-    ]);
+    const normalised = await transcodeToFile(
+      raw,
+      `ch${channel}-n.wav`,
+      [
+        "-map_metadata", "-1",
+        "-vn",
+        "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+        "-ar", "16000",
+        "-ac", "1",
+        "-c:a", "pcm_s16le",
+        "-f", "wav",
+      ],
+      callTranscodeTimeoutMs(raw),
+    );
     return { bytes: normalised, meanVolumeDb, speechSeconds };
   } catch {
     // Normalisation is an improvement, never a requirement.
@@ -281,10 +318,11 @@ async function analyseChannel(
   input: Uint8Array,
 ): Promise<{ meanVolumeDb: number; speechSeconds: number }> {
   try {
-    const stderr = await runFfmpegStderr(input, [
-      "-af", "volumedetect,silencedetect=noise=-45dB:d=0.3",
-      "-f", "null", "-",
-    ]);
+    const stderr = await runFfmpegStderr(
+      input,
+      ["-af", "volumedetect,silencedetect=noise=-45dB:d=0.3", "-f", "null", "-"],
+      callTranscodeTimeoutMs(input),
+    );
     const mean = /mean_volume:\s*(-?[\d.]+) dB/.exec(stderr);
     const meanVolumeDb = mean ? Number(mean[1]) : -91;
 
@@ -314,7 +352,11 @@ async function analyseChannel(
 
 async function probeChannelCount(input: Uint8Array): Promise<number> {
   try {
-    const stderr = await runFfmpegStderr(input, ["-f", "null", "-"]);
+    const stderr = await runFfmpegStderr(
+      input,
+      ["-f", "null", "-"],
+      callTranscodeTimeoutMs(input),
+    );
     // ffmpeg's stream line: "Audio: opus, 48000 Hz, stereo, fltp"
     if (/Audio:.*\bstereo\b/.test(stderr)) return 2;
     if (/Audio:.*\b(\d+) channels\b/.test(stderr)) {
@@ -326,8 +368,14 @@ async function probeChannelCount(input: Uint8Array): Promise<number> {
   }
 }
 
-/** Run ffmpeg for its ANALYSIS output (stderr); the decoded audio is discarded. */
-async function runFfmpegStderr(input: Uint8Array, args: string[]): Promise<string> {
+/** Run ffmpeg for its ANALYSIS output (stderr); the decoded audio is discarded.
+ *  `timeoutMs` is per call site — a call-recording probe reads minutes of audio
+ *  where a voice-note pass reads seconds. */
+async function runFfmpegStderr(
+  input: Uint8Array,
+  args: string[],
+  timeoutMs: number = TRANSCODE_TIMEOUT_MS,
+): Promise<string> {
   return withFfmpegSlot(FFMPEG_WAIT_OUTBOUND_MS, async () => {
     const dir = await mkdtemp(join(tmpdir(), "ccp-voice-"));
     const inPath = join(dir, "in");
@@ -353,7 +401,7 @@ async function runFfmpegStderr(input: Uint8Array, args: string[]): Promise<strin
             ff.kill("SIGKILL");
             reject(new Error("ffmpeg analysis timed out"));
           });
-        }, TRANSCODE_TIMEOUT_MS);
+        }, timeoutMs);
         ff.on("error", (err) => finish(() => reject(err)));
         ff.stderr.on("data", (c: Buffer) => {
           if (stderr.length < 16_000) stderr += c.toString();
@@ -393,13 +441,14 @@ export async function transcodeToM4a(
 async function transcode(
   input: Uint8Array,
   outputArgs: string[],
+  timeoutMs: number = TRANSCODE_TIMEOUT_MS,
 ): Promise<Uint8Array<ArrayBuffer>> {
   return withFfmpegSlot(FFMPEG_WAIT_OUTBOUND_MS, async () => {
     const dir = await mkdtemp(join(tmpdir(), "ccp-voice-"));
     const inPath = join(dir, "in");
     try {
       await writeFile(inPath, Buffer.from(input));
-      return await runFfmpeg(inPath, outputArgs);
+      return await runFfmpeg(inPath, outputArgs, timeoutMs);
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => {});
     }
@@ -416,6 +465,7 @@ async function transcodeToFile(
   input: Uint8Array,
   outName: string,
   outputArgs: string[],
+  timeoutMs: number = TRANSCODE_TIMEOUT_MS,
 ): Promise<Uint8Array<ArrayBuffer>> {
   return withFfmpegSlot(FFMPEG_WAIT_OUTBOUND_MS, async () => {
     const dir = await mkdtemp(join(tmpdir(), "ccp-voice-"));
@@ -424,7 +474,7 @@ async function transcodeToFile(
     try {
       await writeFile(inPath, Buffer.from(input));
       // Run ffmpeg to the temp file (stdout stays empty); `-y` overwrites.
-      await runFfmpegToFile(inPath, [...outputArgs, "-y", outPath]);
+      await runFfmpegToFile(inPath, [...outputArgs, "-y", outPath], timeoutMs);
       const buf = await readFile(outPath);
       if (buf.byteLength === 0) throw new Error("ffmpeg produced an empty file");
       const result = new Uint8Array(buf.byteLength);
@@ -438,7 +488,11 @@ async function transcodeToFile(
 
 /** Run ffmpeg with a FILE output target (no stdout capture). Resolves on a clean
  *  exit, rejects on ENOENT / non-zero / timeout — same contract as {@link runFfmpeg}. */
-function runFfmpegToFile(inPath: string, outputArgs: string[]): Promise<void> {
+function runFfmpegToFile(
+  inPath: string,
+  outputArgs: string[],
+  timeoutMs: number = TRANSCODE_TIMEOUT_MS,
+): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const ff = spawn(
       "ffmpeg",
@@ -458,7 +512,7 @@ function runFfmpegToFile(inPath: string, outputArgs: string[]): Promise<void> {
         ff.kill("SIGKILL");
         reject(new Error("ffmpeg transcode timed out"));
       });
-    }, TRANSCODE_TIMEOUT_MS);
+    }, timeoutMs);
     ff.on("error", (err) => finish(() => reject(err))); // ENOENT = not installed
     ff.stderr.on("data", (c: Buffer) => {
       if (stderr.length < 4000) stderr += c.toString();
@@ -473,7 +527,11 @@ function runFfmpegToFile(inPath: string, outputArgs: string[]): Promise<void> {
   });
 }
 
-function runFfmpeg(inPath: string, outputArgs: string[]): Promise<Uint8Array<ArrayBuffer>> {
+function runFfmpeg(
+  inPath: string,
+  outputArgs: string[],
+  timeoutMs: number = TRANSCODE_TIMEOUT_MS,
+): Promise<Uint8Array<ArrayBuffer>> {
   return new Promise<Uint8Array<ArrayBuffer>>((resolve, reject) => {
     const ff = spawn(
       "ffmpeg",
@@ -498,7 +556,7 @@ function runFfmpeg(inPath: string, outputArgs: string[]): Promise<Uint8Array<Arr
         ff.kill("SIGKILL");
         reject(new Error("ffmpeg transcode timed out"));
       });
-    }, TRANSCODE_TIMEOUT_MS);
+    }, timeoutMs);
 
     ff.on("error", (err) => finish(() => reject(err))); // ENOENT = ffmpeg not installed
     ff.stdout.on("data", (c: Buffer) => {
