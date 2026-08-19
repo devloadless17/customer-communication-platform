@@ -652,7 +652,7 @@ export class ConversationsService {
      * Optional so server-to-server callers (never restricted) can omit it.
      */
     viewer?: ConversationViewer,
-  ): Promise<{ count: number }> {
+  ): Promise<{ count: number; skippedWithTickets?: number }> {
     // AND the restriction as an independent clause, never a sibling spread —
     // `visibilityWhere` sets `assignedUserId`, and a spread next to
     // `id: { in }` would be fine, but the AND form is what keeps this immune to
@@ -669,7 +669,31 @@ export class ConversationsService {
     if (owned.length === 0) {
       throw new NotFoundException({ error: "no_matching_conversations_in_this_team" });
     }
-    const ownedIds = owned.map((c) => c.id);
+    // Same ticket guard as the single delete (S12-2) — the cascade reaches
+    // TicketShare, so one tidy-up here can destroy a sibling workspace's live
+    // work. In BULK the proportionate shape is to SKIP the ticket-bearing
+    // threads rather than refuse the batch: the caller selected many, and
+    // failing all of them because one carries a ticket is the worse outcome.
+    // The response reports what was skipped so the UI can say so.
+    const ticketed = await this.db.ticket.findMany({
+      where: { workspaceId, conversationId: { in: owned.map((c) => c.id) } },
+      select: { conversationId: true },
+      distinct: ["conversationId"],
+    });
+    const ticketedIds = new Set(
+      ticketed.map((t) => t.conversationId).filter((id): id is string => id !== null),
+    );
+    const ownedIds = owned.map((c) => c.id).filter((id) => !ticketedIds.has(id));
+    if (ownedIds.length === 0) {
+      throw new ConflictException({
+        error: "conversation_has_tickets",
+        detail:
+          "Every selected conversation carries a ticket. Delete those tickets first — " +
+          "deleting the threads would destroy their history, files, and any department " +
+          "they were escalated to.",
+        skippedWithTickets: ticketedIds.size,
+      });
+    }
 
     const mediaKeys = await this.collectMediaKeys(workspaceId, ownedIds);
 
@@ -695,7 +719,7 @@ export class ConversationsService {
       });
     });
 
-    return { count: ownedIds.length };
+    return { count: ownedIds.length, ...(ticketedIds.size ? { skippedWithTickets: ticketedIds.size } : {}) };
   }
 
   /**
@@ -1060,6 +1084,28 @@ export class ConversationsService {
       select: { id: true },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation_not_found" });
+
+    // A ticket is the permanent record of WORK on this thread (§2), and
+    // `Ticket.conversation` is onDelete: Cascade — so this delete would take
+    // every ticket raised on the thread with it, and from each ticket the
+    // cascade continues into its TicketShare (a SIBLING workspace's access),
+    // its cross-department TicketMessage thread, its TicketEvent history and
+    // its TicketAttachment evidence. A guest department would lose work it is
+    // actively doing because the owner tidied a thread, with no signal at all.
+    // Deleting a ticket is its own deliberate, owner-only action; require it
+    // first rather than destroying the record as a side effect. (Audit
+    // 2026-08-19, S12-2 — same class as the retention sweeper's ticket guard.)
+    const ticketCount = await this.db.ticket.count({ where: { workspaceId, conversationId } });
+    if (ticketCount > 0) {
+      throw new ConflictException({
+        error: "conversation_has_tickets",
+        detail:
+          `This conversation carries ${ticketCount} ticket${ticketCount === 1 ? "" : "s"}. ` +
+          `Delete the ticket${ticketCount === 1 ? "" : "s"} first — deleting the thread would ` +
+          `destroy their history, files, and any department they were escalated to.`,
+        ticketCount,
+      });
+    }
 
     const mediaKeys = await this.collectMediaKeys(workspaceId, [conversationId]);
 
