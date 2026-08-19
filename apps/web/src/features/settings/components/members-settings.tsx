@@ -122,6 +122,7 @@ export function MembersSettings({
   currentUserOrgRole,
   workspaceId,
   teamName,
+  organizationName,
   users,
   pendingInvites,
   teamWorkHours,
@@ -139,7 +140,13 @@ export function MembersSettings({
   isOrgOwner?: boolean;
   /** Needed for the live presence subscription behind the member status dots. */
   workspaceId: string;
+  /** THIS workspace's name — what the rename card edits (PATCH /api/workspace). */
   teamName: string;
+  /** The ORGANIZATION above it. Load-bearing, not decoration: the danger zone
+   *  deletes the whole org, so its copy and its type-to-confirm string must
+   *  name the org — confirming a workspace name for an org-wide delete is a
+   *  guard that reads as friction while checking the wrong noun. */
+  organizationName: string;
   users: TeamUserRow[];
   /** Empty for non-admins (they can't see this panel). */
   pendingInvites: PendingInviteRow[];
@@ -189,6 +196,11 @@ export function MembersSettings({
   // rather than merely error: the handler tears the socket down BEFORE the
   // request, so a rejected click would strand the clicker signed-out.)
   const canDeleteOrg = canManage && isOrgOwner;
+  // The ORG's name, for everything the danger zone says and checks. Empty on
+  // the (transitional) sessions that carry no org name — the copy falls back to
+  // a generic phrase and the type-to-confirm to the literal DELETE, since an
+  // empty `requireText` turns the guard off entirely.
+  const orgLabel = organizationName.trim();
 
   async function createInvite(form: FormData) {
     setError(null);
@@ -291,11 +303,13 @@ export function MembersSettings({
     });
   }
 
-  async function renameOrg(nextName: string): Promise<boolean> {
+  /** Renames THIS WORKSPACE. The organization's own name is edited on
+   *  Organization → Account info (PATCH /api/workspaces/organization). */
+  async function renameWorkspace(nextName: string): Promise<boolean> {
     setError(null);
     const trimmed = nextName.trim();
     if (trimmed.length === 0 || trimmed.length > 200) {
-      setError("Organization name must be 1–200 characters.");
+      setError("Workspace name must be 1–200 characters.");
       return false;
     }
     if (trimmed === liveTeamName) return true; // no-op save — no toast, no churn
@@ -317,7 +331,7 @@ export function MembersSettings({
       body: JSON.stringify({ name: trimmed }),
     });
     if (!res.ok) {
-      setError(await apiErrorMessage(res, "Failed to rename organization"));
+      setError(await apiErrorMessage(res, "Failed to rename workspace"));
       // Roll the optimistic patch back to the server-truth name.
       dispatchLocalSocketEvent("team:renamed", {
         workspaceId: "",
@@ -326,7 +340,7 @@ export function MembersSettings({
       });
       return false;
     }
-    toast.success("Organization renamed");
+    toast.success("Workspace renamed");
     // Soft-refresh so the RSC layout (sidebar shell) re-fetches and the prop
     // matches the live state next render — purely belt-and-suspenders since
     // the live listener already patched every consumer.
@@ -338,14 +352,17 @@ export function MembersSettings({
     if (deletingOrg) return;
     setError(null);
     const ok = await confirm({
-      title: `Delete ${liveTeamName}?`,
+      title: `Delete ${orgLabel || "this organization"}?`,
       description:
-        "This permanently removes the organization and EVERYTHING in it — contacts, conversations, messages, broadcasts, automations, every teammate's account. The WhatsApp connection is dropped. This cannot be undone. You will be signed out immediately.",
+        "This permanently removes the ORGANIZATION and every workspace in it — including workspaces you may not be a member of, and every inbox, contact, conversation, message, broadcast, automation and teammate account inside them. The WhatsApp connection is dropped. This cannot be undone. You will be signed out immediately.",
       confirmLabel: "Delete organization",
       destructive: true,
       // Highest blast-radius action in the product — require typing the exact
-      // org name so it can't be wiped by a misclick + Enter.
-      requireText: liveTeamName,
+      // ORGANIZATION name so it can't be wiped by a misclick + Enter. It has to
+      // be the org, not this workspace: typing a workspace name to destroy the
+      // org is friction that checks the wrong noun. `orgLabel` falls back to
+      // the literal DELETE, because an empty requireText disables the guard.
+      requireText: orgLabel || "DELETE",
     });
     if (!ok) return;
     setDeletingOrg(true);
@@ -398,7 +415,9 @@ export function MembersSettings({
         </div>
       )}
 
-      {canManage && <OrgNameCard currentName={liveTeamName} onRename={renameOrg} />}
+      {canManage && (
+        <WorkspaceNameCard currentName={liveTeamName} onRename={renameWorkspace} />
+      )}
 
       {canManage && (
         <OrgWorkHoursCard
@@ -507,7 +526,7 @@ export function MembersSettings({
 
       {canDeleteOrg && (
         <DangerZone
-          teamName={liveTeamName}
+          organizationName={orgLabel}
           pending={deletingOrg}
           onDeleteOrg={() => {
             void deleteOrg();
@@ -517,12 +536,12 @@ export function MembersSettings({
 
       {confirmDialog}
       <ResetPasswordDialog target={resetTarget} onClose={() => setResetTarget(null)} />
-      {deletingOrg && <DeletingOrgOverlay teamName={liveTeamName} />}
+      {deletingOrg && <DeletingOrgOverlay organizationName={orgLabel} />}
     </div>
   );
 }
 
-function DeletingOrgOverlay({ teamName }: { teamName: string }) {
+function DeletingOrgOverlay({ organizationName }: { organizationName: string }) {
   return (
     <div
       role="status"
@@ -532,10 +551,12 @@ function DeletingOrgOverlay({ teamName }: { teamName: string }) {
       <div className="flex w-full max-w-sm flex-col items-center gap-3 rounded-xl border border-border bg-card px-6 py-7 text-center shadow-xl">
         <Loader2 className="size-6 animate-spin text-primary" />
         <div className="space-y-1">
-          <div className="text-sm font-medium">Deleting {teamName}…</div>
+          <div className="text-sm font-medium">
+            Deleting {organizationName || "this organization"}…
+          </div>
           <p className="text-xs text-muted-foreground">
-            Removing every conversation, contact, broadcast, and teammate. You'll
-            be signed out as soon as this finishes.
+            Removing every workspace, conversation, contact, broadcast, and
+            teammate. You'll be signed out as soon as this finishes.
           </p>
         </div>
       </div>
@@ -775,11 +796,13 @@ function UserRow({
 }
 
 function DangerZone({
-  teamName,
+  organizationName,
   pending,
   onDeleteOrg,
 }: {
-  teamName: string;
+  /** The ORGANIZATION, not this workspace — the button destroys the whole
+   *  tenant, so this is the only name that may appear here. */
+  organizationName: string;
   pending: boolean;
   onDeleteOrg: () => void;
 }) {
@@ -787,11 +810,15 @@ function DangerZone({
     <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-5">
       <div className="mb-1 text-sm font-medium text-destructive">Danger zone</div>
       <p className="text-xs text-muted-foreground">
-        Deleting <span className="font-medium text-foreground">{teamName}</span>{" "}
-        permanently removes the organization, every teammate account, every
-        conversation, every contact, every broadcast, every automation, and
-        every uploaded file. The WhatsApp connection is dropped. This action
-        cannot be undone.
+        Deleting the organization{" "}
+        <span className="font-medium text-foreground">
+          {organizationName || "you belong to"}
+        </span>{" "}
+        removes <span className="font-medium text-foreground">every workspace in it</span>{" "}
+        — including workspaces you may not be a member of — and with them every
+        inbox, teammate account, conversation, message, contact, broadcast,
+        automation and uploaded file. The WhatsApp connection is dropped. This
+        action cannot be undone.
       </p>
       <div className="mt-3">
         <Button
@@ -809,7 +836,13 @@ function DangerZone({
   );
 }
 
-function OrgNameCard({
+/**
+ * Renames THIS WORKSPACE (PATCH /api/workspace). Named for what it edits — it
+ * said "Organization name" while touching a workspace row, which is the same
+ * noun confusion that made the delete confirm below check the wrong name. The
+ * organization's own name lives on Organization → Account info.
+ */
+function WorkspaceNameCard({
   currentName,
   onRename,
 }: {
@@ -851,7 +884,7 @@ function OrgNameCard({
     <form onSubmit={submit} className="rounded-xl border border-border bg-card p-5">
       <div className="mb-4 flex items-center gap-2">
         <ShieldAlert className="size-4 text-primary" />
-        <div className="text-sm font-medium">Organization name</div>
+        <div className="text-sm font-medium">Workspace name</div>
       </div>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_140px]">
         <Input
@@ -859,8 +892,8 @@ function OrgNameCard({
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           maxLength={200}
-          placeholder="Organization name"
-          aria-label="Organization name"
+          placeholder="Workspace name"
+          aria-label="Workspace name"
           required
         />
         <Button type="submit" disabled={!isDirty || saving}>
@@ -869,7 +902,9 @@ function OrgNameCard({
         </Button>
       </div>
       <p className="mt-2 text-2xs text-muted-foreground">
-        Shown in the sidebar and at the top of every page. Changes appear live for every teammate.
+        Shown in the sidebar and at the top of every page. Changes appear live for
+        every teammate. The organization&apos;s own name is edited on Organization →
+        Account info.
       </p>
     </form>
   );

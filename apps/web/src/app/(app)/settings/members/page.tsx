@@ -14,7 +14,7 @@ import { MembersSettings, type PendingInviteRow, type TeamUserRow } from "@/feat
 export const metadata = { title: "Members · Settings" };
 
 export default async function TeamSettingsPage() {
-  const { user, permissions, orgRole } = await getSession();
+  const { user, permissions, orgRole, organizationName } = await getSession();
   const isAdmin = canManageUsers(user.role);
   // Who may set a teammate's status / edit their schedule. Admin-configurable
   // per role (default: admin + manager), so it's read from the resolved
@@ -72,6 +72,10 @@ export default async function TeamSettingsPage() {
       currentUserOrgRole={orgRole}
       workspaceId={user.workspaceId}
       teamName={team.name}
+      // The danger zone deletes the whole ORG, so it needs the org's name for
+      // its copy and its type-to-confirm — the workspace name it used to show
+      // there was the wrong noun on the highest blast-radius action we have.
+      organizationName={organizationName}
       users={users}
       pendingInvites={pendingInvites}
       teamWorkHours={asWorkHours(teamWorkHours)}

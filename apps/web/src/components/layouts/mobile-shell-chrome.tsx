@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   ContactRound,
+  Flag,
   Inbox,
   LogOut,
   type LucideIcon,
@@ -12,6 +13,7 @@ import {
   MessageSquareText,
   Menu,
   Settings as SettingsIcon,
+  Ticket as TicketIcon,
   UserCircle2,
   BarChart3,
   Workflow,
@@ -72,10 +74,16 @@ interface NavItem {
   match?: string[];
 }
 
+// Same list, same order, as the desktop AppRail's PRIMARY_ITEMS — the rail is
+// `md:flex`, so anything missing here is unreachable on a phone rather than
+// merely inconvenient. Flags and Tickets were absent, which hid both surfaces
+// entirely below md.
 const PRIMARY_ITEMS: NavItem[] = [
   { href: "/inbox", label: "Inbox", icon: Inbox },
   { href: "/team", label: "Team chat", icon: MessageSquareText },
   { href: "/contacts", label: "Contacts", icon: ContactRound },
+  { href: "/flags", label: "Flagged", icon: Flag },
+  { href: "/tickets", label: "Tickets", icon: TicketIcon },
   {
     href: "/broadcasts",
     label: "Broadcasts",
@@ -105,6 +113,8 @@ function sectionTitle(pathname: string): string {
   if (pathname.startsWith("/inbox")) return "Inbox";
   if (pathname.startsWith("/team")) return "Team chat";
   if (pathname.startsWith("/contacts")) return "Contacts";
+  if (pathname.startsWith("/flags")) return "Flagged";
+  if (pathname.startsWith("/tickets")) return "Tickets";
   if (pathname.startsWith("/broadcasts")) return "Broadcasts";
   if (pathname.startsWith("/templates")) return "Templates";
   if (pathname.startsWith("/workflows")) return "Workflows";
