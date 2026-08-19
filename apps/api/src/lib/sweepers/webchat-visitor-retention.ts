@@ -17,8 +17,14 @@ import { EPHEMERAL_CONTACT_CHANNELS } from "@ccp/shared/providers/capabilities";
  *   - ANONYMOUS: no phone AND no email. A visitor who self-identified was PROMOTED
  *     into the directory and is a real contact — never touched. This is the same
  *     `isDirectoryContact` line the directory queries use, in reverse.
- *   - no message activity within the window (the contact's `lastInboundAt`, and no
- *     conversation touched since the cutoff).
+ *   - no message activity within the window: the contact's `lastInboundAt` AND no
+ *     conversation with `lastMessageAt` since the cutoff (outbound counts — an
+ *     agent still replying keeps the thread alive even if the visitor went quiet),
+ *     AND
+ *   - ZERO tickets, ever. Contact→Conversation→Ticket and Contact→Ticket both
+ *     cascade, and a ticket is the permanent record of work (§2) — deleting the
+ *     visitor would silently destroy the ticket, its thread, its attachments and
+ *     any cross-workspace TicketShare. Solved tickets count: the history stays.
  *
  * Deleting the Contact cascades to its Conversation and Messages (FK onDelete). The
  * orphaned solo `Customer` each anonymous visitor mints is reaped too (guarded to
@@ -100,6 +106,20 @@ async function sweepOnce(): Promise<void> {
     // Anonymous ephemeral contacts idle since the cutoff. `lastInboundAt` is the
     // cheap activity proxy (a null one — a visitor who never sent — is also stale
     // if the row itself predates the cutoff).
+    //
+    // Two guards added 2026-08-19 (audit U10-01 + S3-1 — this sweeper predates
+    // ticketing and only ever checked the INBOUND side):
+    //  - conversation-activity: `lastInboundAt` never moves on agent/workflow/AI
+    //    replies, so a thread with recent OUTBOUND traffic looked idle. The
+    //    header always promised "no conversation touched since the cutoff";
+    //    now the code implements it via `Conversation.lastMessageAt`.
+    //  - tickets: Contact→Conversation→Ticket and Contact→Ticket are BOTH
+    //    onDelete: Cascade, so deleting the contact silently destroyed every
+    //    ticket ever raised on the visitor's thread — events, thread messages,
+    //    attachments (whose blobs blob-orphan then reaps), and TicketShare rows
+    //    escalated to a sibling workspace. A ticket is the permanent record of
+    //    work ("the refund in March", §2) — a contact with ANY ticket is
+    //    excluded outright, solved or not.
     const stale = await db.contact.findMany({
       where: {
         identityChannel: { in: EPHEMERAL },
@@ -107,6 +127,8 @@ async function sweepOnce(): Promise<void> {
         phoneNumber: null,
         email: null,
         OR: [{ lastInboundAt: { lt: cutoff } }, { lastInboundAt: null, createdAt: { lt: cutoff } }],
+        conversations: { none: { lastMessageAt: { gte: cutoff } } },
+        tickets: { none: {} },
       },
       select: { id: true, customerId: true },
       take: MAX_PER_SWEEP,

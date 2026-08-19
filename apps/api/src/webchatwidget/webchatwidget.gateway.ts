@@ -14,10 +14,14 @@ import type { Namespace, Socket } from "socket.io";
 import type { MediaKind, MessageStatus } from "@ccp/shared/types";
 import type { NormalizedInboundMessage } from "@ccp/shared/providers/types";
 
+import { channelSupportsMediaKind, mediaSizeCap } from "@ccp/shared/providers/media-caps";
+
 import { DbService } from "../db/db.service";
 import { RealtimeGateway } from "../realtime/realtime.gateway";
 import { ingestEvents } from "@/lib/providers/ingest";
 import { blobStorage } from "@/lib/blob-storage";
+import { ALLOWED_MIME_BY_KIND } from "@/lib/blob-storage/mime-guard";
+import { normalizeMimeType } from "@/lib/media-storage";
 import { publish } from "@/lib/events/bus";
 import { mapMessage } from "@/lib/queries/_shared";
 import { REPLY_TO_INCLUDE } from "@/lib/queries/_shared";
@@ -45,6 +49,12 @@ const MAX_BODY_CHARS = 4096;
 /** How far back a client-claimed send time may reach (the offline-outbox window). */
 const MAX_CLIENT_BACKDATE_MS = 24 * 60 * 60 * 1000;
 
+/** Cap on a visitor-claimed media filename (rendered in list rows and frames). */
+const MAX_MEDIA_FILENAME_CHARS = 255;
+/** Ceiling on a visitor-claimed audio/video duration — hours beyond anything a
+ *  25 MB upload can hold; a wild claim renders nonsense in the inbox. */
+const MAX_MEDIA_DURATION_MS = 6 * 60 * 60 * 1000;
+
 /**
  * When the visitor typed a message, for messages that queued offline.
  *
@@ -71,6 +81,16 @@ function resolveClientTimestamp(clientTs: number | undefined): Date {
 const handshakeBucket = createTokenBucket({ perMin: 120 });
 /** Per-visitor inbound message rate limit (a human can't type faster than this). */
 const messageBucket = createTokenBucket({ perMin: 120 });
+/**
+ * Per-IP AGGREGATE inbound message cap, consumed alongside `messageBucket`.
+ * That bucket is keyed by `${widgetId}:${visitorId}` and visitorId is chosen by
+ * the client, so an attacker minting conversations (15/min allowed by
+ * `newConversationBucket` below) accumulates N independent 120/min budgets —
+ * the per-visitor limit bounds a chat, not a client. The handshake IP is the
+ * only visitor-independent key, so it carries the sum. 300/min is generous for
+ * a NAT'd office of real typists yet bounds the aggregate.
+ */
+const ipMessageBucket = createTokenBucket({ perMin: 300 });
 /**
  * Per-IP cap on creating BRAND-NEW conversations. `messageBucket` is keyed by
  * `${widgetId}:${visitorId}`, but visitorId is chosen by the client — rotating it
@@ -314,10 +334,49 @@ export class WebchatwidgetGateway
     if (!messageBucket.consume(`${data.widgetId}:${data.visitorId}`).ok) {
       return { ok: false, error: "rate_limited" };
     }
+    // Second gate on the visitor-independent key — see ipMessageBucket.
+    if (!ipMessageBucket.consume(data.ip).ok) {
+      this.logger.warn(
+        `widget message throttled (per-IP aggregate) ip=${data.ip} widget=${data.widgetId} team=${data.workspaceId}`,
+      );
+      return { ok: false, error: "rate_limited" };
+    }
 
     const text = typeof body.body === "string" ? body.body.slice(0, MAX_BODY_CHARS) : "";
     const hasMedia = body.media && typeof body.media.mediaKey === "string";
     if (!text && !hasMedia) return { ok: false, error: "empty" };
+    // Media METADATA is visitor input persisted verbatim onto the message row
+    // and read back by renderers and the mime-sensitive download paths. The
+    // upload endpoint validated its OWN response, but nothing binds this frame
+    // to that response — a crafted client can pair a legit mediaKey with an
+    // arbitrary kind/mime. So: `kind` must be one the channel accepts, `mimeType`
+    // must be in that kind's storage allow-list (the same `assertAllowedMime`
+    // table the upload enforced — per-kind sets, so a kind/mime mismatch fails
+    // too), and the scalar claims are clamped rather than trusted.
+    if (hasMedia) {
+      const media = body.media!;
+      const mime = normalizeMimeType(typeof media.mimeType === "string" ? media.mimeType : "");
+      if (
+        typeof media.kind !== "string" ||
+        !channelSupportsMediaKind(CHANNEL, media.kind) ||
+        !ALLOWED_MIME_BY_KIND[media.kind]?.has(mime)
+      ) {
+        return { ok: false, error: "bad_media" };
+      }
+      media.mimeType = mime;
+      media.filename =
+        typeof media.filename === "string" && media.filename.trim()
+          ? media.filename.slice(0, MAX_MEDIA_FILENAME_CHARS)
+          : undefined;
+      media.sizeBytes =
+        typeof media.sizeBytes === "number" && Number.isFinite(media.sizeBytes) && media.sizeBytes > 0
+          ? Math.min(Math.round(media.sizeBytes), mediaSizeCap(CHANNEL, media.kind))
+          : undefined;
+      media.durationMs =
+        typeof media.durationMs === "number" && Number.isFinite(media.durationMs) && media.durationMs > 0
+          ? Math.min(Math.round(media.durationMs), MAX_MEDIA_DURATION_MS)
+          : undefined;
+    }
     // Re-check the org's attachment policy at SEND time, not just at upload. The
     // upload endpoint is the primary gate, but a client could hold a mediaKey from
     // before the policy changed — this makes the two agree.

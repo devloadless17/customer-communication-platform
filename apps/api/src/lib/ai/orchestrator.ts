@@ -271,6 +271,12 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
       channelMode: config.replyChannelMode,
       audioR2Key,
     });
+    // A draft is a paid generation too. Charging only the auto-SEND path meant
+    // the maxAutoRepliesPerConv gate above never tripped in suggest mode, so a
+    // visitor hammering one conversation bought unbounded model spend. Same
+    // counter, same gate; a human reply still resets it (onHumanReply), so an
+    // agent working the thread re-opens the budget.
+    await incrementAutoReply(conversationId);
     // An escalation the mode wouldn't let us SEND is still an escalation: the
     // routing and the sticky pause are what get a human onto the thread, and
     // neither is customer-visible. Only the hand-off LINE waits for approval.

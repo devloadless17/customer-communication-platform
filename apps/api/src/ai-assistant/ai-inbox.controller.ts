@@ -16,6 +16,7 @@ import { ScopedByConversation } from "../auth/conversation-visibility.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
+import { RateLimit } from "../common/rate-limit.interceptor";
 import { zBody, zQuery } from "../common/zod-validation.pipe";
 import { AiInboxService } from "./ai-inbox.service";
 import {
@@ -54,8 +55,13 @@ export class AiInboxController {
   /** On-demand summary for an agent-picked `from`/`to` date range. */
   // Conversation-scoped: this returns a summary of the thread's contents, so
   // it needs the same visibility boundary as the thread itself.
+  // Runs an OpenAI completion synchronously — same cap as the settings
+  // controller's voice-preview, well under the 300/min default. Explicit
+  // bucket: both LLM routes on this controller are 30/min, and the default
+  // class-name scope would pool them into one budget.
   @ScopedByConversation("id")
   @Get("conversations/:id/summary")
+  @RateLimit({ perMinute: 30, bucket: "ai-inbox-summary" })
   async rangeSummary(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
@@ -109,7 +115,10 @@ export class AiInboxController {
     obj.body.pipe(res);
   }
 
+  // Runs OpenAI (and possibly TTS) synchronously — capped like the summary
+  // above, in its own bucket for the same reason.
   @Post("suggestions/:id/regenerate")
+  @RateLimit({ perMinute: 30, bucket: "ai-inbox-regenerate" })
   async regenerateSuggestion(@CurrentSession() session: ApiSession, @Param("id") id: string) {
     const suggestion = await this.svc.regenerateSuggestion(session.workspaceId, session.userId, id, session);
     return { suggestion };

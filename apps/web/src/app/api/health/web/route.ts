@@ -29,7 +29,21 @@ export const dynamic = "force-dynamic";
 
 const PROBE_TIMEOUT_MS = 2_000;
 
-export async function GET() {
+// Module-scoped memo, mirroring /api/health: this route is unauthenticated and
+// each hit costs a DB round-trip, so an anonymous flood becomes DB fan-out.
+// 2s stays fresher than Caddy's health_uri interval while capping probe passes
+// at 0.5/s; concurrent hits share the one in-flight pass. Server-side only —
+// the response keeps no-store so nothing downstream caches the verdict.
+const SNAPSHOT_TTL_MS = 2_000;
+
+interface HealthSnapshot {
+  httpStatus: number;
+  body: Record<string, unknown>;
+}
+
+let memo: { at: number; snapshot: Promise<HealthSnapshot> } | null = null;
+
+async function computeSnapshot(): Promise<HealthSnapshot> {
   let dbOk = true;
   let dbErr: string | undefined;
   try {
@@ -44,8 +58,9 @@ export async function GET() {
     dbErr = err instanceof Error ? err.message : String(err);
   }
 
-  return NextResponse.json(
-    {
+  return {
+    httpStatus: dbOk ? 200 : 503,
+    body: {
       status: dbOk ? "ok" : "down",
       components: {
         db: { status: dbOk ? "ok" : "fail", ...(dbErr ? { detail: dbErr } : {}) },
@@ -53,9 +68,18 @@ export async function GET() {
       uptimeSeconds: Math.round(process.uptime()),
       timestamp: new Date().toISOString(),
     },
-    {
-      status: dbOk ? 200 : 503,
-      headers: { "cache-control": "no-store" },
-    },
-  );
+  };
+}
+
+export async function GET() {
+  const now = Date.now();
+  if (!memo || now - memo.at >= SNAPSHOT_TTL_MS) {
+    memo = { at: now, snapshot: computeSnapshot() };
+  }
+  const { httpStatus, body } = await memo.snapshot;
+
+  return NextResponse.json(body, {
+    status: httpStatus,
+    headers: { "cache-control": "no-store" },
+  });
 }

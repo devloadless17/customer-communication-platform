@@ -96,12 +96,28 @@ async function probeDb(): Promise<{ ok: boolean; err?: string }> {
   }
 }
 
-export async function GET() {
+// Module-scoped memo: this route is unauthenticated and every hit fans out to
+// a DB round-trip plus the api probe (itself DB + Redis behind /health), so an
+// anonymous flood becomes backend fan-out. 2s stays fresher than any
+// healthcheck interval while capping probe passes at 0.5/s regardless of
+// request rate; concurrent hits share the one in-flight pass. Server-side
+// only — the response keeps no-store so nothing downstream caches the verdict.
+const SNAPSHOT_TTL_MS = 2_000;
+
+interface HealthSnapshot {
+  httpStatus: number;
+  body: Record<string, unknown>;
+}
+
+let memo: { at: number; snapshot: Promise<HealthSnapshot> } | null = null;
+
+async function computeSnapshot(): Promise<HealthSnapshot> {
   const [dbResult, apiResult] = await Promise.all([probeDb(), probeApi()]);
   const ok = dbResult.ok && apiResult.ok;
 
-  return NextResponse.json(
-    {
+  return {
+    httpStatus: ok ? 200 : 503,
+    body: {
       status: ok ? "ok" : "down",
       components: {
         db: { status: dbResult.ok ? "ok" : "fail", ...(dbResult.err ? { detail: dbResult.err } : {}) },
@@ -119,9 +135,18 @@ export async function GET() {
       degradedCount: apiResult.degraded ?? 0,
       timestamp: new Date().toISOString(),
     },
-    {
-      status: ok ? 200 : 503,
-      headers: { "cache-control": "no-store" },
-    },
-  );
+  };
+}
+
+export async function GET() {
+  const now = Date.now();
+  if (!memo || now - memo.at >= SNAPSHOT_TTL_MS) {
+    memo = { at: now, snapshot: computeSnapshot() };
+  }
+  const { httpStatus, body } = await memo.snapshot;
+
+  return NextResponse.json(body, {
+    status: httpStatus,
+    headers: { "cache-control": "no-store" },
+  });
 }
