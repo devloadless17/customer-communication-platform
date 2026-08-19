@@ -232,9 +232,13 @@ export class MessagesService {
     } catch (err) {
       if (err instanceof HttpException) throw err; // our own 502 above
       if (err instanceof OpenAiUnavailableError) {
-        throw new ServiceUnavailableException(
-          `${label} isn't configured — set OPENAI_API_KEY.`,
-        );
+        // Env-var hint stays server-side — the browser must not learn the
+        // server's env layout.
+        this.logger.warn(`${label} unavailable — set OPENAI_API_KEY.`);
+        throw new ServiceUnavailableException({
+          error: "ai_not_configured",
+          detail: `${label} is not configured on this server.`,
+        });
       }
       // OpenAI rate limits surface as a 429 on the SDK error object.
       if ((err as { status?: number })?.status === 429) {
@@ -812,6 +816,7 @@ export class MessagesService {
               // job payload so the worker addresses Meta's `recipient` field.
               bsuid: true,
               lastInboundAt: true,
+              blockedAt: true,
             },
           },
         },
@@ -824,6 +829,16 @@ export class MessagesService {
         : Promise.resolve(null),
     ]);
     if (!conversation) throw new NotFoundException({ error: "conversation_not_found" });
+
+    // The workspace blocked this contact — every provider send would be
+    // rejected, so refuse up front (the queued worker never re-checks).
+    // Same refusal as send-text-internal's contact_blocked.
+    if (conversation.contact.blockedAt) {
+      throw new BadRequestException({
+        error: "contact_blocked",
+        detail: "This contact is blocked. Unblock them to send messages.",
+      });
+    }
 
     // Resolve the destination ADDRESS from the contact identity. The PROVIDER
     // is conversation-owned (the row is the source of truth for which channel
@@ -1639,11 +1654,22 @@ export class MessagesService {
             bsuid: true,
             name: true,
             lastInboundAt: true,
+            blockedAt: true,
           },
         },
       },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation_not_found" });
+
+    // The workspace blocked this contact — every provider send would be
+    // rejected, so refuse up front. Same refusal as send-media-internal's
+    // contact_blocked.
+    if (conversation.contact.blockedAt) {
+      throw new BadRequestException({
+        error: "contact_blocked",
+        detail: "This contact is blocked. Unblock them to send messages.",
+      });
+    }
 
     let channel;
     try {
@@ -1744,7 +1770,8 @@ export class MessagesService {
     const cap = policy.caps[kind];
     if (file.size > cap) {
       throw new PayloadTooLargeException({
-        error: `file too large for ${kind}: ${file.size} bytes > ${cap}`,
+        error: "file_too_large",
+        detail: `file too large for ${kind}: ${file.size} bytes > ${cap}`,
         cap,
       });
     }
@@ -2471,6 +2498,19 @@ export class MessagesService {
     const processContact = async (
       contact: (typeof contacts)[number],
     ): Promise<ForwardResult> => {
+      // The workspace blocked this contact — every provider send would be
+      // rejected. Per-contact failure (like the no-address path below) so the
+      // rest of the batch still forwards.
+      if (contact.blockedAt) {
+        return {
+          contactId: contact.id,
+          contactName: contact.name,
+          ok: false,
+          sent: 0,
+          failed: sourceRows.length,
+          error: "contact_blocked",
+        };
+      }
       let channel;
       try {
         channel = resolveContactChannel(contact);
@@ -3027,7 +3067,8 @@ export class MessagesService {
     const cap = MEDIA_SIZE_CAPS[kind];
     if (file.size > cap) {
       throw new PayloadTooLargeException({
-        error: `file too large for ${kind} header: ${file.size} bytes > ${cap}`,
+        error: "file_too_large",
+        detail: `file too large for ${kind} header: ${file.size} bytes > ${cap}`,
         cap,
       });
     }

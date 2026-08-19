@@ -3300,7 +3300,31 @@ async function ingestOutboundEcho(
   // `contact.created` publish — so a duplicate must stop here. The reopen +
   // its event are safe either way: they co-committed with the WINNER's insert
   // above.
-  if (!isFreshRow) return;
+  //
+  // …with ONE recovery carve-out (U1a-01, audit 2026-08-19): the insert tx and
+  // the commitOutboundSend below are SEPARATE transactions, so a crash between
+  // them persisted the row but permanently lost the summary bump + the
+  // `message.sent` event — Meta's redelivery landed here and returned. Detect
+  // that lost bump with a FRESH read (the local `conversation` snapshot may be
+  // stale in the live duplicate race): if `lastMessageAt` never reached the
+  // winner row's timestamp, the first attempt provably died before its commit —
+  // fall through and finish its work. `messageTimestamp` recomputes
+  // deterministically from the same un-bumped inputs, so the fall-through path
+  // rebuilds the identical event. Worst case (a duplicate racing exactly inside
+  // the winner's insert→bump gap) is a double `message.sent`, which §9 requires
+  // every consumer to tolerate — the analytics counter it double-bumps is
+  // reconciled by conversation-analytics-drift. Permanent loss is the failure
+  // mode we refuse; at-least-once is the contract we already have.
+  if (!isFreshRow) {
+    const freshConv = await db.conversation.findFirst({
+      where: { id: conversation.id, workspaceId },
+      select: { lastMessageAt: true },
+    });
+    const bumpLost =
+      freshConv !== null &&
+      (freshConv.lastMessageAt === null || freshConv.lastMessageAt < created.timestamp);
+    if (!bumpLost) return;
+  }
 
   const preview = (evt.body.trim() || mediaPreview(evt.media?.kind)).slice(0, 200);
   const mediaBlock = buildEchoMediaBlock(created.id, evt.media, evt.body);

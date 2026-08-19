@@ -164,7 +164,17 @@ export function getMessageSendQueue(): Queue<MessageSendJobData> {
  */
 export async function enqueueMessageSend(data: MessageSendJobData): Promise<void> {
   const q = getMessageSendQueue();
-  const jobId = data.clientTempId ? `msg-send-${data.clientTempId}` : undefined;
+  // Tenant-namespaced: clientTempId is CLIENT input (the browser mints it with
+  // Math.random), and both the BullMQ jobId dedupe and the globally-unique
+  // OutboundSendAttempt.jobId key on this value for up to 7 days
+  // (removeOnFail age). Without the workspace prefix, a colliding — or
+  // deliberately copied — clientTempId from another workspace's session would
+  // silently no-op that tenant's send at the queue layer (audit 2026-08-19,
+  // U2a-01). The prefix is invisible to clients; they only ever see their own
+  // clientTempId echoed back.
+  const jobId = data.clientTempId
+    ? `msg-send-${data.workspaceId}-${data.clientTempId}`
+    : undefined;
   try {
     if (jobId && data.isRetry) {
       const existing = await withTimeout(q.getJob(jobId), ENQUEUE_TIMEOUT_MS);

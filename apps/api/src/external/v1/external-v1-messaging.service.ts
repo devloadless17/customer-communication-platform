@@ -660,13 +660,70 @@ export class ExternalV1MessagingService {
       });
     } catch (err) {
       // Released only for a failure that provably happened BEFORE Meta could
-      // have accepted it. `sendMessengerTemplateInternal` throws its validation
-      // errors ahead of the provider call; anything else may have landed, so
-      // the claim stays and a retry gets 409 rather than a second billed send.
-      if (idempotencyKey && err instanceof HttpException) {
+      // have accepted it. The old predicate here was `err instanceof
+      // HttpException` — dead code, because sendMessengerTemplateInternal
+      // throws SendTextValidationError / ProviderNotConfiguredError /
+      // MetaSendError, never an HttpException — so EVERY failure stranded the
+      // key and a corrected retry got 409 (audit 2026-08-19, U2a-02). Mirror
+      // the interactive path's rule, including its one subtlety: the post-send
+      // onMissing throws a SendTextValidationError whose message is
+      // "conversation_disappeared_mid_send" AFTER Meta accepted — that one
+      // must NOT release (a same-key retry would double-send).
+      const normalized = normalizeMetaSendError(err);
+      const sentThenLostConversation =
+        err instanceof SendTextValidationError &&
+        err.message === "conversation_disappeared_mid_send";
+      const provablyNotSent =
+        !sentThenLostConversation &&
+        (err instanceof SendTextValidationError ||
+          err instanceof ProviderNotConfiguredError ||
+          isProvablyNotSent(normalized));
+      if (idempotencyKey && provablyNotSent) {
         await this.releaseIdempotency(workspaceId, apiKeyId, idempotencyKey);
       }
-      throw err;
+      if (sentThenLostConversation) {
+        // Meta accepted it; we just couldn't commit. Surface as ambiguous so a
+        // same-key retry gets 409 idempotency_ambiguous — identical to the
+        // text/template/interactive paths.
+        throw new BadGatewayException({
+          error: "send_ambiguous",
+          detail: "conversation_disappeared_mid_send",
+        });
+      }
+      // Map to the /v1 envelope — previously these propagated RAW (a
+      // SendTextValidationError surfaced as a Nest 500 with no error key).
+      // Same mapping as the interactive path so a partner gets the same
+      // status for the same cause.
+      if (err instanceof SendTextValidationError) {
+        const status =
+          err.code === "conversation_not_found"
+            ? 404
+            : err.code === "outside_24h_window" ||
+                err.code === "provider_not_configured" ||
+                err.code === "invalid_template"
+              ? 422
+              : 400;
+        throw new HttpException(
+          { error: err.code, ...(err.detail ? { detail: err.detail } : {}) },
+          status,
+        );
+      }
+      if (err instanceof ProviderNotConfiguredError) {
+        throw new ConflictException({ error: "channel_not_connected", detail: err.message });
+      }
+      if (normalized) {
+        throw new UnprocessableEntityException({
+          error: normalized.code,
+          detail: `Meta ${normalized.httpStatus}: ${normalized.message}${
+            normalized.detail ? ` — ${normalized.detail}` : ""
+          }`,
+        });
+      }
+      this.logger.error("external sendMessengerTemplate failed", err);
+      throw new BadGatewayException({
+        error: "send_failed",
+        detail: err instanceof Error ? err.message : String(err),
+      });
     }
     const out = { messageId: r.messageId };
     if (idempotencyKey) {
@@ -774,6 +831,7 @@ export class ExternalV1MessagingService {
             // back to the BSUID and flags viaBsuid for the send below.
             bsuid: true,
             lastInboundAt: true,
+            blockedAt: true,
           },
         },
       },
@@ -797,6 +855,18 @@ export class ExternalV1MessagingService {
     if (input.onlyIfAiEnabled && conversation.aiEnabled === false) {
       if (idempotencyKey) await this.releaseIdempotency(workspaceId, apiKeyId, idempotencyKey);
       return { message: null, skipped: "ai_disabled" as const };
+    }
+
+    // The workspace blocked this contact — every provider send would be
+    // rejected, so refuse up front (parity with the internal send paths).
+    // Provably-not-sent, so release the claim like the other validation
+    // failures.
+    if (conversation.contact.blockedAt) {
+      if (idempotencyKey) await this.releaseIdempotency(workspaceId, apiKeyId, idempotencyKey);
+      throw new BadRequestException({
+        error: "contact_blocked",
+        detail: "This contact is blocked. Unblock them to send messages.",
+      });
     }
 
     let channel;
