@@ -86,10 +86,16 @@ export function parseStepConfig(type: WorkflowStepType, raw: unknown): unknown {
   return getStepHandler(type).parseConfig(raw);
 }
 
+// Both READ paths below resolve the handler INSIDE the try. A stored graph can
+// name a step type this build no longer registers (a node saved by a newer
+// deploy, a type removed) — and an UnknownStepTypeError escaping here 500s the
+// workflows index and the GET, taking every other workflow down with the one
+// bad node. Falling back to the raw type / config mirrors the runner, which
+// fails the single step rather than the whole run.
 export function redactStepConfig(type: WorkflowStepType, config: unknown): unknown {
-  const handler = getStepHandler(type);
-  if (!handler.redactConfig) return config;
   try {
+    const handler = getStepHandler(type);
+    if (!handler.redactConfig) return config;
     return handler.redactConfig(handler.parseConfig(config));
   } catch {
     return config;
@@ -97,9 +103,9 @@ export function redactStepConfig(type: WorkflowStepType, config: unknown): unkno
 }
 
 export function describeStep(type: WorkflowStepType, config: unknown): string {
-  const handler = getStepHandler(type);
-  if (!handler.describeConfig) return type;
   try {
+    const handler = getStepHandler(type);
+    if (!handler.describeConfig) return type;
     return handler.describeConfig(handler.parseConfig(config));
   } catch {
     return type;

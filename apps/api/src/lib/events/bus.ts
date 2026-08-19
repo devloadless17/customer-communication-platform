@@ -30,14 +30,11 @@ import { markDispatched, persistDispatchedRow } from "@/lib/events/outbox";
  *     the HTTP handler that called `await publish(...)` returns as soon
  *     as the outbox row write resolves; analytics + workflow dispatch +
  *     partner webhook fanout no longer add latency to the response.
- *     Sequential ordering inside this tier is load-bearing:
- *       - `workflow-dispatch` re-reads conversation state (closedCategory /
- *         counters) that `analytics` writes (workflow-dispatch.ts:62,78).
- *       - `outbound-webhooks.subscriber` ships partner payloads carrying
- *         those same post-mutation fields.
+ *     Sequential ordering inside this tier is load-bearing — see
+ *     `SubscriberPriority` for which subscriber depends on which.
  *     Registration order:
- *       realtime-fanout → audit → analytics → workflow-dispatch →
- *       outbound-webhooks
+ *       realtime-fanout → audit → analytics → auto-assign →
+ *       workflow-dispatch → outbound-webhooks
  *     Encoded as explicit priorities, not registration timing, so a
  *     reorder of `AppModule.imports` can't silently break it.
  *
@@ -55,11 +52,19 @@ type Handler<K extends DomainEventType> = (
 /**
  * Subscriber execution tiers. LOWER runs first. The order is LOAD-BEARING,
  * not cosmetic:
- *   - `workflow-dispatch` re-reads conversation state that `analytics`
- *     writes (closedCategory / counters), so it must run AFTER analytics.
- *   - `outbound-webhooks` ships partner payloads carrying those same
- *     post-mutation fields (closedAt, firstResponseAt), so it must run
- *     AFTER analytics too.
+ *   - `outbound-webhooks` ENRICHES its partner payloads from the DB (the
+ *     conversation behind a message.sent, the contact behind a flag / note),
+ *     reading exactly the rows `analytics` writes — unreadCount, status,
+ *     lastMessageAt, closedAt, firstResponseAt. Running it before analytics
+ *     ships the pre-mutation values to partners.
+ *   - `workflow-dispatch`'s ticket triggers DB-load the contact behind the
+ *     ticket, so it too must sit after the writers.
+ *   - AUTO-ASSIGN (ANALYTICS + 5) must run BEFORE WORKFLOW_DISPATCH: a
+ *     `message_received` workflow reads the assignee off the snapshot, and
+ *     routing that lands after dispatch is routing the workflow never saw.
+ *   - Conversation SNAPSHOTS are not part of this: workflow-dispatch reads
+ *     them off the event payload (publisher-built, post-CAS), never a fresh
+ *     read. Don't reintroduce one to "fix" an ordering question.
  * Encoding the order as an explicit priority — rather than relying on
  * module import order / `OnModuleInit` registration timing — makes it
  * impossible for a reorder of `AppModule.imports` to silently break it.

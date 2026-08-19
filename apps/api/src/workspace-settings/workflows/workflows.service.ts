@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-import { Prisma } from "@prisma/client";
+import { Prisma, type Role } from "@prisma/client";
 import {
   BadRequestException,
   ConflictException,
@@ -8,6 +8,7 @@ import {
   Injectable,
   InternalServerErrorException,
   NotFoundException,
+  UnprocessableEntityException,
 } from "@nestjs/common";
 
 import { decryptSecret, encryptSecret, isEncrypted } from "@/lib/crypto/envelope";
@@ -240,6 +241,27 @@ export class WorkflowsService {
         details: parsed.errors,
         stepErrors: parsed.stepErrors,
       });
+    }
+
+    // A LIVE workflow is held to the PUBLISH tier on every save. SAVE tier
+    // demotes control-flow incompleteness (an unwired Branch / ask_question
+    // output) to a warning because that is the normal mid-build state of a
+    // DRAFT — but this row is one the dispatcher is running right now, and
+    // the same graph that only warns here silently truncates real runs. The
+    // publish gate refuses to put it live in that state; letting an autosave
+    // walk it into the same state behind the gate's back is the hole.
+    // Reference validation is deliberately NOT repeated (it is a six-query
+    // round-trip per keystroke, and a tag deleted underneath the author must
+    // not make their canvas unsaveable — /publish still catches it).
+    if (existing.published) {
+      const live = parseWorkflowBody(merged, { forPublish: true });
+      if (live.errors.length > 0) {
+        throw new UnprocessableEntityException({
+          error: "published_workflow_incomplete",
+          details: live.errors,
+          stepErrors: live.stepErrors,
+        });
+      }
     }
 
     try {
@@ -479,6 +501,10 @@ export class WorkflowsService {
    * fire, but the workflow must actually be `trigger=manual_trigger`. That
    * gate keeps a curious user from re-firing a "welcome" workflow outside
    * its natural trigger.
+   *
+   * `triggerConfig.allowedRoles` narrows that further when the author set it
+   * (documented on `Workflow.triggerConfig` in prisma/schema.prisma). Absent
+   * or empty = every role, which is what every workflow saved so far carries.
    */
   async manualTrigger(
     workspaceId: string,
@@ -486,10 +512,16 @@ export class WorkflowsService {
     userId: string | null,
     id: string,
     input: ManualTriggerInput,
+    /**
+     * Workspace role of the person firing. Null on the /v1 path: an API key
+     * is not a person and holds no workspace role, so it is gated by its
+     * SCOPES rather than by a role list written for the inbox menu.
+     */
+    actorRole?: Role | null,
   ): Promise<{ runId: string }> {
     const wf = await this.db.workflow.findFirst({
       where: { id, workspaceId },
-      select: { id: true, trigger: true, published: true },
+      select: { id: true, trigger: true, published: true, triggerConfig: true },
     });
     if (!wf) throw new NotFoundException({ error: "workflow_not_found" });
     if (wf.trigger !== "manual_trigger") {
@@ -500,6 +532,11 @@ export class WorkflowsService {
     if (!wf.published) {
       throw new ConflictException({
         error: "workflow_is_not_published",
+      });
+    }
+    if (actorRole && !roleMayManuallyTrigger(wf.triggerConfig, actorRole)) {
+      throw new ForbiddenException({
+        error: "role_not_allowed", detail: "Your workspace role can't run this workflow.",
       });
     }
 
@@ -1098,6 +1135,24 @@ function parseRunCursor(
   const id = raw.slice(sep + 1);
   if (!Number.isFinite(ms) || !id) return null;
   return { startedAt: new Date(ms), id };
+}
+
+/**
+ * `triggerConfig.allowedRoles` gate for the manual trigger. Anything other
+ * than a non-empty array of strings means the author never scoped it, so
+ * every role may fire — the state every stored workflow is in today, and the
+ * one the inbox menu has always behaved as.
+ */
+function roleMayManuallyTrigger(
+  triggerConfig: Prisma.JsonValue,
+  actorRole: Role,
+): boolean {
+  if (!triggerConfig || typeof triggerConfig !== "object" || Array.isArray(triggerConfig)) {
+    return true;
+  }
+  const allowed = (triggerConfig as Record<string, unknown>).allowedRoles;
+  if (!Array.isArray(allowed) || allowed.length === 0) return true;
+  return allowed.includes(actorRole);
 }
 
 /**

@@ -68,6 +68,55 @@ function dispatchDedupeKey(
   return `${dispatchId}:${workflowId}:${trigger}:${contactId ?? "-"}:${discriminator ?? "-"}`;
 }
 
+/**
+ * The trigger-CONFIG gate, applied alongside `triggerConditions`.
+ *
+ * The two filters answer different questions and neither substitutes for the
+ * other: conditions filter on the payload's DATA ("contact is in Spain"),
+ * while `triggerConfig` scopes WHICH occurrences of the trigger fire at all
+ * ("only when a tag is REMOVED"). The builder's trigger drawer writes these,
+ * and the shapes are documented on `Workflow.triggerConfig` in
+ * prisma/schema.prisma — until this existed nothing read them back, so a
+ * "tag removed" workflow also ran on every tag ADD.
+ *
+ * Absent / empty / unrecognized value = fire on everything. Every workflow
+ * saved before its editor shipped carries `{}`, and fail-open matches the
+ * behavior those workflows have had all along.
+ */
+function matchesTriggerConfig(
+  event: WorkflowTriggerEvent,
+  rawConfig: Prisma.JsonValue,
+  payload: unknown,
+): boolean {
+  const cfg =
+    rawConfig && typeof rawConfig === "object" && !Array.isArray(rawConfig)
+      ? (rawConfig as Record<string, unknown>)
+      : {};
+  switch (event) {
+    case "contact_tag_updated": {
+      // "any" (and anything else) = both directions.
+      const kind = cfg.kind;
+      if (kind !== "added" && kind !== "removed") return true;
+      return (payload as { kind?: string }).kind === kind;
+    }
+    case "contact_lifecycle_updated": {
+      const toStageId = cfg.toStageId;
+      if (typeof toStageId !== "string" || toStageId === "") return true;
+      return (payload as { newStageId?: string | null }).newStageId === toStageId;
+    }
+    case "contact_field_updated": {
+      const fieldKey = cfg.fieldKey;
+      if (typeof fieldKey !== "string" || fieldKey === "") return true;
+      return (payload as { fieldKey?: string }).fieldKey === fieldKey;
+    }
+    default:
+      // `incoming_webhook` (secret) and `manual_trigger` (allowedRoles) carry
+      // config too, but neither reaches this path — both have their own entry
+      // point, which is where each is enforced.
+      return true;
+  }
+}
+
 export async function dispatch<E extends WorkflowTriggerEvent>(
   workspaceId: string,
   event: E,
@@ -97,6 +146,7 @@ export async function dispatch<E extends WorkflowTriggerEvent>(
           select: {
             id: true,
             graph: true,
+            triggerConfig: true,
             triggerConditions: true,
             triggerOncePerContact: true,
           },
@@ -119,8 +169,10 @@ export async function dispatch<E extends WorkflowTriggerEvent>(
     const contactId = (payload as { contact?: { id?: string } })?.contact?.id ?? null;
     const conversationId = (payload as { conversation?: { id?: string } })?.conversation?.id ?? null;
 
-    const matched = workflows.filter((w) =>
-      evaluateConditions(w.triggerConditions, payload as EventPayload),
+    const matched = workflows.filter(
+      (w) =>
+        matchesTriggerConfig(event, w.triggerConfig, payload) &&
+        evaluateConditions(w.triggerConditions, payload as EventPayload),
     );
 
     // Once-per-contact filter — only meaningful when we have a contactId.

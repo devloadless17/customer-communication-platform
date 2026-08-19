@@ -89,6 +89,7 @@ export function registerWorkflowDispatchSubscribers(): () => void {
 
   // ---- message.received → message_received (+ conversation_created on first) ----
   subscribe("message.received", async (e) => {
+    if (e.silent) return; // workflow-step driven; skip chain dispatch
     if (e.isNewConversation) {
       await dispatch(e.workspaceId, "conversation_created", {
         conversation: e.conversation,

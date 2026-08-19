@@ -86,8 +86,9 @@ export class WorkflowsController {
 
   /**
    * Manual trigger — any agent (not admin-only). The workflow itself must
-   * be `trigger=manual_trigger` for the call to succeed; the service
-   * enforces.
+   * be `trigger=manual_trigger` for the call to succeed, and the caller's
+   * workspace role must satisfy `triggerConfig.allowedRoles` when the author
+   * set one; the service enforces both.
    */
   @Post(":id/manual-trigger")
   @UseGuards(SessionGuard)
@@ -101,6 +102,7 @@ export class WorkflowsController {
       session.userId,
       id,
       body,
+      session.role,
     );
     return { ok: true, ...out };
   }
