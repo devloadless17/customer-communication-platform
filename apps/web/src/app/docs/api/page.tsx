@@ -782,7 +782,10 @@ export default function ApiDocsPage() {
           path="/api/external/v1/tags"
           body={{ name: "VIP", color: "emerald" }}
         >
-          Create a tag. Body: <code>{`{ name: string, color?: string }`}</code>.
+          Create a tag. Body: <code>{`{ name: string, color?: string }`}</code>. A
+          workspace holds at most 300 tags; past that the call returns{" "}
+          <code>400 tag_limit_reached</code>. A duplicate name returns{" "}
+          <code>409 tag_name_taken</code>.
         </Endpoint>
         <Endpoint
           method="PATCH"
@@ -792,7 +795,8 @@ export default function ApiDocsPage() {
           Rename / recolor a tag.
         </Endpoint>
         <Endpoint method="DELETE" path="/api/external/v1/tags/:id">
-          Delete a tag (also removes it from every contact).
+          Delete a tag (also removes it from every contact, and drops it from any
+          saved inbox view that filtered on it).
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/stages">
           Lifecycle stage catalog. Assign one to a contact with{" "}

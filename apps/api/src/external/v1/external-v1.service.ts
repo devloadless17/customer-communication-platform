@@ -21,6 +21,7 @@ import {
 import { isProvablyNotSent, normalizeMetaSendError } from "@/lib/providers/meta";
 
 import { ContactFieldsService } from "@/workspace-settings/contact-fields/contact-fields.service";
+import { TagsService } from "@/workspace-settings/tags/tags.service";
 import type {
   CreateContactFieldInput,
   CreateFieldOptionInput,
@@ -203,6 +204,10 @@ export class ExternalV1Service {
     // field/option write rules (this file's create used to be a second copy
     // and grew a duplicate-label bug from it).
     private readonly contactFields: ContactFieldsService,
+    // Same service the tags settings page calls — for exactly the reason above.
+    // The copy that used to live here skipped the saved-view scrub and the
+    // per-workspace tag cap (audit 2026-08-19).
+    private readonly tags: TagsService,
   ) {}
 
   /**
@@ -2043,65 +2048,32 @@ export class ExternalV1Service {
     };
   }
 
+  /**
+   * TAG catalog writes DELEGATE to `TagsService` — they must not be a second
+   * implementation, for the reason `deleteContactField` already delegates to
+   * `ContactFieldsService`: the parallel copy that used to live here drifted
+   * twice. It skipped the saved-view scrub on delete (leaving a dangling id
+   * that `inboxViewWhereClauses` turns into a predicate matching nothing, so a
+   * SHARED view rendered an empty inbox for the whole workspace), and it skipped
+   * the `MAX_TAGS_PER_WORKSPACE` cap on create — and `list()` is unpaginated by
+   * design and refetched by every client on `team.catalog_changed`, so an
+   * uncapped partner loop is a workspace-wide fanout of an unbounded payload.
+   * One owner, one set of rules. (Audit 2026-08-19, S12-1.)
+   */
   async createTag(workspaceId: string, input: ExternalCreateTagInput): Promise<Tag> {
-    const color = normalizeColor(input.color);
-    try {
-      const created = await this.db.tag.create({
-        data: { workspaceId, name: input.name, color },
-      });
-      await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "tags" });
-      return {
-        id: created.id,
-        workspaceId: created.workspaceId,
-        name: created.name,
-        color: normalizeColor(created.color),
-      };
-    } catch (err) {
-      if (
-        typeof err === "object" &&
-        err !== null &&
-        "code" in err &&
-        (err as { code?: string }).code === "P2002"
-      ) {
-        throw new ConflictException({
-          error: "tag_name_taken",
-          detail: `A tag named "${input.name}" already exists.`,
-        });
-      }
-      throw err;
-    }
+    return this.tags.create(workspaceId, { name: input.name, color: normalizeColor(input.color) });
   }
 
   async updateTag(workspaceId: string, id: string, input: ExternalUpdateTagInput): Promise<Tag> {
-    const existing = await this.db.tag.findFirst({ where: { id, workspaceId } });
-    if (!existing) throw new NotFoundException({ error: "tag_not_found", detail: "tag not found" });
-    try {
-      const updated = await this.db.tag.update({ where: { id }, data: input });
-      await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "tags" });
-      return {
-        id: updated.id,
-        workspaceId: updated.workspaceId,
-        name: updated.name,
-        color: normalizeColor(updated.color),
-      };
-    } catch (err) {
-      if (
-        typeof err === "object" &&
-        err !== null &&
-        "code" in err &&
-        (err as { code?: string }).code === "P2002"
-      ) {
-        throw new ConflictException({ error: "tag_name_taken", detail: "a tag with that name already exists" });
-      }
-      throw err;
-    }
+    return this.tags.update(workspaceId, id, {
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.color !== undefined ? { color: normalizeColor(input.color) } : {}),
+    });
   }
 
+  /** Delegated so the saved-view scrub runs — see `createTag`'s note. */
   async deleteTag(workspaceId: string, id: string): Promise<void> {
-    const existing = await this.db.tag.findFirst({ where: { id, workspaceId } });
-    if (!existing) throw new NotFoundException({ error: "tag_not_found", detail: "tag not found" });
-    await this.db.tag.delete({ where: { id } });
-    await this.bus.publish({ type: "team.catalog_changed", workspaceId, scope: "tags" });
+    return this.tags.remove(workspaceId, id);
   }
 
   // ===========================================================================

@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 
 import { ContactsModule } from "@/contacts/contacts.module";
 import { ContactFieldsModule } from "@/workspace-settings/contact-fields/contact-fields.module";
+import { TagsModule } from "@/workspace-settings/tags/tags.module";
 
 import { InstagramModule } from "@/workspace-settings/instagram/instagram.module";
 import { MessengerModule } from "@/workspace-settings/messenger/messenger.module";
@@ -101,6 +102,7 @@ import { WorkflowsModule as WorkflowsSettingsModule } from "@/workspace-settings
     // guards like reserved labels and delete-while-in-use can't drift. The
     // /v1 create used to be a second copy and grew exactly that kind of bug.
     ContactFieldsModule,
+    TagsModule,
   ],
   controllers: [
     // ORDER IS LOAD-BEARING. Nest matches routes in controller-registration
