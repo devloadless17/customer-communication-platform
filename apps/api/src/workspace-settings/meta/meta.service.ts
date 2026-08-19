@@ -11,6 +11,7 @@ import {
   getMetaConnection,
   invalidateMetaConnection,
 } from "@/lib/providers/meta-connection";
+import { SECRET_SAVED_SENTINEL } from "@ccp/shared/dtos";
 
 import { DbService } from "../../db/db.service";
 import { InstagramService } from "../instagram/instagram.service";
@@ -35,8 +36,14 @@ interface MetaConnSecrets {
 export interface MetaConnectionView {
   appId: string | null;
   verifyToken: string | null;
+  /** `SECRET_SAVED_SENTINEL` when a value is stored (and decryptable), else
+   *  null — never the plaintext. The form pre-fills with it and submits it back
+   *  untouched, which `updateConfig` reads as "keep the stored value". */
   appSecret: string | null;
   systemUserToken: string | null;
+  /** True when the corresponding secret is stored and decryptable. */
+  appSecretSet: boolean;
+  systemUserTokenSet: boolean;
   credentialsUndecryptable: boolean;
 }
 
@@ -214,6 +221,39 @@ export class MetaService {
     }
   }
 
+  /**
+   * One submitted credential, resolved against what is stored: the sentinel
+   * means "unchanged", so the stored ciphertext is decrypted back in.
+   *
+   * Refuses when that value can't be read back (row gone, ENCRYPTION_KEY
+   * rotated) rather than storing the sentinel — a placeholder saved as the
+   * shared App secret drops every inbound webhook as forged, silently.
+   */
+  private keepStoredIfUnchanged(
+    submitted: string,
+    cipher: string | null,
+    field: "appSecret" | "systemUserToken",
+  ): string {
+    if (submitted !== SECRET_SAVED_SENTINEL) return submitted;
+    const stored = this.tryDecrypt(cipher, field);
+    if (stored) return stored;
+    throw new BadRequestException({
+      error: "meta_saved_secret_unreadable",
+      detail:
+        `The saved ${field === "appSecret" ? "App secret" : "system-user token"} could not be read ` +
+        `back, so it can't be kept — paste it again from your Meta app.`,
+    });
+  }
+
+  /**
+   * Current config for the shared Meta App form.
+   *
+   * Secrets are decrypted here only to compute the Set/undecryptable flags — the
+   * response carries `SECRET_SAVED_SENTINEL` in their place, never the plaintext.
+   * This pair is the highest-value credential in the system (it signs every
+   * channel's webhooks and derives every Page token), so it must not be readable
+   * from an admin's devtools. `updateConfig` swaps the stored value back in.
+   */
   async getConfig(workspaceId: string): Promise<MetaConnectionView> {
     const row = await this.db.metaConnection.findUnique({
       where: { workspaceId },
@@ -251,14 +291,45 @@ export class MetaService {
       }
     }
 
-    return { appId: config.appId ?? null, verifyToken, appSecret, systemUserToken, credentialsUndecryptable };
+    return {
+      appId: config.appId ?? null,
+      verifyToken,
+      appSecret: appSecret !== null ? SECRET_SAVED_SENTINEL : null,
+      systemUserToken: systemUserToken !== null ? SECRET_SAVED_SENTINEL : null,
+      appSecretSet: appSecret !== null,
+      systemUserTokenSet: systemUserToken !== null,
+      credentialsUndecryptable,
+    };
   }
 
   async updateConfig(
     workspaceId: string,
     input: UpdateMetaConnectionInput,
   ): Promise<{ verifyToken: string; resynced: string[]; warnings: string[] }> {
-    const { appId, appSecret, systemUserToken } = input;
+    const { appId } = input;
+
+    // The stored row, read BEFORE anything else: getConfig ships
+    // SECRET_SAVED_SENTINEL in place of the plaintext, so an untouched form
+    // echoes it back and the stored value has to be swapped in HERE — ahead of
+    // the Graph validation, the debug_token inspection and the channel resync,
+    // which all need a real credential. Unlike the channels there is no fallback
+    // to inherit from: this pair IS the credential, so a sentinel reaching
+    // `encryptSecret` would take every Meta channel down at the next send.
+    const existing = await this.db.metaConnection.findUnique({
+      where: { workspaceId },
+      select: { config: true, secrets: true },
+    });
+    const storedSecrets = (existing?.secrets ?? {}) as MetaConnSecrets;
+    const appSecret = this.keepStoredIfUnchanged(
+      input.appSecret,
+      storedSecrets.appSecret ?? null,
+      "appSecret",
+    );
+    const systemUserToken = this.keepStoredIfUnchanged(
+      input.systemUserToken,
+      storedSecrets.systemUserToken ?? null,
+      "systemUserToken",
+    );
 
     // Validate the token against Graph before persisting — a bad token here
     // would silently break every Meta channel. Bearer header, NOT an
@@ -270,7 +341,8 @@ export class MetaService {
       // posture the onboarding runbook prescribes) rejects unsigned server
       // calls with code 100 — and this validation is the FIRST Graph call a new
       // workspace ever makes, so failing here blocked the whole onboarding.
-      // Both halves of the proof arrive in this same submission.
+      // Both halves of the proof are resolved together above — typed, or kept
+      // from storage — so the pair always belongs to one app.
       const res = await fetch(
         withAppsecretProof(
           `${GRAPH_BASE}/${GRAPH_VERSION}/me?fields=id`,
@@ -313,10 +385,6 @@ export class MetaService {
     const previousShared = await getMetaConnection(workspaceId);
     const previousSharedAppSecret = previousShared?.appSecret ?? null;
 
-    const existing = await this.db.metaConnection.findUnique({
-      where: { workspaceId },
-      select: { config: true },
-    });
     const existingConfig = (existing?.config ?? {}) as MetaConnConfig;
     const verifyToken =
       input.verifyToken?.trim() ||

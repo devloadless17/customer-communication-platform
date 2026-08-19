@@ -14,6 +14,8 @@ export interface MetaCurrent {
   connected: boolean;
   appId: string | null;
   verifyToken: string | null;
+  /** The saved-placeholder sentinel when a credential is stored, never the
+   *  plaintext — see the form state below. */
   appSecret: string | null;
   systemUserToken: string | null;
   credentialsUndecryptable?: boolean;
@@ -36,6 +38,13 @@ export function MetaSettings({
   const [copied, setCopied] = useState<string | null>(null);
   // Controlled inputs — React 19 `<form action>` resets the DOM form after the
   // action, which would wipe fields on a failed submit.
+  //
+  // The two secrets pre-fill with `SECRET_SAVED_SENTINEL`, which is what the GET
+  // ships in place of the stored plaintext (same contract as a saved
+  // `http_request` header in the workflow builder): typing replaces it, and an
+  // untouched box submits it back unchanged, which the server reads as "keep the
+  // stored value". Both fields stay `required` because that is still true — the
+  // sentinel is a value, not a blank.
   const [form, setForm] = useState({
     appSecret: current.appSecret ?? "",
     systemUserToken: current.systemUserToken ?? "",

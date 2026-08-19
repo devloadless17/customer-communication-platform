@@ -119,8 +119,13 @@ export interface MessengerConfigView {
   pageName: string | null;
   appId: string | null;
   verifyToken: string | null;
+  /** `SECRET_SAVED_SENTINEL` when stored (and decryptable), else null — never
+   *  the plaintext. Submitting it back keeps the stored value. */
   pageAccessToken: string | null;
   appSecret: string | null;
+  /** True when the corresponding secret is stored and decryptable. */
+  pageAccessTokenSet: boolean;
+  appSecretSet: boolean;
   credentialsUndecryptable: boolean;
   needsReconnect: boolean;
   /** Webhooks we 403'd in the last 24h — inbound may be silently dropping. */
@@ -150,8 +155,13 @@ export interface InstagramConfigView {
   pageName: string | null;
   appId: string | null;
   verifyToken: string | null;
+  /** `SECRET_SAVED_SENTINEL` when stored (and decryptable), else null — never
+   *  the plaintext. Submitting it back keeps the stored value. */
   igAccessToken: string | null;
   appSecret: string | null;
+  /** True when the corresponding secret is stored and decryptable. */
+  igAccessTokenSet: boolean;
+  appSecretSet: boolean;
   credentialsUndecryptable: boolean;
   needsReconnect: boolean;
   /** Webhooks we 403'd in the last 24h — inbound may be silently dropping. */
@@ -173,8 +183,14 @@ export async function getTeamInstagramConfig(): Promise<InstagramConfigView> {
 export interface MetaConfigView {
   appId: string | null;
   verifyToken: string | null;
+  /** `SECRET_SAVED_SENTINEL` when stored (and decryptable), else null — never
+   *  the plaintext. The form pre-fills with it and submits it back untouched,
+   *  which the server reads as "keep the stored value". */
   appSecret: string | null;
   systemUserToken: string | null;
+  /** True when the corresponding secret is stored and decryptable. */
+  appSecretSet: boolean;
+  systemUserTokenSet: boolean;
   credentialsUndecryptable: boolean;
 }
 export async function getTeamMetaConfig(): Promise<MetaConfigView> {

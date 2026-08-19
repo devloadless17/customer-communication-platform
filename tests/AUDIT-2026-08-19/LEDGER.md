@@ -14,13 +14,20 @@ Resume state: if a session is cut, continue from the first section below not mar
 | Phase 0 S8 dependency audit | DONE — undici HIGH fixed (commit 6b86de82); remaining: 1 high (deepmerge-ts via prisma dev-chain, not runtime), moderates in dev chains + uuid-via-exceljs (accepted, bounded exposure) |
 | Sweeps A (S2, S3, S5, S6, S7) | RUNNING (wf_83bbd429-75b) |
 | Direct-read list (orchestrator) | IN PROGRESS — PASSED so far: send-idempotency + send-queue + send-worker + executeTextSendJob (OutboundSendAttempt state machine sound in every crash window); broadcast-runner per-recipient CAS + attempt lifecycle; send-rate-limiter (atomic Lua, Coexistence 18<20 wins); blob-orphan (cross-check registry complete vs schema — verified no unregistered blob-key columns); resolveActiveWorkspaceId + makeCanAccessBeyondMembership (branches correct); ticketAccessWhere + call-site scan (remove-member handles guest-side shares); workflow send_message (journaled, budget-guarded) + http_request (SSRF, stable delivery key, depth); /v1 api-idempotency (ambiguity-protected claims, atomic reclaim) + /v1 sendText release-only-on-provably-not-sent; meta-waba-subscription (our-app check, truncation refusal). REMAINING: contact-transfer import path detail (U7 reviewer + spot done on artifacts sweeper), retention sweeper predicates (post-S3), meta-page-subscription self-heal (U1b + verify). |
-| Wave 1 reviews (U7, U10, U2, U1) | LAUNCHED |
-| Wave 1 verify + fixes + fix-review | pending |
-| Wave 2 (U4, U3, U8, U9) + S1 | pending |
-| Wave 3 (U6, U11, U5, U12) + S2/S3/S5 | pending |
-| Wave 4 (U13, U14) + S4/S6..S13 | pending |
+| Wave 1 reviews + verify (U7, U10, U2a/b, U1a/b) | DONE — 53 findings, 18 confirmed |
+| Wave 2 reviews + verify (U4, U3, U8, U9) | DONE — 28 findings, 10 confirmed |
+| Sweeps A (S2, S3, S5, S6, S7) | DONE — 21 findings |
+| Wave 1 fixes | LANDED + gates green + COMMITTED (acf77c2d, e594e559, 1fc6c86f, e9053362, eeb415d9, 0a59a8eb) |
+| Wave 2 fixes (workflows/broadcasts/auth) | RE-RUNNING (session limit killed first attempt) |
+| settings-secrets fix (S7-2) | RE-RUNNING |
+| Wave 3 (U6, U11, U5, U12) | RUNNING (wf_55178551-13b) |
+| Wave 4 (U13, U14) + S1/S4/S9..S13 | pending |
+| Low-findings pass (62 collected) | pending — tests/AUDIT-2026-08-19/low-findings-backlog.md |
 | Live phase 1–8 | pending |
 | Final gate chain | pending |
+
+## Gate history
+- 2026-08-19 post-Wave-1-fixes: `pnpm check` exit 0; api vitest 1559/1559; partial-index tripwire green.
 
 ## Findings
 

@@ -37,6 +37,7 @@ import type {
   ChannelPersona,
   ChannelWelcomeScreen,
 } from "@ccp/shared/providers/types";
+import { SECRET_SAVED_SENTINEL } from "@ccp/shared/dtos";
 
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
@@ -72,9 +73,14 @@ export interface MessengerConfigView {
   pageName: string | null;
   appId: string | null;
   verifyToken: string | null;
-  /** Decrypted plaintext — server→browser only, for form pre-fill. */
+  /** `SECRET_SAVED_SENTINEL` when a value is stored (and decryptable), else
+   *  null — never the plaintext. Submitting the sentinel back keeps the stored
+   *  value. */
   pageAccessToken: string | null;
   appSecret: string | null;
+  /** True when the corresponding secret is stored and decryptable. */
+  pageAccessTokenSet: boolean;
+  appSecretSet: boolean;
   /** True when secrets exist but decrypt failed (key rotated / corrupt). */
   credentialsUndecryptable: boolean;
   /** True when a send failed with Graph 190 — the token expired/was revoked and
@@ -149,6 +155,15 @@ export class MessengerService {
     }
   }
 
+  /**
+   * Current config for the admin connect form.
+   *
+   * Secrets are decrypted here only to PROBE (the live subscription + integrity
+   * reads below) and to compute the Set/undecryptable flags — the response
+   * carries `SECRET_SAVED_SENTINEL` in their place, never the plaintext, so the
+   * long-lived Page token + App secret are not readable from every admin's
+   * devtools. `updateConfig` reads the sentinel as "keep the stored value".
+   */
   async getConfig(workspaceId: string): Promise<MessengerConfigView> {
     const conn = await this.db.channelConnection.findFirst({
       where: { workspaceId, channel: CHANNEL, isDefault: true },
@@ -279,8 +294,10 @@ export class MessengerService {
       pageName: config.pageName ?? null,
       appId: config.appId ?? null,
       verifyToken,
-      pageAccessToken,
-      appSecret,
+      pageAccessToken: pageAccessToken !== null ? SECRET_SAVED_SENTINEL : null,
+      appSecret: appSecret !== null ? SECRET_SAVED_SENTINEL : null,
+      pageAccessTokenSet: pageAccessToken !== null,
+      appSecretSet: appSecret !== null,
       credentialsUndecryptable,
       needsReconnect: conn?.needsReconnect ?? false,
       webhookRejection: recentWebhookRejection(
@@ -297,6 +314,15 @@ export class MessengerService {
     input: UpdateMessengerConfigInput,
   ): Promise<{ config: { pageId: string; pageName: string | null; verifyToken: string } }> {
     const { pageId } = input;
+
+    // getConfig ships SECRET_SAVED_SENTINEL in place of stored plaintext, so an
+    // untouched form can echo it back. Treat it as "not typed" — the precedence
+    // below then keeps this row's own stored secret and re-derives its Page
+    // token, exactly as a blank field does. Never let it reach `encryptSecret`.
+    const typedPageAccessToken =
+      input.pageAccessToken === SECRET_SAVED_SENTINEL ? undefined : input.pageAccessToken;
+    const typedAppSecret =
+      input.appSecret === SECRET_SAVED_SENTINEL ? undefined : input.appSecret;
 
     // Source the app-level credentials from the shared Meta App connection,
     // unless the admin overrode them on this form. The Page access token is
@@ -321,7 +347,7 @@ export class MessengerService {
       })
     )?.secrets ?? {}) as MessengerChannelSecrets;
     const ownAppSecret = this.tryDecrypt(ownSecrets.appSecret ?? null, "appSecret");
-    const appSecret = input.appSecret?.trim() || ownAppSecret || meta?.appSecret || null;
+    const appSecret = typedAppSecret?.trim() || ownAppSecret || meta?.appSecret || null;
     // The row's own stored Page token — used ONLY at store time (below) to keep
     // an own-app row's coherent token/secret pair. It must NOT join the
     // sourceToken chain: a stored Page token cannot derive a fresh Page token
@@ -329,7 +355,7 @@ export class MessengerService {
     // it first broke the advertised reconnect path (hit Save after a Graph 190
     // and the stale revoked token won over the freshly rotated shared token).
     const ownPageToken = this.tryDecrypt(ownSecrets.pageAccessToken ?? null, "pageAccessToken");
-    const sourceToken = input.pageAccessToken?.trim() || meta?.systemUserToken || null;
+    const sourceToken = typedPageAccessToken?.trim() || meta?.systemUserToken || null;
     const appId = input.appId?.trim() || meta?.appId || undefined;
     if (!appSecret || !sourceToken) {
       throw new BadRequestException({
@@ -355,8 +381,8 @@ export class MessengerService {
       // `appSecret` — that chain includes the row's OWN secret, and signing the
       // shared token with an own-app secret is a wrong proof Meta rejects even
       // when none is required, failing every own-app re-save probe.
-      const probeProofSecret = input.pageAccessToken?.trim()
-        ? input.appSecret?.trim() || undefined
+      const probeProofSecret = typedPageAccessToken?.trim()
+        ? typedAppSecret?.trim() || undefined
         : (meta?.appSecret ?? undefined);
       const res = await fetch(
         withAppsecretProof(
@@ -394,7 +420,7 @@ export class MessengerService {
     // token — which the New Pages Experience rejects on every send. Storing it
     // would mark the channel "connected" but leave it permanently unsendable, so
     // fail loudly at connect instead of silently later.
-    if (!derivedPageToken && !input.pageAccessToken?.trim()) {
+    if (!derivedPageToken && !typedPageAccessToken?.trim()) {
       throw new BadRequestException({
         error: "page_token_derivation_failed",
         detail:
@@ -413,7 +439,7 @@ export class MessengerService {
       ownAppSecret && meta?.appSecret && ownAppSecret !== meta.appSecret,
     );
     const tokenToStore =
-      !input.pageAccessToken?.trim() && ownAppRow && ownPageToken
+      !typedPageAccessToken?.trim() && ownAppRow && ownPageToken
         ? ownPageToken
         : (derivedPageToken ?? sourceToken);
 

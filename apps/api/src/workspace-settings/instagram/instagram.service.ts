@@ -20,6 +20,7 @@ import { getInstagramSendConfig } from "@/lib/providers/instagram-config";
 import { instagramProvider } from "@/lib/providers/instagram";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import type { ChannelEntryPoints } from "@ccp/shared/providers/types";
+import { SECRET_SAVED_SENTINEL } from "@ccp/shared/dtos";
 import {
   channelInboxSources,
   INBOX_SOURCES,
@@ -66,8 +67,14 @@ export interface InstagramConfigView {
   pageName: string | null;
   appId: string | null;
   verifyToken: string | null;
+  /** `SECRET_SAVED_SENTINEL` when a value is stored (and decryptable), else
+   *  null — never the plaintext. Submitting the sentinel back keeps the stored
+   *  value. */
   igAccessToken: string | null;
   appSecret: string | null;
+  /** True when the corresponding secret is stored and decryptable. */
+  igAccessTokenSet: boolean;
+  appSecretSet: boolean;
   credentialsUndecryptable: boolean;
   /** True when a send failed with Graph 190 (token expired/revoked) — drives the
    *  Settings "reconnect" banner. */
@@ -118,6 +125,15 @@ export class InstagramService {
     }
   }
 
+  /**
+   * Current config for the admin connect form.
+   *
+   * Secrets are decrypted here only to PROBE (the live Page-subscription read
+   * below) and to compute the Set/undecryptable flags — the response carries
+   * `SECRET_SAVED_SENTINEL` in their place, never the plaintext, so the
+   * long-lived token + App secret are not readable from every admin's devtools.
+   * `updateConfig` reads the sentinel as "keep the stored value".
+   */
   async getConfig(workspaceId: string): Promise<InstagramConfigView> {
     const conn = await this.db.channelConnection.findFirst({
       where: { workspaceId, channel: CHANNEL, isDefault: true },
@@ -208,8 +224,10 @@ export class InstagramService {
       pageName: config.pageName ?? null,
       appId: config.appId ?? null,
       verifyToken,
-      igAccessToken,
-      appSecret,
+      igAccessToken: igAccessToken !== null ? SECRET_SAVED_SENTINEL : null,
+      appSecret: appSecret !== null ? SECRET_SAVED_SENTINEL : null,
+      igAccessTokenSet: igAccessToken !== null,
+      appSecretSet: appSecret !== null,
       credentialsUndecryptable,
       needsReconnect: conn?.needsReconnect ?? false,
       webhookRejection: recentWebhookRejection(
@@ -227,6 +245,15 @@ export class InstagramService {
     config: { igId: string; igUsername: string | null; pageId: string; verifyToken: string };
   }> {
     const { pageId } = input;
+
+    // getConfig ships SECRET_SAVED_SENTINEL in place of stored plaintext, so an
+    // untouched form can echo it back. Treat it as "not typed" — the precedence
+    // below then keeps this row's own stored secret and re-derives its Page
+    // token, exactly as a blank field does. Never let it reach `encryptSecret`.
+    const typedIgAccessToken =
+      input.igAccessToken === SECRET_SAVED_SENTINEL ? undefined : input.igAccessToken;
+    const typedAppSecret =
+      input.appSecret === SECRET_SAVED_SENTINEL ? undefined : input.appSecret;
 
     // Source app-level credentials from the shared Meta App connection unless
     // overridden on this form. The Page access token is derived below.
@@ -249,7 +276,7 @@ export class InstagramService {
     const preOwnSecrets = (preExisting?.secrets ?? {}) as InstagramChannelSecrets;
     const ownIgToken = this.tryDecrypt(preOwnSecrets.igAccessToken ?? null, "igAccessToken");
     const preOwnAppSecret = this.tryDecrypt(preOwnSecrets.appSecret ?? null, "appSecret");
-    const sourceToken = input.igAccessToken?.trim() || meta?.systemUserToken || null;
+    const sourceToken = typedIgAccessToken?.trim() || meta?.systemUserToken || null;
     const appId = input.appId?.trim() || meta?.appId || undefined;
     // Checked BEFORE the Graph call that resolves `igId` — that call needs the
     // token. The app-secret half of this guard runs after, for the reason in the
@@ -278,8 +305,8 @@ export class InstagramService {
     // with a typed secret (never mis-signed with a fallback secret — Meta
     // rejects a WRONG proof even when none is required); the shared token
     // signs with the shared secret.
-    const proofSecret = input.igAccessToken?.trim()
-      ? input.appSecret?.trim() || undefined
+    const proofSecret = typedIgAccessToken?.trim()
+      ? typedAppSecret?.trim() || undefined
       : (meta?.appSecret ?? undefined);
     try {
       const res = await fetch(
@@ -335,7 +362,7 @@ export class InstagramService {
     // Fail loudly if we couldn't get a Page token and none was pasted — storing
     // the shared system-user token would mark the channel connected but leave it
     // unsendable (New Pages Experience rejects it). See messenger.service.
-    if (!derivedPageToken && !input.igAccessToken?.trim()) {
+    if (!derivedPageToken && !typedIgAccessToken?.trim()) {
       throw new BadRequestException({
         error: "page_token_derivation_failed",
         detail:
@@ -351,7 +378,7 @@ export class InstagramService {
       preOwnAppSecret && meta?.appSecret && preOwnAppSecret !== meta.appSecret,
     );
     const tokenToStore =
-      !input.igAccessToken?.trim() && ownAppRow && ownIgToken
+      !typedIgAccessToken?.trim() && ownAppRow && ownIgToken
         ? ownIgToken
         : (derivedPageToken ?? sourceToken);
 
@@ -387,7 +414,7 @@ export class InstagramService {
     // The failure it was written to prevent therefore still happened in full.
     const ownSecrets = (existing?.secrets ?? {}) as InstagramChannelSecrets;
     const ownAppSecret = this.tryDecrypt(ownSecrets.appSecret ?? null, "appSecret");
-    const appSecret = input.appSecret?.trim() || ownAppSecret || meta?.appSecret || null;
+    const appSecret = typedAppSecret?.trim() || ownAppSecret || meta?.appSecret || null;
     if (!appSecret) {
       throw new BadRequestException({
         error: "meta_not_configured",
