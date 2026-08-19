@@ -119,11 +119,11 @@ export function WindowBadgeFromStatus({
           state and the full label lives in the title tooltip — so drop the word
           and the middot, keeping just icon + remaining time. */}
       {size === "xs" ? (
-        <span className="truncate opacity-80">{formatWindowRemaining(status)}</span>
+        <span className="truncate">{formatWindowRemaining(status)}</span>
       ) : (
         <>
           <span className="shrink-0 font-medium">{windowStateLabel(state)}</span>
-          <span className="truncate opacity-80">· {formatWindowRemaining(status)}</span>
+          <span className="truncate">· {formatWindowRemaining(status)}</span>
         </>
       )}
     </span>

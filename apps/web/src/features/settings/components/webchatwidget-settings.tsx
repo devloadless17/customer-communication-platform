@@ -225,7 +225,7 @@ export function WebchatWidgetSettings({
                       admin who never opens the Install tab still sees it. */}
                   {w.isActive && w.allowedOrigins.length === 0 && (
                     <span
-                      className="rounded border border-amber-500/40 bg-amber-500/10 px-1 text-2xs text-amber-700 dark:text-amber-400"
+                      className="rounded border border-amber-500/40 bg-amber-500/10 px-1 text-2xs text-amber-800 dark:text-amber-300"
                       title="No allowed domains — any site can embed this widget. Lock it in the Install tab."
                     >
                       open to any site
@@ -1253,7 +1253,7 @@ function Preview({ widget }: { widget: WebchatWidgetView }) {
         </div>
       </div>
       {c.showBranding !== false && (
-        <div className="pb-2 text-center text-[10.5px] tracking-wide opacity-75" style={{ background: surface, color: ink2 }}>Powered by Loadless</div>
+        <div className="pb-2 text-center text-[10.5px] tracking-wide" style={{ background: surface, color: ink2 }}>Powered by Loadless</div>
       )}
     </div>
   );

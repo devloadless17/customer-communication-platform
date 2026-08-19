@@ -57,7 +57,7 @@ export function ContactsSubSidebar({
   const allActive = onContactsPage && noStageFilter && !activeChannel;
   const count = (n: number | undefined) =>
     n === undefined ? undefined : (
-      <span className="text-3xs tabular-nums text-muted-foreground/70">{n}</span>
+      <span className="text-3xs tabular-nums text-muted-foreground">{n}</span>
     );
 
   return (
@@ -126,7 +126,7 @@ export function ContactsSubSidebar({
                 leading={<Users2 className="size-3.5" />}
                 active={active}
                 trailing={
-                  <span className="text-3xs tabular-nums text-muted-foreground/70">
+                  <span className="text-3xs tabular-nums text-muted-foreground">
                     {group.memberCount}
                   </span>
                 }
