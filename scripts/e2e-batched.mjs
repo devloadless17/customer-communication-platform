@@ -34,7 +34,7 @@
  * workaround for a constraint, not the preferred path.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { rmSync } from "node:fs";
+import { readdirSync, rmSync } from "node:fs";
 
 /** Grouped so each chunk's peak memory stays inside a constrained box, and so a
  *  chunk that dies costs one group rather than the whole run. */
@@ -47,7 +47,43 @@ const BATCHES = [
   ["tests/e2e/team-chat", "tests/e2e/webchatwidget"],
   ["tests/e2e/workflows-events"],
   ["tests/e2e/post-audit-fixes"],
+  [
+    "tests/e2e/contacts-segments.spec.ts",
+    "tests/e2e/contact-select-fields.spec.ts",
+    "tests/e2e/reports-team.spec.ts",
+  ],
 ];
+
+/**
+ * Every root spec `playwright.config.ts` would run must appear in a batch.
+ *
+ * This is the gate's own honesty check. The batches are a hand-written list, and
+ * three specs had silently fallen off it — `contacts-segments` (the e2e for the
+ * newest feature), `contact-select-fields` and `reports-team`. A run reported
+ * green while never executing them, which is the same failure mode this file's
+ * header rails against: a gate you cannot trust is worse than no gate, because
+ * it launders an untested change as a verified one. (Audit 2026-08-19.)
+ *
+ * Directory suites (`tests/e2e/calls`, …) are listed as directories, so a spec
+ * added inside one is covered automatically; only ROOT specs need registering.
+ * `meta-channels` is deliberately absent — it runs under its own config via
+ * `pnpm test:e2e:meta`, as `playwright.config.ts`'s `testIgnore` records.
+ */
+function assertEveryRootSpecBatched() {
+  const listed = new Set(BATCHES.flat());
+  const missing = readdirSync("tests/e2e")
+    .filter((f) => f.endsWith(".spec.ts"))
+    .map((f) => `tests/e2e/${f}`)
+    .filter((p) => !listed.has(p));
+  if (missing.length > 0) {
+    console.error(
+      `✖ e2e-batched: ${missing.length} root spec(s) are not in any batch, so this ` +
+        `run would report green without executing them:\n  ${missing.join("\n  ")}\n` +
+        `Add each to a BATCHES group (pick one whose peak memory has headroom).`,
+    );
+    process.exit(1);
+  }
+}
 
 /**
  * Routes warmed before each batch. Next dev compiles on FIRST VISIT, and a cold
@@ -104,6 +140,8 @@ async function startStack() {
   }).unref();
   return (await up(`${API}/health`, 240_000)) && (await up(`${BASE}/login`, 240_000));
 }
+
+assertEveryRootSpecBatched();
 
 const results = [];
 const batches = only === null ? BATCHES.map((b, i) => [i, b]) : [[only, BATCHES[only]]];
