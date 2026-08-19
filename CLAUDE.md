@@ -386,7 +386,7 @@ architecture docs back into `docs/`.
 | Local setup & dev matrix | [ONBOARDING.md](ONBOARDING.md) |
 | Customer onboarding runbook (operator process, the ONE doc in `docs/`) | [docs/customer-onboarding.md](docs/customer-onboarding.md) |
 | Deploy, heap, shutdown, queues, Caddy | [deploy/README.md](deploy/README.md) |
-| What has been verified, how, and when | [tests/VERIFICATION-2026-07-29.md](tests/VERIFICATION-2026-07-29.md) |
+| What has been verified, how, and when | [tests/AUDIT-2026-08-19/REPORT.md](tests/AUDIT-2026-08-19/REPORT.md) + its [LEDGER.md](tests/AUDIT-2026-08-19/LEDGER.md) |
 
 Everything else is a docblock on the module that owns the behaviour. When a
 rule matters, it is written where someone changing that code will see it.

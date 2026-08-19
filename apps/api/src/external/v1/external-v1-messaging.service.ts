@@ -246,7 +246,7 @@ export class ExternalV1MessagingService {
     // Idempotency — a partner retry of the same assign (n8n re-firing on a
     // timeout) must not re-publish conversation.assigned + re-trigger workflows
     // / webhooks. CLAIM-then-execute via the shared service (F2 in
-    // tests/VERIFICATION-2026-07-29.md). A replay returns the prior
+    // the 2026-07-29 verification round). A replay returns the prior
     // { ok: true } with zero side effects.
     if (idempotencyKey) {
       const claim = await this.idem.claim<{ ok: true }>(

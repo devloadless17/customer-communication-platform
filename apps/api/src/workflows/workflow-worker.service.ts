@@ -476,7 +476,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       // Daily retention on ConversationEvent (audit timeline) — the one
       // high-churn table that previously had no sweep. 90-day cutoff (tunable
       // via CONVERSATION_EVENT_RETENTION_DAYS). N2 in
-      // tests/VERIFICATION-2026-07-29.md.
+      // the 2026-07-29 verification round.
       startConversationEventRetentionSweeper();
       this.conversationEventRetentionStarted = true;
       this.logger.log("Conversation event retention sweeper started");

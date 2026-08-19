@@ -1156,7 +1156,7 @@ export class ExternalV1Service {
   ): Promise<ExternalContact> {
     // Idempotency — a partner retry must not re-publish contact.updated /
     // lifecycle_changed and re-trigger workflows/webhooks. F2 in
-    // tests/VERIFICATION-2026-07-29.md.
+    // the 2026-07-29 verification round.
     if (idempotencyKey) {
       const claim = await this.idem.claim<ExternalContact>(
         workspaceId,

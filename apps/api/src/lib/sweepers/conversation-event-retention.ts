@@ -9,7 +9,7 @@ import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
  * on conversation delete, so it's bounded by live conversations — but on an
  * active account it's the fastest-growing audit surface after `Message`. Every
  * other high-churn table has a retention sweep; this one was the gap (N2 in
- * tests/VERIFICATION-2026-07-29.md).
+ * the 2026-07-29 verification round).
  *
  * Retention policy: delete rows older than the cutoff — with ONE carve-out:
  * `kind = 'assigned'` rows are kept forever. They are the assignment ledger

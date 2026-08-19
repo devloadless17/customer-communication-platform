@@ -12,7 +12,6 @@ Resume state: if a session is cut, continue from the first section below not mar
 | Phase 0 baseline gates (`pnpm check`) | PASS (exit 0, 2026-08-19) |
 | Phase 0 api vitest baseline | PASS — 1559/1559 |
 | Phase 0 S8 dependency audit | DONE — undici HIGH fixed (commit 6b86de82); remaining: 1 high (deepmerge-ts via prisma dev-chain, not runtime), moderates in dev chains + uuid-via-exceljs (accepted, bounded exposure) |
-| Sweeps A (S2, S3, S5, S6, S7) | RUNNING (wf_83bbd429-75b) |
 | Direct-read list (orchestrator) | IN PROGRESS — PASSED so far: send-idempotency + send-queue + send-worker + executeTextSendJob (OutboundSendAttempt state machine sound in every crash window); broadcast-runner per-recipient CAS + attempt lifecycle; send-rate-limiter (atomic Lua, Coexistence 18<20 wins); blob-orphan (cross-check registry complete vs schema — verified no unregistered blob-key columns); resolveActiveWorkspaceId + makeCanAccessBeyondMembership (branches correct); ticketAccessWhere + call-site scan (remove-member handles guest-side shares); workflow send_message (journaled, budget-guarded) + http_request (SSRF, stable delivery key, depth); /v1 api-idempotency (ambiguity-protected claims, atomic reclaim) + /v1 sendText release-only-on-provably-not-sent; meta-waba-subscription (our-app check, truncation refusal). REMAINING: contact-transfer import path detail (U7 reviewer + spot done on artifacts sweeper), retention sweeper predicates (post-S3), meta-page-subscription self-heal (U1b + verify). |
 | Wave 1 reviews + verify (U7, U10, U2a/b, U1a/b) | DONE — 53 findings, 18 confirmed |
 | Wave 2 reviews + verify (U4, U3, U8, U9) | DONE — 28 findings, 10 confirmed |
@@ -23,66 +22,61 @@ Resume state: if a session is cut, continue from the first section below not mar
 | Sweeps B (S1, S4, S10, S12, S13) | DONE — 38 findings (1 critical, 5 high) |
 | S1 TENANCY RESULT | **1,778 Prisma call sites + 84 raw SQL + 312 @Param handlers audited: ZERO unscoped-and-request-reachable queries.** 309/312 handlers carry session/API-key scope; the 3 exceptions are credential-gated public surfaces (invite token, HMAC'd Meta webhook, HMAC'd workflow webhook). All raw SQL parameterized. checker allowlist matches schema exactly. Only finding: no MECHANICAL CI control exists (TEN-01, medium). |
 | S12-2 critical (conversation delete cascades into tickets + shares) | FIXED + COMMITTED 4055a283 |
-| Sweeps B fixes (batch 1: S12-3, S13-01..04, S10-1, S10-3) | RUNNING (wf_a3326006-f75) |
+| Sweeps B fixes (batch 1) | COMMITTED |
 | Sweeps B deferred to after Wave-3 fleet (file collisions) | S12-1 (/v1 tag delete skips view scrub, HIGH), S4-01..S4-14 (docs accuracy + parity), S12-4 (AI retention sweeper) |
 | Wave 3 reviews + verify (U6, U11, U5, U12) | DONE — 44 findings, 25 CONFIRMED (1 critical, 3 high), 0 refuted |
 | Wave 3 critical/high direct-reads + fixes | COMMITTED 0cc465c6 (U11-01 critical, U6-1 cross-workspace) |
 | Wave 3 fixes (remaining 21) | LANDED — gates green (`pnpm check` exit 0), typecheck clean both apps |
-| Wave 4 reviews (U13, U14) | RUNNING (wf_dc4978bc-3bb) |
+| Wave 4 reviews (U13, U14) | DONE — 16 findings, 12 confirmed (1 critical: superAdmin password) |
 | Wave 3 + Sweeps B fixes | COMMITTED (40ad061e tickets, 74b0e1dd ai, cb9fb4d8 calls/team-chat, 04fa15cf v1, 3a034b12 views/lists, d81b5d22 v1 tags) |
-| Cleanup fleet (S4 docs, S12-4 AI retention, 97 lows) | RUNNING (wf_cfee02b9-577) |
+| Cleanup fleet (S4 docs, S12-4 AI retention, 97 lows) | DONE — committed 1ecec952 |
 | E2E gate completeness | FIXED + COMMITTED a09a5efd — 3 root specs (incl. contacts-segments) were never run by the batched gate; now batched + self-checking |
-| Wave 4 (U13, U14) + S1/S4/S9..S13 | pending |
+| UI inventory (step 7 input) | DONE — 82 routes / 1009 elements / 74 destructive (UI-INVENTORY.md) |
 | Low-findings pass (97 collected) | DONE — committed 1ecec952 |
 | S11 coverage-manifest diff | DONE — 792/1103 files explicitly attested by wave reviewers; **311 never opened**. Follow-up pass reviewed all of them (337 files incl. corroboration), 253 clean, 51 findings, 15 CONFIRMED. Coverage is now provable. |
 | Coverage-gap fixes | COMMITTED (b5a634ae, 4f6c7d52, 8fc1a0d9, 6f02970a) — gates green, 1560 tests |
 | Live phase: batched e2e | RUN 1 DONE — **592 passed / 11 failed**. Green: batches 0,1,2,6,7. Failed: 3,4,5,8. |
-| Live phase: rerun of failing batches | **INCOMPLETE — RESUME HERE.** The batch-3 rerun was ABORTED mid-flight by the session shutdown (its "25 failed / 6 passed" is the teardown killing the stack — NOT a result, ignore it). Batches 4, 5, 8 never re-ran. Start the reruns from scratch. |
+| Live phase: rerun of failing batches | DONE — all 4 re-run alone on fresh stacks; see "Live-phase results" below. |
 | Memory | `full-system-audit-2026-08-19.md` written + indexed |
-| Live phase 1–8 | pending |
+| Live phase: meta / multiaccount / uiux | meta + multiaccount PASS; uiux running |
 | Final gate chain | pending (re-run `pnpm check` + api vitest before finishing — both were green at 6f02970a) |
-
-## ▶ HOW TO RESUME (next session, start here)
-
-Working tree is clean at `6f02970a` + the two audit docs. Nothing is pushed. All static gates
-were green at that commit: `pnpm check` exit 0, api vitest 148 files / 1560 tests, both apps
-typecheck clean.
-
-**The only open question is the 11 e2e failures.** They are NOT yet attributed. Re-run each
-failing batch ALONE on a fresh stack (this is the documented way to separate the box from the
-code — see the header of `scripts/e2e-batched.mjs`):
-
-```
-node scripts/e2e-batched.mjs --only 3   # availability-work-hours "Settings → Team UI" ×4
-node scripts/e2e-batched.mjs --only 4   # calls panel ×1, platform ×2
-node scripts/e2e-batched.mjs --only 5   # webchatwidget ×3
-node scripts/e2e-batched.mjs --only 8   # contact-select-fields "filter by option" ×1
-```
-
-Evidence so far that they are ENVIRONMENTAL (not yet proof):
-- every failure is an 8–10s timeout or "element(s) not found", never an assertion mismatch;
-- they scatter across settings / calls / platform / webchat, which no single commit touches;
-- batch 6 (146 tests) and batch 7 (188 tests) ran clean immediately after a stack restart;
-- `next-server` sits at 2.8–3.1 GB RSS on a 5.9 GB box, leaving <200 MB free during the
-  failing batches. `--max-old-space-size=1400` caps V8 old space, NOT total RSS.
-- Static checks on the prime suspect came back clean: `/settings/members`'s new
-  `organizationName` prop is a typed `string` defaulting to `""` (cannot throw), the
-  `OrgNameCard`→`WorkspaceNameCard` rename left zero dangling refs, and the work-hours
-  card's `canManage` gating was untouched.
-
-**Treat `contact-select-fields › browser: filter by option` (batch 8) as the highest-priority
-one.** That spec had NEVER been executed by this gate before today's fix, so unlike the others
-it has no history of passing here — it could be a genuine bug that the gate's blind spot hid.
-
-If a failure reproduces on a fresh stack: it is real, fix it. If all pass: record them as
-environmental in this ledger and the program is DONE apart from the final gate chain.
-
-Still not run at all (optional, lower value than the above): `pnpm test:e2e:meta` (mock Graph)
-and `pnpm test:e2e:multiaccount`.
 
 ## Gate history
 - 2026-08-19 post-Wave-1-fixes: `pnpm check` exit 0; api vitest 1559/1559; partial-index tripwire green.
 - 2026-08-19 post-Wave-2-fixes + settings-secrets: `pnpm check` exit 0; api vitest 148 files / 1559 tests; migration `20260819060000_workspace_deleting_claim` applied to the dev DB.
+
+## Live-phase results (2026-08-19)
+
+| Suite | Result |
+|---|---|
+| batched e2e (9 batches) | 592 passed / 11 failed → **all 11 settled** (below) |
+| `test:e2e:meta` (mock Graph, incl. @pressure) | **173 passed** |
+| `test:e2e:multiaccount` | **46 passed** |
+| S9 partial-index tripwire (re-run post-migrations) | pass |
+
+### The 11 e2e failures, attributed
+- **1 REAL product bug** — contacts filter menus had no height cap/scroll, so their
+  lower rows were unreachable once a workspace had select fields. Fixed `ba34d63f`,
+  verified 17→18 passing.
+- **2 REAL test bugs** (pre-existing, broke 2026-08-17, unseen because the gate was
+  not run after that date) — fixed `5181c227`. Causation proved by reverting the
+  audit's own widget.js hunk and watching them fail identically.
+- **8 environmental** — memory pressure; batches 3 and 4 fully green when re-run
+  alone (`next-server` holds ~3 GB RSS on a 5.9 GB box).
+
+## OPEN FINDINGS (not root-caused — do not mark this audit "clean" without them)
+Both are executable reproductions in `tests/e2e/realtime-convergence.spec.ts`,
+marked `test.fixme` so they stay visible rather than being deleted:
+1. **A second session does not render an incoming `note:new`** while the first does.
+   Reproduced with a different user (restricted → admin → assignee) and the SAME
+   user in two contexts, on empty and seeded threads. The second session's socket
+   is demonstrably live (an assignment pill arrived on it in the same run).
+2. **A session offline when a note was added does not converge on reconnect**
+   (45s, no reload). §10 promises every recovery path converges to server state.
+
+Only NOTES are covered. **A missed MESSAGE would be materially more serious** and
+needs the ingest path (HMAC webhook + connected channel) the spec avoids so it
+never touches a provider. That is the highest-value next check.
 
 ## ⚠ OPERATOR ACTION REQUIRED AFTER DEPLOY
 The production superAdmin password is currently the literal `loadless` (every deploy re-asserted it — fixed in 0024e964, but the fix stops FUTURE resets, it cannot change the password already in the database). **After deploying, sign in as the superAdmin and change the password**, or set `SUPERADMIN_PASSWORD` and re-seed. That account can enter every workspace on the box.

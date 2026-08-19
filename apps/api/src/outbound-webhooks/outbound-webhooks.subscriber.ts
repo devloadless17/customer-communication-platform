@@ -183,7 +183,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     // later, outside that scope, so it can't read this itself. Persisted on the
     // delivery row + echoed as X-CCP-Trace-Id. Undefined for events published
     // outside an HTTP request (sweepers, boot reconciler). F6 in
-    // tests/VERIFICATION-2026-07-29.md.
+    // the 2026-07-29 verification round.
     const correlationId = getCorrelationId() ?? null;
     // Capture the inbound chain depth in the SAME synchronous ALS scope as the
     // correlation id (the BullMQ worker runs later, outside this scope). The
