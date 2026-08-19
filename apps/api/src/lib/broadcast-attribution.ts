@@ -90,8 +90,9 @@ export async function attributeInboundToBroadcast(ctx: InboundContext): Promise<
     await applyOptOut(ctx.workspaceId, ctx.contactId, "stop_keyword", ctx.timestamp);
   }
 
-  const recipientId = await resolveAttributedRecipient(ctx);
-  if (!recipientId) return;
+  const attributed = await resolveAttributedRecipient(ctx);
+  if (!attributed) return;
+  const recipientId = attributed.id;
 
   // CAS on `repliedAt: null` → FIRST reply wins. This counts unique recipients
   // who replied, not messages; the report labels it "recipients who replied" so
@@ -124,7 +125,12 @@ export async function attributeInboundToBroadcast(ctx: InboundContext): Promise<
     data: {
       repliedAt: ctx.timestamp,
       repliedMessageId: ctx.messageId,
-      repliedAttribution: ctx.replyToMessageId ? "direct" : "window",
+      // How the credit was earned, from the resolver that actually earned it —
+      // NOT "a quote existed". Quoting an ordinary agent message (or a campaign
+      // message from a campaign this contact isn't a recipient of) falls through
+      // to the 72h window, and labelling that "direct" made the report claim an
+      // exact match it never had.
+      repliedAttribution: attributed.attribution,
     },
   });
 
@@ -155,7 +161,9 @@ export async function attributeInboundToBroadcast(ctx: InboundContext): Promise<
  *     fuzzy matching, ever") and a wrong guess here is worse than an honest
  *     "attributed by time window" label on the report.
  */
-async function resolveAttributedRecipient(ctx: InboundContext): Promise<string | null> {
+async function resolveAttributedRecipient(
+  ctx: InboundContext,
+): Promise<{ id: string; attribution: "direct" | "window" } | null> {
   if (ctx.replyToMessageId) {
     const quoted = await db.message.findUnique({
       where: { id: ctx.replyToMessageId },
@@ -168,7 +176,7 @@ async function resolveAttributedRecipient(ctx: InboundContext): Promise<string |
         },
         select: { id: true },
       });
-      if (direct) return direct.id;
+      if (direct) return { id: direct.id, attribution: "direct" };
     }
   }
 
@@ -188,7 +196,7 @@ async function resolveAttributedRecipient(ctx: InboundContext): Promise<string |
     orderBy: { sentAt: "desc" },
     select: { id: true },
   });
-  return recent?.id ?? null;
+  return recent ? { id: recent.id, attribution: "window" } : null;
 }
 
 /**

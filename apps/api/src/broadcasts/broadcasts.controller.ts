@@ -64,6 +64,12 @@ export class BroadcastsController {
 
   @Post()
   @RequireCapability("broadcasts:manage")
+  // Same 10/min cap as the parity-locked /v1 twin: a create sends billed
+  // template messages to a whole audience and there is no unsend, so it must not
+  // sit on the 300/min default every read shares. Its OWN bucket — the default
+  // scope is the controller class, which would have made an analytics-refresh
+  // spree (also 10/min) 429 a campaign launch.
+  @RateLimit({ perMinute: 10, bucket: "broadcast-create" })
   async create(
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateBroadcastSchema)) body: CreateBroadcastInput,

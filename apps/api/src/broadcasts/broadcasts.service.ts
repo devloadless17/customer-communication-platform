@@ -335,18 +335,19 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         }
       }
 
-      // The composer binds POSITIONAL body variables only. A NAMED-format body
-      // or a button carrying a send-time parameter can't be filled from a
-      // broadcast, and Meta rejects every recipient. Reject up front — the
-      // runner repeats this as a backstop, but by then the row exists and the
-      // agent sees a "failed" broadcast instead of an actionable message.
-      const namedBodyVars = templateNamedPlaceholders(template.bodyText);
-      if (namedBodyVars.length > 0) {
-        throw new BadRequestException({
-          error: "template_uses_named_variables",
-          detail: `This template's body uses named variables (${namedBodyVars.join(", ")}). Broadcasts support numbered {{1}} placeholders only.`,
-        });
-      }
+      // NAMED vs POSITIONAL is `parameterFormat`, Meta's own answer stored at
+      // sync time — never a regex over the body (§18): a positional template
+      // carrying a literal `{{order_id}}` in its copy would be misread, and the
+      // wrong wire shape fails every recipient with 132000.
+      //
+      // Named templates ARE broadcastable: the composer collects one value per
+      // placeholder in FIRST-APPEARANCE order and the runner zips the array back
+      // against the names, so both counts below adapt to the format exactly as
+      // the runner's own guard does.
+      const parameterFormat: "named" | "positional" =
+        template.parameterFormat === "named" ? "named" : "positional";
+      const namedBodyVars =
+        parameterFormat === "named" ? templateNamedPlaceholders(template.bodyText) : [];
       // Button values are CAMPAIGN-LEVEL (one coupon code / URL suffix for
       // every recipient — same shape as the location pin and the LTO expiry).
       // Every button the template demands must be covered, or Meta rejects
@@ -401,8 +402,13 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       }
 
       // Variable count sanity check — fire BEFORE creating the row so the UI
-      // can correct without a broadcast row hanging around in `queued`.
-      const bodyVarCount = countTemplatePlaceholders(template.bodyText);
+      // can correct without a broadcast row hanging around in `queued`. A named
+      // body's expected count is the number of DISTINCT names, not the highest
+      // `{{n}}` (the runner's guard is the same shape).
+      const bodyVarCount =
+        parameterFormat === "named"
+          ? namedBodyVars.length
+          : countTemplatePlaceholders(template.bodyText);
       if (variables.body.length !== bodyVarCount) {
         throw new BadRequestException({
           error: "wrong_variable_count",
@@ -413,25 +419,19 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         ? (template.components as unknown as TemplateComponent[])
         : [];
       const headerComp = components.find((c) => c.type === "HEADER");
-      // A NAMED-format header ({{customer_name}}) needs a `parameter_name` on the
-      // wire (see send-template-internal's headerNamed path). The composer binds
-      // only a positional header value, so a broadcast can't supply it — without
-      // this guard a NAMED-header template with a static body slips past the
-      // body/count checks above and 132000s EVERY recipient at Meta. Reject up
-      // front, mirroring the named-body-var rejection.
-      if (
-        headerComp?.format === "TEXT" &&
-        headerComp.text &&
-        templateNamedPlaceholders(headerComp.text).length > 0
-      ) {
-        throw new BadRequestException({
-          error: "template_uses_named_variables",
-          detail: `This template's header uses a named variable. Broadcasts support numbered {{1}} placeholders only.`,
-        });
-      }
+      // A NAMED-format header ({{customer_name}}) carries at most ONE parameter,
+      // sent with its `parameter_name` (see send-template-internal's headerNamed
+      // path) — so the composer collects a single header value for it, exactly
+      // as it does for a positional `{{1}}`. Counted by format for the same
+      // reason as the body: a regex here would misread a positional header whose
+      // copy contains a literal {{word}}.
       const headerVarCount =
         headerComp?.format === "TEXT" && headerComp.text
-          ? countTemplatePlaceholders(headerComp.text)
+          ? parameterFormat === "named"
+            ? templateNamedPlaceholders(headerComp.text).length > 0
+              ? 1
+              : 0
+            : countTemplatePlaceholders(headerComp.text)
           : 0;
       if (headerVarCount > 0 && (!variables.header || variables.header.length === 0)) {
         throw new BadRequestException({
@@ -740,11 +740,31 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // hold several per channel, and every one of them is a distinct sender
     // identity to the customer — so the campaign binds to one, and both the
     // audience and the template catalogue are scoped to it below.
-    const sendingAccountId = await this.resolveSendingAccount(
-      workspaceId,
-      filterChannel,
-      input.channelConnectionId,
-    );
+    //
+    // `allAccounts` is the one shape that binds NONE. Where identity is
+    // account-scoped no single account can address everyone, so the campaign
+    // stores a NULL account and the runner routes each recipient through the one
+    // that issued their id (`isSocialFanOut` — lib/broadcasts/social-account-
+    // router.ts). Resolving the channel default here regardless is what made
+    // that whole path unreachable, and it silently dropped every other account's
+    // contacts in the scoping block below.
+    const fanOutAccounts = input.allAccounts === true;
+    if (fanOutAccounts && !isAccountScopedIdentity(filterChannel)) {
+      throw new BadRequestException({
+        error: "all_accounts_not_supported",
+        detail:
+          `On ${filterChannel} a phone number is global, so any of your numbers can message anyone — ` +
+          "which one a campaign sends from is a deliberate choice rather than a forced one. Pick the " +
+          'sending account, and turn on "include contacts from other accounts" to reach the rest from it.',
+      });
+    }
+    const sendingAccountId = fanOutAccounts
+      ? null
+      : await this.resolveSendingAccount(
+          workspaceId,
+          filterChannel,
+          input.channelConnectionId,
+        );
 
     // A template belongs to a WhatsApp Business Account, and a number can only
     // send templates from its OWN WABA. Sending one from the wrong account is
@@ -898,8 +918,15 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
           droppedByAccount > 0
             ? `All ${droppedByAccount} selected contact${droppedByAccount === 1 ? "" : "s"} ` +
               `belong to another of your ${filterChannel} accounts. Switch the sending ` +
-              `account, or turn on "include contacts from other accounts" to reach them ` +
-              `from this one.`
+              // Never suggest an option this channel refuses: on an
+              // account-scoped channel "include contacts from other accounts" is
+              // rejected outright (cross_account_not_possible) and fan-out is the
+              // only way to reach them.
+              (identityIsAccountScoped
+                ? `account, or pick "All accounts" so each of them is messaged from the ` +
+                  `account they wrote to.`
+                : `account, or turn on "include contacts from other accounts" to reach them ` +
+                  `from this one.`)
             : hadAnyBeforeFilter
               ? `None of the selected contacts are on ${filterChannel}.`
               : appliedFieldFilters.length > 0

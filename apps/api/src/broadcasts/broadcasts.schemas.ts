@@ -263,6 +263,25 @@ export const CreateBroadcastSchema = z
      */
     channelConnectionId: z.string().min(1).optional(),
     /**
+     * FAN-OUT: pin NO account, and reach every contact on the channel through
+     * the account that issued their id.
+     *
+     * Only meaningful where identity is ACCOUNT-SCOPED (a Messenger PSID belongs
+     * to one Page, an Instagram IGSID to one account), because there no single
+     * account can address everyone. Setting it stores `channelConnectionId` NULL
+     * on the row, which is what the runner reads to route per recipient
+     * (`isSocialFanOut` — lib/broadcasts/social-account-router.ts).
+     *
+     * An EXPLICIT flag rather than "omit channelConnectionId": omitting it means
+     * "use the channel default", which every existing caller relies on, so
+     * overloading absence would make fan-out and "I didn't choose" the same
+     * request.
+     *
+     * Refused on WhatsApp (see the service): a phone number is global, so which
+     * number sends is a real business choice, not a forced one.
+     */
+    allAccounts: z.boolean().optional().default(false),
+    /**
      * Reach contacts belonging to the workspace's OTHER accounts on this
      * channel, not just the sending one.
      *
@@ -303,7 +322,13 @@ export const CreateBroadcastSchema = z
     {
       message: "freeform requires channel + bodyText; template requires templateId",
     },
-  );
+  )
+  // Contradictory: one asks for a specific sender, the other for none at all.
+  // Picking a winner silently would send a campaign from an account the caller
+  // did not ask for.
+  .refine((v) => !(v.allAccounts && v.channelConnectionId), {
+    message: "allAccounts cannot be combined with channelConnectionId",
+  });
 export type CreateBroadcastInput = z.infer<typeof CreateBroadcastSchema>;
 
 /**

@@ -2176,9 +2176,16 @@ export default function ApiDocsPage() {
           <strong>narrow</strong> the audience, hand-picked contacts included. A
           filter naming a deleted field or option matches nothing (an audience
           never silently widens); a saved group applies its own stored{" "}
-          <code>fieldFilters</code> instead. Returns the{" "}
-          <code>broadcastId</code> and the resolved <code>totalCount</code>. Scope{" "}
-          <code>write:broadcasts</code>.
+          <code>fieldFilters</code> instead. <code>channelConnectionId</code>{" "}
+          picks which of your accounts on the channel sends (omitted = that
+          channel&apos;s default); on Messenger and Instagram{" "}
+          <code>allAccounts: true</code> pins none instead and messages each
+          recipient from the account that issued their id — the only way to reach
+          everyone there, since a PSID/IGSID belongs to one account. The two are
+          mutually exclusive, and <code>allAccounts</code> is refused on WhatsApp
+          (a phone number is global, so the sending number is a real choice).
+          Returns the <code>broadcastId</code> and the resolved{" "}
+          <code>totalCount</code>. Scope <code>write:broadcasts</code>.
         </Endpoint>
         <Endpoint
           method="POST"

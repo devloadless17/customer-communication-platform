@@ -644,6 +644,18 @@ export function NewBroadcastForm({
     [channelAccounts, accountId],
   );
 
+  /**
+   * The operator DELIBERATELY chose "All accounts" (fan-out), as opposed to
+   * simply not having picked yet or the accounts fetch having failed — all three
+   * read as `accountId === null`.
+   *
+   * Only the deliberate choice may pin no account on the wire: the server treats
+   * an absent `channelConnectionId` as "use the channel default", so fan-out
+   * travels as its own explicit flag.
+   */
+  const allAccountsChosen =
+    accountChosen && accountId === null && isAccountScopedIdentity(selectedChannel);
+
   /** Which channels the workspace can actually broadcast on. */
   const connectedChannels = useMemo(() => {
     const live = (["whatsapp", "messenger", "instagram"] as const).filter((ch) =>
@@ -1198,7 +1210,11 @@ export function NewBroadcastForm({
           : CHANNEL_LABEL.whatsapp;
         // Name the SENDER too — with several accounts on a channel, "over
         // WhatsApp" alone leaves the most important fact of the send implicit.
-        const senderLabel = selectedAccount ? ` from ${selectedAccount.name}` : "";
+        const senderLabel = selectedAccount
+          ? ` from ${selectedAccount.name}`
+          : allAccountsChosen
+            ? " from each account the recipient wrote to"
+            : "";
         const ok = await confirm({
           title: `Send to ${countLabel} now?`,
           description:
@@ -1259,8 +1275,14 @@ export function NewBroadcastForm({
                       : {}),
                   },
                 }),
-            // Bind the campaign to the chosen sender.
-            ...(accountId ? { channelConnectionId: accountId } : {}),
+            // Bind the campaign to the chosen sender — or to NONE, when the
+            // operator picked "All accounts": each recipient is then messaged
+            // from the account that issued their id.
+            ...(accountId
+              ? { channelConnectionId: accountId }
+              : allAccountsChosen
+                ? { allAccounts: true }
+                : {}),
             // Trimmed so a stray space can't fork the rollup into two campaigns.
             ...(campaignName.trim() ? { campaignName: campaignName.trim() } : {}),
             ...(includeOtherAccounts && !isAccountScopedIdentity(selectedChannel)
@@ -1349,13 +1371,17 @@ export function NewBroadcastForm({
         index={1}
         title="Channel"
         summary={`${CHANNEL_LABEL[selectedChannel]}${
-          selectedAccount ? ` · ${selectedAccount.name}` : ""
+          selectedAccount
+            ? ` · ${selectedAccount.name}`
+            : allAccountsChosen
+              ? " · All accounts"
+              : ""
         }`}
         // Done once the sender is actually resolved. Hardcoded `done` showed a
         // green check from first paint — before accounts had even loaded — and
         // the step numeral "1" never rendered at all. Empty directory (fetch
         // failed / mid-onboarding) counts as done: there is nothing to pick.
-        done={channelAccounts.length === 0 || Boolean(selectedAccount)}
+        done={channelAccounts.length === 0 || Boolean(selectedAccount) || allAccountsChosen}
       >
         <div className="flex flex-col gap-3">
           {/* One connected channel needs no picker — same reasoning as the
@@ -1429,7 +1455,7 @@ export function NewBroadcastForm({
                   </option>
                 ))}
               </select>
-              {accountId === null && isAccountScopedIdentity(selectedChannel) && (
+              {allAccountsChosen && (
                 <span className="text-2xs text-muted-foreground/70">
                   Each person is messaged from the account they originally wrote
                   to — Meta gives no way to reach them from any other.
