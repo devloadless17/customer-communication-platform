@@ -399,6 +399,65 @@ docker compose --env-file .env logs -f api
 
 ---
 
+# Runtime invariants — the four CLAUDE.md §18 points to here
+
+Each of these is load-bearing and each has a way of looking like a harmless
+knob. Change one only with the reason below in front of you.
+
+## Graceful shutdown: HTTP first, workers second
+
+`apps/api/src/main.ts` installs its own SIGTERM/SIGINT handler and does NOT use
+`app.enableShutdownHooks()`. NestJS's bundled handler runs `OnModuleDestroy`
+(where BullMQ workers drain, up to `lockDuration` = 90s) **before** closing the
+HTTP server — so for that whole window the api keeps accepting requests it will
+never finish. The order is inverted deliberately:
+
+`drainSockets()` → `server.close()` → `closeIdleConnections()` → ~3s flush →
+`app.close()` (capped at `APP_CLOSE_BUDGET_MS` = 90s) → `process.exit(0)`.
+
+- **Keep the manual handler.** Deleting it in favour of `enableShutdownHooks()`
+  restores the bad order silently — nothing fails, the api just SIGKILLs
+  mid-job and the next process re-executes that workflow step.
+- **`stop_grace_period: 100s` on api** (`docker-compose.yml`) is the whole
+  drain budget end-to-end: compose sends SIGTERM and hard-kills at that mark.
+  It must stay above BullMQ's 90s lock plus the sweeper/queue-close tail —
+  don't drop below ~100s. `app` (web) sits at 30s; it runs no workers.
+- The `app.close()` cap exists because the per-worker close caps run
+  SEQUENTIALLY and would otherwise sum past the grace period.
+
+## Heap ≤ ~75% of the service's `mem_limit`
+
+The Dockerfiles set `--max-old-space-size` **below** the container cap: api
+2048 under `mem_limit: 3g`, web 1536 under `mem_limit: 2g`. RSS runs above the
+V8 heap (native bindings, socket buffers, V8 metadata), so a heap sized AT the
+cap means the cgroup OOM killer wins the race before V8 ever GCs — the
+container dies with exit 137 and no diagnostic. **Raise both together or
+neither**, and remember the 8 GB box has no spare RAM to hand out (postgres
+1500m + redis 256m are already committed).
+
+## `RUN_WORKER_INLINE` stays on in prod
+
+BullMQ workers, the workflow runner, the broadcast runner and every sweeper run
+IN the api process (`RUN_WORKER_INLINE: ${API_RUN_WORKER_INLINE:-1}`). There is
+no external worker entrypoint any more — `worker.ts` and the standalone
+`worker` service were removed post-Phase-5. Setting it to `0` in prod is
+refused at boot for exactly the failure it causes otherwise: sends still answer
+2xx, `/health` stays green, and nothing drains. Adding a worker container back
+is a named scaling cliff, not a config flip.
+
+## Queues drain, they don't storm
+
+Async work only, bounded retries, dead-letter retention, and a stable `jobId`
+so an enqueue is idempotent (see CLAUDE.md §13). Per-team concurrency caps
+(`WORKFLOW_PER_TEAM_CONCURRENCY`, `BROADCAST_PER_TEAM_CONCURRENCY`) keep one
+busy tenant from starving the rest, and `lockDuration` (90s) is boot-asserted
+to exceed the longest step timeout — a slow `http_request` must not outlive its
+lock and double-fire. In-app rate limiting is 300/min/user and 60/min/api-key
+(tighter per route via `@RateLimit`); the proxy-layer limiter is still a
+"later" item at the bottom of this file.
+
+---
+
 # Local development
 
 Two modes.

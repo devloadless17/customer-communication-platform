@@ -430,6 +430,16 @@ export interface Tag {
   createdAt?: string;
 }
 
+/**
+ * What a delete would cost, per tag. Two numbers, never one: `contacts` is a
+ * contact count (the people badge and its /contacts link read it literally),
+ * `views` counts saved views that filter on the tag.
+ */
+export interface TagUsage {
+  contacts: number;
+  views: number;
+}
+
 export type MediaKind = "image" | "video" | "audio" | "document" | "sticker";
 
 /**

@@ -90,8 +90,12 @@ async function sweepOnce(): Promise<void> {
   const ringingCutoff = new Date(now - RINGING_STALE_MS);
   const inProgressCutoff = new Date(now - INPROGRESS_MAX_MS);
 
-  // Stale RINGING rows → missed. Keyed off ringingAt; the (workspaceId,status,
-  // ringingAt) index serves this filter.
+  // Stale RINGING rows → missed. Keyed off ringingAt. NOTE: this scan is
+  // cross-tenant, so neither Call index applies — both lead with workspaceId
+  // and Postgres 16 has no index skip scan. Accepted while the table is small;
+  // the fix when it isn't is a raw partial index on (status, ringingAt) WHERE
+  // status IN ('ringing','in_progress'), which must land in 0_init's
+  // hand-maintained section and partial-indexes.spec.ts together.
   const stuckRinging = await db.call.findMany({
     where: {
       status: CallStatus.ringing,

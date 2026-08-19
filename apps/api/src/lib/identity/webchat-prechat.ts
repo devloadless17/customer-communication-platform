@@ -303,7 +303,7 @@ export async function applyWebchatPreChatIdentity(
   // silently erasing an agent's work. The bump also makes the enrichment
   // visible to any concurrent PATCH's own CAS.
   const enriched = await db.contact.updateMany({
-    where: { id: contact.id, version: contact.version },
+    where: { id: contact.id, workspaceId, version: contact.version },
     data: {
       ...next,
       ...builtinPatch,
@@ -346,8 +346,8 @@ export async function applyWebchatPreChatIdentity(
   // Announce the change so the contact panel / linked-channels switcher / partner
   // webhooks refresh — same publish the PATCH route + contact-share path use.
   try {
-    const fresh = await db.contact.findUnique({
-      where: { id: contact.id },
+    const fresh = await db.contact.findFirst({
+      where: { id: contact.id, workspaceId },
       include: { tags: { select: { id: true } } },
     });
     if (fresh) {

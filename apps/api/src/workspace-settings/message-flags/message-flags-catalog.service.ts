@@ -1,4 +1,9 @@
-import { ConflictException, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 
 import type {
   MessageFlagDefinition,
@@ -17,6 +22,13 @@ import type {
   CreateFlagDefinitionInput,
   UpdateFlagDefinitionInput,
 } from "./message-flags-catalog.schemas";
+
+/**
+ * See create(). `list()` is deliberately unpaginated; this is its bound —
+ * same reasoning and shape as tags (300), snippets (300), stages (30) and
+ * contact fields (50).
+ */
+const MAX_FLAG_DEFINITIONS_PER_WORKSPACE = 100;
 
 /**
  * The message-flag catalog — which triage flags this team can raise.
@@ -80,6 +92,16 @@ export class MessageFlagsCatalogService {
     workspaceId: string,
     input: CreateFlagDefinitionInput,
   ): Promise<MessageFlagDefinition> {
+    // Bounded like every sibling catalog: `list()` is unpaginated, it is SSR'd
+    // into every inbox render, and every open tab re-pulls it on each
+    // `team.catalog_changed { scope: "message-flags" }` tick.
+    const count = await this.db.messageFlagDefinition.count({ where: { workspaceId } });
+    if (count >= MAX_FLAG_DEFINITIONS_PER_WORKSPACE) {
+      throw new BadRequestException({
+        error: "message_flag_limit_reached",
+        detail: `This workspace has reached its limit of ${MAX_FLAG_DEFINITIONS_PER_WORKSPACE} message flags. Archive an unused one to make room.`,
+      });
+    }
     try {
       const created = await this.db.messageFlagDefinition.create({
         data: {

@@ -17,8 +17,9 @@
  *      and the ticket's resolvedByName.
  *   4. The bell: a Notification row is APPEND-ONLY, so the actorName must be
  *      masked at WRITE time — the persisted row itself says "Support".
- *   5. The team report never grows a row for the operator's activity, while a
- *      genuinely departed member's "Former member" row survives.
+ *   5. Neither report tab (team or overview) grows a row for the operator's
+ *      activity, while a genuinely departed member's "Former member" row
+ *      survives.
  *
  *   BLOB_STORAGE_DRIVER=local pnpm --filter @ccp/api exec vitest run test/operator-name-mask.spec.ts
  */
@@ -34,6 +35,7 @@ import { getTicket, listTicketEvents } from "@/lib/tickets/queries";
 import { listNotifications } from "@/lib/notifications/notifications";
 import { listConversationEvents } from "@/lib/queries/conversations";
 import { getTeamReport } from "@/lib/analytics/team-report";
+import { getWorkspaceReport } from "@/lib/analytics/reports";
 import { operatorActorIds } from "@/lib/workspaces/operator-mask";
 import { setSharedDb } from "@/lib/db";
 
@@ -256,5 +258,13 @@ describe("team report", () => {
     const ids = report.agents.map((a) => a.userId);
     expect(ids).not.toContain(operator);
     expect(ids).toContain(departed);
+
+    // The OVERVIEW's Agents panel is a second workforce list over the same
+    // activity, and it carried the exclusion nowhere — one tab showed the
+    // operator as staff while the other didn't. Both now read the same helper.
+    const overview = await getWorkspaceReport(ws, { from, to, tz: "UTC" });
+    const overviewIds = overview.agents.map((a) => a.userId);
+    expect(overviewIds).not.toContain(operator);
+    expect(overviewIds).toContain(departed);
   });
 });

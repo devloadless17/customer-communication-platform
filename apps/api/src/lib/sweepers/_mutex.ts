@@ -50,6 +50,7 @@ type SweeperName =
   | "message-rawpayload-retention"
   | "broadcast-delivery-drift"
   | "webchat-visitor-retention"
+  | "ai-retention"
   | "contact-transfer-artifacts"
   | "work-hours"
   | "assignment-rebalance"
@@ -93,6 +94,7 @@ const STALE_THRESHOLD_MS: Record<SweeperName, number> = {
   "template-analytics-capture": 7 * 60 * 60 * 1000, // 6h cadence
   "contact-transfer-artifacts": 20 * 60 * 1000, // 15m cadence
   "webchat-visitor-retention": 25 * 60 * 60 * 1000, // 24h cadence
+  "ai-retention": 25 * 60 * 60 * 1000, // 24h cadence
   "work-hours": 5 * 60 * 1000, // 60s cadence
   "assignment-rebalance": 11 * 60 * 1000, // 5m cadence
   "abandoned-registration": 25 * 60 * 60 * 1000, // 24h cadence

@@ -81,12 +81,18 @@ export async function commitOutboundSend(args: {
         where: { id: args.event.message.id },
         data: { ticketId: routed.ticketId },
       });
-      // First response means someone RESPONDED — an agent, or a partner acting
-      // through /v1. A workflow's auto-acknowledgment (senderUserId AND
-      // senderApiKeyId both null) must not stamp it: a workspace with an
-      // auto-reply workflow would never measure — or breach — human first
-      // response on any ticket.
-      if (args.event.senderUserId || args.event.senderApiKeyId) {
+      // First response means someone RESPONDED — an agent, a partner acting
+      // through /v1, or the owner replying from the WhatsApp Business app
+      // (a Coexistence echo, `origin: "business_app"`, which carries neither
+      // sender id but is unambiguously a person). A workflow's auto-
+      // acknowledgment (both ids null AND origin "api") must not stamp it: a
+      // workspace with an auto-reply workflow would never measure — or breach —
+      // human first response on any ticket.
+      if (
+        args.event.senderUserId ||
+        args.event.senderApiKeyId ||
+        args.event.message.origin === "business_app"
+      ) {
         await markFirstResponse(tx, args.event.workspaceId, routed.ticketId, effectiveBump);
       }
     }

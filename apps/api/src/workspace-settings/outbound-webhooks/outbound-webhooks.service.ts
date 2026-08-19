@@ -37,6 +37,13 @@ export interface OutboundWebhookDto {
   disabledReason: string | null;
 }
 
+/**
+ * See create(). Every matching event fans out one delivery row + one queued
+ * POST per endpoint, and the per-workspace delivery-slot gate is small — an
+ * unbounded endpoint list starves a tenant's own real deliveries.
+ */
+const MAX_WEBHOOKS_PER_WORKSPACE = 20;
+
 export interface OutboundWebhookCreatedDto extends OutboundWebhookDto {
   /** Plaintext signing secret — returned ONCE. Lost = rotate. */
   secret: string;
@@ -62,6 +69,13 @@ export class OutboundWebhooksService {
     input: CreateOutboundWebhookInput,
   ): Promise<OutboundWebhookCreatedDto> {
     this.assertUrlSafe(input.url);
+    const count = await this.db.outboundWebhook.count({ where: { workspaceId } });
+    if (count >= MAX_WEBHOOKS_PER_WORKSPACE) {
+      throw new BadRequestException({
+        error: "webhook_limit_reached",
+        detail: `This workspace has reached its limit of ${MAX_WEBHOOKS_PER_WORKSPACE} outbound webhooks. Delete an unused endpoint to make room.`,
+      });
+    }
     const secret = generateWebhookSecret();
     const row = await this.db.outboundWebhook.create({
       data: {

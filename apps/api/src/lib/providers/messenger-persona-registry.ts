@@ -83,8 +83,11 @@ export async function resolvePersonaId(args: {
   if (cached) return cached;
 
   try {
-    const existing = await db.messengerPersona.findUnique({
-      where: { channelConnectionId_userId: { channelConnectionId, userId } },
+    // findFirst, not findUnique, so `workspaceId` rides in the where (§7) —
+    // MessengerPersona carries the column and is not a schema TENANCY
+    // EXCEPTION. The compound unique still serves the lookup.
+    const existing = await db.messengerPersona.findFirst({
+      where: { workspaceId, channelConnectionId, userId },
       select: { externalPersonaId: true },
     });
     if (existing) {
@@ -127,8 +130,8 @@ export async function resolvePersonaId(args: {
         select: { externalPersonaId: true },
       })
       .catch(async () => {
-        return db.messengerPersona.findUnique({
-          where: { channelConnectionId_userId: { channelConnectionId, userId } },
+        return db.messengerPersona.findFirst({
+          where: { workspaceId, channelConnectionId, userId },
           select: { externalPersonaId: true },
         });
       });

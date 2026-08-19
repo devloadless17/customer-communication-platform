@@ -49,8 +49,8 @@ export async function loadContactDetails(
     where: { id: conversationId, workspaceId },
     select: { contact: { select: { email: true } } },
   });
-  const state = await db.aiConversationState.findUnique({
-    where: { conversationId },
+  const state = await db.aiConversationState.findFirst({
+    where: { conversationId, workspaceId },
     select: { emailRequestedAt: true },
   });
   return {
@@ -126,10 +126,13 @@ export async function captureCustomerEmail(
  * twice. Best-effort: the reply has already been sent by the time this runs, and
  * failing to write the marker is worth at most one repeated question.
  */
-export async function markEmailRequested(conversationId: string): Promise<void> {
+export async function markEmailRequested(
+  workspaceId: string,
+  conversationId: string,
+): Promise<void> {
   await db.aiConversationState
     .updateMany({
-      where: { conversationId, emailRequestedAt: null },
+      where: { conversationId, workspaceId, emailRequestedAt: null },
       data: { emailRequestedAt: new Date() },
     })
     .catch(() => {});

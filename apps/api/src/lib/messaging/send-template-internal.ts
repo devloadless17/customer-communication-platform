@@ -102,6 +102,11 @@ export class SendTemplateValidationError extends Error {
     // Body is NAMED-format (`{{order_id}}`) and the caller supplied no/partial
     // `bodyNamed`. Meta rejects these for missing body parameters.
     | "named_body_vars_required"
+    // The reverse: the template is POSITIONAL and the caller supplied
+    // `bodyNamed`. The provider gives bodyNamed precedence when building the
+    // wire shape, so letting it through sends `parameter_name` entries Meta
+    // rejects with an opaque 132000 instead of a named refusal.
+    | "named_body_vars_not_accepted"
     // Template has a dynamic URL button or a copy-code button, which Meta
     // requires a send-time parameter for; the caller supplied none.
     | "button_params_required"
@@ -226,6 +231,18 @@ export async function sendTemplateInternal(
       );
     }
   } else {
+    // `parameterFormat` is the only authority on the wire shape, so named
+    // variables aimed at a positional template are refused BY NAME rather than
+    // forwarded — `buildTemplateSendComponents` prefers `bodyNamed` whenever it
+    // is present, which would turn this into a 132000 from Meta with nothing
+    // for the caller to act on.
+    if ((args.variables.bodyNamed ?? []).length > 0) {
+      throw new SendTemplateValidationError(
+        "named_body_vars_not_accepted",
+        "named body variables not accepted",
+        "This template uses positional variables ({{1}}), so send them in `body`.",
+      );
+    }
     const bodyVarCount = countTemplatePlaceholders(template.bodyText);
     if (args.variables.body.length !== bodyVarCount) {
       throw new SendTemplateValidationError(
@@ -790,9 +807,12 @@ export async function sendTemplateInternal(
 
   // Store the rendered preview ("Hi John, your order is ready") not the raw
   // template ("Hi {{1}}, your order is {{2}}"), so the inbox shows what the
-  // customer actually got. Named bodies render by name, positional by index.
-  const renderedBody = args.variables.bodyNamed?.length
-    ? renderTemplateBodyNamed(template.bodyText, args.variables.bodyNamed)
+  // customer actually got. Keyed on `parameterFormat` — the same single
+  // authority the send shape uses — not on which payload field happens to be
+  // populated, so the preview can never render by a different rule than the
+  // message that went out.
+  const renderedBody = isNamed
+    ? renderTemplateBodyNamed(template.bodyText, args.variables.bodyNamed ?? [])
     : renderTemplateBody(template.bodyText, args.variables.body);
   const previewBody = renderedBody.slice(0, 200);
 

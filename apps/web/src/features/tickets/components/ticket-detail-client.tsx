@@ -30,6 +30,8 @@ import { cn } from "@ccp/shared/utils";
 import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
 import type { Channel, Tag, User } from "@ccp/shared/types";
 import {
+  TICKET_EVENTS_CAP,
+  TICKET_NOTES_CAP,
   TICKET_PRIORITIES,
   TICKET_STATUS_LABELS,
   TICKET_STATUSES,
@@ -1210,6 +1212,13 @@ export function TicketDetailClient({
             ? "Only your workspace sees these — not the customer, and not the other workspaces on this ticket. Use the thread to talk to them."
             : "Only your workspace sees these — the customer never does."}
         </p>
+        {/* The API serves the NEWEST 200 notes with no cursor, so say when the
+            list is at that ceiling instead of silently hiding the earliest. */}
+        {notes.length >= TICKET_NOTES_CAP ? (
+          <p className="mb-2 text-3xs italic text-muted-foreground">
+            Showing the most recent {TICKET_NOTES_CAP} notes — older ones aren&apos;t listed.
+          </p>
+        ) : null}
         {notes.length > 0 ? (
           <ol className="mb-3 flex max-h-72 flex-col gap-2 overflow-y-auto">
             {notes.map((n) => (
@@ -1267,6 +1276,12 @@ export function TicketDetailClient({
             {events.length}
           </span>
         </summary>
+        {/* Same ceiling, same honesty: the newest 500 rows, no load-older. */}
+        {events.length >= TICKET_EVENTS_CAP ? (
+          <p className="mt-2 text-3xs italic text-muted-foreground">
+            Showing the most recent {TICKET_EVENTS_CAP} changes — older history isn&apos;t listed.
+          </p>
+        ) : null}
         <ol className="mt-2 flex max-h-96 flex-col gap-2 overflow-y-auto">
           {events.map((e) => (
             <li key={e.id} className="flex flex-wrap items-baseline gap-x-2 text-2xs">

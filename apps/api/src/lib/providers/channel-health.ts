@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { normalizeMetaSendError } from "@/lib/providers/meta-send-error";
 import type { Channel } from "@ccp/shared/types";
 
 /**
@@ -131,4 +132,33 @@ export function recentWebhookRejection(
   if (!at || !reason) return null;
   if (Date.now() - at.getTime() > 24 * 60 * 60_000) return null;
   return { at: at.toISOString(), reason };
+}
+
+/**
+ * Run a provider send and keep the sending account's reconnect flag honest:
+ * a Graph 190 (`auth_expired`) flags THAT account, any success clears a stale
+ * flag on it.
+ *
+ * One wrapper because the pair used to be inlined in `sendTextInternal` and
+ * `sendTemplateInternal` only — so a dead token exercised through the
+ * interactive / sticker / structured / media / messenger-template senders
+ * raised no banner, and a successful send through them never cleared one.
+ * Both writes are fire-and-forget (see above): keeping the flag current must
+ * never change what the caller sees.
+ */
+export async function withChannelHealth<T>(
+  args: { workspaceId: string; channel: Channel; channelConnectionId?: string | null },
+  send: () => Promise<T>,
+): Promise<T> {
+  let result: T;
+  try {
+    result = await send();
+  } catch (err) {
+    if (normalizeMetaSendError(err)?.code === "auth_expired") {
+      void flagChannelNeedsReconnect(args.workspaceId, args.channel, args.channelConnectionId);
+    }
+    throw err;
+  }
+  void clearChannelNeedsReconnect(args.workspaceId, args.channel, args.channelConnectionId);
+  return result;
 }

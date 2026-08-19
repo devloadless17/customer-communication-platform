@@ -10,6 +10,7 @@ import type {
 } from "@ccp/shared/dtos";
 
 import { useInboxFilter } from "@/features/inbox/contexts/inbox-filter-context";
+import { apiFetch } from "@/lib/api/client-fetch";
 
 const DEBOUNCE_MS = 250;
 
@@ -45,8 +46,9 @@ export interface InboxSearchState<S extends InboxSearchScope> {
  * once); the scope is fixed per instance.
  *
  * Request hygiene: an AbortController cancels the stale first-page fetch on
- * every keystroke, and a queryRef guards a late load-more page from appending
- * under a query the user has since changed.
+ * every keystroke, and a queryRef/accountParamRef pair guards a late load-more
+ * page from appending under a query or account narrow the user has since
+ * changed.
  * Results are a snapshot — realtime events don't re-run the search; the user
  * re-types to refresh (a global LIKE on every team event would be wasteful).
  */
@@ -88,7 +90,7 @@ export function useInboxSearch<S extends InboxSearchScope>(
     const controller = new AbortController();
     const timer = setTimeout(() => {
       const url = `/api/inbox/search?scope=${scope}&q=${encodeURIComponent(trimmed)}${accountParam}`;
-      fetch(url, { signal: controller.signal })
+      apiFetch(url, { signal: controller.signal })
         .then((r) => (r.ok ? (r.json() as Promise<Page<H>>) : null))
         .then((page) => {
           if (!page) return;
@@ -112,6 +114,11 @@ export function useInboxSearch<S extends InboxSearchScope>(
     cursorRef.current = nextCursor;
   }, [nextCursor]);
 
+  const accountParamRef = useRef(accountParam);
+  useEffect(() => {
+    accountParamRef.current = accountParam;
+  }, [accountParam]);
+
   // Ref, not the loadingMore state: a re-fired scroll sentinel calls before
   // the state round-trips, and the same page must not append twice.
   const loadingMoreRef = useRef(false);
@@ -124,13 +131,15 @@ export function useInboxSearch<S extends InboxSearchScope>(
     setLoadingMore(true);
     // Same accountParam as the first page — the cursor was minted under that
     // narrow, so an unfiltered page 2 would skip/repeat rows.
-    const url = `/api/inbox/search?scope=${scope}&q=${encodeURIComponent(q)}&cursor=${encodeURIComponent(cursor)}${accountParam}`;
-    fetch(url)
+    const narrow = accountParam;
+    const url = `/api/inbox/search?scope=${scope}&q=${encodeURIComponent(q)}&cursor=${encodeURIComponent(cursor)}${narrow}`;
+    apiFetch(url)
       .then((r) => (r.ok ? (r.json() as Promise<Page<H>>) : null))
       .then((page) => {
         if (!page) return;
-        // Drop a page that landed after the user changed the query.
-        if (queryRef.current !== q) return;
+        // Drop a page that landed after the user changed the query OR the
+        // account narrow — the cursor was minted under both.
+        if (queryRef.current !== q || accountParamRef.current !== narrow) return;
         setResults((prev) => [...prev, ...page.items]);
         setNextCursor(page.nextCursor);
       })

@@ -727,12 +727,12 @@ export interface TicketChangedEvent {
     /** Permanently deleted. `ticket` carries the pre-delete snapshot so
      *  subscribers know which card to drop; messages survive, events cascade. */
     | "deleted"
-    /** Escalated to another workspace in the org (fired on the SOURCE side;
-     *  the target side sees an ordinary `created`). */
+    /** Shared with a sibling workspace in the org: one ticket row, a second
+     *  workspace granted access (`TicketShare`). Published to every party. */
     | "escalated"
-    /** The TWIN ticket in the other workspace changed (shared comment, status
-     *  move, sever) — this side's timeline gained a mirrored row. The ticket's
-     *  own lifecycle did NOT move. */
+    /** A SHARE-scoped change on that one row — a grant revoked, a guest
+     *  conversation bound, an attachment added. The ticket's own lifecycle
+     *  did NOT move. */
     | "escalation_update";
   /** The ticket AFTER the change (for `deleted`, the pre-delete snapshot). */
   ticket: Ticket;

@@ -226,9 +226,19 @@ export class WorkflowsService {
           const inH = inHeaders as Record<string, unknown>;
           const oldH = oldHeaders as Record<string, unknown>;
           for (const [k, v] of Object.entries(inH)) {
-            if (v === REDACTED_HEADER_VALUE && typeof oldH[k] === "string") {
+            if (v !== REDACTED_HEADER_VALUE) continue;
+            if (typeof oldH[k] === "string") {
               inH[k] = oldH[k];
+              continue;
             }
+            // The sentinel under a key we hold no value for = the author
+            // RENAMED the key while its value still read as redacted. Storing
+            // it would encrypt the sentinel and send "•••••••• (saved)" to the
+            // partner as the header value, with the real secret unrecoverable.
+            throw new BadRequestException({
+              error: "header_value_required",
+              detail: `Retype the value for the renamed header "${k}".`,
+            });
           }
         }
       }
@@ -564,9 +574,17 @@ export class WorkflowsService {
       return { runId };
     } catch (err) {
       if (err instanceof InternalServerErrorException) throw err;
-      throw new InternalServerErrorException({
-        error: err instanceof Error ? err.message : "dispatch failed",
-      });
+      // The dispatcher's two client-input refusals (a stale contact id from
+      // the inbox menu, a workflow deleted underneath the request) are 404s,
+      // not server faults — 500ing them alarms error monitoring for a bad id.
+      const message = err instanceof Error ? err.message : "dispatch failed";
+      if (message === "contact not found") {
+        throw new NotFoundException({ error: "contact_not_found" });
+      }
+      if (message === "workflow not found") {
+        throw new NotFoundException({ error: "workflow_not_found" });
+      }
+      throw new InternalServerErrorException({ error: message });
     }
   }
 

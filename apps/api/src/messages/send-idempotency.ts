@@ -24,6 +24,17 @@
  * topology, so the lock works. When we scale out, move to a Redis-based
  * SETNX (the API-key path already uses the DB `ApiIdempotencyKey` table
  * for cross-process idempotency).
+ *
+ * ACCEPTED, and the reason this is a lock rather than a ledger: only the
+ * QUEUED text path writes `OutboundSendAttempt`, so the synchronous composer
+ * senders (media, forward, template, interactive, structured, sticker) lose
+ * this map with the process. A crash between Meta accepting the send and the
+ * HTTP response landing therefore leaves a same-key retry free to re-hit Meta,
+ * and the second send earns its own `externalId`, so the message-level dedupe
+ * cannot absorb it — the customer sees it twice. The exposure is one process
+ * death inside one send's window; closing it costs an `OutboundSendAttempt`
+ * write on every composer send. Revisit if a real restart is ever observed to
+ * double-send.
  */
 import { HttpException } from "@nestjs/common";
 

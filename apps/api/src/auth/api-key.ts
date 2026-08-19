@@ -3,13 +3,15 @@ import { createHash, randomBytes } from "node:crypto";
 /**
  * Team API key helpers.
  *
- * Tokens look like `ccp_<32 hex chars>`. We store SHA-256(token) in
- * WorkspaceApiKey.tokenHash and the first 8 chars of the token in tokenPrefix.
- * The plaintext is shown ONCE at creation; lost keys are rotated, not
+ * Tokens look like `ccp_<48 hex chars>` (24 random bytes). We store
+ * SHA-256(token) in WorkspaceApiKey.tokenHash and the first 12 chars —
+ * `ccp_` + 8 hex — in tokenPrefix, which is what the UI shows to identify a
+ * key. The plaintext is shown ONCE at creation; lost keys are rotated, not
  * recovered.
  *
  * Storing only the hash means a database read leak doesn't grant API access —
- * an attacker would have to reverse SHA-256 on a 32-byte random value first.
+ * an attacker would have to reverse SHA-256 on a 24-byte random value first,
+ * and the stored prefix reveals 4 of those bytes at most.
  */
 
 const PREFIX = "ccp_";

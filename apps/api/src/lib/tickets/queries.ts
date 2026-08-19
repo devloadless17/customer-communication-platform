@@ -15,7 +15,12 @@ import type {
   TicketSource,
   TicketStatus,
 } from "@ccp/shared/tickets/types";
-import { TICKET_ACTIVE_STATUSES, TICKET_SOURCES } from "@ccp/shared/tickets/types";
+import {
+  TICKET_ACTIVE_STATUSES,
+  TICKET_EVENTS_CAP,
+  TICKET_NOTES_CAP,
+  TICKET_SOURCES,
+} from "@ccp/shared/tickets/types";
 
 /**
  * Read side of tickets — the SELECT shapes, the row→wire mappers, and the
@@ -773,7 +778,7 @@ export async function listTicketNotes(
       AND: [noteVisibilityWhere(workspaceId)],
     },
     orderBy: { createdAt: "desc" },
-    take: 200,
+    take: TICKET_NOTES_CAP,
     select: TICKET_EVENT_SELECT,
   });
   return maskTicketEventNames(
@@ -810,7 +815,7 @@ export async function listTicketEvents(
       ticket: ticketAccessWhere(workspaceId),
     },
     orderBy: { createdAt: "desc" },
-    take: 500,
+    take: TICKET_EVENTS_CAP,
     select: TICKET_EVENT_SELECT,
   });
   return maskTicketEventNames(

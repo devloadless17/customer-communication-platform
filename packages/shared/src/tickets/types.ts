@@ -186,8 +186,9 @@ export interface Ticket {
   contactName: string;
   channel: string;
   subject: string | null;
-  /** The cause — why the ticket was raised, in the agent's words. Set at
-   *  creation, editable, read by whoever the ticket is handed to. */
+  /** The cause — why the ticket was raised, in the agent's words. WRITE-ONCE:
+   *  fillable while empty, then immutable (`cause_immutable`) — everything
+   *  after it reasons against it. Updates travel in the thread. */
   description: string | null;
   status: TicketStatus;
   priority: TicketPriority;
@@ -428,3 +429,11 @@ export interface TicketCounts {
   /** Count keyed by status. Statuses with zero are omitted. */
   byStatus: Partial<Record<TicketStatus, number>>;
 }
+
+/**
+ * Read caps on a ticket's detail lists. Newest-first fetch, no cursor: these
+ * are the ceilings the UI names when a list is sitting on one, so the earliest
+ * rows are not silently absent. Shared so the query and the notice can't drift.
+ */
+export const TICKET_NOTES_CAP = 200;
+export const TICKET_EVENTS_CAP = 500;

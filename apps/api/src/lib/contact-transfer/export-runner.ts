@@ -235,13 +235,23 @@ type ExportContact = {
  * 100% is worse than none.
  */
 async function countScope(workspaceId: string, scope: ExportScope): Promise<number | null> {
-  if (scope.ids) return scope.ids.length;
+  if (scope.ids) {
+    // Counted, not `scope.ids.length`: an explicit selection arrives from the
+    // client and may name a foreign, deleted or non-directory contact, none of
+    // which `hydrate` returns — so the raw length overstates the total and the
+    // bar never reaches 100%.
+    return db.contact.count({
+      where: {
+        AND: [{ workspaceId, id: { in: scope.ids }, deletedAt: null }, directoryContactWhere],
+      },
+    });
+  }
   const where = buildContactFilterWhere(workspaceId, scope.filters ?? {});
-  // AND the directory gate, matching hydrate(): with `channel=webchatwidget`
-  // explicitly selected, the shared filter opts anonymous visitors IN (the
-  // list view needs them) — but hydrate drops them (§6: hidden from CSV), so
-  // counting them here made the progress bar's `total` a lie and the file end
-  // short with no explanation (audit 2026-08-10).
+  // The directory gate is already inside `buildContactFilterWhere` (selecting
+  // `channel=webchatwidget` no longer opts anonymous visitors in — 9c3940b1), so
+  // this AND is redundant today. Kept, here and in `iterateContacts`, because
+  // the count and the file MUST agree with `hydrate`'s own gate: when they
+  // didn't, `total` was a lie and the export ended short with no explanation.
   const rows = await db.$queryRaw<Array<{ count: bigint }>>`
     SELECT COUNT(*)::bigint AS count FROM "Contact" c WHERE ${where} AND ${DIRECTORY_CONTACT_SQL}
   `;

@@ -143,7 +143,7 @@ CCPWebchat.unreadCount();   // → unread agent replies`}</Pre>
         <ul className="ml-4 list-disc space-y-1 text-sm text-muted-foreground">
           <li>Empty = any site may embed it. Fine while testing.</li>
           <li>Add one domain and every other site is refused.</li>
-          <li><Code>localhost</Code> always works, so local development needs no entry.</li>
+          <li><Code>localhost</Code> works while the list is empty. Once you lock it down, add <Code>localhost</Code> (or <Code>127.0.0.1</Code>) as well while you develop.</li>
         </ul>
         <P className="mt-3">
           Enter hosts, not URLs — <Code>example.com</Code>, not{" "}

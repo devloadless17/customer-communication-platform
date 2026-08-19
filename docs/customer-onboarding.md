@@ -77,12 +77,25 @@ page before the WhatsApp page.
 
 In the customer's App Dashboard.
 
+- [ ] **[You] — platform side, BEFORE the toggle below.** The platform only
+      signs Graph calls with `appsecret_proof` when `META_APPSECRET_PROOF=1`;
+      it is **off by default** (`apps/api/src/lib/providers/appsecret-proof.ts`),
+      and with it off no proof is appended at all — so ticking Meta's toggle
+      first breaks every Graph call for that client. Set
+      `META_APPSECRET_PROOF=1` in the api's env and restart the api. The flag
+      is process-wide, not per client, and each channel signs with the app
+      secret that issued its own token; Meta accepts a correct proof whether
+      or not an app requires one, so already-onboarded clients are unaffected.
 - [ ] **Enable "Require app secret"**: App settings → **Advanced** → Security →
-      toggle **Require app secret** ON. The platform signs every Graph call
-      with `appsecret_proof`, so this is safe here and blocks anyone using a
-      leaked token without the secret. Leaving it in the wrong state has
-      caused real API errors during past setups — set it deliberately, don't
-      skip it.
+      toggle **Require app secret** ON. With the flag above set, the platform
+      signs every Graph call with `appsecret_proof`, so this is safe here and
+      blocks anyone using a leaked token without the secret. Leaving it in the
+      wrong state has caused real API errors during past setups — set it
+      deliberately, don't skip it.
+- [ ] **[You]** Confirm with one live send once the number is connected (phase
+      6 below covers it): the local Graph mock cannot validate a proof, so a
+      real inbound + outbound round-trip is the only proof that the pair is
+      set correctly.
 - [ ] **Set the API version**: App settings → **Advanced** → Upgrade API
       version → match the platform's pinned Graph version (**v26.0** — the
       `META_GRAPH_VERSION` default in `apps/api/src/lib/providers/config.ts`).

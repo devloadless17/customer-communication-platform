@@ -284,8 +284,10 @@ export class SocketAuthService {
               await this.db.workspace.findMany({
                 // The caller's OWN org, superAdmin or not — see the
                 // HTTP guard's twin. `where: {}` picked the oldest workspace
-                // on the PLATFORM, i.e. a customer's.
-                where: { organizationId: dbUser.organizationId },
+                // on the PLATFORM, i.e. a customer's. `deletingAt: null`
+                // keeps the candidate set identical to what `canAccess` will
+                // accept, exactly as the HTTP guard and the web resolver do.
+                where: { organizationId: dbUser.organizationId, deletingAt: null },
                 select: { id: true },
                 orderBy: { createdAt: "asc" },
                 take: 1,

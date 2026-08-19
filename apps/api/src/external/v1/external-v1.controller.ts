@@ -212,11 +212,14 @@ import {
  */
 @Controller("api/external/v1")
 @UseGuards(ApiKeyGuard, ScopeGuard)
-// Default per-key ceiling for the whole external surface. ApiKeyGuard's
-// own bucket at 60/min/key is the upstream brake; this decorator-driven
-// guard adds a second axis (per-route-class) so a bulk path can tighten
-// further with its own @RateLimit. Set to 600/min as a generous ceiling
-// for read-heavy traffic — mutation routes override to 60/min below.
+// Default per-key ceiling for the whole external surface, mirrored on every
+// peeled /v1 controller.
+//
+// It NEVER BINDS as written, and that is the honest reading: ApiKeyGuard meters
+// 60/min/key BEFORE this interceptor runs (api-key.guard.ts), which is also what
+// the public docs promise — so only a decorator TIGHTER than 60 has any effect
+// (the per-route overrides below do). This 600 is the second axis kept ready for
+// the day the guard's cap rises; do not read it as "reads allow 600/min".
 @RateLimit({ perMinute: 600 })
 export class ExternalV1Controller {
   constructor(

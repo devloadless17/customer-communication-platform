@@ -37,28 +37,29 @@ export class TagsService {
   ) {}
 
   /**
-   * Contact-usage count per tag. Settings/tags shows this so an admin knows
-   * how many contact rows would lose a label before they confirm a delete.
+   * Per-tag usage, as TWO numbers. Settings/tags shows both so an admin knows
+   * the whole blast radius of a delete before confirming it — contacts lose a
+   * label, saved views lose a criterion. They are reported separately because
+   * every consumer renders the contact figure as a contact count (a people
+   * badge linking to /contacts): folding view references into it made that
+   * number, its link and the delete copy disagree with reality.
    * One aggregate query so 100 tags don't fan into 100 SELECTs.
    */
-  async usage(workspaceId: string): Promise<Record<string, number>> {
+  async usage(workspaceId: string): Promise<Record<string, { contacts: number; views: number }>> {
     const [rows, views] = await Promise.all([
       this.db.tag.findMany({
         where: { workspaceId },
         select: { id: true, _count: { select: { contacts: true } } },
       }),
-      // Saved views that filter on a tag count as usage too. Counting contacts
-      // alone under-reported the blast radius of a delete: a tag on zero
-      // contacts reads as "unused" while a shared view still filters on it.
       this.db.inboxView.findMany({ where: { workspaceId }, select: { filters: true } }),
     ]);
-    const usage: Record<string, number> = {};
-    for (const r of rows) usage[r.id] = r._count.contacts;
+    const usage: Record<string, { contacts: number; views: number }> = {};
+    for (const r of rows) usage[r.id] = { contacts: r._count.contacts, views: 0 };
     for (const v of views) {
       const tagIds = (v.filters as { tagIds?: unknown } | null)?.tagIds;
       if (!Array.isArray(tagIds)) continue;
       for (const t of tagIds) {
-        if (typeof t === "string" && usage[t] !== undefined) usage[t] += 1;
+        if (typeof t === "string" && usage[t] !== undefined) usage[t].views += 1;
       }
     }
     return usage;

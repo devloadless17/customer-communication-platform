@@ -1392,7 +1392,10 @@ export class ExternalV1MessagingService {
           error: "account_not_found",
           detail:
             `no active ${channel} account ${input.account_id} in this workspace. ` +
-            "List them with GET /v1/channels.",
+            // GET /v1/channel-accounts, NOT /v1/channels: the latter reports the
+            // PROVIDER's id per account (phone_number_id / Page id / IG id), and
+            // `account_id` here is the ChannelConnection id (audit 2026-08-19).
+            "List them with GET /v1/channel-accounts.",
         });
       }
       try {

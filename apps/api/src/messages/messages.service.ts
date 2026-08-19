@@ -3559,6 +3559,7 @@ const TEMPLATE_ERROR_STATUS: Record<SendTemplateValidationError["code"], number>
   template_not_approved: 409,
   wrong_body_var_count: 400,
   named_body_vars_required: 400,
+  named_body_vars_not_accepted: 400,
   button_params_required: 400,
   param_type_mismatch: 400,
   // 422: the request is well-formed — the TEMPLATE is one the platform can't

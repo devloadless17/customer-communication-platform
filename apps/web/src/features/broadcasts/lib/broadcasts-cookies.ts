@@ -11,6 +11,7 @@
 export type BroadcastStatusFilter =
   | "all"
   | "scheduled"
+  | "materializing"
   | "queued"
   | "running"
   | "paused"
@@ -27,6 +28,7 @@ export const BROADCASTS_VIEW_COOKIE = "broadcasts-view";
 const VALID_STATUSES: ReadonlySet<BroadcastStatusFilter> = new Set([
   "all",
   "scheduled",
+  "materializing",
   "queued",
   "running",
   "paused",

@@ -35,6 +35,14 @@ import { createTokenBucket } from "../common/token-bucket";
  * throttle entirely. Meta's webhook egress is a bounded IP set, so a
  * generous 1200/min ceiling bounds a single-IP storm without tripping on
  * legitimate multi-team burst traffic from Meta's shared infrastructure.
+ *
+ * ACCEPTED, deliberately: the team token is spent BEFORE the controller's
+ * HMAC check, so a garbage-signature request still costs the tenant a token
+ * and a distributed spray of a known workspaceId can 429 that tenant's real
+ * deliveries. Cheap-rejection-first is the trade — refunding the token on a
+ * 403 would instead let an unauthenticated spray drive the pre-auth secret
+ * lookups without bound. Impact is delay, not loss: Meta retries with
+ * backoff and every event dedupes on (workspaceId, channel, externalId).
  */
 const metaWebhookBucket = createTokenBucket({ perMin: 600, maxKeys: 5_000 });
 const metaWebhookIpBucket = createTokenBucket({ perMin: 1_200, maxKeys: 5_000 });

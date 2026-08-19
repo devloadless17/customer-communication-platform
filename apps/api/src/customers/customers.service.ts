@@ -446,7 +446,14 @@ export class CustomersService {
             select: { name: true },
           })
         : null;
-      await tx.contact.update({ where: { id: contactId }, data: { customerId } });
+      // updateMany so `workspaceId` rides in the WHERE (§7) even though the
+      // findFirst above already proved ownership, and `version` bumps like every
+      // other identity-layer re-point (contact-share, bsuid-reconcile) — an
+      // agent PATCH racing this must 409 rather than interleave.
+      await tx.contact.updateMany({
+        where: { id: contactId, workspaceId },
+        data: { customerId, version: { increment: 1 } },
+      });
 
       // Persisted audit (§6): who merged this contact into which customer, and
       // from where. Co-committed so it can't drift from the actual re-point.
@@ -528,7 +535,12 @@ export class CustomersService {
         data: { workspaceId, name: restoredName },
         select: { id: true },
       });
-      await tx.contact.update({ where: { id: contactId }, data: { customerId: fresh.id } });
+      // Same discipline as `linkContact`'s re-point: workspace-scoped where, and
+      // a version bump so a concurrent agent PATCH 409s.
+      await tx.contact.updateMany({
+        where: { id: contactId, workspaceId },
+        data: { customerId: fresh.id, version: { increment: 1 } },
+      });
 
       // Persisted audit (§6): the split back to a distinct person.
       await tx.customerIdentityEvent.create({

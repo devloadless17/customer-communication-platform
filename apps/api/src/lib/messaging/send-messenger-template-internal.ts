@@ -8,6 +8,7 @@ import {
   NoChannelDestinationError,
   resolveContactChannel,
 } from "@/lib/providers/channel";
+import { withChannelHealth } from "@/lib/providers/channel-health";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import {
   personasEnabled,
@@ -217,21 +218,28 @@ export async function sendMessengerTemplateInternal(
 
   let result;
   try {
-    result =
-      args.mode === "structured"
-        ? await (send as NonNullable<typeof binding.provider.sendStructuredTemplate>)(
-            {
-              to: dest.to,
-              template: args.template,
-              useHumanAgentTag,
-              ...(personaId ? { personaId } : {}),
-            },
-            sendConfig,
-          )
-        : await (send as NonNullable<typeof binding.provider.sendUtilityTemplate>)(
-            { ...args.template, to: dest.to, ...(personaId ? { personaId } : {}) },
-            sendConfig,
-          );
+    result = await withChannelHealth(
+      {
+        workspaceId: args.workspaceId,
+        channel: conversation.channel,
+        channelConnectionId: conversation.channelConnectionId,
+      },
+      () =>
+        args.mode === "structured"
+          ? (send as NonNullable<typeof binding.provider.sendStructuredTemplate>)(
+              {
+                to: dest.to,
+                template: args.template,
+                useHumanAgentTag,
+                ...(personaId ? { personaId } : {}),
+              },
+              sendConfig,
+            )
+          : (send as NonNullable<typeof binding.provider.sendUtilityTemplate>)(
+              { ...args.template, to: dest.to, ...(personaId ? { personaId } : {}) },
+              sendConfig,
+            ),
+    );
   } catch (err) {
     // A template Meta would reject is a 400 the agent can fix (too many buttons,
     // a call button that isn't E.164, an external media URL) — surfaced as a

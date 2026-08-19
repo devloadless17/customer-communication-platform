@@ -8,7 +8,7 @@
  *
  * ONE VALIDATED DOCUMENT, ONE WHERE-BUILDER. These criteria are stored as a
  * single JSON document and turned into SQL in exactly one place
- * (`apps/api/src/lib/tickets/views/where.ts`), which returns independent
+ * (`apps/api/src/lib/tickets/views.ts`), which returns independent
  * predicates the caller ANDs in. That is the same rule the inbox views learned
  * the hard way three times: a filter merged by SPREAD lets an "Unassigned" view
  * silently clobber an agent's visibility restriction, or a guest's access gate.

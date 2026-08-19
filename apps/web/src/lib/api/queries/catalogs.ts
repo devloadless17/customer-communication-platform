@@ -19,6 +19,7 @@ import type {
   ContactStage,
   MessageFlagDefinition,
   Tag,
+  TagUsage,
 } from "@ccp/shared/types";
 import type { MessageFlagDefinitionWithUsage } from "@ccp/shared/message-flags/types";
 import type {
@@ -194,8 +195,9 @@ export async function listMessageFlagDefinitionsWithUsage(): Promise<
   return definitions;
 }
 
-export async function getTagUsage(): Promise<Record<string, number>> {
-  const { usage } = await api<{ usage: Record<string, number> }>("/api/workspace/tags/usage");
+/** Per-tag `{ contacts, views }` — two numbers, never summed (see TagsService.usage). */
+export async function getTagUsage(): Promise<Record<string, TagUsage>> {
+  const { usage } = await api<{ usage: Record<string, TagUsage> }>("/api/workspace/tags/usage");
   return usage;
 }
 

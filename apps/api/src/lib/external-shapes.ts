@@ -174,7 +174,13 @@ export function toExternalAssignee(u: AssigneeRow): ExternalAssignee | null {
   return u ? { id: u.id, name: u.name, email: u.email } : null;
 }
 
-export function toExternalContact(
+/**
+ * MODULE-PRIVATE on purpose: `channelConnectionId` defaults to null here, and
+ * every /v1 contact WRITE that called this directly reported no account while
+ * the reads reported the real one (audit 2026-08-19). Call sites go through
+ * `contactRowToExternal` below, which reads the account off the include.
+ */
+function toExternalContact(
   c: DbContact,
   tagIds: string[] = [],
   /** The thread's account, when the caller fetched with

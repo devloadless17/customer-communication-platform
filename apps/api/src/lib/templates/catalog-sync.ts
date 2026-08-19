@@ -152,7 +152,21 @@ export async function syncTemplateCatalog(workspaceId: string): Promise<CatalogS
       continue;
     }
 
-    const one = await reconcileWaba(workspaceId, waba.id, fetched);
+    // Fail-soft here too, not just around the fetch: `reconcileWaba` is a
+    // transaction of upserts plus a deleteMany, so a tx timeout or a unique race
+    // between two concurrent syncs used to propagate out of the whole sweep —
+    // skipping every remaining WABA and surfacing a raw 500 on the Sync button
+    // instead of the structured partial result this function promises.
+    let one;
+    try {
+      one = await reconcileWaba(workspaceId, waba.id, fetched);
+    } catch (err) {
+      result.failed.push({
+        wabaId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
     result.syncedCount += one.syncedCount;
     result.prunedCount += one.prunedCount;
 

@@ -618,10 +618,31 @@ export function AssignToEditor({
   users: BuilderCatalogs["users"];
   assignmentPolicies: BuilderCatalogs["assignmentPolicies"];
 }) {
-  // Both auto-route modes share the overwrite switch — it's the one decision
-  // that changes whether the step can take a conversation away from the agent
-  // already working it.
+  // Both auto-route modes AND a fixed-user assign share the overwrite switch —
+  // it's the one decision that changes whether the step can take a conversation
+  // away from the agent already working it. assign_to accepts it on mode=user
+  // too ("set it when the workflow's whole purpose is a re-route"), so an
+  // escalate-to-a-named-teammate step has to be expressible here.
   const isAuto = config.mode === "round_robin" || config.mode === "policy";
+  const overwriteToggle = (
+    <label className="ml-6 flex items-start gap-2 text-sm">
+      <input
+        type="checkbox"
+        className="mt-1"
+        checked={config.overwrite === true}
+        onChange={(e) => onChange({ ...config, overwrite: e.target.checked })}
+      />
+      <span>
+        Reassign even if someone already has it
+        <span className="mt-0.5 block text-xs text-muted-foreground">
+          Off (recommended): the step only fills an empty assignee, so it
+          can&apos;t take a conversation away from the agent working it. Turn it
+          on for an escalation workflow whose whole purpose is to move the
+          thread.
+        </span>
+      </span>
+    </label>
+  );
   return (
     <Field label="Mode">
       <div className="flex flex-col gap-2">
@@ -630,24 +651,33 @@ export function AssignToEditor({
             type="radio"
             name="assign-mode"
             checked={config.mode === "user"}
-            onChange={() => onChange({ mode: "user", userId: config.userId ?? users[0]?.id ?? "" })}
+            onChange={() =>
+              onChange({
+                mode: "user",
+                userId: config.userId ?? users[0]?.id ?? "",
+                overwrite: config.overwrite ?? false,
+              })
+            }
           />
           Assign to a teammate
         </label>
         {config.mode === "user" && (
-          <Select
-            value={config.userId ?? ""}
-            onChange={(e) => onChange({ mode: "user", userId: e.target.value })}
-            className="h-8 px-2 pr-7"
-            wrapperClassName="ml-6"
-          >
-            <option value="">Select a user…</option>
-            {users.map((u) => (
-              <option key={u.id} value={u.id}>
-                {u.name} ({u.email})
-              </option>
-            ))}
-          </Select>
+          <>
+            <Select
+              value={config.userId ?? ""}
+              onChange={(e) => onChange({ ...config, mode: "user", userId: e.target.value })}
+              className="h-8 px-2 pr-7"
+              wrapperClassName="ml-6"
+            >
+              <option value="">Select a user…</option>
+              {users.map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.name} ({u.email})
+                </option>
+              ))}
+            </Select>
+            {overwriteToggle}
+          </>
         )}
         <label className="flex items-center gap-2 text-sm">
           <input
@@ -701,25 +731,7 @@ export function AssignToEditor({
             ))}
           </Select>
         )}
-        {isAuto && (
-          <label className="ml-6 flex items-start gap-2 text-sm">
-            <input
-              type="checkbox"
-              className="mt-1"
-              checked={config.overwrite === true}
-              onChange={(e) => onChange({ ...config, overwrite: e.target.checked })}
-            />
-            <span>
-              Reassign even if someone already has it
-              <span className="mt-0.5 block text-xs text-muted-foreground">
-                Off (recommended): the step only fills an empty assignee, so it
-                can&apos;t take a conversation away from the agent working it. Turn
-                it on for an escalation workflow whose whole purpose is to move
-                the thread.
-              </span>
-            </span>
-          </label>
-        )}
+        {isAuto && overwriteToggle}
         <label className="flex items-center gap-2 text-sm">
           <input
             type="radio"
@@ -1364,7 +1376,7 @@ export function JumpToStepEditor({
           ))}
         </Select>
       </Field>
-      <Field label="Max jumps (optional)" hint="Per-run cap. The global ceiling is 100 steps regardless.">
+      <Field label="Max jumps (optional)" hint="Per-run cap. The global ceiling is 200 steps regardless.">
         <Input
           type="number"
           min={1}
@@ -1910,7 +1922,7 @@ export function HttpRequestEditor({
       </Field>
       <Field
         label="Custom headers (optional)"
-        hint="One per line: Header-Name: value. Saved values are encrypted; a header shown as “•••••••• (saved)” keeps its stored value unless you overwrite it."
+        hint="One per line: Header-Name: value. Saved values are encrypted; a header shown as “•••••••• (saved)” keeps its stored value unless you overwrite it — rename a header and you must retype its value, since the stored one is keyed by name."
       >
         <Textarea
           value={headersToText(config.customHeaders)}
@@ -1935,7 +1947,7 @@ export function HttpRequestEditor({
               timeoutMs: Number.isFinite(n) && n > 0 ? n : undefined,
             });
           }}
-          placeholder="8000"
+          placeholder="30000"
           min={1}
           max={60_000}
         />

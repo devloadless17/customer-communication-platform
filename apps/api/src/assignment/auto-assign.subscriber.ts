@@ -168,7 +168,7 @@ export class AutoAssignSubscriber implements OnModuleInit, OnModuleDestroy {
     if (!aiTextEngineConfigured()) return false;
     const config = await loadAiConfig(workspaceId);
     if (!configEnabled(config)) return false;
-    const state = await getState(conversationId);
+    const state = await getState(workspaceId, conversationId);
     // No row yet = a brand-new thread the assistant hasn't touched → it will.
     if (!state) return true;
     return state.state === "ai_active";

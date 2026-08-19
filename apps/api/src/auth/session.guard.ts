@@ -558,7 +558,10 @@ export async function resolveSession(
               // The caller's OWN org, superAdmin or not. `where: {}`
               // picked the oldest workspace ON THE PLATFORM — a customer's,
               // for any operator seeded after the anchor.
-              where: { organizationId: user.organizationId },
+              // `deletingAt: null` because `canAccess` refuses a workspace
+              // claimed for deletion: without it `take: 1` can hand the loop
+              // its only candidate and have it refused, resolving null.
+              where: { organizationId: user.organizationId, deletingAt: null },
               select: { id: true },
               orderBy: { createdAt: "asc" },
               take: 1,

@@ -119,8 +119,9 @@ export default function ApiDocsPage() {
             <dd className="text-muted-foreground">
               <code>/api/external/v1</code> over HTTPS.{" "}
               <code>Authorization: Bearer ccp_…</code> on every request — one key =
-              one organization, every call auto-scoped to your org. Missing/invalid
-              key → <code>401</code>.
+              one <strong>workspace</strong>, every call auto-scoped to it. An
+              organization with several workspaces needs one key per workspace;
+              nothing crosses that line. Missing/invalid key → <code>401</code>.
             </dd>
           </div>
           <div>
@@ -134,12 +135,21 @@ export default function ApiDocsPage() {
           <div>
             <dt className="font-semibold text-foreground">Idempotency</dt>
             <dd className="text-muted-foreground">
-              The send routes (<code>POST /messages</code>,{" "}
+              Ten routes <strong>require</strong> an <code>Idempotency-Key</code>{" "}
+              header — everything that spends money or fans out irreversibly:{" "}
+              <code>POST /messages</code>,{" "}
               <code>POST /conversations/:id/messages</code>,{" "}
-              <code>POST /conversations/:id/interactive</code>){" "}
-              <strong>require</strong> an <code>Idempotency-Key</code> header —
-              reuse it on a retry and we never double-send (the inbound message
-              id is a good key). Other mutations accept it optionally.
+              <code>POST /conversations/:id/interactive</code>,{" "}
+              <code>POST /conversations/:id/messenger-template</code>,{" "}
+              <code>POST /conversations/:id/call-permission</code>,{" "}
+              <code>POST /conversations/:id/call-button</code>,{" "}
+              <code>POST /broadcasts</code>, <code>POST /broadcasts/:id/retry</code>,{" "}
+              <code>POST /workflows/:id/trigger</code> and{" "}
+              <code>POST /contacts/import</code>. Reuse the key on a retry and we
+              never double-send (the inbound message id is a good key); omit it and
+              the call is refused with <code>400 idempotency_key_required</code>.
+              Other mutations accept it optionally. Reusing one key for a{" "}
+              <em>different</em> payload is <code>422</code>, never a replay.
             </dd>
           </div>
           <div>
@@ -156,8 +166,12 @@ export default function ApiDocsPage() {
             <dt className="font-semibold text-foreground">Errors</dt>
             <dd className="text-muted-foreground">
               Non-2xx → <code>{`{ error, detail }`}</code>. Common:{" "}
-              <code>403 insufficient_scope</code>, <code>404</code>,{" "}
-              <code>409 duplicate_phone</code>, <code>422</code> validation,{" "}
+              <code>400 invalid_body</code> / <code>invalid_query</code>{" "}
+              (validation — the failing fields are listed in{" "}
+              <code>issues</code>), <code>403 insufficient_scope</code>,{" "}
+              <code>404</code>, <code>409 duplicate_phone</code>,{" "}
+              <code>422</code> (an <code>Idempotency-Key</code> reused with a
+              different payload, or a send a channel cannot carry),{" "}
               <code>429 rate_limited</code>.
             </dd>
           </div>
@@ -166,11 +180,24 @@ export default function ApiDocsPage() {
               <code>silent</code> &amp; loop safety
             </dt>
             <dd className="text-muted-foreground">
-              Any mutating route accepts <code>{`"silent": true`}</code> to suppress
-              the webhook/automation echo for that write. If a webhook handler calls
-              back into this API, forward the <code>X-CCP-Depth</code> header
-              verbatim — we reject at depth 8 (<code>429 chain_depth_exceeded</code>),
-              which breaks accidental webhook → API → webhook loops.
+              <code>{`"silent": true`}</code> suppresses the webhook/automation
+              echo for one write, and is honoured by exactly these routes:{" "}
+              <code>PATCH /contacts/:id</code>,{" "}
+              <code>POST /contacts/:id/tags</code>,{" "}
+              <code>POST /contacts/:id/tags/remove</code>,{" "}
+              <code>POST /contacts/tags/add</code>,{" "}
+              <code>POST /contacts/tags/remove</code>,{" "}
+              <code>POST /contacts/:id/assign</code>,{" "}
+              <code>POST /contacts/:id/status</code>,{" "}
+              <code>POST /conversations/:id/assign</code>,{" "}
+              <code>POST /conversations/:id/status</code>,{" "}
+              <code>POST /conversations/:id/ai</code> and{" "}
+              <code>POST /conversations/:id/notes</code>. Anywhere else the field
+              is ignored, so don&apos;t rely on it for loop safety — use{" "}
+              <code>X-CCP-Depth</code>: if a webhook handler calls back into this
+              API, forward that header verbatim and we reject at depth 8
+              (<code>429 chain_depth_exceeded</code>), which breaks accidental
+              webhook → API → webhook loops.
             </dd>
           </div>
         </dl>
@@ -215,7 +242,11 @@ export default function ApiDocsPage() {
           people who have a phone number, <code>?reach=email</code> only those
           with an email. The two are <strong>orthogonal</strong> — combine them
           for &quot;Instagram people I can email&quot;. Omitting{" "}
-          <code>reach</code> applies no gate at all.
+          <code>reach</code> applies no gate at all. The badge counts behind the
+          in-app contacts rail have no API surface by decision: they are
+          unfiltered totals for fixed navigation destinations (chrome, not an
+          action), and any number a partner needs comes from this endpoint with
+          the matching filters.
           <br />
           Every contact row carries <code>channelConnectionId</code> — which of
           your accounts that person&apos;s thread is on — so a partner can route
@@ -289,7 +320,18 @@ export default function ApiDocsPage() {
           requests, contact us for a hard purge.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/contacts/:id/channels">
-          List a contact's channels (today: one WhatsApp row per contact).
+          The channel this contact is reachable on, as{" "}
+          <code>{`{ items: [{ channel, phoneNumber, externalContactId }] }`}</code>.
+          A contact is a <em>channel identity</em>, so there is exactly one row
+          and <code>channel</code> is whichever one they arrived on —{" "}
+          <code>whatsapp</code>, <code>messenger</code>, <code>instagram</code>{" "}
+          or <code>webchatwidget</code>. A social or widget contact has no{" "}
+          <code>phoneNumber</code>; it carries an <code>externalContactId</code>{" "}
+          instead (the PSID / IGSID / session token).{" "}
+          <code>{`{ items: [] }`}</code> only for a row with neither identity.
+          To see every channel one <em>person</em> is on, use{" "}
+          <code>GET /v1/contacts/:id/customer</code> — that is the layer that
+          rolls several contacts up into one profile.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/contacts/:id/acquisition">
           Where this customer came from — the Click-to-WhatsApp / Click-to-
@@ -803,7 +845,15 @@ export default function ApiDocsPage() {
           <code>POST /contacts/:id/stage</code> (above).
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/channels">
-          Read-only list of the channels this workspace has connected.
+          Read-only list of the channels this workspace has connected — one row
+          per connected account, as <code>{`{ id, channel, display }`}</code>.{" "}
+          <code>id</code> here is the <strong>provider&apos;s</strong> id for the
+          account (WhatsApp phone-number id, Page id, Instagram id) so you can
+          correlate against data pulled straight from Meta. It is <em>not</em>{" "}
+          the account id our own routes take — for that (<code>?accountId=</code>{" "}
+          filters, <code>account_id</code> on a send,{" "}
+          <code>channelConnectionId</code> on a row) use{" "}
+          <code>GET /v1/channel-accounts</code> below.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/channels/:channel/accounts">
           The accounts under one channel — <code>whatsapp</code>,{" "}
@@ -831,7 +881,8 @@ export default function ApiDocsPage() {
           only: <code>id</code>, <code>channel</code>, <code>name</code> (the
           admin&apos;s label when set, else the provider&apos;s own name, else the raw
           id — never blank), <code>providerName</code>, <code>isDefault</code>,{" "}
-          <code>isActive</code>. This is the lookup for a conversation&apos;s{" "}
+          <code>isActive</code>, <code>needsReconnect</code>. This is the lookup
+          for a conversation&apos;s{" "}
           <code>channelConnectionId</code>, which names the account a thread is on
           and therefore the number a reply goes out from. Carries no credentials, so
           scope <code>read:catalog</code> rather than <code>read:channels</code>.
@@ -1107,6 +1158,7 @@ export default function ApiDocsPage() {
         <Endpoint
           method="POST"
           path="/api/external/v1/conversations/:id/call-permission"
+          headers={{ "Idempotency-Key": "<uuid>" }}
         >
           Ask the customer to allow calls. Sends a real, billable message, so an{" "}
           <code>Idempotency-Key</code> is required. Returns the existing grant
@@ -1123,13 +1175,17 @@ export default function ApiDocsPage() {
             ttlMinutes: 1440,
             payload: "order-1522",
           }}
+          headers={{ "Idempotency-Key": "<uuid>" }}
         >
           A tappable button that starts a WhatsApp call <em>to you</em>. Needs
           no permission at all, and a customer who uses it grants you callback
           permission as a side effect — often the better move for a cold
           contact. <code>payload</code> comes back on the call webhooks so you
           can trace an inbound call to what produced the button; older WhatsApp
-          clients drop it, so treat its absence as normal.
+          clients drop it, so treat its absence as normal. This posts a real,
+          billable message to the thread, so an <code>Idempotency-Key</code> is{" "}
+          <strong>required</strong> — without one the call is refused with{" "}
+          <code>400 idempotency_key_required</code>.
         </Endpoint>
       </Section>
 
@@ -1468,7 +1524,8 @@ export default function ApiDocsPage() {
           <code>statuses</code>, <code>assignee</code> (
           <code>{`{ kind: "anyone" | "me" | "unassigned" }`}</code> or{" "}
           <code>{`{ kind: "users", userIds: [...] }`}</code>),{" "}
-          <code>channels</code>, <code>stageIds</code>, <code>tagIds</code> +{" "}
+          <code>channels</code>, <code>channelAccountIds</code>,{" "}
+          <code>stageIds</code>, <code>tagIds</code> +{" "}
           <code>tagMatch</code> (<code>&quot;any&quot;</code> default or{" "}
           <code>&quot;all&quot;</code>), <code>fields</code>,{" "}
           <code>hasOpenFlags</code>, <code>unreadOnly</code>.{" "}
@@ -1476,7 +1533,12 @@ export default function ApiDocsPage() {
           <code>{`[{ key, optionIds: [...] }]`}</code> — option ids are OR&apos;d
           within an entry, entries AND with everything else. Select fields only
           (text fields have no option catalog); get keys and option ids from{" "}
-          <code>GET /v1/contact-fields</code>.
+          <code>GET /v1/contact-fields</code>.{" "}
+          <code>channelAccountIds</code> is narrower than <code>channels</code>:
+          it names which WhatsApp number / Page / handle the thread is on (ids
+          from <code>GET /v1/channel-accounts</code>), so &ldquo;the Sales
+          number&rdquo; can be a view of its own. A thread with no account —
+          legacy, or an account since disconnected — never satisfies it.
         </Endpoint>
         <Endpoint method="PATCH" path="/api/external/v1/inbox-views/:id" body={{ name: "Renamed" }}>
           Any subset of the create fields.
@@ -1749,12 +1811,16 @@ export default function ApiDocsPage() {
           <code>button_params_required</code>, not an opaque Meta code.
           <br />
           <br />
-          <code>account_id</code> (a <code>ChannelConnection</code> id from{" "}
-          <code>GET /v1/channels</code>) picks <strong>which of your accounts on
-          the channel</strong> a <strong>brand-new</strong> thread is opened on —
-          pass back the <code>account.id</code> from the webhook that prompted
-          the send and the reply leaves from the same number/Page the customer
-          reached. If the contact <em>already</em> has a conversation, that
+          <code>account_id</code> (an account id from{" "}
+          <code>GET /v1/channel-accounts</code>) picks <strong>which of your
+          accounts on the channel</strong> a <strong>brand-new</strong> thread is
+          opened on — pass back the <code>account.id</code> from the webhook that
+          prompted the send and the reply leaves from the same number/Page the
+          customer reached; that field already carries exactly this id.{" "}
+          <strong>Not</strong> the ids from <code>GET /v1/channels</code>, which
+          reports the <em>provider&apos;s</em> id for each account (the WhatsApp
+          phone-number id, Page id or Instagram id — the webhook&apos;s{" "}
+          <code>account.external_id</code>). If the contact <em>already</em> has a conversation, that
           thread owns its account and <code>account_id</code> is not needed;
           naming a <em>different</em> one returns{" "}
           <code>400 account_mismatch</code> rather than silently sending from
@@ -1839,7 +1905,7 @@ export default function ApiDocsPage() {
           explicit params so a chip still narrows further. Scope{" "}
           <code>read:tickets</code>.
         </Endpoint>
-        <Endpoint method="GET" path="/api/external/v1/tickets/views">
+        <Endpoint method="GET|POST|PATCH|DELETE" path="/api/external/v1/tickets/views">
           <strong>Saved ticket views</strong> — the named, reusable filters a
           department works from. A key sees the SHARED views (a personal view belongs
           to one person). <code>POST</code> the same path to create one (always shared
@@ -2019,7 +2085,7 @@ export default function ApiDocsPage() {
           than a storage URL, so every byte passes the ticket&apos;s access check; uploads
           are in-app multipart only. Scope <code>write:tickets</code>.
         </Endpoint>
-        <Endpoint method="GET" path="/api/external/v1/tickets-settings">
+        <Endpoint method="GET|PATCH" path="/api/external/v1/tickets-settings">
           <code>ticketCloseConversationOnLastSolved</code>. <code>PATCH</code> the same
           path to change it (<code>admin:settings</code>). Scope{" "}
           <code>read:tickets</code>.
@@ -2032,7 +2098,7 @@ export default function ApiDocsPage() {
           <code>400</code>.
         </Endpoint>
         <Endpoint
-          method="POST"
+          method="POST|GET"
           path="/api/external/v1/ticket-sla"
           body={{ priority: "urgent", firstResponseMins: 15, resolutionMins: 60 }}
         >
@@ -2043,7 +2109,7 @@ export default function ApiDocsPage() {
           breaches open work. <code>GET</code> the same path to read them. Scope{" "}
           <code>admin:settings</code> / <code>read:tickets</code>.
         </Endpoint>
-        <Endpoint method="GET" path="/api/external/v1/ticket-fields">
+        <Endpoint method="GET|POST|PATCH|DELETE" path="/api/external/v1/ticket-fields">
           Custom fields on a ticket. <code>POST</code> to create,{" "}
           <code>PATCH</code>/<code>DELETE /ticket-fields/:id</code> to edit or remove. The{" "}
           <code>key</code> is derived from the label once and is immutable — stored values
@@ -2508,6 +2574,88 @@ export default function ApiDocsPage() {
         </Endpoint>
       </Section>
 
+      <section className="mb-8">
+        <h2 className="mb-2 text-base font-semibold">Not in /v1 (yet)</h2>
+        <div className="rounded-md border border-border bg-card p-3 text-xs text-muted-foreground">
+          <p className="mb-3">
+            Everything the product does is reachable here except the surfaces
+            below. They are listed so a boundary reads as a decision rather than
+            a gap — each is either destructive enough to want a person behind it,
+            or configuration whose only sane editor is the admin console. If one
+            of them blocks an integration you are building, tell us: the seam is
+            there, the endpoint just isn&apos;t worth the blast radius yet.
+          </p>
+          <dl className="grid gap-3">
+            <div>
+              <dt className="font-semibold text-foreground">
+                Deleting a conversation (single or bulk)
+              </dt>
+              <dd>
+                Destroys a customer&apos;s whole thread — every message, note and
+                file — and is not recoverable. It stays an in-app action behind
+                the <code>conversations:delete</code> permission, with a person
+                confirming it. What an integration usually wants is{" "}
+                <code>POST /conversations/:id/status</code> with{" "}
+                <code>closed</code>, which is here and is reversible.
+              </dd>
+            </div>
+            <div>
+              <dt className="font-semibold text-foreground">
+                Editing the lifecycle-stage catalog
+              </dt>
+              <dd>
+                <code>GET /stages</code> is read-only: creating, renaming,
+                reordering or deleting a stage reshapes the pipeline every
+                contact in the workspace sits in, so it is an admin-console
+                change. Moving one contact between stages <em>is</em> here —{" "}
+                <code>POST /contacts/:id/stage</code>.
+              </dd>
+            </div>
+            <div>
+              <dt className="font-semibold text-foreground">
+                Web-chat widget configuration
+              </dt>
+              <dd>
+                Appearance, the pre-chat form and the site keys are in-app admin
+                only — a site key decides which websites may open a thread with
+                you, which makes it a credential rather than a setting.
+                Conversations the widget produces are ordinary conversations and
+                behave like every other channel here.
+              </dd>
+            </div>
+            <div>
+              <dt className="font-semibold text-foreground">
+                Authoring a workflow
+              </dt>
+              <dd>
+                Reading workflows, publishing / unpublishing, firing a manual
+                trigger and inspecting runs are all above. Creating, editing,
+                deleting or test-running the step <em>graph</em> is not: it is a
+                validated visual document (DAG shape, node caps, per-step
+                schemas) and a hand-POSTed graph is how you get an automation
+                nobody can read or repair.
+              </dd>
+            </div>
+            <div>
+              <dt className="font-semibold text-foreground">
+                The AI assistant
+              </dt>
+              <dd>
+                Its configuration, voice preview and knowledge documents have no{" "}
+                <code>/v1</code> surface at all — the whole surface is admin
+                console today. The one part an integration needs is here:{" "}
+                <code>POST /conversations/:id/ai</code> turns Autopilot on or off
+                for a single thread, which is what an escalation branch calls.
+              </dd>
+            </div>
+          </dl>
+          <p className="mt-3">
+            Send types with no <code>/v1</code> twin yet (direct media upload,
+            location, contact cards, reactions, stickers, forwards) are listed on{" "}
+            <code>POST /messages</code> above.
+          </p>
+        </div>
+      </section>
 
       <hr className="my-10 border-border" />
 
@@ -2625,6 +2773,22 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 type Method = "GET" | "POST" | "PATCH" | "DELETE" | "PUT";
 
+/**
+ * One block may cover several verbs on the same path — declare them
+ * pipe-separated (`"GET|POST|PATCH|DELETE"`). `scripts/check-v1-docs.mjs` is
+ * verb-keyed and reads every one, so a mutation covered only by a sibling
+ * block's prose no longer passes the gate; the curl button uses the first.
+ */
+type MethodDecl = Method | `${Method}|${string}`;
+
+const METHOD_COLOR: Record<Method, string> = {
+  GET: "bg-success-bg text-success-fg",
+  POST: "bg-blue-500/10 text-blue-600",
+  PATCH: "bg-warning-bg text-warning-fg",
+  DELETE: "bg-destructive/10 text-destructive",
+  PUT: "bg-slate-500/10 text-slate-600",
+};
+
 function Endpoint({
   method,
   path,
@@ -2632,28 +2796,27 @@ function Endpoint({
   headers,
   children,
 }: {
-  method: Method;
+  method: MethodDecl;
   path: string;
   body?: Record<string, unknown>;
   headers?: Record<string, string>;
   children: React.ReactNode;
 }) {
-  const color =
-    method === "GET"
-      ? "bg-success-bg text-success-fg"
-      : method === "POST"
-        ? "bg-blue-500/10 text-blue-600"
-        : method === "PATCH"
-          ? "bg-warning-bg text-warning-fg"
-          : method === "DELETE"
-            ? "bg-destructive/10 text-destructive"
-            : "bg-slate-500/10 text-slate-600";
+  // `split` on a non-empty string always yields at least one verb.
+  const methods = method.split("|") as [Method, ...Method[]];
   return (
     <div className="flex flex-col gap-1 px-2 py-1.5">
       <div className="flex items-center gap-2">
-        <span className={`rounded px-1.5 py-0.5 text-3xs font-bold ${color}`}>{method}</span>
+        {methods.map((m) => (
+          <span
+            key={m}
+            className={`rounded px-1.5 py-0.5 text-3xs font-bold ${METHOD_COLOR[m]}`}
+          >
+            {m}
+          </span>
+        ))}
         <code className="truncate font-mono text-xs">{path}</code>
-        <CopyCurlButton method={method} path={path} body={body} headers={headers} />
+        <CopyCurlButton method={methods[0]} path={path} body={body} headers={headers} />
       </div>
       <div className="pl-12 text-xs text-muted-foreground">{children}</div>
     </div>

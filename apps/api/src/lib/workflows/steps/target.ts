@@ -5,6 +5,7 @@ import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { resolveOutboundAccountId } from "@/lib/conversations/account";
+import { ensureDefaultStage } from "@/lib/queries/stages";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
 import { bestChannelForCustomer } from "@/lib/identity/best-channel";
 import { teamConnectedChannels } from "@/lib/providers";
@@ -334,6 +335,11 @@ export async function resolveStepTarget(
           // list before any real name is captured.
           name: phone,
           source: "manual",
+          // Every other contact-create path resolves the default stage
+          // (contacts service, /v1, import, ingest, ingest-call) and nothing
+          // backfills a null one — a stage-less contact is invisible to every
+          // pipeline view. Race-safe helper, cached per workspace.
+          stageId: await ensureDefaultStage(workspaceId),
         },
         select: { id: true },
       });
@@ -351,12 +357,18 @@ export async function resolveStepTarget(
           // WhatsApp identity; without the pin this could grab a social
           // sibling that borrowed the phone.
           where: { workspaceId, phoneNumber: phone, identityChannel: "whatsapp" },
-          select: { id: true, deletedAt: true },
+          select: { id: true, deletedAt: true, stageId: true },
         });
         if (slotHolder.deletedAt) {
           await db.contact.update({
             where: { id: slotHolder.id },
-            data: { deletedAt: null, source: "manual" },
+            data: {
+              deletedAt: null,
+              source: "manual",
+              // A ghost from before stages existed can hold a null one; the
+              // revive is the only chance to fill it (nothing sweeps for it).
+              ...(slotHolder.stageId ? {} : { stageId: await ensureDefaultStage(workspaceId) }),
+            },
           });
           // A revived ghost is a fresh directory appearance for downstream.
           contactCreated = true;

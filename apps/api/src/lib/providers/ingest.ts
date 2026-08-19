@@ -1398,6 +1398,14 @@ async function ingestTemplateStatusUpdate(
   });
   if (affected.length === 0) return; // not in our catalog yet — sync owns creation
 
+  // Archival stamps the 28-day deletion countdown, so it may only be written on
+  // the TRANSITION — same rule (and same reason) as `catalog-sync.ts`. Meta
+  // delivers webhooks at-least-once, and a redelivered `archived` re-stamping
+  // `archivedAt` pushes the deadline forward and hides an expiring template.
+  if (evt.status === "archived" && affected.every((a) => a.status === "archived")) {
+    delete data.archivedAt;
+  }
+
   const result = await db.messageTemplate.updateMany({
     where,
     data,

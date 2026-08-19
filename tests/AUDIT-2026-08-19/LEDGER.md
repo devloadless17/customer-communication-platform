@@ -29,6 +29,9 @@ Resume state: if a session is cut, continue from the first section below not mar
 | Wave 3 critical/high direct-reads + fixes | COMMITTED 0cc465c6 (U11-01 critical, U6-1 cross-workspace) |
 | Wave 3 fixes (remaining 21) | LANDED — gates green (`pnpm check` exit 0), typecheck clean both apps |
 | Wave 4 reviews (U13, U14) | RUNNING (wf_dc4978bc-3bb) |
+| Wave 3 + Sweeps B fixes | COMMITTED (40ad061e tickets, 74b0e1dd ai, cb9fb4d8 calls/team-chat, 04fa15cf v1, 3a034b12 views/lists, d81b5d22 v1 tags) |
+| Cleanup fleet (S4 docs, S12-4 AI retention, 97 lows) | RUNNING (wf_cfee02b9-577) |
+| E2E gate completeness | FIXED + COMMITTED a09a5efd — 3 root specs (incl. contacts-segments) were never run by the batched gate; now batched + self-checking |
 | Wave 4 (U13, U14) + S1/S4/S9..S13 | pending |
 | Low-findings pass (62 collected) | pending — tests/AUDIT-2026-08-19/low-findings-backlog.md |
 | Live phase 1–8 | pending |
@@ -37,6 +40,9 @@ Resume state: if a session is cut, continue from the first section below not mar
 ## Gate history
 - 2026-08-19 post-Wave-1-fixes: `pnpm check` exit 0; api vitest 1559/1559; partial-index tripwire green.
 - 2026-08-19 post-Wave-2-fixes + settings-secrets: `pnpm check` exit 0; api vitest 148 files / 1559 tests; migration `20260819060000_workspace_deleting_claim` applied to the dev DB.
+
+## ⚠ OPERATOR ACTION REQUIRED AFTER DEPLOY
+The production superAdmin password is currently the literal `loadless` (every deploy re-asserted it — fixed in 0024e964, but the fix stops FUTURE resets, it cannot change the password already in the database). **After deploying, sign in as the superAdmin and change the password**, or set `SUPERADMIN_PASSWORD` and re-seed. That account can enter every workspace on the box.
 
 ## Accepted trade-offs recorded during fix-review (do not re-flag)
 - `Workspace.deletingAt` excludes a mid-delete workspace from `resolveActiveWorkspaceId`. A member whose ONLY workspace is being deleted resolves to null and is logged out. Correct: the workspace is being destroyed. The org still keeps ≥1 workspace for everyone else.

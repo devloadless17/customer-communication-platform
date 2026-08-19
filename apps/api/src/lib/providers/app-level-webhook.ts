@@ -51,7 +51,7 @@ import type { Channel } from "@ccp/shared/types";
 
 /** Outcome of attributing ONE entry. Internal to the grouping below. */
 type AppLevelResolution =
-  | { kind: "ok"; workspaceId: string; via: "waba_info" | "waba_id" | "portfolio_id" | "account_id" }
+  | { kind: "ok"; workspaceId: string }
   | { kind: "none" }
   | { kind: "ambiguous"; detail: string };
 
@@ -250,7 +250,7 @@ export async function groupEntriesByWorkspace(
       const hits = new Set<string>();
       for (const id of attempt.ids) for (const ws of attempt.map.get(id) ?? []) hits.add(ws);
       if (hits.size === 1) {
-        return { kind: "ok", workspaceId: [...hits][0]!, via: "waba_id" };
+        return { kind: "ok", workspaceId: [...hits][0]! };
       }
       if (hits.size > 1) {
         return {

@@ -704,10 +704,14 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
           ? `Preparing ${data.totalCount.toLocaleString()} recipients — sending starts automatically`
           : `${progressPct}% processed`}
         {(data.status === "queued" || data.status === "running") && " · updates live"}
+        {/* Only a shutdown pause is unconditionally auto-resumed. A pause that
+            carries an error can be a template rejection or an abuse warning,
+            which resume ONLY when an operator hits Resume — so the copy points
+            at the error rather than promising anything. */}
         {data.status === "paused" &&
           (data.lastError
-            ? ` · paused — ${(CHANNEL_LABEL as Record<string, string>)[data.channel] ?? "channel"} connection error; fix the connection and it will auto-resume`
-            : " · paused for server restart, will auto-resume")}
+            ? " · paused — see the message above, then resume it once that's fixed"
+            : " · paused for a server restart, resumes automatically")}
       </div>
 
       {/* Campaign report. Sits directly under the progress bar because the

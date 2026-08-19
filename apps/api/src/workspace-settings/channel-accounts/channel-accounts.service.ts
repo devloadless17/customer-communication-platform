@@ -628,10 +628,17 @@ export class ChannelAccountsService {
     // Social: the Page is the subscription unit and both channels may share it.
     const pageId = (target.config as { pageId?: string } | null)?.pageId;
     if (!pageId) return;
+    // DELIBERATELY NOT workspace-scoped, unlike every other query in this file.
+    // `DELETE /{page-id}/subscribed_apps` removes the calling APP's subscription
+    // to the Page outright, and `ChannelConnection`'s uniqueness is per-workspace
+    // — so the same Page can be connected in a sibling workspace under the same
+    // Meta app. Counting only THIS workspace's rows took that sibling's inbound
+    // dark on a removal it had nothing to do with. The read answers a boolean
+    // about an app-level object and returns no tenant data. (The WhatsApp half
+    // above needs no equivalent: `externalWabaId` is globally unique.)
     const stillInUse =
       (await this.db.channelConnection.count({
         where: {
-          workspaceId,
           channel: { in: ["messenger", "instagram"] },
           config: { path: ["pageId"], equals: pageId },
         },

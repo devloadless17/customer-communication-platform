@@ -948,14 +948,20 @@ export function parseSocialMessaging(
       continue;
     }
     for (const m of entry.messaging) {
-      // Unsend: the customer deleted a message. References an existing mid;
+      // Unsend: someone deleted a message. References an existing mid;
       // tombstone the stored row (no new content). Checked before the echo/
-      // message branches since a deleted message carries `message.mid`.
+      // message branches since a deleted message carries `message.mid` — so the
+      // direction pin has to be derived HERE: an `is_echo` unsend is the
+      // BUSINESS retracting its own native-inbox reply, and pinning that to the
+      // default "in" would make ingest drop it, leaving the agent's copy showing
+      // a message the customer can no longer see. Same fix as the WhatsApp smb
+      // echo revoke path.
       if (m.message?.is_deleted && m.message.mid) {
         emit({
           kind: "message_correction",
           action: "delete",
           targetExternalId: m.message.mid,
+          expectedDirection: m.message.is_echo ? "out" : "in",
           timestamp: new Date(m.timestamp ?? entry.time ?? Date.now()),
           rawPayload: rawPayloadOf(m),
         });

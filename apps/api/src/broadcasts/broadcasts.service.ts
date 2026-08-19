@@ -61,7 +61,6 @@ import {
 } from "@ccp/shared/template-render";
 import type { Channel, ContactFieldFilter } from "@ccp/shared/types";
 import {
-  BROADCASTABLE_CHANNELS,
   CHANNEL_CAPABILITIES,
   isAccountScopedIdentity,
 } from "@ccp/shared/providers/capabilities";
@@ -549,22 +548,18 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     // through create and then fails EVERY recipient at Meta. Reuse the shared,
     // byte-aware `checkTextCap` the four other send paths use so a multibyte
     // (Arabic/emoji) body is measured in the SAME unit Meta enforces — a bare
-    // `.length` char count silently under-counts Instagram's byte cap. For a
-    // fixed freeform channel we cap against that channel; customer-mode resolves
-    // a channel per recipient, so we check EVERY live channel and raise on the
-    // first (strictest, byte-aware) bound any recipient could hit.
-    if (effectiveKind === "freeform" && input.bodyText) {
-      const capChannels = freeformChannel ? [freeformChannel] : [...BROADCASTABLE_CHANNELS];
-      for (const c of capChannels) {
-        const over = checkTextCap(input.bodyText, CHANNEL_CAPABILITIES[c], c);
-        if (over) {
-          throw new BadRequestException({
-            error: "message_too_long",
-            detail: freeformChannel
-              ? over.detail
-              : `${over.detail} (must fit every channel to reach all recipients).`,
-          });
-        }
+    // `.length` char count silently under-counts Instagram's byte cap. A
+    // freeform campaign always names its channel (the schema's refine), so the
+    // cap is that one channel's — the old "check every channel" arm belonged to
+    // the per-recipient customer target mode, removed 2026-07-27.
+    if (effectiveKind === "freeform" && input.bodyText && freeformChannel) {
+      const over = checkTextCap(
+        input.bodyText,
+        CHANNEL_CAPABILITIES[freeformChannel],
+        freeformChannel,
+      );
+      if (over) {
+        throw new BadRequestException({ error: "message_too_long", detail: over.detail });
       }
     }
 
@@ -2283,6 +2278,15 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         detail: "Wait for the broadcast to finish before retrying failed recipients.",
       });
     }
+    // Paused is NOT terminal, so the terminal-status CAS below misses and the
+    // operator reads "Another retry or run started" — wrong advice for a state
+    // whose actual next step is Resume (or Cancel).
+    if (row.status === "paused") {
+      throw new ConflictException({
+        error: "broadcast_paused",
+        detail: "Resume or cancel the paused broadcast first.",
+      });
+    }
 
     // The same per-user marketing-cap gate the CREATE path applies (see the
     // suppression above `all_recipients_opted_out`), because retry is the
@@ -2401,6 +2405,9 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
           deliveryState: "pending",
           errorMessage: null,
           errorCode: null,
+          // The raw Meta code belongs to the attempt we're discarding — left
+          // behind, a recipient that later delivered still reported 131026.
+          metaErrorCode: null,
           sentAt: null,
           externalId: null,
         },

@@ -32,6 +32,14 @@ export interface CarouselButtonDraft {
   url: string;
   /** Example for the URL's `{{1}}`, required by Meta when one is present. */
   example: string;
+  /**
+   * The ORIGINAL Meta button object, kept when editing a synced template so
+   * properties this editor doesn't model — and a button TYPE it can't
+   * represent (a Manager-authored COPY_CODE card button) — survive the
+   * round-trip instead of being rewritten as QUICK_REPLY. Same discipline as
+   * `ButtonRow.raw` for the top-level buttons. Absent on new buttons.
+   */
+  raw?: Record<string, unknown>;
 }
 
 export interface CarouselCardDraft {
@@ -87,25 +95,45 @@ export function carouselDraftToComponent(draft: CarouselDraft) {
         },
         ...(draft.hasBody ? [{ type: "BODY" as const, text: card.body }] : []),
         ...(card.buttons.length > 0
-          ? [
-              {
-                type: "BUTTONS" as const,
-                buttons: card.buttons.map((b) =>
-                  b.kind === "URL"
-                    ? {
-                        type: "URL" as const,
-                        text: b.text,
-                        url: b.url,
-                        ...(b.url.includes("{{") ? { example: [b.example] } : {}),
-                      }
-                    : { type: "QUICK_REPLY" as const, text: b.text },
-                ),
-              },
-            ]
+          ? [{ type: "BUTTONS" as const, buttons: card.buttons.map(toMetaCardButton) }]
           : []),
       ],
     })),
   };
+}
+
+/**
+ * One card button in Meta's shape.
+ *
+ * Mirrors `toMetaButton` for the top-level buttons: properties this editor
+ * doesn't model ride through from the original object, and a type it can't
+ * represent keeps its ORIGINAL type on the way out — rewriting a Manager-
+ * authored COPY_CODE card button as quick_reply silently mutated a
+ * Meta-approved component on every edit resubmission.
+ */
+function toMetaCardButton(b: CarouselButtonDraft) {
+  const {
+    type: rawType,
+    text: _text,
+    url: _url,
+    example: _example,
+    ...passthrough
+  } = (b.raw ?? {}) as Record<string, unknown>;
+
+  if (b.kind === "URL") {
+    return {
+      ...passthrough,
+      type: "URL",
+      text: b.text,
+      url: b.url,
+      ...(b.url.includes("{{") ? { example: [b.example] } : {}),
+    };
+  }
+  const keepType =
+    typeof rawType === "string" && rawType.toUpperCase() !== "QUICK_REPLY"
+      ? rawType
+      : "QUICK_REPLY";
+  return { ...passthrough, type: keepType, text: b.text };
 }
 
 export function CarouselEditor({
@@ -285,6 +313,11 @@ export function CarouselEditor({
                         text: "",
                         url: "",
                         example: "",
+                        // Carry the slot's raw type too, or a card added to a
+                        // carousel with an unrepresentable button type would
+                        // emit a quick_reply where its siblings emit theirs —
+                        // Meta requires every card to match.
+                        ...(b.raw ? { raw: b.raw } : {}),
                       })),
                     },
                   ],

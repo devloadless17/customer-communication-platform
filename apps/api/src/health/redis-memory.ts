@@ -16,9 +16,14 @@ export async function probeRedisMemory(
   redis: Redis,
   timeoutMs: number,
 ): Promise<RedisMemoryReport> {
-  const timeout = new Promise<RedisMemoryReport>((resolve) =>
-    setTimeout(() => resolve({ usedPercent: null }), timeoutMs),
-  );
+  // The loser of the race must be cleared, not left to fire: /health is the
+  // container's healthcheck and runs every few seconds, so an uncleared timer
+  // per hit keeps the event loop holding a pending handle for `timeoutMs` each
+  // time. Same finally-clearTimeout shape as `probeStuckBroadcasts`.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<RedisMemoryReport>((resolve) => {
+    timer = setTimeout(() => resolve({ usedPercent: null }), timeoutMs);
+  });
   const probe = (async (): Promise<RedisMemoryReport> => {
     try {
       const info = await redis.info("memory");
@@ -37,5 +42,9 @@ export async function probeRedisMemory(
       return { usedPercent: null };
     }
   })();
-  return Promise.race([probe, timeout]);
+  try {
+    return await Promise.race([probe, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }

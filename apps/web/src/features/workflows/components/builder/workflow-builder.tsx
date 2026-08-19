@@ -12,6 +12,8 @@ import {
   Trash2,
 } from "lucide-react";
 
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
+
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
@@ -353,7 +355,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     };
     if (ctl.signal.aborted) return false;
     if (!res.ok) {
-      setTopErrors(json.details ?? [json.error ?? `error ${res.status}`]);
+      setTopErrors(json.details ?? [apiErrorMessageFrom(json, `error ${res.status}`)]);
       if (json.stepErrors) setStepErrors(json.stepErrors);
       return false;
     }
@@ -460,7 +462,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
         stepErrors?: Record<string, string>;
       };
       if (!res.ok) {
-        setTopErrors(json.details ?? [json.error ?? `error ${res.status}`]);
+        setTopErrors(json.details ?? [apiErrorMessageFrom(json, `error ${res.status}`)]);
         if (json.stepErrors) setStepErrors(json.stepErrors);
         toast.error(
           goLive ? "Couldn't go live — check the errors" : "Couldn't set to draft",

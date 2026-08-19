@@ -25,6 +25,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { useChannelAccounts } from "@/features/channels/contexts/channel-accounts-context";
 import { CHANNEL_LABEL } from "@/features/inbox/components/channel-badge";
 import type { Filter } from "@/features/inbox/components/inbox-controls";
 import { useInboxViews } from "@/features/inbox/contexts/inbox-views-context";
@@ -66,12 +67,20 @@ export function InboxViewsSection({
   // promise from `confirm()` never resolves and Delete silently does nothing.
   const { confirm, confirmDialog } = useConfirm();
 
+  // Same directory the view BUILDER summarizes with — without it an
+  // account-scoped view's tooltip degraded to "1 account" in the rail while the
+  // dialog named the number.
+  const { byId: accountsById } = useChannelAccounts();
+
   const lookup = useMemo(
     () => ({
       stageNames: Object.fromEntries(stages.map((s) => [s.id, s.name])),
       tagNames: Object.fromEntries(tags.map((t) => [t.id, t.name])),
       userNames: Object.fromEntries(teammates.map((u) => [u.id, u.name])),
       channelLabels: CHANNEL_LABEL,
+      accountNames: Object.fromEntries(
+        [...accountsById.values()].map((a) => [a.id, a.name]),
+      ),
       fieldLabels: Object.fromEntries(
         fieldDefinitions.map((d) => [d.key, d.label]),
       ),
@@ -81,7 +90,7 @@ export function InboxViewsSection({
         ),
       ),
     }),
-    [stages, tags, teammates, fieldDefinitions],
+    [stages, tags, teammates, accountsById, fieldDefinitions],
   );
 
   function openCreate() {

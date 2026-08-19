@@ -17,8 +17,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // `vi.mock` is hoisted above module scope, so the spy has to be created inside
 // `vi.hoisted` — a plain top-level const is not initialised yet when the factory runs.
-const { updateMany } = vi.hoisted(() => ({ updateMany: vi.fn() }));
-vi.mock("@/lib/db", () => ({ db: { contact: { updateMany } } }));
+const { updateMany, findMany, publish } = vi.hoisted(() => ({
+  updateMany: vi.fn(),
+  findMany: vi.fn(),
+  publish: vi.fn(),
+}));
+vi.mock("@/lib/db", () => ({ db: { contact: { updateMany, findMany } } }));
+// The route announces each tombstone in its OWN tenant (the matched rows carry
+// the workspaceId the route itself has no context for).
+vi.mock("@/lib/events/bus", () => ({ publish }));
 
 import { MetaDataDeletionController } from "@/webhooks/meta/data-deletion.controller";
 
@@ -55,6 +62,10 @@ describe("MetaDataDeletionController", () => {
     process.env.APP_PUBLIC_URL = "https://example.test";
     updateMany.mockReset();
     updateMany.mockResolvedValue({ count: 1 });
+    findMany.mockReset();
+    findMany.mockResolvedValue([{ id: "c_1", workspaceId: "ws_1" }]);
+    publish.mockReset();
+    publish.mockResolvedValue(undefined);
     controller = new MetaDataDeletionController();
   });
   afterEach(() => {
@@ -75,13 +86,22 @@ describe("MetaDataDeletionController", () => {
 
   it("tombstones only the two Meta SOCIAL channels, and only live rows", async () => {
     await controller.handle({ signed_request: signedRequest(validPayload, SECRET) });
-    const where = updateMany.mock.calls[0]![0].where;
-    expect(where.identityChannel).toEqual({ in: ["messenger", "instagram"] });
-    expect(where.externalContactId).toBe("PSID_OR_ASID_123");
+    // The SELECTION is the predicate that matters — the update then works off
+    // the ids it returned, so each tombstone can be announced in its own tenant.
+    const selected = findMany.mock.calls[0]![0].where;
+    expect(selected.identityChannel).toEqual({ in: ["messenger", "instagram"] });
+    expect(selected.externalContactId).toBe("PSID_OR_ASID_123");
     // Idempotent: Meta retries, and a second delivery must not churn timestamps.
+    expect(selected.deletedAt).toBeNull();
+    const where = updateMany.mock.calls[0]![0].where;
+    expect(where.id).toEqual({ in: ["c_1"] });
     expect(where.deletedAt).toBeNull();
     // Preserves the chat — the product's own established delete semantic.
     expect(updateMany.mock.calls[0]![0].data).toEqual({ deletedAt: expect.any(Date) });
+    // …and the tenant hears about it, in ITS workspace.
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "contact.deleted", workspaceId: "ws_1", contactId: "c_1" }),
+    );
   });
 
   it("REJECTS a request signed with a different app's secret", async () => {

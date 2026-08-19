@@ -51,6 +51,10 @@ export interface ActiveWorkspaceCandidateInput {
    * 401, and the RSC session redirects to /logout, which clears the cookie —
    * so the next login loops login → logout with no way back in short of DB
    * surgery when the locked-out user is the org's only owner.
+   *
+   * The list MUST already be filtered the way `canAccessBeyondMembership`
+   * filters (`deletingAt: null`, own org): callers pass a tiny slice, so a
+   * candidate this refuses leaves nothing to fall back to.
    */
   beyondMembershipFallbacks?: readonly string[];
 }

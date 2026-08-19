@@ -531,6 +531,12 @@
    * going straight back to a fresh, usable chat.
    */
   function doReset(silent) {
+    // Was there anything to restart? Read BEFORE the teardown below wipes both
+    // signals (resetVisitorIdentity drops K.chatted; S.formDone is cleared with
+    // the rest of the state). A visitor who never chatted has no previous
+    // conversation, so flagging their FIRST message as a restart writes a
+    // "Visitor started a new conversation" note on a thread that is not one.
+    var hadSession = S.formDone || !!lsGet(K.chatted);
     // STOP EVERYTHING IN FLIGHT FIRST — a reset that only hides the UI leaves the
     // old session running behind it. A live recording is the worst of these: the
     // panel would hide the red pulse and its cancel button while the mic stayed
@@ -555,7 +561,7 @@
     // The restart marker is only for the RELOAD path (boot reads it). In place we
     // carry the flag in memory, so a later refresh can't replay it.
     lsDel(K.restart);
-    S.startedNew = true;
+    S.startedNew = hadSession;
     // Clear the conversation — "cleared on this device" is the promise the confirm
     // makes, and the privacy reason people end a chat on a shared computer.
     S.byId = {}; S.pending = {};

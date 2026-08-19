@@ -85,8 +85,12 @@ export class AdminOperatorAccessController {
     // controllers do. The operator reaches their OWN workspaces through the
     // ordinary switcher, where they are a real member; routing that through the
     // operator door would write audit rows about visiting themselves.
+    // `deletingAt: null` mirrors the resolver's own precondition
+    // (`makeCanAccessBeyondMembership`): a workspace claimed for deletion can
+    // never become anyone's active workspace, so entering one would write the
+    // audit row for an entry that then lands somewhere else.
     const workspace = await this.db.workspace.findFirst({
-      where: { id: body.workspaceId, organization: { isPlatform: false } },
+      where: { id: body.workspaceId, deletingAt: null, organization: { isPlatform: false } },
       select: {
         id: true,
         name: true,

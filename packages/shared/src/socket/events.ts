@@ -194,10 +194,11 @@ export interface ServerToClientEvents {
       | "updated"
       /** Permanently deleted — the board drops the card, the detail view exits. */
       | "deleted"
-      /** Escalated to another workspace — the source ticket gained the link. */
+      /** Shared with a sibling workspace — the ONE ticket gained a grant. */
       | "escalated"
-      /** The twin in the other workspace changed — the open detail view should
-       *  refetch its timeline; the ticket's own lifecycle did not move. */
+      /** Something SHARE-scoped changed on the one shared row (a grant added
+       *  or revoked, a guest conversation bound, an attachment) — the open
+       *  detail view should refetch; the ticket's own lifecycle did not move. */
       | "escalation_update";
     ticket: Ticket;
     previousStatus: TicketStatus | null;

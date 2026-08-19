@@ -940,8 +940,15 @@ async function linkTags(args: {
   if (options.tagMode === "replace") {
     const ids = rowsToClear.filter((id): id is string => Boolean(id));
     if (ids.length > 0) {
+      // The workspace IN-subquery is the same defense-in-depth backstop the bulk
+      // tag path carries (contacts.service.ts): `ids` came from a workspace-scoped
+      // read, so it is redundant today — and a destructive DELETE on a join table
+      // is exactly where a future caller's missing pre-filter must not become a
+      // cross-tenant write.
       await db.$executeRaw`
-        DELETE FROM "_ContactToTag" WHERE "A" = ANY(${ids}::text[])
+        DELETE FROM "_ContactToTag"
+        WHERE "A" = ANY(${ids}::text[])
+          AND "A" IN (SELECT id FROM "Contact" WHERE "workspaceId" = ${workspaceId})
       `;
     }
   }

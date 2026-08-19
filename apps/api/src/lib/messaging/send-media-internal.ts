@@ -16,6 +16,7 @@ import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { getProviderBinding, requireProviderMethod } from "@/lib/providers";
 import { NoChannelDestinationError, resolveContactChannel } from "@/lib/providers/channel";
+import { withChannelHealth } from "@/lib/providers/channel-health";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import type { Message } from "@ccp/shared/types";
 import {
@@ -157,18 +158,26 @@ export async function sendMediaInternal(
     mediaId = up.mediaId;
   }
 
-  const send = await sendMedia(
+  const send = await withChannelHealth(
     {
-      to: channel.to,
-      ...(channel.viaBsuid ? { viaBsuid: true } : {}),
-      kind: "audio",
-      mediaId,
-      ...(mediaUrl ? { mediaUrl } : {}),
-      voice: args.voice,
-      useHumanAgentTag,
-      ...(args.caption ? { caption: args.caption } : {}),
+      workspaceId: args.workspaceId,
+      channel: conversation.channel,
+      channelConnectionId: conversation.channelConnectionId,
     },
-    sendConfig,
+    () =>
+      sendMedia(
+        {
+          to: channel.to,
+          ...(channel.viaBsuid ? { viaBsuid: true } : {}),
+          kind: "audio",
+          mediaId,
+          ...(mediaUrl ? { mediaUrl } : {}),
+          voice: args.voice,
+          useHumanAgentTag,
+          ...(args.caption ? { caption: args.caption } : {}),
+        },
+        sendConfig,
+      ),
   );
 
   const lastTs = conversation.lastMessageAt ?? null;

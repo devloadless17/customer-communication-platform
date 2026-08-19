@@ -88,8 +88,16 @@ export class WhatsappTemplatesController {
    * `?accountId=` mirrors the GET: an account-scoped sync answers with that
    * account's catalogue (the sync itself still refreshes every WABA — the
    * reconciliation is whole-workspace and fail-soft per account).
+   *
+   * Rate-limited as hard as `health/refresh`, for the same reason: one press
+   * costs a Graph catalogue read per WABA in the workspace, and at the 300/min
+   * default a single agent leaning on Refresh burns the whole workspace's Meta
+   * rate budget. Deliberately NOT capability-gated — the picker in the reply
+   * box and the broadcast composer fire this automatically when the cache is
+   * empty, so it is a read path every agent needs.
    */
   @Post()
+  @RateLimit({ perMinute: 6 })
   async sync(
     @CurrentSession() session: ApiSession,
     @Query("accountId") accountId?: string,

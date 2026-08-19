@@ -2,7 +2,7 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 
 import type { ContactSnapshot, Ticket } from "@ccp/shared/tickets/types";
 import { isTicketActive } from "@ccp/shared/tickets/types";
-import { kickOutbox, publishInTx } from "@/lib/events/outbox";
+import { kickOutbox } from "@/lib/events/outbox";
 
 import { ticketByIdWhere } from "./access";
 import { resolveActorDisplayName } from "@/lib/workspaces/operator-mask";
@@ -470,20 +470,24 @@ export async function bindGuestConversation(
     });
     await touchTicketActivity(tx, ticket.id, linkEvent?.createdAt ?? new Date());
     const t = await readTicket(tx, ticket.id);
-    await publishInTx(tx, {
-      type: "ticket.changed",
-      workspaceId: ticket.workspaceId,
-      ticketId: ticket.id,
-      conversationId: t.conversationId,
-      contactId: t.contactId,
-      action: "escalation_update",
+    // Through `publishTicketEvent` like every other ticket writer: it derives
+    // the guest audience, the per-workspace ticket mapping and the per-user
+    // co-targets a hand-rolled publish has none of — and the count is the
+    // real one, not a hardcoded 0.
+    const openTicketCount = t.conversationId
+      ? await bumpOpenTicketCount(tx, t.conversationId, 0)
+      : 0;
+    await publishTicketEvent(tx, {
+      args: {
+        workspaceId: ticket.workspaceId,
+        actor: args.actor,
+        silent: true,
+        skipOutboundWebhook: true,
+      },
       ticket: t,
+      openTicketCount,
+      action: "escalation_update",
       previousStatus: t.status,
-      openTicketCount: 0,
-      changedByUserId: args.actor.userId ?? null,
-      changedByApiKeyId: args.actor.apiKeyId ?? null,
-      silent: true,
-      skipOutboundWebhook: true,
     });
     return t;
   });

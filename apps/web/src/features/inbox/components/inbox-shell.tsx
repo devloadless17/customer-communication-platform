@@ -326,6 +326,15 @@ export function InboxShell({
   const displayedIdRef = useRef(displayedId);
   displayedIdRef.current = displayedId;
 
+  // The DISPLAYED thread's cached snapshot is deliberately never patched by
+  // `message:new` (evictIfBackground bails for it, and the event is a
+  // REDUCER_EXCLUSION), so its `channelConnectionId` stays whatever it was at
+  // open — while ingest re-stamps the thread's account when the customer
+  // writes to a different number of ours. The live hook applies the re-stamp;
+  // mirror it here for the outbound-call panel, keyed by conversation id so a
+  // chat switch invalidates the value on its own.
+  const displayedAccountRef = useRef<{ id: string; accountId: string | null } | null>(null);
+
   // ---- WhatsApp voice calling ----
   // The call API (single useCall instance) now lives in the app-wide
   // CallProvider, so the incoming-call toast + active-call panel render on
@@ -844,6 +853,21 @@ export function InboxShell({
       cache.delete(payload.conversationId);
     };
 
+    // Account re-stamp for the DISPLAYED thread (see displayedAccountRef).
+    // `undefined` means "unchanged" (outbound frames), never "cleared".
+    const onDisplayedAccountRestamp = (payload: {
+      conversationId: string;
+      channelConnectionId?: string | null;
+    }) => {
+      if (!payload?.conversationId) return;
+      if (payload.conversationId !== displayedIdRef.current) return;
+      if (payload.channelConnectionId === undefined) return;
+      displayedAccountRef.current = {
+        id: payload.conversationId,
+        accountId: payload.channelConnectionId,
+      };
+    };
+
     // Coalesced bulk version — server fires this from bulk-tag etc. instead
     // of N per-contact frames to bound socket bandwidth on big batches.
     // Per-contact `contact:updated` frames go through the reducer table
@@ -1006,7 +1030,16 @@ export function InboxShell({
     ]);
 
     socket.on("connect", onConnect);
+    // The socket singleton is usually ALREADY connected when this effect runs
+    // (soft navigation into /inbox), so no `connect` event fires at mount and
+    // the flag would stay false — the first genuine reconnect would then be
+    // consumed as "first connect" and clearExcept skipped exactly once. Burn
+    // the skip here instead, same as useSocketReconnect's already-connected
+    // branch. Setting only the flag (not calling onConnect) keeps this
+    // idempotent if the effect re-runs while connected.
+    if (socket.connected) hasConnectedOnceRef.current = true;
     socket.on("message:new", evictIfBackground);
+    socket.on("message:new", onDisplayedAccountRestamp);
     socket.on("note:new", evictIfBackground);
     // Background send failures invalidate the cached snapshot too — if a
     // teammate's tab is parked on a different conversation when our send
@@ -1028,6 +1061,7 @@ export function InboxShell({
     return () => {
       socket.off("connect", onConnect);
       socket.off("message:new", evictIfBackground);
+      socket.off("message:new", onDisplayedAccountRestamp);
       socket.off("note:new", evictIfBackground);
       socket.off("message:failed", evictIfBackground);
       socket.off("contacts:bulk_updated", onContactsBulkUpdated);
@@ -1232,13 +1266,20 @@ export function InboxShell({
     if (!targetId) return;
     const snapshot = cache.get(targetId);
     const contactName = snapshot?.data.contact.name ?? "Customer";
+    // The re-stamp ref wins over the snapshot when it names THIS thread — the
+    // snapshot's account is frozen at open (see displayedAccountRef).
+    const restamped = displayedAccountRef.current;
+    const accountId =
+      restamped?.id === targetId
+        ? restamped.accountId
+        : (snapshot?.data.conversation.channelConnectionId ?? null);
     const result = await callApi.initiateOutbound(
       targetId,
       contactName,
       // The thread owns the account — this call goes out the number the
       // customer already messaged, and the live panel should say which.
       snapshot?.data.conversation.channel ?? null,
-      snapshot?.data.conversation.channelConnectionId ?? null,
+      accountId,
     );
     if (!result.ok) {
       // A pre-flight rejection tore down `liveCall`, so the global CallPanel

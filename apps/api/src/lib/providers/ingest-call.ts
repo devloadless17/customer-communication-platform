@@ -687,6 +687,7 @@ export async function ingestCallEvent(
         await tx.contact.updateMany({
           where: {
             id: contact.id,
+            workspaceId,
             OR: [{ lastInboundAt: null }, { lastInboundAt: { lt: windowAnchor } }],
           },
           data: { lastInboundAt: windowAnchor },

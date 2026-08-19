@@ -88,8 +88,8 @@ function literalSegments(path) {
 }
 
 /**
- * PATH-EXACT: the route's literal-segment sequence must match an
- * `<Endpoint path="...">` declaration on the docs page.
+ * VERB + PATH-EXACT: the route's verb and literal-segment sequence must match
+ * an `<Endpoint method="..." path="...">` declaration on the docs page.
  *
  * Two weaker versions preceded this, and each hid a real gap:
  *   - stem matching (dropped 2026-07-30): only the prefix before the first
@@ -105,15 +105,17 @@ function literalSegments(path) {
  * than no guard: it is the reason nobody re-checks by hand.
  *
  * Item routes that add no segment of their own (`ticket-fields/:id`,
- * `tickets/views/:viewId`) still pass on their collection's declaration, which
- * is correct — there is nothing distinguishing left to document.
+ * `tickets/views/:viewId`) still pass on their collection's declaration OF THE
+ * SAME VERB, which is correct — there is nothing distinguishing left to
+ * document, and the verb is what says whether it reads or destroys.
  */
-function documented(path, text) {
+function documented(route, text) {
+  const [verb, path] = route.split(" ");
   const segments = literalSegments(path);
   if (segments.length === 0) return true;
   // PATH-EXACT first: the docs page declares each route as
-  // `<Endpoint path="/api/external/v1/...">`, so the literal-segment SEQUENCE
-  // of a route must match one of those declarations.
+  // `<Endpoint method="GET" path="/api/external/v1/...">`, so the VERB and the
+  // literal-segment SEQUENCE of a route must both match one declaration.
   //
   // Checking segments INDEPENDENTLY was still a hole, found 2026-07-31 by
   // adding `GET reports/acquisition` and watching the checker report "all
@@ -129,29 +131,55 @@ function documented(path, text) {
   // the one route that did not (`assignment-policies`, mentioned only inside
   // another endpoint's prose) turned out to be a real documentation gap the
   // loose check had been hiding.
-  return documentedPaths(text).has(segments.join("/"));
+  //
+  // VERB-KEYED since 2026-08-19. The set used to drop the verb on both sides,
+  // so a NEW mutation on an ALREADY-documented path passed unread: adding
+  // `DELETE conversations/:id` to the controller was green on the strength of
+  // `GET /conversations/:id`, and a partner would have discovered a destructive
+  // route the reference never mentions. Same lesson as the two fixes above, one
+  // axis over: a green light that does not depend on the thing it guards.
+  return documentedRoutes(text).has(`${verb} ${segments.join("/")}`);
 }
 
 /**
- * Every route path declared on the docs page, as its literal-segment sequence.
+ * Every route declared on the docs page, as `<VERB> <literal-segments>`.
  *
- * Read from the `path="..."` attribute of each `<Endpoint>` — an exact,
- * machine-readable declaration, unlike the surrounding prose.
+ * Read from the `method="..."` + `path="..."` attributes of each `<Endpoint>`
+ * — an exact, machine-readable declaration, unlike the surrounding prose. Both
+ * are read from the SAME tag (the page is split on `<Endpoint` and each chunk
+ * yields its own first pair), so a verb can never be borrowed from a sibling.
+ *
+ * A block covering several verbs declares them pipe-separated
+ * (`method="PATCH|PUT"`); the component renders the first and the checker
+ * counts them all, which keeps "one doc block, several verbs" explicit rather
+ * than inferred.
  */
-const _documentedPaths = new Map();
-function documentedPaths(text) {
+const _documentedRoutes = new Map();
+function documentedRoutes(text) {
   // Keyed by the surface's text, NOT a process-global: with a single cached
   // set, adding a second surface to SURFACES would silently reuse the first
   // surface's paths and report the second fully documented without ever
   // reading it — a green light independent of the thing it guards, again.
-  let set = _documentedPaths.get(text);
+  let set = _documentedRoutes.get(text);
   if (set) return set;
   set = new Set();
-  for (const m of text.matchAll(/path="([^"]+)"/g)) {
-    const p = m[1].replace(/^\/api\/external\/v1\/?/, "");
-    set.add(literalSegments(p).join("/"));
+  for (const chunk of text.split("<Endpoint").slice(1)) {
+    const method = /method="([^"]+)"/.exec(chunk);
+    const path = /path="([^"]+)"/.exec(chunk);
+    if (!method || !path) continue;
+    const p = path[1].replace(/^\/api\/external\/v1\/?/, "");
+    const segments = literalSegments(p).join("/");
+    for (const verb of method[1].split("|")) {
+      set.add(`${verb.trim().toUpperCase()} ${segments}`);
+    }
   }
-  _documentedPaths.set(text, set);
+  if (set.size === 0) {
+    console.error(
+      "✖ v1-docs check: no <Endpoint method=… path=…> declarations found — the docs page shape changed, fix this checker",
+    );
+    process.exit(1);
+  }
+  _documentedRoutes.set(text, set);
   return set;
 }
 
@@ -207,10 +235,9 @@ let failures = 0;
 for (const { label, path } of SURFACES) {
   const text = read(path);
 
-  const missingRoutes = routes.filter((r) => {
-    const [, p] = r.split(" ");
-    return !ALLOWLIST.has(r) && !documented(p, text);
-  });
+  const missingRoutes = routes.filter(
+    (r) => !ALLOWLIST.has(r) && !documented(r, text),
+  );
   const missingScopes = scopes.filter((s) => !text.includes(s));
 
   if (missingRoutes.length) {

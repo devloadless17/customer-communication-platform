@@ -454,11 +454,17 @@ export class MetaWebhookIngestService implements OnModuleDestroy {
     // ingest, which commits the rows as media-pending. Non-consuming catch so
     // an orphaned rejection can't float if ingest below fails and returns early;
     // completePendingMedia awaits the same promise on the success path.
+    //
+    // Only the INGESTABLE events, never the raw parse output: an unknown-account
+    // group and an opted-out comment never get a Message row, so fetching their
+    // attachments uploads blobs nothing will ever reference — orphans the blob
+    // sweeper reclaims a day later.
+    const ingestableEvents = ingestable.flatMap((g) => g.events);
     const downloadOutcomes = new Map<string, DownloadOutcome>();
     const downloadPromise = this.downloadSocialMedia(
       workspaceId,
       channel,
-      events,
+      ingestableEvents,
       downloadOutcomes,
     );
     downloadPromise.catch((err) =>
@@ -503,7 +509,7 @@ export class MetaWebhookIngestService implements OnModuleDestroy {
     // shutdown rather than abandoning a half-written patch.
     const completion = this.completePendingMedia(
       workspaceId,
-      events,
+      ingestableEvents,
       downloadPromise,
       downloadOutcomes,
       channel,

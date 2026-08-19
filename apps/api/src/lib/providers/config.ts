@@ -27,7 +27,6 @@ import { getCountryFromPhone } from "@ccp/shared/utils";
 interface MetaChannelConfig {
   phoneNumberId?: string;
   displayPhoneNumber?: string;
-  wabaId?: string;
   // NO `wabaId` HERE. It used to live in this JSON blob *and* in a column, with
   // the send-config loader reading the JSON while template scoping read the
   // column — two copies of one fact that could drift. The
@@ -590,6 +589,13 @@ export async function getMetaWebhookConfig(
     // EVERY active account, not the default one. Meta signs with the secret of
     // whichever app owns the account the event came from, so resolving only the
     // default silently 403'd (and permanently lost) all inbound on siblings.
+    //
+    // `isActive` IS filtered, and that is pinned by
+    // test/webhook-secret-candidates.spec.ts ("inactive accounts must not keep
+    // signing"): a deactivated account stops being trusted here, even though
+    // `resolveInboundAccounts` still ATTRIBUTES a deactivated account's in-flight
+    // inbound. The residual gap — a deactivated account on its OWN Meta app whose
+    // secret exists nowhere else 403s before reaching attribution — is accepted.
     const conns = await db.channelConnection.findMany({
       where: { workspaceId, channel: "whatsapp", isActive: true },
       select: { secrets: true },

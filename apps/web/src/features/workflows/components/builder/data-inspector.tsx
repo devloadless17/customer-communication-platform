@@ -264,9 +264,11 @@ function ShapeTree({
                 const token = `$var.${fullPath.join(".")}`;
                 // Drop the group prefix from the visible label when grouped —
                 // "id" reads cleaner than "contact.id" under a "CONTACT" header.
-                const display = grp.name
-                  ? leaf.path.slice(1).join(".")
-                  : leaf.path.join(".");
+                // A ROOT leaf (http_request: the whole parsed body) has no
+                // path segments — label it rather than rendering a blank row.
+                const display =
+                  (grp.name ? leaf.path.slice(1).join(".") : leaf.path.join(".")) ||
+                  "(whole value)";
                 return (
                   <button
                     key={fullPath.join(".")}

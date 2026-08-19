@@ -72,7 +72,7 @@ export class AiInboxService {
     });
     const [cfg, state, suggestion, summary, memory, hallucination] = await Promise.all([
       loadAiConfig(workspaceId),
-      this.db.aiConversationState.findUnique({ where: { conversationId } }),
+      this.db.aiConversationState.findFirst({ where: { conversationId, workspaceId } }),
       this.db.aiReplySuggestion.findFirst({
         // Expired drafts are never offered — see unexpiredPendingWhere().
         where: { workspaceId, conversationId, ...unexpiredPendingWhere() },

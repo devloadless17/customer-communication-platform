@@ -420,6 +420,13 @@ export class RealtimeGateway
         const refill = (now - bucket.ts) * HANDSHAKE_REFILL_PER_MS;
         bucket.tokens = Math.min(HANDSHAKE_CAP, bucket.tokens + refill);
         bucket.ts = now;
+        // Re-insert so the Map's iteration order is LEAST-RECENTLY-USED first,
+        // which is what the eviction above assumes. Without it, eviction took
+        // the oldest-INSERTED key — typically the long-lived office NAT — and
+        // its replacement bucket started at the full cap, refunding whatever
+        // budget the caller had spent.
+        handshakeBuckets.delete(ip);
+        handshakeBuckets.set(ip, bucket);
       }
       if (bucket.tokens < 1) {
         // Tell the client this is transient (NOT auth failure) so its
@@ -1082,6 +1089,7 @@ export class RealtimeGateway
       this.logger.error(`emitAvailabilitySnapshot lookup failed: ${err}`);
       return;
     }
+    const viewerUserId = client.data.userId as string | undefined;
     const byUserId: Record<
       string,
       {
@@ -1108,7 +1116,12 @@ export class RealtimeGateway
         ...(r.availabilitySource && r.availabilitySource !== "manual"
           ? { source: r.availabilitySource as AvailabilitySource }
           : {}),
-        ...(r.availabilityOverrideUntil
+        // `until` is OWN-ROOM ONLY, exactly as the `user.availability_changed`
+        // fanout rule builds it: the team frame carries no `until`, so
+        // shipping it here for teammates gave the snapshot a field no live
+        // frame ever refreshes — visible until the next reconnect and past
+        // the boundary the fanout states.
+        ...(r.id === viewerUserId && r.availabilityOverrideUntil
           ? { until: r.availabilityOverrideUntil.toISOString() }
           : {}),
       };
@@ -1599,6 +1612,11 @@ export class RealtimeGateway
     // room. Otherwise a malicious client could spam typing into channels it
     // can't read.
     if (!client.rooms.has(channelRoom(body.channelId))) return;
+    // STEALTH GATE (operator mode), same reasoning as the conversation twin:
+    // typing is the strongest passive tell, and the operator reaches the
+    // default channel without membership. Dropping the start makes the
+    // matching stop a no-op on its own `typingInChannel.delete` gate.
+    if (client.data.isOperator === true) return;
     const wasTyping = typingInChannel.has(body.channelId);
     typingInChannel.add(body.channelId);
     this.typing.addChannel(body.channelId, userId, client.id);

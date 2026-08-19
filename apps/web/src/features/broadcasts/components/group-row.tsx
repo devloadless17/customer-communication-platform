@@ -49,9 +49,9 @@ export function GroupRow({ group, sampleTags }: { group: AudienceGroupDto; sampl
               +{extraTagCount} tag{extraTagCount === 1 ? "" : "s"}
             </span>
           )}
-          {/* manualContactCount, NOT contactIds.length — the list ships only a
-              preview slice of the ids so its payload can't grow with a group's
-              membership. The count is always exact. */}
+          {/* manualContactCount, NOT contactIds.length: the count is the
+              server's own (unfiltered by design — hand-picked chips, not
+              reach), so it stays right even as the DTO's id list changes. */}
           {group.manualContactCount > 0 && (
             <span className="rounded-full border border-violet-500/30 bg-violet-500/10 px-1.5 py-0.5 text-3xs font-medium text-violet-700 dark:text-violet-300">
               +{group.manualContactCount} manual

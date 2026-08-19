@@ -118,6 +118,14 @@ interface WidgetSocketData {
   visitorId: string;
   /** externalContactId = `${widgetId}:${visitorId}` — unique per widget. */
   externalContactId: string;
+  /** The handshake's site key, kept so a send can RE-resolve the config. */
+  siteKey: string;
+  /**
+   * Config snapshot taken at handshake. A long-lived socket outlives policy
+   * changes, so anything that ENFORCES a policy re-resolves (see
+   * `onVisitorMessage`) instead of reading this; it stays as the connect-time
+   * `ready` payload and as the fallback when the re-resolve can't run.
+   */
   resolved: WebchatwidgetResolved;
   conversationId: string | null;
   /** Handshake IP — the only visitor-independent key we can rate-limit new
@@ -264,6 +272,7 @@ export class WebchatwidgetGateway
             widgetId: resolved.widgetId,
             visitorId,
             externalContactId: `${resolved.widgetId}:${visitorId}`,
+            siteKey,
             resolved,
             conversationId: null,
             ip,
@@ -340,6 +349,24 @@ export class WebchatwidgetGateway
         `widget message throttled (per-IP aggregate) ip=${data.ip} widget=${data.widgetId} team=${data.workspaceId}`,
       );
       return { ok: false, error: "rate_limited" };
+    }
+
+    // The handshake snapshot ages: saving the widget invalidates every cache but
+    // cannot reach an already-connected socket, so an admin turning attachments
+    // off — or deactivating the widget — wouldn't bind this visitor until they
+    // reconnected. Re-resolve per send; the resolver is TTL-cached, so this is a
+    // map hit. Fail-soft on a DB blip: keep the handshake snapshot rather than
+    // dropping a real message.
+    try {
+      const live = await resolveWebchatwidgetByPublicKey(data.siteKey);
+      if (!live) return { ok: false, error: "widget_unavailable" };
+      data.resolved = live;
+    } catch (err) {
+      this.logger.warn(
+        `widget config re-resolve failed (using handshake snapshot): ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
     }
 
     const text = typeof body.body === "string" ? body.body.slice(0, MAX_BODY_CHARS) : "";
@@ -748,7 +775,7 @@ export class WebchatwidgetGateway
     // replied — one query for the distinct senders on the page. Skipped entirely
     // when the widget's `showAgentName` switch is off, so replayed history is as
     // anonymous as the live frames (checked once per page, not per message).
-    const showNames = await webchatwidgetShowsAgentName(conversationId);
+    const showNames = await webchatwidgetShowsAgentName(workspaceId, conversationId);
     const senderIds = showNames
       ? [
           ...new Set(
@@ -772,7 +799,7 @@ export class WebchatwidgetGateway
     const aiIds = new Set<string>();
     if (outIds.length > 0) {
       const meta = await this.db.aiMessageMetadata.findMany({
-        where: { messageId: { in: outIds }, aiGenerated: true },
+        where: { workspaceId, messageId: { in: outIds }, aiGenerated: true },
         select: { messageId: true },
       });
       for (const m of meta) aiIds.add(m.messageId);

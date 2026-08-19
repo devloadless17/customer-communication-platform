@@ -147,6 +147,15 @@ export function TemplateFillView({
     () => requiredTemplateButtonParams(components, template.category),
     [components, template.category],
   );
+  // An authentication template's OTP button is DERIVED from the body — the send
+  // path fills it from `body[0]` whenever the caller supplies nothing for it. So
+  // it is never prompted here: asking the agent to type the code twice is the
+  // exact failure the autofill exists to prevent (a button that copies a
+  // different code than the text shows).
+  const promptedButtons = useMemo(
+    () => requiredButtons.filter((b) => !b.autofillFromBody),
+    [requiredButtons],
+  );
   // IMAGE/VIDEO/DOCUMENT headers need real media supplied at send time.
   const headerMediaKind: "image" | "video" | "document" | null =
     headerComp?.format === "IMAGE"
@@ -294,7 +303,7 @@ export function TemplateFillView({
     // Gate on the RESOLVED value, exactly like the body fields: a `$var.…`
     // token that resolves to empty for this contact must block the send, not
     // sail through and be rejected by Meta.
-    requiredButtons.every(
+    promptedButtons.every(
       (b) => resolve(buttonVars[`${b.index}:${b.subType}`] ?? "").trim() !== "",
     ) &&
     // A countdown to a past instant arrives already expired, so the gate is
@@ -343,9 +352,11 @@ export function TemplateFillView({
                 })),
               }
             : {}),
-          ...(requiredButtons.length > 0
+          // Autofilled buttons are deliberately absent from the payload — the
+          // server fills them from body[0] only when nothing is supplied.
+          ...(promptedButtons.length > 0
             ? {
-                buttons: requiredButtons.map((b) => ({
+                buttons: promptedButtons.map((b) => ({
                   index: b.index,
                   subType: b.subType,
                   text: resolve(buttonVars[`${b.index}:${b.subType}`] ?? ""),
@@ -500,7 +511,7 @@ export function TemplateFillView({
           </div>
         ) : (
           !needsLocation &&
-          requiredButtons.length === 0 && (
+          promptedButtons.length === 0 && (
             <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-2xs text-muted-foreground">
               This template has no variables — it&apos;ll send as-is.
             </div>
@@ -512,12 +523,12 @@ export function TemplateFillView({
             them. The picker used to render such buttons read-only in the
             preview, so the agent hit `button_params_required` with no field to
             fill: the template was simply un-sendable from the inbox. */}
-        {requiredButtons.length > 0 && (
+        {promptedButtons.length > 0 && (
           <div className="mt-4 flex flex-col gap-3">
             <div className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">
               Button values
             </div>
-            {requiredButtons.map((b) => {
+            {promptedButtons.map((b) => {
               const btn = buttonsComp?.buttons?.[b.index];
               const k = `${b.index}:${b.subType}`;
               return (
@@ -540,7 +551,7 @@ export function TemplateFillView({
                 />
               );
             })}
-            {requiredButtons.some((b) => b.subType === "url") && (
+            {promptedButtons.some((b) => b.subType === "url") && (
               <p className="text-3xs text-muted-foreground">
                 The value is appended to the button&apos;s URL. Percent-encode
                 spaces and special characters (a space becomes %20).

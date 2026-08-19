@@ -8,6 +8,7 @@ import {
   NoChannelDestinationError,
   resolveContactChannel,
 } from "@/lib/providers/channel";
+import { withChannelHealth } from "@/lib/providers/channel-health";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import type { Message, MessageStructured } from "@ccp/shared/types";
 import type { SharedContactInput } from "@ccp/shared/providers/types";
@@ -131,6 +132,14 @@ export async function sendStructuredInternal(
     throw err;
   }
 
+  // Shared by both branches so a 190 flags — and a success clears — the same
+  // sending account whichever structured kind went out.
+  const health = {
+    workspaceId: args.workspaceId,
+    channel: conversation.channel,
+    channelConnectionId: conversation.channelConnectionId,
+  };
+
   // Build the structured payload (renders the card) + a text placeholder body
   // (list preview + search), and call the kind-specific provider method. The
   // requireProviderMethod call lives INSIDE each branch so its literal name
@@ -157,17 +166,19 @@ export async function sendStructuredInternal(
       ...(args.address ? { address: args.address } : {}),
     };
     body = args.name ? `📍 ${args.name}` : "📍 Location";
-    send = await sendLocation(
-      {
-        to: dest.to,
-        ...(dest.viaBsuid ? { viaBsuid: true } : {}),
-        latitude: args.latitude,
-        longitude: args.longitude,
-        ...(args.name ? { name: args.name } : {}),
-        ...(args.address ? { address: args.address } : {}),
-        useHumanAgentTag,
-      },
-      sendConfig,
+    send = await withChannelHealth(health, () =>
+      sendLocation(
+        {
+          to: dest.to,
+          ...(dest.viaBsuid ? { viaBsuid: true } : {}),
+          latitude: args.latitude,
+          longitude: args.longitude,
+          ...(args.name ? { name: args.name } : {}),
+          ...(args.address ? { address: args.address } : {}),
+          useHumanAgentTag,
+        },
+        sendConfig,
+      ),
     );
   } else {
     let sendContacts;
@@ -184,7 +195,9 @@ export async function sendStructuredInternal(
     const first = args.contacts[0]?.name?.trim() || "Contact";
     body =
       args.contacts.length > 1 ? `👤 ${first} +${args.contacts.length - 1}` : `👤 ${first}`;
-    send = await sendContacts({ to: dest.to, ...(dest.viaBsuid ? { viaBsuid: true } : {}), contacts: args.contacts, useHumanAgentTag }, sendConfig);
+    send = await withChannelHealth(health, () =>
+      sendContacts({ to: dest.to, ...(dest.viaBsuid ? { viaBsuid: true } : {}), contacts: args.contacts, useHumanAgentTag }, sendConfig),
+    );
   }
 
   const lastTs = conversation.lastMessageAt ?? null;

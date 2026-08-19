@@ -165,10 +165,18 @@ interface CheckResult {
   probeOnly?: boolean;
 }
 
-/** Graph 190 / OAuthException = the token itself is dead (vs a transient failure). */
+/**
+ * Graph code 190 = the token itself is dead (expired, revoked, password change).
+ *
+ * ONLY 190, not any `OAuthException`: Graph files permission failures (the code
+ * 200 family) and other auth-shaped refusals under that same `type`, and a live
+ * but under-scoped token reported as "access token dead — reconnect required" is
+ * a wrong diagnosis wearing alarming copy. Those ride the indeterminate streak
+ * instead, which escalates a persistent cause after eight consecutive sweeps.
+ */
 function isTokenError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  return msg.includes('"code":190') || msg.includes("OAuthException");
+  return /"code"\s*:\s*190\b/.test(msg);
 }
 
 /**

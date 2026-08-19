@@ -3,7 +3,7 @@ import { z } from "zod";
 export const SendTextSchema = z.object({
   conversationId: z.string().min(1),
   body: z.string().trim().min(1).max(8000),
-  clientTempId: z.string().min(1).optional(),
+  clientTempId: z.string().min(1).max(128).optional(),
   replyToMessageId: z.string().min(1).optional(),
 });
 export type SendTextInput = z.infer<typeof SendTextSchema>;
@@ -15,14 +15,14 @@ export const SendLocationSchema = z.object({
   longitude: z.number().gte(-180).lte(180),
   name: z.string().trim().max(200).optional(),
   address: z.string().trim().max(500).optional(),
-  clientTempId: z.string().min(1).optional(),
+  clientTempId: z.string().min(1).max(128).optional(),
 });
 export type SendLocationInput = z.infer<typeof SendLocationSchema>;
 
 /** Outbound contact share (vCard). At least one contact, each with a name. */
 export const SendContactsSchema = z.object({
   conversationId: z.string().min(1),
-  clientTempId: z.string().min(1).optional(),
+  clientTempId: z.string().min(1).max(128).optional(),
   contacts: z
     .array(
       z.object({
@@ -205,7 +205,7 @@ export const SendTemplateSchema = z.object({
         .optional(),
     })
     .default({ body: [] }),
-  clientTempId: z.string().min(1).optional(),
+  clientTempId: z.string().min(1).max(128).optional(),
 });
 export type SendTemplateInput = z.infer<typeof SendTemplateSchema>;
 
@@ -389,7 +389,7 @@ export const SendInteractiveSchema = z
     // window short-circuits to the first result instead of producing a second
     // interactive message + Meta send. Optional — legacy clients run through
     // un-deduped exactly as before.
-    clientTempId: z.string().min(1).optional(),
+    clientTempId: z.string().min(1).max(128).optional(),
   })
   .refine((b) => new Set(b.contactShare ?? []).size === (b.contactShare ?? []).length, {
     message: "contactShare entries must be unique",
@@ -540,7 +540,7 @@ export const SendMediaFormSchema = z.object({
     .max(1024)
     .optional()
     .transform((v) => (v ?? "").trim()),
-  clientTempId: z.string().min(1).optional(),
+  clientTempId: z.string().min(1).max(128).optional(),
   replyToMessageId: z.string().min(1).optional(),
   /**
    * Audio voice-note marker. Multipart form fields are strings — the recorder
@@ -570,7 +570,7 @@ export const ForwardMessagesSchema = z
     // I-1: idempotency identity for the forward action. The client sends a
     // stable id per forward so a transport retry / re-confirmed picker dedupes
     // server-side instead of re-delivering up to 40 messages to customers.
-    clientTempId: z.string().min(1).optional(),
+    clientTempId: z.string().min(1).max(128).optional(),
   })
   .refine(
     (b) => b.messageIds.length * b.contactIds.length <= MAX_FORWARD_TOTAL,

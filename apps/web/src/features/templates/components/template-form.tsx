@@ -205,6 +205,11 @@ export function TemplateForm({
   // The template declares the offer HEADING; the expiry instant is per-send.
   const [offerHeading, setOfferHeading] = useState(initial?.offerHeading ?? "");
   const [offerEnabled, setOfferEnabled] = useState(initial?.offerHeading !== undefined);
+  // `has_expiration: false` is a valid Meta shape (heading + code, no timer, no
+  // per-send expiry parameter). This form only authors the countdown variant,
+  // but an EDIT must re-emit what the stored template carries or a resubmission
+  // silently turns the timer on. Not state: there is no control for it.
+  const offerHasExpiration = initial?.offerHasExpiration ?? true;
   // ---- Carousel (marketing only) -----
   const [carousel, setCarousel] = useState<CarouselDraft>(
     () => initial?.carousel ?? emptyCarouselDraft(),
@@ -347,7 +352,7 @@ export function TemplateForm({
     if (offerEnabled && category === "marketing") {
       out.push({
         type: "LIMITED_TIME_OFFER",
-        limited_time_offer: { text: offerHeading, has_expiration: true },
+        limited_time_offer: { text: offerHeading, has_expiration: offerHasExpiration },
       });
     }
 
@@ -377,6 +382,7 @@ export function TemplateForm({
     footer,
     offerEnabled,
     offerHeading,
+    offerHasExpiration,
     category,
     buttons,
     carousel,
@@ -1679,6 +1685,12 @@ function hydrateFromTemplate(t: TemplateEditTarget): {
   examples: Record<string, string>;
   /** Present only when the template carries a LIMITED_TIME_OFFER component. */
   offerHeading?: string;
+  /**
+   * The stored `has_expiration`, so an edit re-emits it rather than forcing the
+   * countdown on. Absent on the wire means "shows the countdown" — the same
+   * reading `templateNeedsOfferExpiry` uses at send time.
+   */
+  offerHasExpiration?: boolean;
   /** Present only when the template carries a CAROUSEL component. */
   carousel?: CarouselDraft;
 } {
@@ -1745,7 +1757,12 @@ function hydrateFromTemplate(t: TemplateEditTarget): {
       };
     }),
     examples,
-    ...(ltoComp ? { offerHeading: ltoComp.limited_time_offer?.text ?? "" } : {}),
+    ...(ltoComp
+      ? {
+          offerHeading: ltoComp.limited_time_offer?.text ?? "",
+          offerHasExpiration: ltoComp.limited_time_offer?.has_expiration !== false,
+        }
+      : {}),
     ...(carouselComp ? { carousel: hydrateCarousel(carouselComp) } : {}),
   };
 }
@@ -1778,6 +1795,9 @@ function hydrateCarousel(comp: TemplateComponent): CarouselDraft {
           text: b.text ?? "",
           url: b.url ?? "",
           example: Array.isArray(b.example) ? (b.example[0] ?? "") : (b.example ?? ""),
+          // Same round-trip guard as the top-level buttons: a type this editor
+          // can't represent (COPY_CODE) rides back out unchanged.
+          raw: { ...b },
         })),
       };
     }),

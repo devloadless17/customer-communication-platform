@@ -9,6 +9,8 @@ import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import type { ChannelAccountView } from "@/lib/api/queries";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { toast } from "@/lib/toast";
+import { apiErrorMessage, NETWORK_ERROR_MESSAGE } from "@ccp/shared/api/error-message";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { cn } from "@ccp/shared/utils";
 import { AccountHealthRow } from "./account-health-row";
@@ -86,11 +88,26 @@ export function ChannelAccountsPanel({
   // "0 accounts" above it would be pure noise.
   if (accounts.length === 0) return null;
 
-  async function call(id: string, path: string, init: RequestInit) {
+  /**
+   * The one mutation helper — make-default / rename / disconnect.
+   *
+   * A non-2xx here is ACTIONABLE (`account_inactive`, `account_not_found`), and
+   * swallowing it cleared the spinner and left the row exactly as it was: the
+   * admin's only signal that anything happened was that nothing did. Surface the
+   * server's own message, via `apiErrorMessage` so a raw snake_case key never
+   * reaches the screen; `apiFetch` THROWS on 401/network, hence the catch.
+   */
+  async function call(id: string, path: string, init: RequestInit, fallback: string) {
     setPendingId(id);
     try {
       const res = await apiFetch(`/api/workspace/channels/${channel}/accounts/${path}`, init);
-      if (res.ok) startTransition(() => refresh());
+      if (!res.ok) {
+        toast.error(await apiErrorMessage(res, fallback));
+        return;
+      }
+      startTransition(() => refresh());
+    } catch {
+      toast.error(NETWORK_ERROR_MESSAGE);
     } finally {
       setPendingId(null);
     }
@@ -185,10 +202,15 @@ export function ChannelAccountsPanel({
                     onSubmit={(e) => {
                       e.preventDefault();
                       setEditing(null);
-                      void call(a.id, a.id, {
-                        method: "PATCH",
-                        body: JSON.stringify({ label: draftLabel.trim() || null }),
-                      });
+                      void call(
+                        a.id,
+                        a.id,
+                        {
+                          method: "PATCH",
+                          body: JSON.stringify({ label: draftLabel.trim() || null }),
+                        },
+                        `Couldn't rename this ${accountNoun}`,
+                      );
                     }}
                   >
                     <Input
@@ -247,7 +269,14 @@ export function ChannelAccountsPanel({
                       size="sm"
                       variant="ghost"
                       className="h-7 shrink-0 px-2 text-2xs"
-                      onClick={() => void call(a.id, `${a.id}/default`, { method: "POST" })}
+                      onClick={() =>
+                        void call(
+                          a.id,
+                          `${a.id}/default`,
+                          { method: "POST" },
+                          `Couldn't make this the default ${accountNoun}`,
+                        )
+                      }
                     >
                       <Star aria-hidden className="mr-1 size-3.5" />
                       Make default
@@ -290,7 +319,14 @@ export function ChannelAccountsPanel({
                         confirmLabel: "Disconnect",
                         destructive: true,
                       });
-                      if (ok) void call(a.id, a.id, { method: "DELETE" });
+                      if (ok) {
+                        void call(
+                          a.id,
+                          a.id,
+                          { method: "DELETE" },
+                          `Couldn't disconnect this ${accountNoun}`,
+                        );
+                      }
                     }}
                   >
                     <Trash2 aria-hidden className="size-3.5" />

@@ -3,6 +3,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Body, Controller, HttpException, Logger, Post, UseGuards } from "@nestjs/common";
 
 import { db } from "@/lib/db";
+import { publish } from "@/lib/events/bus";
 import { platformAppSecrets } from "@/lib/providers/app-level-webhook";
 import { WebhookRateLimitGuard } from "../webhook-rate-limit.guard";
 
@@ -178,14 +179,47 @@ export class MetaDataDeletionController {
     // across every workspace: the requester is one human, and we have no tenant
     // context here. `deletedAt: null` keeps this idempotent — Meta can and does
     // retry, and a second request must not churn timestamps.
-    const affected = await db.contact.updateMany({
+    // Read the matches FIRST so each tombstone can be announced in its own
+    // tenant: the route has no workspace context, but the rows carry one, and a
+    // deletion the tenant is legally required to evidence must reach their
+    // contacts list and their outbound webhooks like any other.
+    const matches = await db.contact.findMany({
       where: {
         identityChannel: { in: ["messenger", "instagram"] },
         externalContactId: userId,
         deletedAt: null,
       },
+      select: { id: true, workspaceId: true },
+    });
+    const affected = await db.contact.updateMany({
+      where: {
+        id: { in: matches.map((m) => m.id) },
+        deletedAt: null,
+      },
       data: { deletedAt: new Date() },
     });
+
+    // One event per contact, in its own workspace — same shape the in-app soft
+    // delete publishes (conversations are preserved, so nothing to splice).
+    // Best-effort: the tombstone has committed, and a publish failure must not
+    // turn a completed erasure into a retried one.
+    for (const m of matches) {
+      try {
+        await publish({
+          type: "contact.deleted",
+          workspaceId: m.workspaceId,
+          contactId: m.id,
+          conversationIds: [],
+          deletedByUserId: null,
+        });
+      } catch (err) {
+        this.logger.error(
+          `[meta-data-deletion] publish(contact.deleted) failed for contact=${m.id}: ${
+            err instanceof Error ? err.message : err
+          }`,
+        );
+      }
+    }
 
     // Always log, matched or not. A zero match is the EXPECTED outcome for an
     // app-scoped id (see the ASID/PSID note above), and it is the case that needs a

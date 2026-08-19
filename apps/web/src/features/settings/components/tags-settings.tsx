@@ -5,6 +5,7 @@ import {
   ArrowUpDown,
   Check,
   ChevronDown,
+  ListFilter,
   Loader2,
   Pencil,
   Plus,
@@ -29,7 +30,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useConfirm } from "@/components/ui/confirm-dialog";
-import { type Tag, type TagColor } from "@ccp/shared/types";
+import { type Tag, type TagColor, type TagUsage } from "@ccp/shared/types";
 import { cn } from "@ccp/shared/utils";
 import { ColorSwatchPicker } from "@/components/ui/color-swatch-picker";
 
@@ -53,11 +54,11 @@ export function TagsSettings({
   initialUsage,
 }: {
   initialTags: Tag[];
-  initialUsage: Record<string, number>;
+  initialUsage: Record<string, TagUsage>;
 }) {
   const { confirm, confirmDialog } = useConfirm();
   const [tags, setTags] = useState<Tag[]>(initialTags);
-  const [usage, setUsage] = useState<Record<string, number>>(initialUsage);
+  const [usage, setUsage] = useState<Record<string, TagUsage>>(initialUsage);
   // Sync from SSR-re-runs (router.refresh from useCatalogSync) so a teammate's
   // tag additions/renames show up without manual refresh.
   useEffect(() => {
@@ -93,7 +94,7 @@ export function TagsSettings({
   }, []);
 
   const totalUsage = useMemo(
-    () => Object.values(usage).reduce((a, b) => a + b, 0),
+    () => Object.values(usage).reduce((a, u) => a + u.contacts, 0),
     [usage],
   );
 
@@ -129,7 +130,7 @@ export function TagsSettings({
         return;
       }
       setTags((cur) => [body.tag!, ...cur]);
-      setUsage((cur) => ({ ...cur, [body.tag!.id]: 0 }));
+      setUsage((cur) => ({ ...cur, [body.tag!.id]: { contacts: 0, views: 0 } }));
       setCreating(false);
       setNewName("");
     } finally {
@@ -174,13 +175,21 @@ export function TagsSettings({
 
   const deleteTag = useCallback(
     async (tag: Tag) => {
-      const used = usage[tag.id] ?? 0;
+      const used = usage[tag.id]?.contacts ?? 0;
+      const inViews = usage[tag.id]?.views ?? 0;
+      // Both consequences, named separately — a saved view that filters on the
+      // tag loses that criterion, which is not the same thing as a contact
+      // losing a label.
+      const viewsNote =
+        inViews > 0
+          ? ` ${inViews} saved view${inViews === 1 ? "" : "s"} filter${inViews === 1 ? "s" : ""} on it and will stop narrowing by it.`
+          : "";
       const ok = await confirm({
         title: `Delete "${tag.name}"?`,
         description:
           used > 0
-            ? `${used} contact${used === 1 ? " currently carries" : "s currently carry"} this tag. Deleting it removes the tag from those contacts — their other tags are unaffected. The action can't be undone.`
-            : `This tag isn't on any contact right now. Deleting it can't be undone.`,
+            ? `${used} contact${used === 1 ? " currently carries" : "s currently carry"} this tag. Deleting it removes the tag from those contacts — their other tags are unaffected.${viewsNote} The action can't be undone.`
+            : `This tag isn't on any contact right now.${viewsNote} Deleting it can't be undone.`,
         confirmLabel: "Delete tag",
         destructive: true,
       });
@@ -346,7 +355,8 @@ export function TagsSettings({
             <TagRow
               key={tag.id}
               tag={tag}
-              count={usage[tag.id] ?? 0}
+              count={usage[tag.id]?.contacts ?? 0}
+              viewCount={usage[tag.id]?.views ?? 0}
               busy={busyId === tag.id}
               onRename={(name) => patchTag(tag.id, { name })}
               onRecolor={(color) => patchTag(tag.id, { color })}
@@ -396,13 +406,17 @@ export function TagsSettings({
 function TagRow({
   tag,
   count,
+  viewCount,
   busy,
   onRename,
   onRecolor,
   onDelete,
 }: {
   tag: Tag;
+  /** Contacts carrying the tag — what the people badge and its link mean. */
   count: number;
+  /** Saved views filtering on it. A separate consequence, so a separate chip. */
+  viewCount: number;
   busy: boolean;
   onRename: (name: string) => void;
   onRecolor: (color: TagColor) => void;
@@ -473,6 +487,16 @@ function TagRow({
         <span className="tabular-nums">{count}</span>
       </a>
 
+      {viewCount > 0 && (
+        <span
+          title={`Used by ${viewCount} saved view${viewCount === 1 ? "" : "s"}`}
+          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-2xs text-muted-foreground"
+        >
+          <ListFilter className="size-3" />
+          <span className="tabular-nums">{viewCount}</span>
+        </span>
+      )}
+
       <button
         type="button"
         onClick={onDelete}
@@ -531,7 +555,7 @@ const SORT_OPTIONS: { key: SortKey; label: string }[] = [
 function sortTags(
   tags: Tag[],
   sortBy: SortKey,
-  usage: Record<string, number>,
+  usage: Record<string, TagUsage>,
 ): Tag[] {
   const out = [...tags];
   switch (sortBy) {
@@ -545,11 +569,15 @@ function sortTags(
       return out.sort((a, b) => b.name.localeCompare(a.name));
     case "usage-desc":
       return out.sort(
-        (a, b) => (usage[b.id] ?? 0) - (usage[a.id] ?? 0) || a.name.localeCompare(b.name),
+        (a, b) =>
+          (usage[b.id]?.contacts ?? 0) - (usage[a.id]?.contacts ?? 0) ||
+          a.name.localeCompare(b.name),
       );
     case "usage-asc":
       return out.sort(
-        (a, b) => (usage[a.id] ?? 0) - (usage[b.id] ?? 0) || a.name.localeCompare(b.name),
+        (a, b) =>
+          (usage[a.id]?.contacts ?? 0) - (usage[b.id]?.contacts ?? 0) ||
+          a.name.localeCompare(b.name),
       );
   }
 }

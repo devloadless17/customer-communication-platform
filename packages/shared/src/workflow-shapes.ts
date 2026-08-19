@@ -351,16 +351,14 @@ export const STEP_OUTPUT_SHAPES: Record<WorkflowStepType, FieldShape> = {
       optionId: leafString("Stable id for button / list taps"),
     },
   },
+  // The runner stores the PARSED response body at the output ROOT
+  // (runner.ts captureStepOutput), so the body's own keys are the paths —
+  // there is no `statusCode` and no `body` wrapper to drill through. A
+  // non-JSON response falls back to `{ body: <raw text> }`.
   http_request: {
-    kind: "object",
-    fields: {
-      statusCode: leafNumber(),
-      body: {
-        kind: "leaf",
-        type: "json",
-        description: "Response body — drill in via $var.previousStep.body.<path>",
-      },
-    },
+    kind: "leaf",
+    type: "json",
+    description: "The parsed response body — drill in via $var.previousStep.<path>",
   },
   trigger_workflow: {
     kind: "object",

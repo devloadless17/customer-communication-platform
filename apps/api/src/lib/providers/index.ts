@@ -1,4 +1,8 @@
-import { getMetaSendConfig, type MetaSendConfig } from "@/lib/providers/config";
+import {
+  getMetaSendConfig,
+  ProviderNotConfiguredError,
+  type MetaSendConfig,
+} from "@/lib/providers/config";
 import { db } from "@/lib/db";
 import { metaProvider } from "@/lib/providers/meta";
 import { messengerProvider } from "@/lib/providers/messenger";
@@ -186,8 +190,12 @@ export async function teamConnectedChannels(workspaceId: string): Promise<Set<Ch
         // takes no account and has no ambiguous fallback to guard against.
         await getProviderBinding(ch).getSendConfig(workspaceId, accountByChannel.get(ch));
         connected.add(ch);
-      } catch {
-        // Not connected / creds expired — exclude from best-channel resolution.
+      } catch (err) {
+        // ONLY "not connected / creds expired" is a legitimate exclusion. A
+        // bare catch swallowed a pool blip or a bug as disconnection too, so
+        // an infrastructure failure silently narrowed a customer's reachable
+        // channels instead of surfacing.
+        if (!(err instanceof ProviderNotConfiguredError)) throw err;
       }
     }),
   );

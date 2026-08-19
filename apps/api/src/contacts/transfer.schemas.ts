@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { zLiveChannel } from "@/common/channel-schema";
 import {
   IMPORT_MODES,
   IMPORT_TAG_MODES,
@@ -33,8 +34,12 @@ export const ExportFiltersSchema = z.object({
   fieldKey: z.string().max(80).optional(),
   fieldValue: z.string().max(200).optional(),
   fieldMode: z.enum(["contains", "equals"]).optional(),
-  source: z.string().max(40).optional(),
-  channel: z.string().max(40).optional(),
+  // Same enums as the list, not free text: both are interpolated into the
+  // shared filter's raw SQL as `::"ContactSource"` / `::"Channel"` casts, so an
+  // unknown value failed the export JOB with a raw Postgres cast error stored as
+  // its error message instead of a 400 at submit.
+  source: z.enum(["inbound", "manual"]).optional(),
+  channel: zLiveChannel().optional(),
   // Exporting "current filters" must honour the reachability gate too, or the
   // CSV silently contains people the list on screen was hiding.
   reach: z.enum(["phone", "email"]).optional(),

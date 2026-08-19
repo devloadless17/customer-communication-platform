@@ -172,6 +172,7 @@ export class MetaWebhookController {
   async receiveAppLevel(
     @Headers("x-hub-signature-256") signature: string | undefined,
     @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<{ ok: boolean; ingested?: number; dropped?: string }> {
     if (!appLevelWebhookEnabled()) {
       // Unconfigured platform app. 200-drop rather than 403: if Meta ever points
@@ -237,6 +238,7 @@ export class MetaWebhookController {
 
     let ingested = 0;
     let rateLimited = 0;
+    let retryAfter = 0;
     for (const group of grouping.groups) {
       // PER-WORKSPACE rate limiting, consumed HERE rather than in the guard. The
       // guard keys on the `workspaceId` path param and falls back to the client IP —
@@ -251,6 +253,9 @@ export class MetaWebhookController {
       const rate = appLevelWorkspaceBucket.consume(`team:${group.workspaceId}`);
       if (!rate.ok) {
         rateLimited += 1;
+        // The longest wait across the throttled groups — a redelivery earlier
+        // than that would just throttle the same group again.
+        retryAfter = Math.max(retryAfter, rate.retryAfter);
         this.logger.warn(
           `[app-level] rate-limited ${channel} group for workspace ${group.workspaceId} ` +
             `(${group.entryCount} entr${group.entryCount === 1 ? "y" : "ies"})`,
@@ -278,6 +283,9 @@ export class MetaWebhookController {
     // (workspaceId, channel, externalId)), and Meta's retry backoff outlives
     // the one-minute bucket window. (Audit 2026-08-10.)
     if (rateLimited > 0) {
+      // Retry-After like WebhookRateLimitGuard: Meta respects it on webhook
+      // responses, and a bare 429 leaves the redelivery schedule to guesswork.
+      res.setHeader("Retry-After", String(Math.max(1, retryAfter)));
       throw new HttpException(
         {
           error: "rate_limited",

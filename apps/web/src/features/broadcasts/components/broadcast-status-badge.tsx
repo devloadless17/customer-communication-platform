@@ -120,13 +120,17 @@ function mapStatus(status: string, failedCount: number, totalCount: number) {
         spin: false,
       };
     case "paused":
-      // Auto-paused by graceful shutdown — boot reconciler will resume
-      // automatically on next restart. Amber to communicate "in-flight,
-      // waiting" without the alarm of red/failed.
+      // Plain "Paused": only SOME pauses auto-resume (shutdown, rate limit,
+      // credentials). A `template` pause waits for the operator to fix the
+      // template and an `abuse_warning` pause lifts ONLY via the explicit
+      // Resume action — and `pausedReason` isn't on the row this badge gets, so
+      // promising an auto-resume here is wrong for exactly the pauses that need
+      // a human. The detail page carries the reasoned copy. Amber to read
+      // "in-flight, waiting" without the alarm of red/failed.
       return {
         Icon: PauseCircle,
         tone: "border-warning-border bg-warning-bg text-warning-fg",
-        label: "Paused (auto-resumes)",
+        label: "Paused",
         spin: false,
       };
     default:

@@ -11,6 +11,7 @@ import {
   NoChannelDestinationError,
   resolveContactChannel,
 } from "@/lib/providers/channel";
+import { withChannelHealth } from "@/lib/providers/channel-health";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import type { Message } from "@ccp/shared/types";
 import {
@@ -155,9 +156,17 @@ export async function sendStickerInternal(
     throw err;
   }
 
-  const send = await sendSticker(
-    { to: dest.to, ...(dest.viaBsuid ? { viaBsuid: true } : {}), stickerId: args.stickerId, useHumanAgentTag },
-    sendConfig,
+  const send = await withChannelHealth(
+    {
+      workspaceId: args.workspaceId,
+      channel: conversation.channel,
+      channelConnectionId: conversation.channelConnectionId,
+    },
+    () =>
+      sendSticker(
+        { to: dest.to, ...(dest.viaBsuid ? { viaBsuid: true } : {}), stickerId: args.stickerId, useHumanAgentTag },
+        sendConfig,
+      ),
   );
 
   // Capture the image AFTER the send. Order matters: the send is the billed,

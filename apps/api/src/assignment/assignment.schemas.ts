@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { zLiveChannel } from "@/common/channel-schema";
 import {
   ASSIGNMENT_ELIGIBILITIES,
   ASSIGNMENT_LIMITS,
@@ -73,7 +74,10 @@ export type UpdatePolicyInput = z.infer<typeof UpdatePolicySchema>;
 
 export const RuleConditionsSchema = z
   .object({
-    channels: z.array(z.string().min(1)).max(20).optional(),
+    // `zLiveChannel`, not free text — same rule the inbox-view criterion
+    // records: a bogus value here fails closed in `matchesConditions`, so the
+    // settings UI shows an enabled rule that provably never fires.
+    channels: z.array(zLiveChannel()).max(20).optional(),
     /** ChannelConnection ids — a specific number / Page / handle. */
     channelAccountIds: z.array(id).max(50).optional(),
     tagIds: z.array(id).max(50).optional(),

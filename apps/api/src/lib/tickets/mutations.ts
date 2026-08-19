@@ -684,8 +684,10 @@ export async function updateTicket(db: Db, args: UpdateTicketArgs): Promise<Tick
         data.status = "open";
       }
     }
-    if (args.assignedUserId !== undefined && isGuest && existing.status === "new" && !statusMoves) {
-      // Same nudge for the guest's claim — the work is being done, by them.
+    // Same nudge for the guest's claim — the work is being done, by them.
+    // Truthiness matters, exactly as in the owner branch: a guest CLEARING
+    // their side's assignee is the opposite of a claim.
+    if (args.assignedUserId && isGuest && existing.status === "new" && !statusMoves) {
       data.status = "open";
     }
 

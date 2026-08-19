@@ -13,6 +13,7 @@ import {
   NoChannelDestinationError,
   resolveContactChannel,
 } from "@/lib/providers/channel";
+import { withChannelHealth } from "@/lib/providers/channel-health";
 import {
   getBusinessNumberCountry,
   ProviderNotConfiguredError,
@@ -345,26 +346,34 @@ export async function sendInteractiveInternal(
     }
   }
 
-  const send = await sendInteractive(
+  const send = await withChannelHealth(
     {
-      to: channel.to,
-      ...(channel.viaBsuid ? { viaBsuid: true } : {}),
-      bodyText,
-      kind: args.kind,
-      options: args.options,
-      useHumanAgentTag,
-      ...(args.voiceCall ? { voiceCall: args.voiceCall } : {}),
-      ...(args.ctaUrl ? { ctaUrl: args.ctaUrl } : {}),
-      ...(args.carouselCards ? { carouselCards: args.carouselCards } : {}),
-      ...(args.genericCards ? { genericCards: args.genericCards } : {}),
-      ...(args.productIds ? { productIds: args.productIds } : {}),
-      ...(contactShare.length > 0 ? { contactShare } : {}),
-      ...(args.listCtaLabel ? { listCtaLabel: args.listCtaLabel } : {}),
-      ...(args.listSectionTitle ? { listSectionTitle: args.listSectionTitle } : {}),
-      ...(args.headerText ? { headerText: args.headerText } : {}),
-      ...(args.footerText ? { footerText: args.footerText } : {}),
+      workspaceId: args.workspaceId,
+      channel: conversation.channel,
+      channelConnectionId: conversation.channelConnectionId,
     },
-    sendConfig,
+    () =>
+      sendInteractive(
+        {
+          to: channel.to,
+          ...(channel.viaBsuid ? { viaBsuid: true } : {}),
+          bodyText,
+          kind: args.kind,
+          options: args.options,
+          useHumanAgentTag,
+          ...(args.voiceCall ? { voiceCall: args.voiceCall } : {}),
+          ...(args.ctaUrl ? { ctaUrl: args.ctaUrl } : {}),
+          ...(args.carouselCards ? { carouselCards: args.carouselCards } : {}),
+          ...(args.genericCards ? { genericCards: args.genericCards } : {}),
+          ...(args.productIds ? { productIds: args.productIds } : {}),
+          ...(contactShare.length > 0 ? { contactShare } : {}),
+          ...(args.listCtaLabel ? { listCtaLabel: args.listCtaLabel } : {}),
+          ...(args.listSectionTitle ? { listSectionTitle: args.listSectionTitle } : {}),
+          ...(args.headerText ? { headerText: args.headerText } : {}),
+          ...(args.footerText ? { footerText: args.footerText } : {}),
+        },
+        sendConfig,
+      ),
   );
 
   // Strict timestamp ordering, same idiom as sendTextInternal.

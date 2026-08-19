@@ -5,8 +5,10 @@
  * or `*.example.com` (any subdomain). We compare on HOST so an admin doesn't have
  * to think about `https://`/port. An EMPTY allow-list means "not locked down yet"
  * → allow (dev convenience); the onboarding UI nudges admins to add their domains.
- * `localhost` / `127.0.0.1` are always allowed so the embed test page + local dev
- * work without configuration.
+ * `localhost` / `127.0.0.1` are allowed while the list is EMPTY (embed test page,
+ * local dev) and outside production; once a production tenant locks the list down,
+ * loopback must be listed like any other host — `Origin: http://localhost` is one
+ * header on a scripted client, so a permanent exemption is a free bypass.
  *
  * Note: CORS is not the security boundary for the widget (visitors are anonymous,
  * the site key is public) — this origin check + per-IP rate limits are. The

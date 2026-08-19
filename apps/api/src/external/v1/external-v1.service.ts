@@ -36,7 +36,6 @@ import { toExternalAvatarUrl } from "@/lib/blob-storage";
 
 import {
   contactRowToExternal,
-  toExternalContact,
   redactExternalContactPii,
   EXTERNAL_CONTACT_INCLUDE,
   type ExternalContact,
@@ -759,6 +758,12 @@ export class ExternalV1Service {
           email: { equals: q.email.trim(), mode: "insensitive" },
         },
         include: EXTERNAL_CONTACT_INCLUDE,
+        // Email is NOT unique per workspace (a social/webchat contact can carry
+        // the same address as the WhatsApp one, via the contact-share chip or
+        // the pre-chat form), and without an ORDER BY Postgres may hand back a
+        // different row per call. Oldest wins — the same "canonical owner"
+        // answer the phone branch gets from its channel scope.
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
         take: 1,
       });
       const items = rows.map((r) => contactRowToExternal(r));
@@ -1012,7 +1017,10 @@ export class ExternalV1Service {
       silent: true,
     });
 
-    return toExternalContact(created, tagIds);
+    // contactRowToExternal, not toExternalContact(row, tagIds): the latter
+    // defaults `channelConnectionId` to null, so every contact WRITE reported
+    // no account while the READ paths reported the real one (audit 2026-08-19).
+    return contactRowToExternal(created);
   }
 
   /**
@@ -1129,7 +1137,7 @@ export class ExternalV1Service {
       });
     }
 
-    return toExternalContact(updated, tagIds);
+    return contactRowToExternal(updated);
   }
 
   /**
@@ -1292,7 +1300,7 @@ export class ExternalV1Service {
     // (The version was bumped by the CAS above; that's a cheap idempotent write,
     // and the realistic storm is the webhook fanout, which this suppresses.)
     if (fieldChanges.length === 0 && existing.stageId === updated.stageId) {
-      return toExternalContact(updated, tagIds);
+      return contactRowToExternal(updated);
     }
 
     // `silent: true` → skip reactions on every event this update fans out, so
@@ -1329,7 +1337,7 @@ export class ExternalV1Service {
       });
     }
 
-    return toExternalContact(updated, tagIds);
+    return contactRowToExternal(updated);
   }
 
   /**
@@ -1554,7 +1562,7 @@ export class ExternalV1Service {
     const newIds = validIds.filter((id) => !existingIds.has(id));
 
     if (newIds.length === 0) {
-      return toExternalContact(contact, [...existingIds]);
+      return contactRowToExternal(contact);
     }
 
     let updated;
@@ -1577,7 +1585,6 @@ export class ExternalV1Service {
       throw err;
     }
 
-    const tagIds = updated.tags.map((t) => t.id);
     await this.publishContactTagChange(
       workspaceId,
       apiKeyId,
@@ -1587,7 +1594,7 @@ export class ExternalV1Service {
       { added: newIds, removed: [] },
       input.silent === true,
     );
-    return toExternalContact(updated, tagIds);
+    return contactRowToExternal(updated);
   }
 
   /**
@@ -1633,7 +1640,7 @@ export class ExternalV1Service {
     const existingIds = new Set(contact.tags.map((t) => t.id));
     const toRemove = tagIds.filter((id) => existingIds.has(id));
     if (toRemove.length === 0) {
-      return toExternalContact(contact, [...existingIds]);
+      return contactRowToExternal(contact);
     }
 
     let updated;
@@ -1655,7 +1662,6 @@ export class ExternalV1Service {
       }
       throw err;
     }
-    const newTagIds = updated.tags.map((t) => t.id);
     await this.publishContactTagChange(
       workspaceId,
       apiKeyId,
@@ -1665,7 +1671,7 @@ export class ExternalV1Service {
       { added: [], removed: toRemove },
       silent,
     );
-    return toExternalContact(updated, newTagIds);
+    return contactRowToExternal(updated);
   }
 
   async removeContactTag(

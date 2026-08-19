@@ -10,14 +10,20 @@
 
 /**
  * Render a template body for preview/storage by substituting `{{n}}`
- * placeholders with positional values. Missing/empty positions are left as
- * `{{n}}` so an agent can spot the one they forgot before sending.
+ * placeholders with positional values. Missing/empty positions are left
+ * untouched so an agent can spot the one they forgot before sending.
+ *
+ * Whitespace inside the braces is tolerated, matching `positionalPlaceholder-
+ * Indices` (the authoring detector) and the two named functions below. The four
+ * regexes MUST agree: while only the authoring side tolerated `{{ 1 }}`, such a
+ * body validated as a one-variable positional template and then counted zero at
+ * send time, so the value was never rendered and never sent.
  */
 export function renderTemplateBody(text: string, vars: string[]): string {
-  return text.replace(/\{\{(\d+)\}\}/g, (_match, idxStr) => {
+  return text.replace(/\{\{\s*(\d+)\s*\}\}/g, (match: string, idxStr: string) => {
     const idx = Number(idxStr) - 1;
     const v = vars[idx];
-    return v && v.length > 0 ? v : `{{${idxStr}}}`;
+    return v && v.length > 0 ? v : match;
   });
 }
 
@@ -28,7 +34,9 @@ export function renderTemplateBody(text: string, vars: string[]): string {
  */
 export function countTemplatePlaceholders(text: string): number {
   let max = 0;
-  const re = /\{\{(\d+)\}\}/g;
+  // Whitespace-tolerant, in lockstep with `renderTemplateBody` and
+  // `positionalPlaceholderIndices` — see the note on the former.
+  const re = /\{\{\s*(\d+)\s*\}\}/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     const n = Number(m[1]);

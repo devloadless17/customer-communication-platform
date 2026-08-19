@@ -48,11 +48,27 @@ export class PrismaExceptionFilter implements ExceptionFilter {
     err: Prisma.PrismaClientKnownRequestError | Prisma.PrismaClientValidationError,
     host: ArgumentsHost,
   ): void {
+    const { status, errorKey } = this.map(err);
+
+    // APP_FILTER binds this to EVERY context, so a Prisma error escaping a
+    // @SubscribeMessage handler in either gateway lands here too — and there
+    // `getResponse()` is a socket, not an Express Response. Calling
+    // `res.status()` on it threw a TypeError, replacing one clean error with
+    // two and losing the correlation log. Log and stop: the ws layer has no
+    // status code to carry, and the gateway handlers own their own acks.
+    if (host.getType() !== "http") {
+      this.logger.error(
+        withCorrelation(`prisma error outside http (${host.getType()}) → ${errorKey}`),
+        err instanceof Prisma.PrismaClientKnownRequestError
+          ? `code=${err.code} meta=${JSON.stringify(err.meta ?? {})}`
+          : err.message,
+      );
+      return;
+    }
+
     const ctx = host.switchToHttp();
     const res = ctx.getResponse<Response>();
     const req = ctx.getRequest<Request>();
-
-    const { status, errorKey } = this.map(err);
 
     // Log the FULL error (including .meta) server-side so debugging has
     // everything. The response body keeps only the safe summary.

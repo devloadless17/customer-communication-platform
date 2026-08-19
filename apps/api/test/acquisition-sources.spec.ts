@@ -162,6 +162,20 @@ describe("aggregate report", () => {
     expect(r.organic).toBe(1); // ONLY the messenger contact
   });
 
+  it("bounds organic by the same window as the rows", async () => {
+    // The rows count contacts ACQUIRED in the window; organic used to count
+    // every directory contact with no attributed inbound EVER, so a windowed
+    // report answered two different questions and overstated organic (and the
+    // share percentages with it). These contacts entered the directory today,
+    // so a window that closed in April holds no arrivals.
+    const r = await acquisitionSources(workspaceId, {
+      since: new Date("2026-03-01T00:00:00Z"),
+      until: new Date("2026-04-01T00:00:00Z"),
+    });
+    expect(r.rows[0]).toMatchObject({ sourceId: "AD_FIRST" });
+    expect(r.organic).toBe(0);
+  });
+
   it("bounds the rows by the date window", async () => {
     const r = await acquisitionSources(workspaceId, {
       since: new Date("2026-04-01T00:00:00Z"),

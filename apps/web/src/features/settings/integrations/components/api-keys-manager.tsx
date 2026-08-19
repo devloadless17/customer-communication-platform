@@ -43,7 +43,10 @@ const SCOPE_LABELS: Record<string, string> = {
   "write:conversations": "Write conversations (assign / status)",
   "read:messages": "Read messages",
   "write:messages": "Send messages",
-  "read:notes": "Read notes",
+  // No /v1 route requires it today (notes are write-only on the API), so say
+  // so here rather than let a partner mint a key and get 403 with nothing to
+  // explain it — the same treatment `write:users` gets.
+  "read:notes": "Reserved — grants nothing yet (no note-read endpoint)",
   "write:notes": "Write notes",
   "read:flags": "Read message flags",
   "write:flags": "Raise / resolve message flags",

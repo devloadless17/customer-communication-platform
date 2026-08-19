@@ -18,6 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Pagination } from "@/components/ui/pagination";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { getClientSocket } from "@/lib/socket-client";
+import { useSocketReconnect } from "@/hooks/use-socket-reconnect";
 import { toast } from "@/lib/toast";
 import { cn } from "@ccp/shared/utils";
 import type { BroadcastListItem } from "@/lib/api/queries";
@@ -50,6 +51,10 @@ import {
 const FILTERS: { id: BroadcastStatusFilter; label: string; dot: string }[] = [
   { id: "all", label: "All", dot: "bg-info-fg" },
   { id: "scheduled", label: "Scheduled", dot: "bg-indigo-500" },
+  // A 100k campaign sits in `materializing` for minutes and is cancelable
+  // there, so it needs a chip of its own — otherwise it is invisible under
+  // every filter but All.
+  { id: "materializing", label: "Preparing", dot: "bg-info-fg" },
   { id: "queued", label: "Queued", dot: "bg-muted-foreground" },
   { id: "running", label: "In progress", dot: "bg-info-fg" },
   // Both reachable states an operator PUT a campaign into (Stop button →
@@ -278,6 +283,27 @@ export function BroadcastsBrowser({
       lastTicket?.cancel();
     };
   }, [refetch]);
+
+  // Reconnect convergence (§10). The frames above are the ONLY thing that moves
+  // a row, so every status flip that happens during a transport gap is lost and
+  // the table keeps showing pre-gap state — the global catalog-sync refresh
+  // fires only on a server-forced kick, not on an ordinary drop. Re-pull the
+  // current page on a genuine reconnect, jittered so a deploy's simultaneous
+  // reconnects don't arrive as one burst of full-page queries.
+  const reconnectTimerRef = useRef<number | null>(null);
+  useSocketReconnect(() => {
+    if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = window.setTimeout(() => {
+      reconnectTimerRef.current = null;
+      refetch({ showLoading: false });
+    }, Math.floor(Math.random() * 1500));
+  });
+  useEffect(
+    () => () => {
+      if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
+    },
+    [],
+  );
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-4">

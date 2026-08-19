@@ -101,7 +101,7 @@ export class WebchatwidgetDeliveryService implements OnModuleInit, OnModuleDestr
           // The per-widget `showAgentName` switch is enforced HERE so a disabled
           // widget's frames never carry the name at all (not merely hidden client-side).
           const senderName =
-            e.senderUserId && (await webchatwidgetShowsAgentName(e.conversationId))
+            e.senderUserId && (await webchatwidgetShowsAgentName(e.workspaceId, e.conversationId))
               ? await this.nameFor(e.workspaceId, e.senderUserId)
               : null;
           const ai = isAiSend(e.message.rawPayload);

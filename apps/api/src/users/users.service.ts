@@ -64,6 +64,28 @@ export class UsersService {
    * shape so the post-Step-7b switch is a wire-shape no-op.
    */
   /**
+   * Every workspace whose member roster shows this person, starting with the
+   * acting one. Falls back to the acting workspace alone if the membership read
+   * fails — a courtesy fanout must never cost the profile write.
+   */
+  private async profileAudienceWorkspaceIds(
+    userId: string,
+    actingWorkspaceId: string,
+  ): Promise<string[]> {
+    try {
+      const rows = await this.db.workspaceMember.findMany({
+        where: { userId },
+        select: { workspaceId: true },
+      });
+      const ids = new Set(rows.map((r) => r.workspaceId));
+      ids.add(actingWorkspaceId);
+      return [...ids];
+    } catch {
+      return [actingWorkspaceId];
+    }
+  }
+
+  /**
    * Self-profile update. Bypasses the admin-only PATCH /:id because the user
    * is editing themselves — the four-layered admin gate at .update() would
    * forbid this for non-admin agents who legitimately want to change their
@@ -100,13 +122,20 @@ export class UsersService {
     // new name/avatar without a 15s lag.
     this.sessionInvalidator.bustCache(userId);
 
-    await this.bus.publish({
-      type: "user.profile_updated",
-      workspaceId,
-      userId,
-      ...(data.name !== undefined ? { name: data.name } : {}),
-      ...(data.avatarUrl !== undefined ? { avatarUrl: data.avatarUrl } : {}),
-    });
+    // One frame per workspace this person belongs to, not just the acting one:
+    // the members roster (assignment picker, "assigned to", sender names,
+    // mention list) is per-workspace, so a rename published only here left the
+    // sibling workspaces showing the old name until their next full reload.
+    // Same shape and reasoning as lib/availability/apply.ts.
+    for (const wsId of await this.profileAudienceWorkspaceIds(userId, workspaceId)) {
+      await this.bus.publish({
+        type: "user.profile_updated",
+        workspaceId: wsId,
+        userId,
+        ...(data.name !== undefined ? { name: data.name } : {}),
+        ...(data.avatarUrl !== undefined ? { avatarUrl: data.avatarUrl } : {}),
+      });
+    }
 
     return mapUser(updated, workspaceId);
   }
@@ -144,12 +173,14 @@ export class UsersService {
         data: { avatarUrl },
       });
       this.sessionInvalidator.bustCache(userId);
-      await this.bus.publish({
-        type: "user.profile_updated",
-        workspaceId,
-        userId,
-        avatarUrl,
-      });
+      for (const wsId of await this.profileAudienceWorkspaceIds(userId, workspaceId)) {
+        await this.bus.publish({
+          type: "user.profile_updated",
+          workspaceId: wsId,
+          userId,
+          avatarUrl,
+        });
+      }
       return { url: avatarUrl };
     } catch (err) {
       if (err instanceof AvatarUploadError) {

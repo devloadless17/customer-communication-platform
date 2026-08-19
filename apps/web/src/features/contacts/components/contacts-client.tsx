@@ -4,6 +4,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
+import { useSocketReconnect } from "@/hooks/use-socket-reconnect";
 import { apiFetch } from "@/lib/api/client-fetch";
 import {
   Download,
@@ -431,6 +432,27 @@ export function ContactsClient({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Reconnect convergence (§10). Every contact frame that lands during a
+  // transport gap is simply lost — the rows above then show pre-gap state with
+  // no repair path, because the one global reconnect refresh (use-catalog-sync)
+  // deliberately fires only on a server-forced kick. Re-pull the visible page
+  // on a genuine reconnect, jittered for the same thundering-herd reason the
+  // bulk frame is (a deploy reconnects every client at once).
+  const reconnectTimerRef = useRef<number | null>(null);
+  useSocketReconnect(() => {
+    if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = window.setTimeout(() => {
+      reconnectTimerRef.current = null;
+      refetch();
+    }, Math.floor(Math.random() * 1500));
+  });
+  useEffect(
+    () => () => {
+      if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
+    },
+    [],
+  );
 
   // Patch a single contact's tag list in-place — used when the per-row tag
   // picker saves. Avoids a router.refresh that would also reset selection.
@@ -1661,9 +1683,7 @@ function BulkTagMenu({
       });
       const data = (await res.json()) as { tag?: Tag; error?: string; detail?: string };
       if (!res.ok || !data.tag) {
-        throw new Error(
-          [data.error, data.detail].filter(Boolean).join(": ") || `HTTP ${res.status}`,
-        );
+        throw new Error(apiErrorMessageFrom(data, `HTTP ${res.status}`));
       }
       onCreated(data.tag);
       setQuery("");

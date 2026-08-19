@@ -111,7 +111,11 @@ export class AiReplySubscriber implements OnModuleInit, OnModuleDestroy {
     if (!configEnabled(config)) return;
     // Per-widget switch: the website widget defaults to AI OFF (see
     // webchatwidgetAiAllowed). Only pay the lookup for a widget message.
-    if (m.channel === "webchatwidget" && !(await webchatwidgetAiAllowed(e.conversationId))) return;
+    if (
+      m.channel === "webchatwidget" &&
+      !(await webchatwidgetAiAllowed(e.workspaceId, e.conversationId))
+    )
+      return;
     await enqueueAiReply({
       workspaceId: e.workspaceId,
       conversationId: e.conversationId,
@@ -127,7 +131,7 @@ export class AiReplySubscriber implements OnModuleInit, OnModuleDestroy {
     const kind = e.media?.kind;
     // media_ready carries no channel — the helper is a no-op (returns true) for
     // non-widget conversations, and gates widget ones on their per-widget switch.
-    if (!(await webchatwidgetAiAllowed(e.conversationId))) return;
+    if (!(await webchatwidgetAiAllowed(e.workspaceId, e.conversationId))) return;
     if (kind === "audio") {
       // Audio needs STT before there is any text to reply to, so this branch
       // gates on the transcription engine specifically rather than on

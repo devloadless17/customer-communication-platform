@@ -40,6 +40,10 @@ const h = vi.hoisted(() => {
     aiConversationState: {
       findUnique: async ({ where }: { where: { conversationId: string } }) =>
         convState.get(where.conversationId) ?? null,
+      // Reads carry `workspaceId` alongside the conversation id (§7), so they
+      // go through findFirst rather than the unique lookup.
+      findFirst: async ({ where }: { where: { conversationId: string } }) =>
+        convState.get(where.conversationId) ?? null,
       create: async ({ data }: { data: Record<string, unknown> }) => {
         const id = data.conversationId as string;
         if (convState.has(id)) throw p2002();
@@ -170,7 +174,7 @@ describe("conversation state machine", () => {
     await pauseByAgent("t1", "c2", "u1");
     const afterCustomer = await onCustomerInbound("t1", "c2");
     expect(afterCustomer.state).toBe("ai_paused"); // NOT auto-resumed
-    const s = await getState("c2");
+    const s = await getState("t1", "c2");
     expect(s?.state).toBe("ai_paused");
   });
 });

@@ -220,10 +220,16 @@ export async function getWebchatwidgetSendConfig(
  * cached to keep visitor traffic off Postgres. Backed by the unique index on
  * `WebchatWidget.publicKey`.
  */
+/** `wc_pk_` + 48 hex = 54. The cap is generous headroom, not the format. */
+const MAX_PUBLIC_KEY_LENGTH = 128;
+
 export async function resolveWebchatwidgetByPublicKey(
   publicKey: string,
 ): Promise<WebchatwidgetResolved | null> {
-  if (!publicKey) return null;
+  // Refused BEFORE the cache: the key is attacker-chosen and a miss is
+  // negative-cached, so an over-long key would be stored verbatim as a cache
+  // KEY. The entry count is bounded, the bytes were not.
+  if (!publicKey || publicKey.length > MAX_PUBLIC_KEY_LENGTH) return null;
   const cached = byKeyCache.get(publicKey);
   if (cached !== undefined) return cached;
   const widget = await db.webchatWidget.findUnique({
@@ -294,9 +300,12 @@ async function withSelectOptions(
  * One indexed lookup, and only reached on the AI path (team already has AI
  * configured), so it never touches the general inbound hot path.
  */
-export async function webchatwidgetAiAllowed(conversationId: string): Promise<boolean> {
-  const conv = await db.conversation.findUnique({
-    where: { id: conversationId },
+export async function webchatwidgetAiAllowed(
+  workspaceId: string,
+  conversationId: string,
+): Promise<boolean> {
+  const conv = await db.conversation.findFirst({
+    where: { id: conversationId, workspaceId },
     select: {
       webchatWidgetId: true,
       webchatWidget: { select: { isActive: true, config: true } },
@@ -325,12 +334,19 @@ export async function webchatwidgetAiAllowed(conversationId: string): Promise<bo
  */
 const showNameCache = new TtlCache<boolean>();
 
-export async function webchatwidgetShowsAgentName(conversationId: string): Promise<boolean> {
-  const hit = showNameCache.get(conversationId);
+export async function webchatwidgetShowsAgentName(
+  workspaceId: string,
+  conversationId: string,
+): Promise<boolean> {
+  // Cache key carries the workspace, like every other workspace-scoped cache
+  // here — a conversation id alone would key one tenant's answer under a
+  // lookup another tenant can perform.
+  const cacheKey = `${workspaceId}:${conversationId}`;
+  const hit = showNameCache.get(cacheKey);
   if (hit !== undefined) return hit;
   try {
-    const conv = await db.conversation.findUnique({
-      where: { id: conversationId },
+    const conv = await db.conversation.findFirst({
+      where: { id: conversationId, workspaceId },
       select: {
         webchatWidgetId: true,
         webchatWidget: { select: { config: true } },
@@ -338,7 +354,7 @@ export async function webchatwidgetShowsAgentName(conversationId: string): Promi
     });
     const cfg = (conv?.webchatWidget?.config ?? {}) as WebchatwidgetConfig;
     const show = cfg.showAgentName !== false;
-    showNameCache.set(conversationId, show);
+    showNameCache.set(cacheKey, show);
     return show;
   } catch {
     return true;

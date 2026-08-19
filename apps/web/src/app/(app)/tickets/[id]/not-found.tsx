@@ -2,12 +2,13 @@ import Link from "next/link";
 import { ArrowLeft, Ticket as TicketIcon } from "lucide-react";
 
 /**
- * Rendered when the ticket id in the URL doesn't exist in the ACTIVE
+ * Rendered when the ticket id in the URL isn't reachable from the ACTIVE
  * workspace. The by-far most common way to land here is a stale link after a
- * workspace switch — tickets never leave their workspace, so an id from the
- * previous workspace legitimately 404s in this one (an escalated pair is TWO
- * tickets with two different ids). Say that, instead of Next's bare 404 that
- * reads like the ticket was lost.
+ * workspace switch: a ticket is ONE row owned by one workspace, and a sibling
+ * workspace reaches it only while it holds a share — same id, same number, so
+ * the fix is to switch back (or open the board here) rather than hunt for a
+ * copy. Say that, instead of Next's bare 404 that reads like the ticket was
+ * lost.
  */
 export default function TicketNotFound() {
   return (
@@ -17,9 +18,9 @@ export default function TicketNotFound() {
       </div>
       <h1 className="text-sm font-semibold">No ticket with this id here</h1>
       <p className="text-2xs leading-relaxed text-muted-foreground">
-        Tickets live inside one workspace. If you just switched workspaces, this link
-        belonged to the previous one — an escalated ticket has its own twin (and its own
-        number) on each side. Open the board to find it here, or switch back.
+        A ticket is one row, owned by one workspace and reachable from another only
+        while that workspace holds a share. If you just switched workspaces, this link
+        belonged to the previous one — open the board to find it here, or switch back.
       </p>
       <Link
         href="/tickets"

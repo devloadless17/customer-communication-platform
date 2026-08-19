@@ -109,7 +109,7 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
 
   // PRE-SEND RE-CHECK on FRESH state (correction #4). If a human replied while
   // the model was generating, onHumanReply moved us to human_active — abort.
-  const fresh = await getState(conversationId);
+  const fresh = await getState(workspaceId, conversationId);
   if (!fresh || fresh.state !== "ai_active") {
     await audit(workspaceId, conversationId, inboundMessageId, config.configVersion, {
       decision: "cancelled",
@@ -183,7 +183,7 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
     // customer never saw must not burn the one ask we allow ourselves; the
     // human approving that draft is the backstop against a repeat.
     if (payload.askedForEmail && config.collectCustomerEmail) {
-      await markEmailRequested(conversationId);
+      await markEmailRequested(workspaceId, conversationId);
     }
 
     const outIds = [delivery.textMessageId, delivery.voiceMessageId].filter(
@@ -249,7 +249,7 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
         outboundMessageId: delivery.voiceMessageId ?? delivery.textMessageId,
       });
     } else {
-      await incrementAutoReply(conversationId);
+      await incrementAutoReply(workspaceId, conversationId);
       await audit(workspaceId, conversationId, inboundMessageId, config.configVersion, {
         ...auditBase,
         decision: "replied",
@@ -276,7 +276,7 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
     // visitor hammering one conversation bought unbounded model spend. Same
     // counter, same gate; a human reply still resets it (onHumanReply), so an
     // agent working the thread re-opens the budget.
-    await incrementAutoReply(conversationId);
+    await incrementAutoReply(workspaceId, conversationId);
     // An escalation the mode wouldn't let us SEND is still an escalation: the
     // routing and the sticky pause are what get a human onto the thread, and
     // neither is customer-visible. Only the hand-off LINE waits for approval.
