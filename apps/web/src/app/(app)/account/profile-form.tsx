@@ -10,7 +10,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api/client-fetch";
-import { apiErrorMessage } from "@ccp/shared/api/error-message";
+import { apiErrorMessage, apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 import { toast } from "@/lib/toast";
 
 interface ProfileFormProps {
@@ -96,7 +96,7 @@ export function ProfileForm({ user }: ProfileFormProps) {
         detail?: string;
       };
       if (!res.ok || !data.url) {
-        toast.error(data.detail ?? data.error ?? "Couldn't upload avatar");
+        toast.error(apiErrorMessageFrom(data, "Couldn't upload avatar"));
         return;
       }
       setAvatarUrl(data.url);

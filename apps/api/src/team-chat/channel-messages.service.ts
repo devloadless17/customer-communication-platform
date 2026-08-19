@@ -777,7 +777,8 @@ export class ChannelMessagesService {
     const cap = MEDIA_SIZE_CAPS[kind];
     if (args.file.size > cap) {
       throw new BadRequestException({
-        error: `file too large for ${kind}`,
+        error: "file_too_large",
+        detail: `File too large for ${kind}.`,
         cap,
       });
     }

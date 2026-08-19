@@ -26,6 +26,7 @@ import {
 import { useMessageFlags } from "@/features/inbox/components/message-flags-context";
 import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 import { cn } from "@ccp/shared/utils";
 import { toast } from "@/lib/toast";
 import type { Message } from "@ccp/shared/types";
@@ -84,7 +85,7 @@ function PublicReplyComposer({
         | { detail?: string; error?: string }
         | null;
       if (!res.ok) {
-        toast.error(data?.detail ?? data?.error ?? "Couldn't post the reply.");
+        toast.error(apiErrorMessageFrom(data, "Couldn't post the reply."));
         return;
       }
       toast.success("Replied publicly on the comment.");
@@ -214,7 +215,7 @@ export function BubbleActions({
       });
       if (!res.ok) {
         const d = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
-        throw new Error(d.detail || d.error || "Couldn't react");
+        throw new Error(apiErrorMessageFrom(d, "Couldn't react"));
       }
       // The pill renders via the message.reaction_changed socket frame.
     } catch (err) {

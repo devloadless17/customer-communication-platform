@@ -10,6 +10,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 
 // Shape is intentionally loose — mirrors the API row; the form only reads/writes
 // the fields it renders. configVersion 0 + id null = never saved yet.
@@ -146,7 +147,7 @@ export function AiAssistantSettings({
         if (res.status === 409) {
           toast.error("Someone else changed these settings — reload and try again.");
         } else {
-          toast.error(data.error ? `Save failed: ${data.error}` : "Save failed");
+          toast.error(apiErrorMessageFrom(data, "Save failed"));
         }
         return;
       }
@@ -410,7 +411,7 @@ function VoicePreviewButton({
       });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string; detail?: string };
-        toast.error(data.detail || data.error || "Voice preview failed");
+        toast.error(apiErrorMessageFrom(data, "Voice preview failed"));
         return;
       }
       const blob = await res.blob();
@@ -592,7 +593,7 @@ function KnowledgeFiles({
       const res = await apiFetch("/api/workspace/ai-assistant/documents", { method: "POST", body: fd });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
-        toast.error(data.error ? `Upload failed: ${data.error}` : "Upload failed");
+        toast.error(apiErrorMessageFrom(data, "Upload failed"));
         return;
       }
       toast.success("Uploaded — processing…");

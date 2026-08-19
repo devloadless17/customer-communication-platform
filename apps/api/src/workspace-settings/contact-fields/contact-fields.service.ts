@@ -139,7 +139,8 @@ export class ContactFieldsService {
     });
     if (existing.length >= MAX_FIELDS_PER_TEAM) {
       throw new BadRequestException({
-        error: `at most ${MAX_FIELDS_PER_TEAM} contact fields per team`,
+        error: "contact_field_limit_reached",
+        detail: `At most ${MAX_FIELDS_PER_TEAM} contact fields per team.`,
       });
     }
 
@@ -226,7 +227,7 @@ export class ContactFieldsService {
       });
       return toDto(created);
     } catch (err) {
-      throwIfUniqueViolation(err, "field with that key already exists");
+      throwIfUniqueViolation(err, "field_key_taken", "A field with that key already exists.");
       throw err;
     }
   }
@@ -445,7 +446,7 @@ export class ContactFieldsService {
       });
       return toOptionDto(created);
     } catch (err) {
-      throwIfUniqueViolation(err, "an option with this name already exists");
+      throwIfUniqueViolation(err, "option_name_taken", "An option with this name already exists.");
       throw err;
     }
   }
@@ -475,7 +476,7 @@ export class ContactFieldsService {
       });
       if (result.count === 0) throw new NotFoundException({ error: "not_found" });
     } catch (err) {
-      throwIfUniqueViolation(err, "an option with this name already exists");
+      throwIfUniqueViolation(err, "option_name_taken", "An option with this name already exists.");
       throw err;
     }
     const updated = await this.db.contactFieldOption.findUniqueOrThrow({
@@ -801,13 +802,13 @@ function requireManage(canManage: boolean): void {
   if (!canManage) throw new ForbiddenException({ error: "forbidden" });
 }
 
-function throwIfUniqueViolation(err: unknown, detail: string): void {
+function throwIfUniqueViolation(err: unknown, key: string, detail: string): void {
   if (
     typeof err === "object" &&
     err !== null &&
     "code" in err &&
     (err as { code?: string }).code === "P2002"
   ) {
-    throw new ConflictException({ error: detail });
+    throw new ConflictException({ error: key, detail });
   }
 }

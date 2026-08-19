@@ -1,3 +1,4 @@
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 import type { User } from "@ccp/shared/types";
 
 /**
@@ -57,12 +58,8 @@ export function actorName(
 
 /** Best-effort extract a human-readable message from a 4xx/5xx response. */
 export async function readError(res: Response): Promise<string> {
-  try {
-    const json = (await res.json()) as { error?: string; detail?: string };
-    if (json.detail) return `${json.error ?? "error"}: ${json.detail}`;
-    if (json.error) return json.error;
-  } catch {
-    // not JSON — fall through
-  }
-  return `Server returned HTTP ${res.status}.`;
+  const json = (await res.json().catch(() => null)) as
+    | { error?: string; detail?: string }
+    | null;
+  return apiErrorMessageFrom(json, `Server returned HTTP ${res.status}.`);
 }

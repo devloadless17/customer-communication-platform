@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Select } from "@/components/ui/select";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 
 import { TransferProgress } from "./transfer-progress";
 import { useTransferJob } from "./use-transfer-job";
@@ -107,7 +108,7 @@ export function ExportContactsDialog({
       });
       const json = (await res.json()) as { jobId?: string; error?: string; detail?: string };
       if (!res.ok || !json.jobId) {
-        setError(json.detail ?? json.error ?? "We couldn't start the export.");
+        setError(apiErrorMessageFrom(json, "We couldn't start the export."));
         return;
       }
       setJobId(json.jobId);

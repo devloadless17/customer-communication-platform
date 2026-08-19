@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 
 import { apiFetch } from "@/lib/api/client-fetch";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -99,7 +100,7 @@ export function StagesSettings({
         detail?: string;
       };
       if (!res.ok || !body.stage) {
-        setError(body.detail || body.error || `Couldn't create (HTTP ${res.status})`);
+        setError(apiErrorMessageFrom(body, `Couldn't create (HTTP ${res.status})`));
         return;
       }
       setStages((cur) => [...cur, body.stage!].sort(byPosition));
@@ -137,7 +138,7 @@ export function StagesSettings({
             detail?: string;
           };
           setStages(prev);
-          setError(body.detail || body.error || `Update failed (HTTP ${res.status})`);
+          setError(apiErrorMessageFrom(body, `Update failed (HTTP ${res.status})`));
         }
       } catch {
         setStages(prev);
@@ -220,7 +221,7 @@ export function StagesSettings({
             error?: string;
             detail?: string;
           };
-          setError(body.detail || body.error || `Delete failed (HTTP ${res.status})`);
+          setError(apiErrorMessageFrom(body, `Delete failed (HTTP ${res.status})`));
           return;
         }
         setStages((cur) => cur.filter((s) => s.id !== stage.id));

@@ -72,9 +72,11 @@ async function walk(dir, out = []) {
 const files = [...SCAN_FILES];
 for (const d of SCAN_DIRS) await walk(d, files);
 
-// `error: "two words"` — a quoted value containing a space, assigned to the
-// `error` field of a structured response.
-const PROSE_KEY = /\berror:\s*"([^"]*\s[^"]*)"/g;
+// `error: "two words"` — a quoted value containing a space — or a backtick
+// template assigned to the `error` field. Templates are matched broadly and
+// filtered below: `${kind}_limit` is a dynamic KEY (fine), while
+// `file too large for ${kind}` has prose in its static text (not fine).
+const PROSE_KEY = /\berror:\s*(?:"([^"]*\s[^"]*)"|`([^`]*)`)/g;
 
 const problems = [];
 for (const file of files) {
@@ -85,9 +87,16 @@ for (const file of files) {
   let m;
   PROSE_KEY.lastIndex = 0;
   while ((m = PROSE_KEY.exec(code))) {
-    const key = m[1];
-    // Template literals and interpolations are not literal keys.
-    if (key.includes("${")) continue;
+    const key = m[1] ?? m[2];
+    if (m[1] !== undefined) {
+      // A literal `${` inside a DOUBLE-quoted string is not interpolation —
+      // it is deliberate template copy (Meta named-param docs), not a key.
+      if (key.includes("${")) continue;
+    } else {
+      // Backtick template: judge only the STATIC text — interpolations are
+      // values, not prose. A space around (or outside) one is the tell.
+      if (!/\s/.test(key.replace(/\$\{[^}]*\}/g, ""))) continue;
+    }
     const line = code.slice(0, m.index).split("\n").length;
     // An internal RESULT object — `{ ok: false, error: "…" }` — is not the HTTP
     // envelope. The envelope is `{ error, detail? }` and never carries `ok`;

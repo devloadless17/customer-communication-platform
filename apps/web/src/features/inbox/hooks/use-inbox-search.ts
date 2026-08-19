@@ -112,12 +112,19 @@ export function useInboxSearch<S extends InboxSearchScope>(
     cursorRef.current = nextCursor;
   }, [nextCursor]);
 
+  // Ref, not the loadingMore state: a re-fired scroll sentinel calls before
+  // the state round-trips, and the same page must not append twice.
+  const loadingMoreRef = useRef(false);
+
   const loadMore = useCallback(() => {
     const cursor = cursorRef.current;
     const q = queryRef.current;
-    if (!cursor || !q) return;
+    if (!cursor || !q || loadingMoreRef.current) return;
+    loadingMoreRef.current = true;
     setLoadingMore(true);
-    const url = `/api/inbox/search?scope=${scope}&q=${encodeURIComponent(q)}&cursor=${encodeURIComponent(cursor)}`;
+    // Same accountParam as the first page — the cursor was minted under that
+    // narrow, so an unfiltered page 2 would skip/repeat rows.
+    const url = `/api/inbox/search?scope=${scope}&q=${encodeURIComponent(q)}&cursor=${encodeURIComponent(cursor)}${accountParam}`;
     fetch(url)
       .then((r) => (r.ok ? (r.json() as Promise<Page<H>>) : null))
       .then((page) => {
@@ -127,7 +134,10 @@ export function useInboxSearch<S extends InboxSearchScope>(
         setResults((prev) => [...prev, ...page.items]);
         setNextCursor(page.nextCursor);
       })
-      .finally(() => setLoadingMore(false));
+      .finally(() => {
+        loadingMoreRef.current = false;
+        setLoadingMore(false);
+      });
   }, [scope, accountParam]);
 
   return { active, results, nextCursor, loading, loadingMore, loadMore };

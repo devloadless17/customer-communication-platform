@@ -591,8 +591,17 @@ export interface ListContactsOpts {
 
 // ---------------------------------------------------------------------------
 // WhatsApp settings — current Meta config view shipped to the admin
-// pre-fill form. Plain values (decrypted server-side), display-only.
+// pre-fill form. Secrets travel as SECRET_SAVED_SENTINEL, never plaintext.
 // ---------------------------------------------------------------------------
+
+/**
+ * Placeholder every settings GET ships IN PLACE of a stored secret (same
+ * string the workflow builder shows for saved `http_request` headers). The
+ * plaintext never leaves the server: the form pre-fills with this sentinel,
+ * and a save that submits it back (or omits the field) means "keep the
+ * stored value" — the save paths swap the stored ciphertext back in.
+ */
+export const SECRET_SAVED_SENTINEL = "•••••••• (saved)";
 
 /**
  * Channel-member row for the members panel. Mirrors the underlying
@@ -621,9 +630,14 @@ export interface WhatsappConfigView {
   wabaId: string | null;
   appId: string | null;
   verifyToken: string | null;
-  /** Decrypted plaintext — wire path is server→browser only, never client→server. */
+  /** `SECRET_SAVED_SENTINEL` when a value is stored (and decryptable), else
+   *  null — never the plaintext. Submitting the sentinel back keeps the
+   *  stored value. */
   accessToken: string | null;
   appSecret: string | null;
+  /** True when the corresponding secret is stored and decryptable. */
+  accessTokenSet: boolean;
+  appSecretSet: boolean;
   /** True when secrets are present in the DB but decrypt failed (key rotated,
    *  envelope corrupt). Page surfaces this so admin can re-paste. */
   credentialsUndecryptable: boolean;

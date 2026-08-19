@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 
 import { apiFetch } from "@/lib/api/client-fetch";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/layouts/page-header";
@@ -124,7 +125,7 @@ export function TagsSettings({
         detail?: string;
       };
       if (!res.ok || !body.tag) {
-        setError(body.detail || body.error || `Couldn't create (HTTP ${res.status})`);
+        setError(apiErrorMessageFrom(body, `Couldn't create (HTTP ${res.status})`));
         return;
       }
       setTags((cur) => [body.tag!, ...cur]);
@@ -159,7 +160,7 @@ export function TagsSettings({
             detail?: string;
           };
           setTags(prev);
-          setError(body.detail || body.error || `Update failed (HTTP ${res.status})`);
+          setError(apiErrorMessageFrom(body, `Update failed (HTTP ${res.status})`));
         }
       } catch {
         setTags(prev);
@@ -193,7 +194,7 @@ export function TagsSettings({
             error?: string;
             detail?: string;
           };
-          setError(body.detail || body.error || `Delete failed (HTTP ${res.status})`);
+          setError(apiErrorMessageFrom(body, `Delete failed (HTTP ${res.status})`));
           return;
         }
         setTags((cur) => cur.filter((t) => t.id !== tag.id));

@@ -58,7 +58,7 @@ import {
   MissingAppIdError,
   MissingWabaIdError,
 } from "@/lib/providers/meta";
-import type { WhatsappConfigView } from "@ccp/shared/dtos";
+import { SECRET_SAVED_SENTINEL, type WhatsappConfigView } from "@ccp/shared/dtos";
 import type {
   AuthTemplatePreview,
   LibraryTemplate,
@@ -171,14 +171,11 @@ export class WhatsappService {
   /**
    * Current config for the admin settings form.
    *
-   * Tradeoff considered (carried over from the pre-NestJS RSC page comment):
-   * we ship the access token + app secret to the admin's browser so the
-   * "Update credentials" form can pre-fill them. Acceptable for a
-   * single-admin pilot; for multi-admin teams, swap to a mask + reveal-on-demand
-   * pattern (one extra route) so the field isn't readable from every admin's
-   * devtools. The decryption is a net win regardless: this endpoint replaces
-   * the old RSC page that imported `decryptSecret` directly into apps/web,
-   * which is why the envelope key no longer needs to live in the web image.
+   * Secrets are decrypted here only to PROBE (the live subscription read
+   * below) and to compute the Set/undecryptable flags — the response carries
+   * `SECRET_SAVED_SENTINEL` in their place, never the plaintext, so the
+   * long-lived token + App secret are not readable from every admin's
+   * devtools. `updateConfig` treats the sentinel as "keep the stored value".
    */
   async getConfig(workspaceId: string): Promise<WhatsappConfigView> {
     const conn = await this.db.channelConnection.findFirst({
@@ -302,8 +299,10 @@ export class WhatsappService {
       wabaId: conn?.wabaAccount?.externalWabaId ?? null,
       appId: config.appId ?? null,
       verifyToken,
-      accessToken,
-      appSecret,
+      accessToken: accessToken !== null ? SECRET_SAVED_SENTINEL : null,
+      appSecret: appSecret !== null ? SECRET_SAVED_SENTINEL : null,
+      accessTokenSet: accessToken !== null,
+      appSecretSet: appSecret !== null,
       credentialsUndecryptable,
       needsReconnect: conn?.needsReconnect ?? false,
       messagingTier: conn?.wabaAccount?.portfolio?.messagingTier ?? null,
@@ -366,6 +365,14 @@ export class WhatsappService {
     const { phoneNumberId } = input;
     const warnings: string[] = [];
 
+    // getConfig ships SECRET_SAVED_SENTINEL in place of stored plaintext, so an
+    // untouched form can echo it back. Treat it as "not typed": the own-row →
+    // shared precedence below then keeps what is already stored.
+    const typedAccessToken =
+      input.accessToken === SECRET_SAVED_SENTINEL ? undefined : input.accessToken;
+    const typedAppSecret =
+      input.appSecret === SECRET_SAVED_SENTINEL ? undefined : input.appSecret;
+
     // Source the access token (system-user) + App secret from the shared Meta
     // App connection unless overridden on this form.
     const meta = await getMetaConnection(workspaceId);
@@ -395,8 +402,8 @@ export class WhatsappService {
     const ownAccessToken = this.tryDecrypt(ownSecrets.accessToken ?? null, "accessToken");
     const ownAppSecret = this.tryDecrypt(ownSecrets.appSecret ?? null, "appSecret");
     const accessToken =
-      input.accessToken?.trim() || ownAccessToken || meta?.systemUserToken || null;
-    const appSecret = input.appSecret?.trim() || ownAppSecret || meta?.appSecret || null;
+      typedAccessToken?.trim() || ownAccessToken || meta?.systemUserToken || null;
+    const appSecret = typedAppSecret?.trim() || ownAppSecret || meta?.appSecret || null;
     if (!accessToken || !appSecret) {
       throw new BadRequestException({
         error: "meta_not_configured",

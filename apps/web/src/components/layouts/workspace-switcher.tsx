@@ -21,6 +21,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
 import { cn } from "@ccp/shared/utils";
@@ -115,7 +116,7 @@ export function WorkspaceSwitcher({
             detail?: string;
             error?: string;
           };
-          toast.error(d.detail || d.error || "Couldn't switch workspace");
+          toast.error(apiErrorMessageFrom(d, "Couldn't switch workspace"));
           setSwitchingTo(null);
           return;
         }

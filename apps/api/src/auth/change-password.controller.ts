@@ -101,7 +101,9 @@ export class ChangePasswordController {
 
     const policyError = validatePasswordStructure(newPassword);
     if (policyError) {
-      throw new BadRequestException({ error: policyError });
+      // `policyError` is a human sentence — the form renders detail-first via
+      // apiErrorMessage, so it reaches the user; the key stays machine-stable.
+      throw new BadRequestException({ error: "password_policy", detail: policyError });
     }
 
     // Per-user lockout: refuse further attempts after MAX consecutive wrong

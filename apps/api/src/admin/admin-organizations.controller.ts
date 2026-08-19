@@ -54,7 +54,10 @@ export class AdminOrganizationsController {
   /** Refuse to act on the operator's own tenant — same rule as the workspace-keyed pair. */
   private assertNotOwnOrg(organizationId: string, session: ApiSession, action: string): void {
     if (organizationId === session.organizationId) {
-      throw new BadRequestException({ error: `cannot ${action} your own organization` });
+      throw new BadRequestException({
+        error: "cannot_act_on_own_organization",
+        detail: `Cannot ${action} your own organization.`,
+      });
     }
   }
 
