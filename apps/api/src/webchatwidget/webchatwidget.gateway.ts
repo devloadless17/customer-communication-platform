@@ -644,6 +644,66 @@ export class WebchatwidgetGateway
     await this.markOutbound(data.workspaceId, data.conversationId, "delivered");
   }
 
+  /**
+   * The visitor pressed "End chat".
+   *
+   * This is NOT a disconnect. A closed tab comes back — the same visitorId is in
+   * their localStorage and every message an agent sent meanwhile is waiting in
+   * history. Ending rotates that identity, so THIS conversation can never
+   * receive another inbound and the visitor will never see another outbound:
+   * anything typed here from now on reaches nobody, forever. Recording it is
+   * what lets the agent composer say so instead of accepting messages into a
+   * void.
+   *
+   * Stamped once and never cleared (a returning visitor is a new contact, hence
+   * a new conversation), the thread is closed so it leaves the open queue, and a
+   * timeline line explains why it closed on its own.
+   *
+   * Best-effort and rate-gated like the other cheap frames: the visitor's UI has
+   * already moved on, so a failure here must not be visible to them.
+   */
+  @SubscribeMessage("visitor:end")
+  async onVisitorEnd(@ConnectedSocket() client: Socket): Promise<void> {
+    const data = client.data as WidgetSocketData | undefined;
+    if (!data?.conversationId || !this.allowCheapFrame(data)) return;
+    const conversationId = data.conversationId;
+    try {
+      // `visitorEndedAt: null` makes this idempotent — a double-tap, or a
+      // reconnect that re-sends, must not re-close a thread an agent reopened.
+      const stamped = await this.db.conversation.updateMany({
+        where: { id: conversationId, workspaceId: data.workspaceId, visitorEndedAt: null },
+        data: { visitorEndedAt: new Date(), status: "closed", closedAt: new Date() },
+      });
+      if (stamped.count === 0) return;
+      await recordConversationEvent({
+        conversationId,
+        workspaceId: data.workspaceId,
+        userId: null,
+        kind: "visitor_ended_conversation",
+      });
+      const conv = await this.db.conversation.findFirst({
+        where: { id: conversationId, workspaceId: data.workspaceId },
+        select: { contactId: true, status: true },
+      });
+      if (!conv) return;
+      // Reuse the status event the inbox already reconciles on, so the thread
+      // leaves the open queue live rather than on the agent's next refresh.
+      await publish({
+        type: "conversation.status_changed",
+        workspaceId: data.workspaceId,
+        conversationId,
+        contactId: conv.contactId,
+        previousStatus: "open",
+        newStatus: "closed",
+        conversation: { id: conversationId, channel: CHANNEL, contactId: conv.contactId },
+        actorUserId: null,
+        occurredAt: new Date().toISOString(),
+      } as never);
+    } catch (err) {
+      this.logger.error(`visitor:end failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
   // The panel is open + tab visible → mark outbound `read` (agent sees "Seen").
   @SubscribeMessage("visitor:read")
   async onRead(@ConnectedSocket() client: Socket): Promise<void> {

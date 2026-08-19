@@ -198,6 +198,7 @@ function ReplyBoxImpl({
   tags,
   fieldDefinitions,
   lastInboundAt,
+  visitorEndedAt = null,
   replyTarget,
   aiEnabled,
   aiAutopilotEnabled,
@@ -236,6 +237,14 @@ function ReplyBoxImpl({
    * catalogue, matching the send path's own fallback.
    */
   channelConnectionId?: string | null;
+  /**
+   * `webchatwidget` only — when the VISITOR ended the session. Their browser
+   * identity rotates at that moment, so nothing sent here can ever reach them:
+   * the composer locks instead of accepting replies into a void. Unlike a closed
+   * window this never reopens, and unlike a closed tab there is no one to come
+   * back and read the backlog.
+   */
+  visitorEndedAt?: string | null;
   /** Team stage + tag catalogs — used to resolve the derived
    *  `$var.contact.stage_name` / `$var.contact.tag_names` tokens when an
    *  agent inserts a snippet (the contact carries only ids). */
@@ -347,10 +356,15 @@ function ReplyBoxImpl({
   // error the agent would have seen anyway.
   const privateReplyOpen =
     caps.commentPrivateReply === true && hasAnswerableComment(privateReplyCandidates, now);
+  // The visitor walked away for good. Not a window (webchat has none) and not a
+  // disconnect (a closed tab returns to a waiting backlog) — the identity behind
+  // this thread is retired, so every send path below is shut, permanently.
+  const visitorEnded = Boolean(visitorEndedAt);
   const windowClosed =
-    hasSendWindow &&
-    !privateReplyOpen &&
-    (windowStatus.state === "closed" || windowStatus.state === "never");
+    visitorEnded ||
+    (hasSendWindow &&
+      !privateReplyOpen &&
+      (windowStatus.state === "closed" || windowStatus.state === "never"));
   const [mode, setMode] = useState<Mode>("reply");
   // Draft persistence: WhatsApp/Slack/Telegram all hold typed-but-unsent text
   // across chat switches. We persist to localStorage keyed by team+conv id so
@@ -1621,9 +1635,15 @@ function ReplyBoxImpl({
                 <MessageCircle className="size-3" />
                 Private reply · one per comment
               </span>
-            ) : (
+            ) : hasSendWindow ? (
+              // Only channels that HAVE a window get the badge. `computeWindowStatus`
+              // falls back to 24h when handed `undefined`, so webchat — which has no
+              // window at all, only a live socket — was showing a WhatsApp-style
+              // countdown for a visitor it does not apply to. `WindowBadge` already
+              // returns null on a null capability; this is the same rule at the one
+              // call site that computes the status itself.
               <WindowBadgeFromStatus status={windowStatus} size="sm" />
-            ))}
+            ) : null)}
           {/* WHICH ACCOUNT this reply leaves from. The thread header already says
               which account the conversation arrived on, but the composer is where
               it changes a decision — the agent is choosing to send, and on a
@@ -1782,7 +1802,12 @@ function ReplyBoxImpl({
             placeholder={
               isNote
                 ? "Leave an internal note for your teammates…"
-                : windowClosed
+                : visitorEnded
+                  ? // Permanent, and the reason is not a window: say the true thing
+                    // rather than "wait for the customer to message again", which
+                    // would have them waiting on someone who cannot return.
+                    "This visitor ended the chat — replies can no longer reach them."
+                  : windowClosed
                   ? caps.templates
                     ? "Free-form replies blocked — send a pre-approved template to re-engage."
                     : "Free-form replies blocked — wait for the customer to message again to re-open the conversation."

@@ -318,6 +318,7 @@ enum ConversationEventKind {
   // as a normal timeline pill (activity-entry.tsx). Actor is the visitor → no
   // userId, so it reads as a self-contained "Visitor started…" line.
   visitor_started_conversation
+  visitor_ended_conversation
   // AI Autopilot toggled off / on for this conversation (by a human in the
   // inbox, by the AI on escalation via /v1, or auto-paused on a human reply).
   // Rendered as an inline timeline pill, same as status/assignment.
@@ -579,10 +580,10 @@ model Organization {
   statusUpdatedAt   DateTime?
   statusUpdatedById String?
 
-  workspaces        Workspace[]
-  users             User[]
-  ticketShares      TicketShare[]
-  operatorAccesses  OperatorAccess[]
+  workspaces       Workspace[]
+  users            User[]
+  ticketShares     TicketShare[]
+  operatorAccesses OperatorAccess[]
 }
 
 // TENANCY EXCEPTION — no workspaceId by design: this row is ABOUT crossing the
@@ -656,7 +657,7 @@ model Workspace {
   // inside the org-lock transaction and the remaining-count predicate ignores
   // stamped rows, so the second caller sees 1 and is refused. Cleared if the
   // destroy fails, since the workspace is then still real.
-  deletingAt     DateTime?
+  deletingAt DateTime?
 
   // Per-workspace channel credentials live in `ChannelConnection`, one row per
   // (workspaceId, channel, externalAccountId). Adding a channel = insert a row,
@@ -760,63 +761,63 @@ model Workspace {
   // old org-wide default, so a single-workspace org sees no change.
   maxMembers Int @default(2)
 
-  members                 WorkspaceMember[]
-  contacts                Contact[]
-  customers               Customer[]
-  conversations           Conversation[]
-  messages                Message[]
-  contactFieldDefinitions ContactFieldDefinition[]
-  contactFieldOptions     ContactFieldOption[]
-  contactTransferJobs     ContactTransferJob[]
-  contactStages           ContactStage[]
-  messageTemplates        MessageTemplate[]
-  broadcasts              Broadcast[]
-  tags                    Tag[]
-  messageFlagDefinitions  MessageFlagDefinition[]
-  messageFlags            MessageFlag[]
-  inboxViews              InboxView[]
-  ticketViews             TicketView[]
-  templateAnalytics       TemplateAnalyticsDaily[]
-  tickets                 Ticket[]
-  ticketEvents            TicketEvent[]
-  ticketSlaPolicies       TicketSlaPolicy[]
-  ticketFieldDefinitions  TicketFieldDefinition[]
-  ticketNumberCounter     TicketNumberCounter?
-  ticketSharesOut         TicketShare[]            @relation("TicketSharesOut")
-  ticketSharesIn          TicketShare[]            @relation("TicketSharesIn")
-  ticketAttachments       TicketAttachment[]
-  ticketEventsActedIn     TicketEvent[]            @relation("TicketEventActorWorkspace")
-  ticketMessages          TicketMessage[]
-  ticketMessagesAuthored  TicketMessage[]          @relation("TicketMessageAuthorWorkspace")
-  ticketThreadUnreads     TicketThreadUnread[]
-  notifications           Notification[]
-  audienceGroups          AudienceGroup[]
-  workflows               Workflow[]
-  workflowRuns            WorkflowRun[]
-  workflowContactStates   WorkflowContactState[]
-  workflowAwaitingReplies WorkflowAwaitingReply[]
-  apiKeys                 WorkspaceApiKey[]
-  outboundWebhooks        OutboundWebhook[]
-  snippets                Snippet[]
-  conversationEvents      ConversationEvent[]
-  internalNotes           InternalNote[]
-  teamChannels            TeamChannel[]
-  teamChannelMessages     TeamChannelMessage[]
-  outboundEvents          OutboundEvent[]
-  outboundSendAttempts    OutboundSendAttempt[]
-  channelConnections      ChannelConnection[]
+  members                     WorkspaceMember[]
+  contacts                    Contact[]
+  customers                   Customer[]
+  conversations               Conversation[]
+  messages                    Message[]
+  contactFieldDefinitions     ContactFieldDefinition[]
+  contactFieldOptions         ContactFieldOption[]
+  contactTransferJobs         ContactTransferJob[]
+  contactStages               ContactStage[]
+  messageTemplates            MessageTemplate[]
+  broadcasts                  Broadcast[]
+  tags                        Tag[]
+  messageFlagDefinitions      MessageFlagDefinition[]
+  messageFlags                MessageFlag[]
+  inboxViews                  InboxView[]
+  ticketViews                 TicketView[]
+  templateAnalytics           TemplateAnalyticsDaily[]
+  tickets                     Ticket[]
+  ticketEvents                TicketEvent[]
+  ticketSlaPolicies           TicketSlaPolicy[]
+  ticketFieldDefinitions      TicketFieldDefinition[]
+  ticketNumberCounter         TicketNumberCounter?
+  ticketSharesOut             TicketShare[]                @relation("TicketSharesOut")
+  ticketSharesIn              TicketShare[]                @relation("TicketSharesIn")
+  ticketAttachments           TicketAttachment[]
+  ticketEventsActedIn         TicketEvent[]                @relation("TicketEventActorWorkspace")
+  ticketMessages              TicketMessage[]
+  ticketMessagesAuthored      TicketMessage[]              @relation("TicketMessageAuthorWorkspace")
+  ticketThreadUnreads         TicketThreadUnread[]
+  notifications               Notification[]
+  audienceGroups              AudienceGroup[]
+  workflows                   Workflow[]
+  workflowRuns                WorkflowRun[]
+  workflowContactStates       WorkflowContactState[]
+  workflowAwaitingReplies     WorkflowAwaitingReply[]
+  apiKeys                     WorkspaceApiKey[]
+  outboundWebhooks            OutboundWebhook[]
+  snippets                    Snippet[]
+  conversationEvents          ConversationEvent[]
+  internalNotes               InternalNote[]
+  teamChannels                TeamChannel[]
+  teamChannelMessages         TeamChannelMessage[]
+  outboundEvents              OutboundEvent[]
+  outboundSendAttempts        OutboundSendAttempt[]
+  channelConnections          ChannelConnection[]
   pendingSubscriptionReleases PendingSubscriptionRelease[]
-  whatsappPortfolios      WhatsappPortfolio[]
-  whatsappBusinessAccounts WhatsappBusinessAccount[]
-  webchatWidgets          WebchatWidget[]
-  metaConnection          MetaConnection?
-  calls                   Call[]
-  callPermissionRequests  CallPermissionRequest[]
-  customerIdentityEvents  CustomerIdentityEvent[]
-  assignmentPolicies      Team[]
-  assignmentRules         AssignmentRule[]
-  assignmentSettings      AssignmentSettings?
-  aiHandoffAssignee       User?                    @relation("AiHandoffAssignee", fields: [aiHandoffAssigneeId], references: [id], onDelete: SetNull)
+  whatsappPortfolios          WhatsappPortfolio[]
+  whatsappBusinessAccounts    WhatsappBusinessAccount[]
+  webchatWidgets              WebchatWidget[]
+  metaConnection              MetaConnection?
+  calls                       Call[]
+  callPermissionRequests      CallPermissionRequest[]
+  customerIdentityEvents      CustomerIdentityEvent[]
+  assignmentPolicies          Team[]
+  assignmentRules             AssignmentRule[]
+  assignmentSettings          AssignmentSettings?
+  aiHandoffAssignee           User?                        @relation("AiHandoffAssignee", fields: [aiHandoffAssigneeId], references: [id], onDelete: SetNull)
 
   // --- Native AI Assistant subsystem (SEPARATE from the legacy autopilot/n8n
   // fields above: aiAutopilotEnabled / aiHandoff* / firstTouchGreeter). Nothing
@@ -834,10 +835,10 @@ model Workspace {
   aiInteractions          AiAssistantInteraction[]
   aiReplySuggestions      AiReplySuggestion[]
   invites                 Invite[]
+  messengerPersonas       MessengerPersona[]
+  agentPresenceDays       AgentPresenceDaily[]
 
   @@index([organizationId])
-  messengerPersonas    MessengerPersona[]
-  agentPresenceDays    AgentPresenceDaily[]
 }
 
 // Join table: a user's membership + role in ONE workspace. A user (org-scoped)
@@ -868,22 +869,22 @@ model WorkspaceMember {
 // envelope-encrypted ciphertext per field (access token, app secret) — same
 // crypto boundary as before, just relocated. One row per channel per team.
 model ChannelConnection {
-  id                String    @id @default(cuid())
-  workspaceId       String
-  channel           Channel
+  id                      String    @id @default(cuid())
+  workspaceId             String
+  channel                 Channel
   // The PROVIDER's own id for this account: WhatsApp phoneNumberId, Messenger
   // pageId, Instagram igId. Promoted out of `config` into a top-level indexed
   // column so an inbound webhook resolves its account in ONE indexed lookup
   // instead of scanning JSON — the same move `WebchatWidget.publicKey` already
   // makes for the widget channel. This is what makes a workspace able to hold
   // SEVERAL accounts of one channel.
-  externalAccountId String    @default("")
+  externalAccountId       String    @default("")
   // Human label shown to agents when a channel has more than one account
   // ("Sales line", "Support UK"). Mirrors WebchatWidget.name.
-  label             String?
+  label                   String?
   // The account outbound-initiated sends and broadcasts default to when the
   // workspace has several on this channel. Exactly one per (workspace, channel).
-  isDefault         Boolean   @default(false)
+  isDefault               Boolean   @default(false)
   // WhatsApp only. The WhatsappBusinessAccount (WABA) this number belongs to —
   // Meta's real hierarchy is portfolio → WABA → phone number, so the portfolio
   // link lives on the WABA, NOT here.
@@ -893,15 +894,15 @@ model ChannelConnection {
   // known. It is NOT "no opinion": every WhatsApp send guard treats a null WABA
   // as a hard refusal (`waba_unknown`), never as permission. Connecting a number
   // requires `wabaId` in the request.
-  wabaAccountId     String?
-  config            Json      @default("{}")
-  secrets           Json      @default("{}")
-  isActive          Boolean   @default(true)
+  wabaAccountId           String?
+  config                  Json      @default("{}")
+  secrets                 Json      @default("{}")
+  isActive                Boolean   @default(true)
   // Set when a send fails with Graph error 190 (access token expired/revoked) so
   // Settings can surface a "reconnect" banner and admins are prompted to re-issue
   // the token — per Meta's access-token best practice. Cleared on reconnect.
-  needsReconnect    Boolean   @default(false)
-  lastAuthErrorAt   DateTime?
+  needsReconnect          Boolean   @default(false)
+  lastAuthErrorAt         DateTime?
   // Inbound webhooks REJECTED at our door (403: bad_signature / no_config).
   // Meta gives up on an endpoint after ~24-36h of failures, so a persistent
   // signature mismatch is silently-lost inbound — these two make it visible
@@ -924,7 +925,7 @@ model ChannelConnection {
   // Null = not yet polled → treated as NOT coexistence, because the ordinary
   // ladder is the common case and `resolveSendRate`'s unknown-throughput baseline
   // already errs slow.
-  isOnBusinessApp   Boolean?
+  isOnBusinessApp Boolean?
 
   // ── WhatsApp messaging-health snapshot (whatsapp channel only) ────────────
   // Cached from Meta so large broadcasts can be gated BEFORE sending: WhatsApp
@@ -998,8 +999,8 @@ model ChannelConnection {
   // verified_name and threw it away). Written at connect and by the
   // `phone_number_name_update` webhook; NOT in `config` because settings saves
   // rebuild that JSON wholesale and would clobber webhook writes.
-  verifiedName String?
-  nameStatus   String?
+  verifiedName     String?
+  nameStatus       String?
   // The number's WhatsApp @username (whatsapp channel only) — a chat-native
   // handle, 1:1 with the business phone number, globally unique across
   // WhatsApp, stored lowercase (case-insensitive at Meta). A CACHE, never the
@@ -1049,8 +1050,8 @@ model ChannelConnection {
   customerMessagingRestrictionType String?
   customerMessagingRestrictedUntil DateTime?
 
-  createdAt     DateTime           @default(now())
-  updatedAt     DateTime           @updatedAt
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @updatedAt
   workspace     Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   wabaAccount   WhatsappBusinessAccount? @relation(fields: [wabaAccountId], references: [id], onDelete: SetNull)
   // Threads bound to this account. SetNull on the far side, so removing an
@@ -1096,7 +1097,7 @@ model ChannelConnection {
 /// "does any active connection still use this WABA/Page" before each retry, so
 /// a reconnect that raced the removal makes the row moot rather than released.
 model PendingSubscriptionRelease {
-  id String @id @default(cuid())
+  id          String  @id @default(cuid())
   // NULLABLE, and the FK is SetNull rather than Cascade: the loudest case of an
   // owed release is a WORKSPACE (or organization) delete, and that IOU is
   // written for the workspace that just went away. Cascade would take the row
@@ -1106,7 +1107,7 @@ model PendingSubscriptionRelease {
   // ciphertexts copied into `secrets`.
   workspaceId String?
 
-  channel Channel
+  channel          Channel
   // The Meta object the subscription lives on: the WABA id (whatsapp) or the
   // Page id (messenger/instagram — shared, so the writer only enqueues when
   // NEITHER channel still uses the Page).
@@ -1253,7 +1254,7 @@ model WhatsappBusinessAccount {
 /// here and SHARED by every phone number in the portfolio — it is no longer a
 /// per-number budget. Throughput (msg/s) stays per-number on ChannelConnection.
 model WhatsappPortfolio {
-  id                       String    @id @default(cuid())
+  id                       String                  @id @default(cuid())
   workspaceId              String
   /// Meta's business-portfolio id. Null until we've read it from Graph.
   externalPortfolioId      String?
@@ -1285,13 +1286,13 @@ model WhatsappPortfolio {
   /// same posture as `messagingDailyCap`.
   maxPhoneNumbers          Int?
   messagingHealthUpdatedAt DateTime?
-  createdAt                DateTime  @default(now())
-  updatedAt                DateTime  @updatedAt
+  createdAt                DateTime                @default(now())
+  updatedAt                DateTime                @updatedAt
 
-  workspace    Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace     Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   /// Portfolio → WABA → phone number. Numbers reach their portfolio through the
   /// WABA, which is where Meta actually records the ownership.
-  wabaAccounts WhatsappBusinessAccount[]
+  wabaAccounts  WhatsappBusinessAccount[]
   /// Contacts whose `bsuid` this portfolio issued (BSUIDs are portfolio-scoped).
   bsuidContacts Contact[]
 
@@ -1513,12 +1514,12 @@ model User {
   // mode). SetNull on delete so removing the member degrades the team setting
   // to "leave unassigned" rather than orphaning the FK.
   aiHandoffForWorkspaces  Workspace[]              @relation("AiHandoffAssignee")
-  assignmentMemberships   TeamMember[] @relation("AssignmentPolicyMemberships")
+  assignmentMemberships   TeamMember[]             @relation("AssignmentPolicyMemberships")
+  /// Messenger personas minted for this agent (one per Page). See MessengerPersona.
+  messengerPersonas       MessengerPersona[]
+  presenceDays            AgentPresenceDaily[]
 
   @@index([organizationId])
-  /// Messenger personas minted for this agent (one per Page). See MessengerPersona.
-  messengerPersonas   MessengerPersona[]
-  presenceDays        AgentPresenceDaily[]
 }
 
 // Per-(workspace, user, UTC day) online-time ledger behind the team report's
@@ -1662,7 +1663,7 @@ model Snippet {
 }
 
 model Contact {
-  id                    String        @id @default(cuid())
+  id                    String             @id @default(cuid())
   workspaceId           String
   // Nullable so non-phone channels (Instagram, Telegram) can land contacts
   // without a phone number. WhatsApp contacts always populate it; the
@@ -1744,7 +1745,7 @@ model Contact {
   // VALUES is the right fix IF value-substring search ever shows up hot in
   // EXPLAIN (trigger: ~50k contacts/team); it bloats every contact write, so
   // don't add it preemptively.
-  customFields          Json          @default("{}")
+  customFields          Json               @default("{}")
   // Customer-lifecycle stage. Per-team configurable list (managed in
   // /settings/stages). Defaulted to the team's `isDefault` stage at create
   // time — see ensureDefaultStage in lib/queries.ts. SetNull on delete so
@@ -1760,8 +1761,8 @@ model Contact {
   // How this row got into the DB. Defaulted to inbound because the webhook
   // ingest path uses the bare default; the manual create + CSV import paths
   // explicitly set 'manual'.
-  source                ContactSource @default(inbound)
-  createdAt             DateTime      @default(now())
+  source                ContactSource      @default(inbound)
+  createdAt             DateTime           @default(now())
   // Denormalized "most recent inbound message timestamp" for this contact.
   // Maintained on every inbound-message commit (see lib/providers/ingest.ts).
   // Used by:
@@ -1825,7 +1826,7 @@ model Contact {
   // races where one set of changes is silently lost. The conflict-park UI
   // in contact-panel surfaces 409s as a "teammate just edited this" banner
   // so the agent can choose to reload or overwrite.
-  version               Int           @default(0)
+  version               Int                @default(0)
   // Soft-delete tombstone. Deleting a contact is NON-destructive: the row + its
   // conversations/messages are PRESERVED (a contact delete must NOT take the
   // conversation with it). Set = hidden from the contacts DIRECTORY (list /
@@ -2286,6 +2287,15 @@ model Conversation {
   // refer to the most-recent close.
   closedAt              DateTime?
   closedByUserId        String?
+  // WEBCHAT ONLY — when the VISITOR ended the session from their side ("End
+  // chat" in the widget). That rotates their browser identity, so this exact
+  // conversation can never receive another inbound and the visitor will never
+  // see another outbound: a reply here reaches nobody, forever. Distinct from
+  // `closedAt` (an AGENT closing a thread, which a visitor can still reopen by
+  // messaging) and from mere disconnection (a closed tab returns, and the
+  // messages are waiting in history when it does). Set once and never cleared —
+  // a returning visitor arrives as a new contact with a new conversation.
+  visitorEndedAt        DateTime?
   // Denormalized API-key actor mirroring closedByUserId — set when a /v1 partner
   // call or a workflow step closed the thread (closedByUserId is null then). Plain
   // column (no FK) to match closedByUserId; the durable "who/what closed this"
@@ -2326,30 +2336,30 @@ model Conversation {
   // Bumped only on ticket writes (rare), never per-message.
   openTicketCount Int     @default(0)
 
-  workspace         Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  contact           Contact             @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  assignedUser      User?               @relation("AssignedConversations", fields: [assignedUserId], references: [id], onDelete: SetNull)
-  webchatWidget     WebchatWidget?      @relation(fields: [webchatWidgetId], references: [id], onDelete: SetNull)
+  workspace                       Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contact                         Contact             @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  assignedUser                    User?               @relation("AssignedConversations", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  webchatWidget                   WebchatWidget?      @relation(fields: [webchatWidgetId], references: [id], onDelete: SetNull)
   // SetNull: removing an account must never delete conversation history.
-  channelConnection ChannelConnection?  @relation(fields: [channelConnectionId], references: [id], onDelete: SetNull)
-  messages          Message[]
-  notes             InternalNote[]
+  channelConnection               ChannelConnection?  @relation(fields: [channelConnectionId], references: [id], onDelete: SetNull)
+  messages                        Message[]
+  notes                           InternalNote[]
   // Audit timeline rows for this conversation. Cascade with the parent —
   // a deleted conversation drops its history. Workspace-level audit (if we want
   // a global "show me everything" feed) lives on the ConversationEvent.workspaceId
   // index, independent of cascade.
-  events            ConversationEvent[]
+  events                          ConversationEvent[]
   // Voice calls placed/received on this thread. Cascade with the parent —
   // deleting a conversation drops its call history alongside its messages.
-  calls             Call[]
+  calls                           Call[]
   // Triage flags raised on this thread's messages. Cascade with the parent.
-  messageFlags      MessageFlag[]
+  messageFlags                    MessageFlag[]
   // Every piece of work raised on this thread, oldest to newest.
-  tickets           Ticket[]            @relation("ConversationTickets")
+  tickets                         Ticket[]            @relation("ConversationTickets")
   // Back-reference for TicketShare.guestConversationId — a guest workspace's
   // own thread with a customer whose ticket was shared with them.
-  ticketSharesAsGuestConversation TicketShare[] @relation("TicketShareGuestConversation")
-  activeTicket      Ticket?             @relation("ConversationActiveTicket", fields: [activeTicketId], references: [id], onDelete: SetNull)
+  ticketSharesAsGuestConversation TicketShare[]       @relation("TicketShareGuestConversation")
+  activeTicket                    Ticket?             @relation("ConversationActiveTicket", fields: [activeTicketId], references: [id], onDelete: SetNull)
   // NO trgm GIN on lastMessagePreview. The inbox-list search ORs a
   // `lastMessagePreview contains` arm with two Contact RELATION filters
   // (contact.name / contact.phoneNumber) — Prisma renders relations as a
@@ -3025,7 +3035,7 @@ model Broadcast {
   /// THAT is when it earns a table, and this column becomes its backfill.
   ///
   /// Null for an ad-hoc send, which stays the common case.
-  campaignName      String?
+  campaignName          String?
   workspaceId           String
   // The channel ACCOUNT this campaign sends from. Null = fall back to the
   // channel default (pre-multi-account rows).
@@ -3206,9 +3216,9 @@ model Broadcast {
 // checker (scripts/check-prisma-fields.mjs) allowlists this model — adding a
 // new tenant-less model without updating the allowlist fails CI.
 model BroadcastRecipient {
-  id             String                   @id @default(cuid())
-  broadcastId    String
-  contactId      String
+  id                  String                   @id @default(cuid())
+  broadcastId         String
+  contactId           String
   /// WHICH ACCOUNT this recipient must be sent from — resolved at MATERIALIZE
   /// time, not at send time.
   ///
@@ -3241,26 +3251,26 @@ model BroadcastRecipient {
   // The unified PERSON this recipient targets (customer-mode only). `contactId`
   // is the channel-contact actually sent to — resolved from the person's best
   // live channel at build time. Null in contact-mode. Soft pointer (no FK).
-  customerId     String?
+  customerId          String?
   // Set after the runner picks/creates a conversation for this recipient so
   // the message lands in the existing thread (matches the inbox rules). Soft
   // reference (plain string, no FK) — survives conversation hard-delete by
   // design: the broadcast's audit trail must outlive a thread an agent later
   // deletes. The detail UI tolerates a 404 when following a dangled id.
-  conversationId String?
+  conversationId      String?
   // Pre-drawn assignee for this recipient (see BroadcastAssignmentMode). Set
   // when the recipient rows are built — NOT at send time — so an exact-count
   // split ("first 50 to Ali") is deterministic and a resumed run reuses the
   // same draw instead of redistributing. The runner applies it AFTER a
   // successful send, via the shared `assignConversation` mutation. Plain id
   // (no FK): a removed member degrades to "no assignment", never a broken row.
-  assignedUserId String?
-  status         BroadcastRecipientStatus @default(queued)
+  assignedUserId      String?
+  status              BroadcastRecipientStatus @default(queued)
   // Meta wamid of the sent message — links back to the Message row.
-  externalId     String?
+  externalId          String?
   // Per-recipient error body, kept compact for the UI table.
-  errorMessage   String?
-  sentAt         DateTime?
+  errorMessage        String?
+  sentAt              DateTime?
 
   // ── Delivery truth (webhook-owned; see BroadcastDeliveryState) ────────────
   // Advanced by `applyBroadcastDeliveryStatus` in lib/providers/ingest.ts as
@@ -3911,26 +3921,26 @@ model Ticket {
   /// (`ticket-last-activity-drift`) per §7.
   lastActivityAt DateTime @default(now())
 
-  workspace     Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  conversation  Conversation?     @relation("ConversationTickets", fields: [conversationId], references: [id], onDelete: Cascade)
-  contact       Contact?          @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  assignedUser  User?             @relation("AssignedTickets", fields: [assignedUserId], references: [id], onDelete: SetNull)
-  assignedTeam  Team? @relation("TeamTickets", fields: [assignedTeamId], references: [id], onDelete: SetNull)
-  resolvedBy    User?             @relation("ResolvedTickets", fields: [resolvedById], references: [id], onDelete: SetNull)
-  slaPolicy     TicketSlaPolicy?  @relation(fields: [slaPolicyId], references: [id], onDelete: SetNull)
+  workspace      Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  conversation   Conversation?        @relation("ConversationTickets", fields: [conversationId], references: [id], onDelete: Cascade)
+  contact        Contact?             @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  assignedUser   User?                @relation("AssignedTickets", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  assignedTeam   Team?                @relation("TeamTickets", fields: [assignedTeamId], references: [id], onDelete: SetNull)
+  resolvedBy     User?                @relation("ResolvedTickets", fields: [resolvedById], references: [id], onDelete: SetNull)
+  slaPolicy      TicketSlaPolicy?     @relation(fields: [slaPolicyId], references: [id], onDelete: SetNull)
   // Shared taxonomy with contacts — an org that already colour-codes "VIP" and
   // "billing" should not maintain a second parallel tag list.
-  tags          Tag[]             @relation("TicketTags")
-  events        TicketEvent[]
-  notifications Notification[]
-  messages      Message[]
+  tags           Tag[]                @relation("TicketTags")
+  events         TicketEvent[]
+  notifications  Notification[]
+  messages       Message[]
   // Back-reference for Conversation.activeTicketId.
-  activeOn      Conversation[]    @relation("ConversationActiveTicket")
+  activeOn       Conversation[]       @relation("ConversationActiveTicket")
   // Which sibling workspaces have been granted access to THIS ticket (see
   // TicketShare). Empty for the overwhelming majority — a ticket only becomes
   // cross-workspace when someone deliberately escalates it.
-  shares       TicketShare[]
-  attachments  TicketAttachment[]
+  shares         TicketShare[]
+  attachments    TicketAttachment[]
   // The cross-department conversation, and who still has an unread reply on it.
   threadMessages TicketMessage[]
   threadUnreads  TicketThreadUnread[]
@@ -3990,46 +4000,46 @@ model Ticket {
 }
 
 model TicketEvent {
-  id String @id @default(cuid())
+  id               String          @id @default(cuid())
   // The OWNING workspace of the ticket (denormalized from Ticket.workspaceId),
   // not the actor's. A shared ticket has ONE history, so every row on it
   // carries the same workspaceId regardless of which department wrote it — and
   // reads reach it through `ticketAccessWhere()` on the parent ticket, never by
   // a bare workspaceId filter. Who DID it is `actorWorkspaceId` below.
-  workspaceId   String
-  ticketId      String
+  workspaceId      String
+  ticketId         String
   // Which workspace the actor was acting in. Null for pre-share history and
   // for system/sweeper writes. This is what makes a shared log readable:
   // "Billing changed the status" instead of an unattributed change.
   actorWorkspaceId String?
-  kind          TicketEventKind
+  kind             TicketEventKind
   // Same before/after shape as ConversationEvent so one renderer covers both
   // timelines. Names (assignee, tag, field label) are SNAPSHOTTED at write time
   // so history keeps reading correctly after a rename or a departure.
-  before        Json?
-  after         Json?
+  before           Json?
+  after            Json?
   // Free text — the note body, and the optional "why" on a team handoff.
   //
   // A handoff without a reason is the most common way this feature fails in
   // practice: Sales receives a ticket and has to re-read the whole thread to
   // work out what Support wanted. Null on every other kind.
-  body          String?
+  body             String?
   // Nullable + SetNull: ticket history must outlive whoever made it.
-  actorUserId   String?
+  actorUserId      String?
   // Set when a /v1 partner call or a workflow made the change (actorUserId is
   // null then) — so automation is never attributed to nobody.
-  actorApiKeyId String?
-  createdAt     DateTime        @default(now())
+  actorApiKeyId    String?
+  createdAt        DateTime        @default(now())
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  ticket    Ticket    @relation(fields: [ticketId], references: [id], onDelete: Cascade)
-  actorUser User?     @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  workspace      Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ticket         Ticket             @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  actorUser      User?              @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
   // SetNull, not Cascade: a shared ticket's history must outlive the guest
   // workspace being deleted — the entry stays, unattributed.
-  actorWorkspace Workspace? @relation("TicketEventActorWorkspace", fields: [actorWorkspaceId], references: [id], onDelete: SetNull)
+  actorWorkspace Workspace?         @relation("TicketEventActorWorkspace", fields: [actorWorkspaceId], references: [id], onDelete: SetNull)
   // Files attached to THIS timeline entry (a comment with its evidence). A
   // ticket-level attachment has no event; see TicketAttachment.
-  attachments TicketAttachment[]
+  attachments    TicketAttachment[]
 
   // The detail page reads one ticket's timeline oldest-first.
   @@index([ticketId, createdAt])
@@ -4057,7 +4067,7 @@ model TicketEvent {
 // and reads go through `ticketAccessWhere()` on the parent ticket, never a bare
 // workspaceId filter.
 model TicketAttachment {
-  id          String @id @default(cuid())
+  id          String  @id @default(cuid())
   // The UPLOADER's workspace, for attribution ("added by Billing"). NOT the
   // read scope — see the note above.
   workspaceId String
@@ -4076,12 +4086,12 @@ model TicketAttachment {
   // Canonical R2 key — the authority, same rule as Message.mediaKey. Registered
   // in the blob-orphan sweeper's cross-check (four historical incidents of
   // exactly this omission silently deleting live files 24h later).
-  blobKey  String
+  blobKey   String
   // Stable (non-fetchable) object URL. Bytes reach the browser through
   // GET /api/tickets/:id/attachments/:attachmentId, same-origin streamed.
-  blobUrl  String
-  filename String
-  mimeType String
+  blobUrl   String
+  filename  String
+  mimeType  String
   // MediaKind ("image" | "video" | "audio" | "document" | "sticker") — a plain
   // string for the same reason as Message.mediaKind's neighbours: provenance
   // for rendering, not behaviour.
@@ -4091,11 +4101,11 @@ model TicketAttachment {
   uploadedById String?
   createdAt    DateTime @default(now())
 
-  workspace  Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  ticket     Ticket       @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  workspace  Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ticket     Ticket         @relation(fields: [ticketId], references: [id], onDelete: Cascade)
   event      TicketEvent?   @relation(fields: [eventId], references: [id], onDelete: Cascade)
   message    TicketMessage? @relation(fields: [messageId], references: [id], onDelete: Cascade)
-  uploadedBy User?        @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+  uploadedBy User?          @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
 
   // The detail page reads a ticket's files oldest-first; the timeline joins by
   // event.
@@ -4163,32 +4173,32 @@ model TicketView {
 // It also keeps the audit trail honest: read-state, optimistic-send ids and
 // (one day) editing do not belong hanging off an append-only audit row.
 model TicketMessage {
-  id String @id @default(cuid())
+  id                String   @id @default(cuid())
   // The ticket's OWNING workspace — the same convention as TicketEvent: one
   // thread per ticket, carrying the owner's id however many departments write
   // in it. Reads reach it through `ticketAccessWhere()` on the parent ticket,
   // never a bare workspaceId filter.
-  workspaceId String
-  ticketId    String
+  workspaceId       String
+  ticketId          String
   // WHICH department spoke. Nullable only to accept the backfill of comments
   // written before shares existed.
   authorWorkspaceId String?
   authorUserId      String?
   authorApiKeyId    String?
-  body              String  @db.Text
+  body              String   @db.Text
   // Optimistic-send idempotency, the same contract as TeamChannelMessage: a
   // retry of the same (ticket, author, tempId) returns the existing row rather
   // than posting twice. NULLs are distinct in Postgres, so API-key and
   // backfilled rows never collide on it.
-  clientTempId String?
-  createdAt    DateTime @default(now())
+  clientTempId      String?
+  createdAt         DateTime @default(now())
 
-  workspace       Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  ticket          Ticket     @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  workspace       Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ticket          Ticket               @relation(fields: [ticketId], references: [id], onDelete: Cascade)
   // SetNull: the conversation outlives whoever left. The UI renders "Removed
   // user" the same way the timeline does.
-  author          User?      @relation("TicketMessageAuthor", fields: [authorUserId], references: [id], onDelete: SetNull)
-  authorWorkspace Workspace? @relation("TicketMessageAuthorWorkspace", fields: [authorWorkspaceId], references: [id], onDelete: SetNull)
+  author          User?                @relation("TicketMessageAuthor", fields: [authorUserId], references: [id], onDelete: SetNull)
+  authorWorkspace Workspace?           @relation("TicketMessageAuthorWorkspace", fields: [authorWorkspaceId], references: [id], onDelete: SetNull)
   attachments     TicketAttachment[]
   // The unread markers anchored on this message ("New replies" divider).
   unreadAnchors   TicketThreadUnread[] @relation("TicketThreadUnreadSince")
@@ -4220,12 +4230,12 @@ model TicketMessage {
 // "every denormalization needs a reconciler" does not attach and there is
 // deliberately no drift sweeper.
 model TicketThreadUnread {
-  id String @id @default(cuid())
+  id             String   @id @default(cuid())
   // The ticket's OWNING workspace, same convention as above — NOT the
   // reader's tenant. The reader is `userId`.
-  workspaceId String
-  ticketId    String
-  userId      String
+  workspaceId    String
+  ticketId       String
+  userId         String
   // The message that made it unread. Insert is `skipDuplicates`, so a second
   // reply keeps the FIRST one — the divider sits at the first thing you
   // missed, not the last.
@@ -4401,7 +4411,7 @@ model TicketShare {
   organizationId String
 
   // The ONE ticket. Cascade: the grant is meaningless without it.
-  ticketId String
+  ticketId         String
   // Denormalized from `Ticket.workspaceId` for the "everything we shared out"
   // read. The ticket is the authority; this cannot drift because a ticket never
   // changes workspace.
@@ -4437,13 +4447,13 @@ model TicketShare {
   createdById String?
   createdAt   DateTime @default(now())
 
-  organization    Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  ticket          Ticket        @relation(fields: [ticketId], references: [id], onDelete: Cascade)
-  ownerWorkspace  Workspace     @relation("TicketSharesOut", fields: [ownerWorkspaceId], references: [id], onDelete: Cascade)
-  guestWorkspace  Workspace     @relation("TicketSharesIn", fields: [guestWorkspaceId], references: [id], onDelete: Cascade)
+  organization      Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  ticket            Ticket        @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  ownerWorkspace    Workspace     @relation("TicketSharesOut", fields: [ownerWorkspaceId], references: [id], onDelete: Cascade)
+  guestWorkspace    Workspace     @relation("TicketSharesIn", fields: [guestWorkspaceId], references: [id], onDelete: Cascade)
   guestConversation Conversation? @relation("TicketShareGuestConversation", fields: [guestConversationId], references: [id], onDelete: SetNull)
-  createdBy       User?         @relation(fields: [createdById], references: [id], onDelete: SetNull)
-  assignedUser    User?         @relation("TicketShareAssignee", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  createdBy         User?         @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  assignedUser      User?         @relation("TicketShareAssignee", fields: [assignedUserId], references: [id], onDelete: SetNull)
 
   // One grant per (ticket, workspace) — re-escalating to the same department is
   // a no-op, not a second key. A ticket CAN be shared with several departments.
@@ -5836,18 +5846,18 @@ model AiContextChunk {
 // Per-conversation native-AI state (correction #2). Default row is created
 // lazily on first eligibility check as ai_active when the team config is on.
 model AiConversationState {
-  id             String                @id @default(cuid())
-  workspaceId    String
-  workspace      Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  conversationId String                @unique
-  state          AiConvAutomationState @default(ai_active)
+  id               String                @id @default(cuid())
+  workspaceId      String
+  workspace        Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  conversationId   String                @unique
+  state            AiConvAutomationState @default(ai_active)
   // Who/when for an explicit pause (state = ai_paused). Plain user id, no FK.
-  pausedByUserId String?
-  pausedAt       DateTime?
-  stateChangedAt DateTime              @default(now())
+  pausedByUserId   String?
+  pausedAt         DateTime?
+  stateChangedAt   DateTime              @default(now())
   // Consecutive AI auto-replies since the last human/customer break — enforces
   // AiAssistantConfig.maxAutoRepliesPerConv.
-  autoReplyCount Int                   @default(0)
+  autoReplyCount   Int                   @default(0)
   // When the assistant last asked this customer for their email address (see
   // AiAssistantConfig.collectCustomerEmail). ASKED, not answered — it exists so
   // the question is asked ONCE. Nagging someone who declined on every thread
@@ -5856,7 +5866,7 @@ model AiConversationState {
   // is assistant bookkeeping, not a property of the person; one conversation
   // per contact makes it per-person in practice either way.
   emailRequestedAt DateTime?
-  updatedAt      DateTime              @updatedAt
+  updatedAt        DateTime              @updatedAt
 
   @@index([workspaceId])
 }
@@ -6202,11 +6212,11 @@ model Team {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  workspace Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   members   TeamMember[]
   /// Tickets currently owned by this team — the queue side of a handoff.
   /// See `Ticket.assignedTeamId`.
-  tickets   Ticket[]                 @relation("TeamTickets")
+  tickets   Ticket[]         @relation("TeamTickets")
   rules     AssignmentRule[]
 
   @@index([workspaceId, archivedAt])
@@ -6245,7 +6255,7 @@ model TeamMember {
   updatedAt DateTime @updatedAt
 
   policy Team @relation(fields: [policyId], references: [id], onDelete: Cascade)
-  user   User             @relation("AssignmentPolicyMemberships", fields: [userId], references: [id], onDelete: Cascade)
+  user   User @relation("AssignmentPolicyMemberships", fields: [userId], references: [id], onDelete: Cascade)
 
   // workspaceId deliberately absent from this unique: the leading cuid FK
   // already implies exactly one workspace (Batch D, 2026-07-27).
@@ -6281,8 +6291,8 @@ model AssignmentRule {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  policy    Team @relation(fields: [policyId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  policy    Team      @relation(fields: [policyId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, enabled, position])
 }

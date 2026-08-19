@@ -408,6 +408,10 @@ export function mapConversation(
     channel: c.channel as Channel,
     // Website-widget attribution — which site this chat came from.
     ...(c.webchatWidgetId ? { webchatWidgetId: c.webchatWidgetId } : {}),
+    // The visitor ended the session, so this thread can never reach them again.
+    // Only emitted when set — the composer reads it to stop accepting replies
+    // that would go nowhere.
+    ...(c.visitorEndedAt ? { visitorEndedAt: c.visitorEndedAt.toISOString() } : {}),
     ...(c.webchatWidget ? { webchatWidgetName: c.webchatWidget.name } : {}),
     // Channel-ACCOUNT attribution — which of the workspace's WhatsApp numbers /
     // Pages / IG handles this thread is on. Scalar already on the row, so it

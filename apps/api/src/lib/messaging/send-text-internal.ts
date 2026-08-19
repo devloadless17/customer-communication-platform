@@ -64,6 +64,11 @@ export class SendTextValidationError extends Error {
     | "contact_has_no_phone"
     | "provider_not_configured"
     | "outside_24h_window"
+    // Webchat: the visitor ended the session, rotating the browser identity this
+    // thread is addressed to. Permanent — unlike a closed window, nothing
+    // reopens it, so callers should surface it as "this chat is over", not
+    // "try again later".
+    | "visitor_ended_chat"
     | "empty_body"
     // Body exceeds the channel's `messageTextMaxChars`. Parity with the composer
     // and `/v1`, which both reject up front rather than letting Meta fail the
@@ -123,6 +128,8 @@ export async function sendTextInternal(
       // lastMessageAt feeds the timestamp-ordering guard below. Pulling it
       // here avoids a second roundtrip after the Meta send returns.
       lastMessageAt: true,
+      // Webchat: the visitor ended the session, so this thread is unreachable.
+      visitorEndedAt: true,
       contact: {
         select: {
           phoneNumber: true,
@@ -142,6 +149,17 @@ export async function sendTextInternal(
     throw new SendTextValidationError(
       "conversation_not_found",
       "conversation not found",
+    );
+  }
+  // The webchat visitor ended the session: their browser identity was rotated,
+  // so this conversation can never deliver again. The composer already refuses,
+  // but a UI gate is advisory — /v1, workflows and automations reach this same
+  // path, and a send that "succeeds" into a void is worse than a clear refusal.
+  if (conversation.visitorEndedAt) {
+    throw new SendTextValidationError(
+      "visitor_ended_chat",
+      "visitor_ended_chat",
+      "This visitor ended the chat, so replies can no longer reach them.",
     );
   }
   if (conversation.contact.blockedAt) {

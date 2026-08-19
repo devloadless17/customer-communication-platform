@@ -62,7 +62,8 @@ const http = createServer(async (req, res) => {
     }
     if (cmd.agentMessage && live) {
       const m = { id: "srv" + Date.now(), externalId: "se" + Date.now(), direction: "out", body: cmd.agentMessage.body,
-        senderName: cmd.agentMessage.senderName, status: "sent", createdAt: new Date().toISOString() };
+        senderName: cmd.agentMessage.senderName, status: "sent", createdAt: new Date().toISOString(),
+        ...(cmd.agentMessage.media ? { media: cmd.agentMessage.media } : {}) };
       state.history.push(m); live.emit("message", m);
     }
     if (cmd.emit && live) live.emit(cmd.emit.event, cmd.emit.data);
@@ -73,6 +74,18 @@ const http = createServer(async (req, res) => {
   if (url.pathname === "/host.html") {
     res.writeHead(200, { "content-type": "text/html" });
     return res.end(HOST_HTML);
+  }
+  // Media the widget renders through its own `mediaUrl()` builder, so image and
+  // video bubbles exercise the real layout path (a 1600x900 PNG is deliberately
+  // far wider than any bubble — that is what catches an unconstrained <img>).
+  if (url.pathname.startsWith("/api/widget/media/")) {
+    const w = 1600, h = 900;
+    // Minimal uncompressed-ish PNG via a data URI would not stream, so emit a
+    // tiny SVG instead: the browser lays it out at its intrinsic size just like
+    // a photo would.
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><rect width="${w}" height="${h}" fill="#123"/><text x="60" y="500" font-size="120" fill="#8ff">MEDIA ${w}x${h}</text></svg>`;
+    res.writeHead(200, { "content-type": "image/svg+xml" });
+    return res.end(svg);
   }
   if (url.pathname === "/api/widget/config") {
     res.writeHead(200, { "content-type": "application/json" });
@@ -128,6 +141,7 @@ widget.on("connection", (socket) => {
     if (ack) ack({ messages: (page && page.messages) || [], hasMore: state.olderPages.length > 0 });
   });
   socket.on("visitor:presence", (p) => state.presenceSeen.push(p));
+  socket.on("visitor:end", () => state.ended.push(Date.now()));
   socket.on("visitor:typing", () => {});
   socket.on("visitor:read", () => {});
   socket.on("visitor:received", () => {});

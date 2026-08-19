@@ -275,7 +275,7 @@
     "header{display:flex;align-items:center;gap:11px;padding:16px 17px;background:var(--c);background:linear-gradient(135deg,color-mix(in srgb,var(--c) 96%,#fff),color-mix(in srgb,var(--c) 88%,#000));color:var(--ct);flex:0 0 auto;box-shadow:inset 0 -1px 0 rgba(255,255,255,.10)}",
     ".hava{width:38px;height:38px;border-radius:12px;background:rgba(255,255,255,.16);box-shadow:inset 0 0 0 1px rgba(255,255,255,.14);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;position:relative;overflow:hidden;flex:0 0 auto}.hava img{width:100%;height:100%;object-fit:cover}",
     ".hdot{position:absolute;right:-2px;bottom:-2px;width:12px;height:12px;border-radius:9999px;background:#22c55e;box-shadow:0 0 0 2px var(--c)}.hdot.re{background:#f59e0b}.hdot.off{background:#9ca3af}",
-    ".htxt{flex:1;min-width:0}.htxt b{display:block;font-size:15px;font-weight:650;letter-spacing:-.012em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.25}.htxt small{font-size:11.5px;opacity:.82;letter-spacing:-.004em}",
+    ".htxt{flex:1;min-width:0}.htxt b{display:block;font-size:15px;font-weight:650;letter-spacing:-.012em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.25}.htxt small{font-size:11.5px;opacity:.82;letter-spacing:-.004em}.htxt small.live{opacity:1;font-weight:600}",
     // Drag-to-resize grip on the panel's OUTER top corner (the one pointing away
     // from the screen edge the panel is anchored to). Replaced an expand/restore
     // toggle button: two icon states in the header to pick between two fixed sizes,
@@ -307,12 +307,15 @@
     ".mr.out .bubble{background:var(--uc);background:linear-gradient(160deg,color-mix(in srgb,var(--uc) 97%,#fff),color-mix(in srgb,var(--uc) 90%,#000));color:var(--uct);border-bottom-right-radius:7px;box-shadow:0 2px 8px -2px color-mix(in srgb,var(--uc) 38%,transparent)}",
     ".mr.in .bubble{background:var(--inb);color:var(--ink);border:1px solid var(--border);border-bottom-left-radius:7px}",
     ".bubble a{color:inherit;text-decoration:underline;text-underline-offset:2px}",
+    // …except an attachment row, which is a control, not a link in prose. Needs
+    // to out-specify `.bubble a` above, which is why it is not just on `.doc`.
+    ".bubble a.doc,.bubble a.doc:hover{text-decoration:none}",
     ".meta{font-size:10.5px;color:var(--ink2);margin:4px 6px 0;display:flex;gap:4px;align-items:center;font-variant-numeric:tabular-nums;opacity:.9}.tick.err{color:#ef4444}.retry{color:#ef4444;cursor:pointer;text-decoration:underline}.tick.read{color:#38bdf8}",
     ".rep{opacity:0;background:transparent;border:0;color:var(--ink2);cursor:pointer;font-size:14px;align-self:center;padding:4px;border-radius:7px;transition:opacity .12s}.mr:hover .rep{opacity:.7}.rep:hover{opacity:1;background:color-mix(in srgb,var(--ink2) 14%,transparent)}",
     ".rq{border-left:3px solid rgba(0,0,0,.18);padding:2px 8px;margin-bottom:5px;font-size:12.5px;opacity:.85;max-height:44px;overflow:hidden}.mr.out .rq{border-left-color:rgba(255,255,255,.55)}.rq.jump{cursor:pointer}.rq.jump:hover{opacity:1}",
     // Brief highlight on the message a quote jumped to, so the eye lands on it.
     reduceMotion ? ".mr.flash .bubble{box-shadow:0 0 0 3px color-mix(in srgb,var(--c) 45%,transparent)}" : ".mr.flash .bubble{animation:rqring 1.4s ease}@keyframes rqring{0%,100%{box-shadow:0 0 0 0 transparent}28%,62%{box-shadow:0 0 0 3px color-mix(in srgb,var(--c) 45%,transparent)}}",
-    ".media{min-height:48px}.media img,.media video{max-width:var(--media-max,236px);max-height:250px;border-radius:13px;display:block;cursor:pointer;background:color-mix(in srgb,var(--ink2) 10%,transparent)}.media audio{width:100%;min-width:min(260px,100%);max-width:100%}",
+    ".media{min-height:48px;max-width:100%}.media img,.media video{max-width:236px;max-width:min(var(--media-max,236px),100%);height:auto;max-height:250px;border-radius:13px;display:block;cursor:pointer;background:color-mix(in srgb,var(--ink2) 10%,transparent)}.media audio{width:100%;min-width:min(260px,100%);max-width:100%}",
     // Voice note: a purpose-built row, not native controls. Sized in ch/flex so it
     // fills whatever width the bubble has — including a resized panel.
     ".vn{display:flex;align-items:center;gap:10px;min-width:180px;padding:2px 0}",
@@ -553,9 +556,17 @@
     flushGen++;
     flushing = false;
     resetVisitorIdentity();
-    // A fresh identity needs a fresh handshake — visitorId rides the socket auth,
-    // so the old connection can't be reused for the new session.
-    if (S.socket) { try { S.socket.disconnect(); } catch (_e) {} S.socket = null; }
+    // Tell the server the visitor ENDED — a disconnect alone is ambiguous (a
+    // closed tab returns and reads what it missed), and without this the agent
+    // keeps typing into a thread that can never reach anyone again. Emitted
+    // BEFORE the disconnect, and the socket is torn down on a short delay so the
+    // frame actually leaves the buffer; the UI below doesn't wait on it.
+    if (S.socket) {
+      var ending = S.socket;
+      S.socket = null;
+      try { ending.emit("visitor:end"); } catch (_e) {}
+      setTimeout(function () { try { ending.disconnect(); } catch (_e) {} }, 250);
+    }
     S.visitorId = newVisitorId();
     lsSet(K.visitor, S.visitorId);
     // The restart marker is only for the RELOAD path (boot reads it). In place we
@@ -899,8 +910,9 @@
     else { havaInit = document.createTextNode(initials(name)); hava.appendChild(havaInit); }
     hava.appendChild(hdot);
     // Explicit else — a cached subtitle the org has since cleared must be undone.
-    if (cfg.headerSubtitle) { subEl.textContent = cfg.headerSubtitle; subEl.style.display = ""; }
-    else { subEl.textContent = ""; subEl.style.display = "none"; }
+    // Routed through the one owner so a config (re)apply can't overwrite a live
+    // "Active now" with the static subtitle.
+    paintHeaderStatus();
     if (cfg.showBranding !== false) { footEl.textContent = "Powered by Loadless"; footEl.style.display = ""; } else footEl.style.display = "none";
     // "Just chat" — hide the header on an embedded (inline / full-page) widget, so the
     // host page's own chrome frames it. Only for INLINE: a floating bubble needs its
@@ -2037,18 +2049,41 @@
     // never collect an email. Orgs that do reply by email say so in awayMessage.
     awayBar.textContent = cfg.awayMessage || "We're away right now — leave a message and we'll get back to you.";
     awayBar.classList.toggle("on", away);
+    paintHeaderStatus();
+  }
+  /**
+   * The one line under the title, and the only place that writes it.
+   *
+   * Priority is deliberate:
+   *   1. a connection problem — nothing else matters if we can't deliver;
+   *   2. "Active now" when an agent is genuinely there. This is what the visitor
+   *      most wants to know and had no way to see: a second tick means DELIVERED,
+   *      not "a person is reading this", so a quiet thread was indistinguishable
+   *      from an unattended one. The avatar dot carried this in COLOUR alone,
+   *      which says nothing to someone who doesn't know the convention;
+   *   3. the org's own subtitle — which is also where "Away" defers to, because
+   *      the away BANNER already spells that state out in the body and repeating
+   *      it here would cost the org their line for no new information.
+   *
+   * "idle" (socket not opened yet, by design) and "connecting" are NOT failures:
+   * showing "Offline" for them flashed a scary status the instant a visitor
+   * opened the chat.
+   */
+  function paintHeaderStatus() {
+    var cfg = (S.cfg && S.cfg.config) || {};
+    var live = S.conn !== "reconnecting" && S.conn !== "offline";
+    var t =
+      S.conn === "reconnecting" ? "Reconnecting…"
+      : S.conn === "offline" ? "Offline"
+      : S.agentsOnline === true ? "Active now"
+      : cfg.headerSubtitle || (S.agentsOnline === false ? "Away" : "");
+    subEl.textContent = t;
+    subEl.style.display = t ? "" : "none";
+    subEl.classList.toggle("live", live && S.agentsOnline === true);
   }
   function setConn(c) {
     S.conn = c; paintPresence();
     reStrip.classList.toggle("on", c === "reconnecting");
-    var sub = (S.cfg && S.cfg.config && S.cfg.config.headerSubtitle) || "";
-    // "idle" (socket not opened yet, by design) and "connecting" are NOT failures —
-    // showing "Offline" for them flashed a scary status the moment a visitor opened
-    // the chat. Only a real reconnect/failure gets copy.
-    if (!sub) {
-      var t = c === "reconnecting" ? "Reconnecting…" : c === "offline" ? "Offline" : "";
-      subEl.textContent = t; subEl.style.display = t ? "" : "none";
-    }
   }
   function connect() {
     // transports: websocket FIRST, polling as the fallback. Websocket-only was a

@@ -2025,6 +2025,7 @@ function MessageThreadImpl({
             tags={tags}
             fieldDefinitions={fieldDefinitions}
             lastInboundAt={lastInboundAt}
+            visitorEndedAt={conversation.visitorEndedAt ?? null}
             aiEnabled={conversation.aiEnabled ?? true}
             aiAutopilotEnabled={aiAutopilotEnabled}
             status={conversation.status}

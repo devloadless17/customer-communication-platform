@@ -12,6 +12,7 @@ import {
   PhoneCall,
   PhoneIncoming,
   PhoneOff,
+  LogOut,
   RefreshCw,
   Tag,
   Ticket as TicketIcon,
@@ -252,6 +253,13 @@ function describe(e: ConversationActivityEvent): {
       return {
         icon: RefreshCw,
         text: <>Visitor started a new conversation</>,
+      };
+    // The visitor chose "End chat". Their browser identity is rotated, so this
+    // thread is permanently unreachable — the composer says so too.
+    case "visitor_ended_conversation":
+      return {
+        icon: LogOut,
+        text: <>Visitor ended the chat — replies can no longer reach them</>,
       };
     // Customer call-permission decisions. The actor is the CUSTOMER (no team
     // user), so these are self-contained lines like the visitor case above.

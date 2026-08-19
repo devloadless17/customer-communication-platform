@@ -1028,6 +1028,7 @@ export type ConversationEventKind =
   | "note_added"
   | "note_deleted"
   | "visitor_started_conversation"
+  | "visitor_ended_conversation"
   | "ai_paused"
   | "ai_resumed"
   | "call_completed"
@@ -1196,6 +1197,14 @@ export interface Conversation {
    * known; the name is resolved via a join on the primary read paths.
    */
   webchatWidgetId?: string | null;
+  /**
+   * `webchatwidget` threads only — when the VISITOR ended the session from the
+   * widget. Their browser identity is rotated at that moment, so this thread can
+   * never receive another inbound and the visitor will never see another
+   * outbound: the composer refuses replies rather than accepting them into a
+   * void. Absent on every other channel, and on threads still in play.
+   */
+  visitorEndedAt?: string | null;
   /**
    * The channel ACCOUNT this thread belongs to — which WhatsApp number, Page or
    * Instagram handle the customer is actually talking to. Re-stamped on every
