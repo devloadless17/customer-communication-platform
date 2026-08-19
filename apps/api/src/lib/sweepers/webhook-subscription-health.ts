@@ -158,6 +158,11 @@ interface CheckResult {
   detail: string;
   /** True when the missing subscription was re-established this tick. */
   healed?: boolean;
+  /** True when the verdict is about the PROBE connection's own token, not the
+   *  shared WABA subscription — apply to the probe only, never the group.
+   *  A dead token is per connection (channel-health.ts rule); fanning it out
+   *  flagged sibling numbers whose own tokens are fine. */
+  probeOnly?: boolean;
 }
 
 /** Graph 190 / OAuthException = the token itself is dead (vs a transient failure). */
@@ -371,7 +376,11 @@ async function checkWhatsapp(
     return { state: "broken", detail: `${missing} and re-subscribe failed: ${healed.error}` };
   } catch (err) {
     if (isTokenError(err)) {
-      return { state: "broken", detail: "access token dead (Graph 190) — reconnect required" };
+      return {
+        state: "broken",
+        detail: "access token dead (Graph 190) — reconnect required",
+        probeOnly: true,
+      };
     }
     return { state: null, detail: `transient: ${err instanceof Error ? err.message : String(err)}` };
   }
@@ -433,7 +442,13 @@ async function checkPageChannel(
     return { state: "broken", detail: `Page not subscribed to messages and re-subscribe failed: ${healed.error}` };
   } catch (err) {
     if (isTokenError(err)) {
-      return { state: "broken", detail: "access token dead (Graph 190) — reconnect required" };
+      // `probeOnly` is a no-op here (social units are single-connection) but
+      // keeps the token-dead contract uniform across checks.
+      return {
+        state: "broken",
+        detail: "access token dead (Graph 190) — reconnect required",
+        probeOnly: true,
+      };
     }
     return { state: null, detail: `transient: ${err instanceof Error ? err.message : String(err)}` };
   }
@@ -480,12 +495,13 @@ export async function sweepWebhookSubscriptionHealthOnce(): Promise<void> {
   // answer that cannot differ — and a WABA with four numbers burned four calls a
   // tick to learn one fact.
   //
-  // The RESULT still fans out to every connection under the WABA, so the Settings
-  // reconnect banner and the state transitions are byte-for-byte what they were.
-  // That fan-out is correct precisely because the resource is shared: if the WABA
-  // subscription is gone, every number under it loses inbound together. (Contrast
-  // `channel-health.ts`, where flagging siblings was a BUG — a dead access token is
-  // per number, so one number's failure says nothing about the next.)
+  // The RESULT fans out to every connection under the WABA, so the Settings
+  // reconnect banner and the state transitions reach each number. That fan-out is
+  // correct precisely because the resource is shared: if the WABA subscription is
+  // gone, every number under it loses inbound together. The ONE exception is a
+  // token-dead verdict (`CheckResult.probeOnly`): a dead access token is per
+  // number — the same rule that made flagging siblings a BUG in
+  // `channel-health.ts` — so it stays on the probe connection.
   //
   // Social stays per connection: there the subscription is per PAGE, and a Page is
   // reached through its own connection.
@@ -541,7 +557,11 @@ export async function sweepWebhookSubscriptionHealthOnce(): Promise<void> {
                 conn.workspaceId,
                 conn.id,
               );
-        for (const target of unit.applyTo) await applyResult(target, result);
+        // Subscription / re-parent verdicts are about the shared WABA and fan
+        // out to every number under it; a token-dead verdict is about the
+        // probe's own credentials and stays on the probe.
+        const targets = result.probeOnly ? [conn] : unit.applyTo;
+        for (const target of targets) await applyResult(target, result);
       } catch (err) {
         if (isPoolClosedError(err)) throw err;
         console.warn(

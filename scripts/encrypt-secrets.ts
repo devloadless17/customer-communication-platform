@@ -27,10 +27,19 @@
  *   docker compose exec --workdir /app api node -r @swc-node/register scripts/encrypt-secrets.ts --dry-run
  *
  * Covers every envelope-encrypted secret location in the current schema:
- *   - ChannelConnection.secrets        { accessToken?, appSecret? }
+ *   - ChannelConnection.secrets        { accessToken?, appSecret?,
+ *                                        pageAccessToken? (messenger),
+ *                                        igAccessToken? (instagram) }
+ *   - MetaConnection.secrets            { appSecret?, systemUserToken? }
+ *   - PendingSubscriptionRelease.secrets{ accessToken?, appSecret? }
  *   - OutboundWebhook.secret            string
  *   - Workflow.triggerConfig.secret     string (incoming_webhook HMAC)
  *   - Workflow.graph.nodes[].config     http_request bearerToken + customHeaders
+ *
+ * When Embedded Signup ships, WhatsappBusinessAccount.secrets (business token)
+ * starts being written — add a pass here IN THE SAME COMMIT. A secret field
+ * this script misses silently survives on the OLD key and fails GCM auth on
+ * the first decrypt after rotation (observed class: audit 2026-08-19, S7-1).
  *
  * NOT covered (by design): WorkspaceApiKey stores a one-way `tokenHash`, not
  * reversible ciphertext — there's nothing to re-encrypt, and a key rotation
@@ -146,7 +155,10 @@ async function run(): Promise<void> {
     const secrets = (conn.secrets ?? {}) as Record<string, unknown>;
     const next: Record<string, unknown> = { ...secrets };
     let changed = false;
-    for (const field of ["accessToken", "appSecret"]) {
+    // pageAccessToken (messenger) and igAccessToken (instagram) live in the
+    // same JSON column — omitting them left every social connection on the OLD
+    // key after a rotation, failing GCM auth on the next send (S7-1).
+    for (const field of ["accessToken", "appSecret", "pageAccessToken", "igAccessToken"]) {
       const v = secrets[field];
       if (typeof v !== "string" || v.length === 0) continue;
       const rw = normalize(v);
@@ -249,6 +261,67 @@ async function run(): Promise<void> {
       console.log(`  Workflow ${wf.id}: trigger/graph secrets re-encrypted`);
       if (!DRY_RUN) {
         await db.workflow.update({ where: { id: wf.id }, data });
+      }
+    }
+  }
+
+  // 4. MetaConnection.secrets { appSecret?, systemUserToken? } — the org-wide
+  // Meta credentials every Page token derives from and the PRIMARY inbound
+  // HMAC candidate. Missed until 2026-08-19 (S7-1): a rotation left them on
+  // the old key, so credential resync and webhook verification silently died.
+  const metaConns = await db.metaConnection.findMany({ select: { id: true, secrets: true } });
+  for (const conn of metaConns) {
+    const secrets = (conn.secrets ?? {}) as Record<string, unknown>;
+    const next: Record<string, unknown> = { ...secrets };
+    let changed = false;
+    for (const field of ["appSecret", "systemUserToken"]) {
+      const v = secrets[field];
+      if (typeof v !== "string" || v.length === 0) continue;
+      const rw = normalize(v);
+      if (rw !== null) {
+        next[field] = rw;
+        changed = true;
+      }
+    }
+    if (changed) {
+      rewritten++;
+      console.log(`  MetaConnection ${conn.id}: secrets re-encrypted`);
+      if (!DRY_RUN) {
+        await db.metaConnection.update({
+          where: { id: conn.id },
+          data: { secrets: next as Prisma.InputJsonValue },
+        });
+      }
+    }
+  }
+
+  // 5. PendingSubscriptionRelease.secrets { accessToken?, appSecret? } —
+  // ciphertext copies carried for the retry sweeper. Rows are short-lived, but
+  // one that straddles a rotation would fail decrypt at retry time and give up.
+  const pendings = await db.pendingSubscriptionRelease.findMany({
+    select: { id: true, secrets: true },
+  });
+  for (const row of pendings) {
+    const secrets = (row.secrets ?? {}) as Record<string, unknown>;
+    const next: Record<string, unknown> = { ...secrets };
+    let changed = false;
+    for (const field of ["accessToken", "appSecret"]) {
+      const v = secrets[field];
+      if (typeof v !== "string" || v.length === 0) continue;
+      const rw = normalize(v);
+      if (rw !== null) {
+        next[field] = rw;
+        changed = true;
+      }
+    }
+    if (changed) {
+      rewritten++;
+      console.log(`  PendingSubscriptionRelease ${row.id}: secrets re-encrypted`);
+      if (!DRY_RUN) {
+        await db.pendingSubscriptionRelease.update({
+          where: { id: row.id },
+          data: { secrets: next as Prisma.InputJsonValue },
+        });
       }
     }
   }

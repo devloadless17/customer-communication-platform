@@ -29,7 +29,10 @@ import type { Channel } from "@ccp/shared/types";
 
 import { db } from "@/lib/db";
 
+import { invalidateProviderConfig } from "./config";
 import { TtlCache } from "./config-cache";
+import { invalidateInstagramConfig } from "./instagram-config";
+import { invalidateMessengerConfig } from "./messenger-config";
 import { GRAPH_BASE, graphPostJson } from "./meta-graph";
 
 /** The three channels Meta's business-messaging Conversions API covers. */
@@ -75,10 +78,11 @@ function datasetKey(workspaceId: string, channel: ConversionsChannel, hostId: st
  * Read-through order: in-process cache → `ChannelConnection.config.capiDatasetId`
  * (when the caller knows which connection row the thread is bound to) →
  * `POST /{host-id}/dataset`. A freshly minted id is persisted back into the
- * connection's config opportunistically — best-effort read-modify-write, so a
- * concurrent settings save can clobber it; that is acceptable because the
- * `/dataset` edge is idempotent and the next resolve simply re-fetches the
- * same id. Never a schema column (CLAUDE.md: config JSON is the home for
+ * connection's config opportunistically — CAS-guarded on `updatedAt`, because
+ * a settings save replaces the WHOLE config JSON and a blind read-modify-write
+ * spanning the Graph round-trip would revert it. On a lost race the save wins
+ * and the id is simply re-resolved next send (the `/dataset` edge is
+ * idempotent). Never a schema column (CLAUDE.md: config JSON is the home for
  * per-connection non-secret facts).
  */
 export async function resolveConversionsDatasetId(args: {
@@ -126,15 +130,37 @@ export async function resolveConversionsDatasetId(args: {
   datasetCache.set(key, datasetId);
 
   if (conn) {
-    // Opportunistic persist so the id survives a restart. Failure is fine —
-    // the cache carries this process and the edge re-answers the same id.
+    // Opportunistic persist so the id survives a restart. CAS on `updatedAt`
+    // (same style as the sweepers' config writes): the Graph POST above is a
+    // window a concurrent settings save can land in, and merging into the copy
+    // read BEFORE it would silently revert that save. Re-read, merge, and only
+    // write if nobody else did — on a lost race the id re-resolves next send.
     try {
-      await db.channelConnection.update({
-        where: { id: conn.id },
-        data: { config: { ...config, [CONFIG_DATASET_KEY]: datasetId } },
+      const row = await db.channelConnection.findFirst({
+        where: { id: conn.id, workspaceId: args.workspaceId },
+        select: { config: true, updatedAt: true },
       });
+      if (row) {
+        const won = await db.channelConnection.updateMany({
+          where: { id: conn.id, workspaceId: args.workspaceId, updatedAt: row.updatedAt },
+          data: {
+            config: {
+              ...((row.config ?? {}) as Record<string, unknown>),
+              [CONFIG_DATASET_KEY]: datasetId,
+            },
+          },
+        });
+        if (won.count > 0) {
+          // The cached send config snapshots this row — drop it the same way
+          // the settings path does, per channel.
+          if (args.channel === "whatsapp") invalidateProviderConfig(args.workspaceId);
+          else if (args.channel === "messenger") invalidateMessengerConfig(args.workspaceId);
+          else invalidateInstagramConfig(args.workspaceId);
+        }
+      }
     } catch {
-      // Row deleted / concurrent write — nothing to reconcile, see above.
+      // Row deleted / DB blip — nothing to reconcile; the cache carries this
+      // process and the edge re-answers the same id.
     }
   }
   return datasetId;
