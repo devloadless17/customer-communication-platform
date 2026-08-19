@@ -1,54 +1,24 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 
-import { useSocketReconnect } from "@/hooks/use-socket-reconnect";
 import { apiFetch } from "@/lib/api/client-fetch";
-import { getClientSocket } from "@/lib/socket-client";
 
 import { Section } from "../contact-panel/section";
+import { useAiOverview, type AiSessionSummary } from "./ai-overview-context";
 
 /**
  * Two contact-panel sections, in this order (placement map):
  *   AI Customer Understanding  — PERSON-level memory (durable), curated by agents.
  *   Latest Session Summary     — SESSION-level rollup (current open session).
  * They are deliberately distinct surfaces (correction #7 — never merged).
- * Data comes from one /overview fetch; persisted server-side so it survives
- * refresh/reconnect.
+ * Data comes from the thread's shared /overview (AiOverviewProvider); persisted
+ * server-side so it survives refresh/reconnect.
+ *
+ * Renders NOTHING until that overview says the workspace has the assistant
+ * enabled: a workspace that never turned AI on must see no AI chrome, and none
+ * of these controls may reach the LLM routes there.
  */
-
-interface MemoryItem {
-  id: string;
-  kind: string;
-  value: string;
-  confidence: number;
-  status: "candidate" | "confirmed" | "rejected";
-}
-interface SessionSummary {
-  customerGoal: string | null;
-  importantContext: string | null;
-  questions: string[];
-  answers: string[];
-  commitments: string[];
-  openQuestions: string[];
-  requiredFollowUp: string | null;
-  sentiment: string | null;
-  language: string | null;
-  tone: string | null;
-  latestStatus: string | null;
-  overallBrief: string | null;
-  updatedAt: string;
-}
-interface HallucinationSummary {
-  ratePercent: number | null;
-  scoredCount: number;
-  flagged: Array<{ messageId: string; risk: number; notes: string | null }>;
-}
-interface Overview {
-  memory: MemoryItem[];
-  summary: SessionSummary | null;
-  hallucination: HallucinationSummary | null;
-}
 
 const KIND_LABEL: Record<string, string> = {
   preferred_language: "Preferred language",
@@ -67,7 +37,7 @@ const KIND_LABEL: Record<string, string> = {
 const TAG_KINDS = new Set(["interest", "recurring_need", "preference"]);
 
 export function AiConversationPanel({ conversationId }: { conversationId: string }) {
-  const [data, setData] = useState<Overview | null>(null);
+  const ai = useAiOverview();
   // Date-range summary: separate, on-demand, spans the WHOLE conversation —
   // not part of /overview. `from`/`to` are the (initially empty)
   // <input type="date"> values; `range` is the last FETCHED result, kept
@@ -77,48 +47,9 @@ export function AiConversationPanel({ conversationId }: { conversationId: string
   const [rangeTo, setRangeTo] = useState("");
   const [rangeLoading, setRangeLoading] = useState(false);
   const [rangeError, setRangeError] = useState<string | null>(null);
-  const [range, setRange] = useState<SessionSummary | null | undefined>(undefined); // undefined = never fetched
+  const [range, setRange] = useState<AiSessionSummary | null | undefined>(undefined); // undefined = never fetched
 
-  const load = useCallback(async () => {
-    const res = await apiFetch(`/api/ai-assistant/conversations/${conversationId}/overview`);
-    if (!res.ok) return;
-    setData((await res.json()) as Overview);
-  }, [conversationId]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  // §10 convergence: memory / summary / flag frames are sparse, so one missed
-  // during a drop past the socket recovery window leaves the panel showing a
-  // superseded brief for as long as the thread stays open. The date-range
-  // result below is agent-driven and deliberately left alone.
-  useSocketReconnect(load);
-
-  // Realtime: refetch when the system updates this conversation's summary, the
-  // customer's memory, or flags a newly-sent AI reply as a hallucination risk
-  // (ai.summary_changed / ai.memory_changed / ai.message_flagged).
-  useEffect(() => {
-    const socket = getClientSocket();
-    const onSummary = (p: { workspaceId: string; conversationId: string }) => {
-      if (p.conversationId === conversationId) void load();
-    };
-    const onMemory = (p: { workspaceId: string; conversationId: string; customerId: string }) => {
-      if (p.conversationId === conversationId) void load();
-    };
-    const onFlag = (p: { workspaceId: string; conversationId: string }) => {
-      if (p.conversationId === conversationId) void load();
-    };
-    socket.on("ai:summary", onSummary);
-    socket.on("ai:memory", onMemory);
-    socket.on("ai:flag", onFlag);
-    return () => {
-      socket.off("ai:summary", onSummary);
-      socket.off("ai:memory", onMemory);
-      socket.off("ai:flag", onFlag);
-    };
-  }, [conversationId, load]);
-
+  const data = ai?.overview ?? null;
   const memory = (data?.memory ?? []).filter((m) => m.status !== "rejected");
   const attributes = memory.filter((m) => !TAG_KINDS.has(m.kind));
   // Only the most recent, SURE (confirmed) interests — capped so the panel stays
@@ -144,7 +75,7 @@ export function AiConversationPanel({ conversationId }: { conversationId: string
         setRangeError("Couldn't load a summary for that range.");
         return;
       }
-      const json = (await res.json()) as { summary: Partial<SessionSummary> | null };
+      const json = (await res.json()) as { summary: Partial<AiSessionSummary> | null };
       setRange(
         json.summary
           ? {
@@ -177,12 +108,16 @@ export function AiConversationPanel({ conversationId }: { conversationId: string
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ status: "confirmed" }),
     });
-    void load();
+    ai?.reload();
   }
   async function remove(id: string) {
     await apiFetch(`/api/ai-assistant/memory/${id}`, { method: "DELETE" });
-    void load();
+    ai?.reload();
   }
+
+  // No AI chrome at all until the overview has loaded AND the workspace has the
+  // assistant enabled (`state: "disabled"` — see ai-inbox.service overview()).
+  if (!ai?.enabled) return null;
 
   return (
     <>

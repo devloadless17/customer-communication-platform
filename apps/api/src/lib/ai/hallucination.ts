@@ -39,7 +39,13 @@ export interface ConversationHallucinationSummary {
  * window is served by the ([conversationId, timestamp desc, id desc]) index.
  */
 const SCAN_MESSAGES = 300;
-/** The panel lists these; a runaway thread must not ship hundreds of rows. */
+/**
+ * The panel lists these; a runaway thread must not ship hundreds of rows. They
+ * are also what the thread's per-bubble badge reads (the badge no longer
+ * fetches per message), so the cap keeps the NEWEST flags: those are the
+ * bubbles an agent is looking at. `aiMessageMetadata` comes back in no defined
+ * order, so the sort below is what makes that true.
+ */
 const MAX_FLAGGED = 25;
 
 export async function getConversationHallucinationSummary(
@@ -66,6 +72,8 @@ export async function getConversationHallucinationSummary(
   if (!rows.length) return { ratePercent: null, scoredCount: 0, flagged: [] };
 
   const sum = rows.reduce((acc, r) => acc + (r.hallucinationRisk ?? 0), 0);
+  // `messages` is already newest-first, so its index orders the flags by recency.
+  const recency = new Map(messages.map((m, i) => [m.id, i]));
   const flagged = rows
     .filter((r) => (r.hallucinationRisk ?? 0) >= HALLUCINATION_FLAG_THRESHOLD)
     .map((r) => ({
@@ -73,6 +81,10 @@ export async function getConversationHallucinationSummary(
       risk: r.hallucinationRisk ?? 0,
       notes: r.hallucinationNotes,
     }))
+    .sort(
+      (a, b) =>
+        (recency.get(a.messageId) ?? Infinity) - (recency.get(b.messageId) ?? Infinity),
+    )
     .slice(0, MAX_FLAGGED);
 
   return {

@@ -45,6 +45,7 @@ import { ConnectionBanner } from "./connection-banner";
 import { ConversationList } from "./conversation-list";
 import { SnippetsProvider } from "./snippets-context";
 import { MessageFlagsProvider } from "./message-flags-context";
+import { AiOverviewProvider } from "./ai/ai-overview-context";
 import { ConversationViewersProvider } from "@/features/inbox/contexts/conversation-viewers-context";
 import { MessageThread } from "./message-thread";
 import { ContactPanel } from "./contact-panel";
@@ -1704,7 +1705,10 @@ function ThreadWorkspace({
     ],
   );
   return (
-    <>
+    // ONE /overview fetch for the whole thread: the contact panel's AI sections
+    // and every outbound bubble's hallucination badge read it from here. The
+    // badge used to fetch per message — see ai-overview-context.tsx.
+    <AiOverviewProvider conversationId={thread.data.conversation.id}>
       <MessageThread
         data={thread.data}
         initialMayBeStale={initialMayBeStale}
@@ -1769,7 +1773,7 @@ function ThreadWorkspace({
           anchors at the bottom (newest) on first layout — the SSR'd thread paints
           at the latest message with zero JS, no hydration jump, no inline script,
           no CSP nonce. */}
-    </>
+    </AiOverviewProvider>
   );
 }
 

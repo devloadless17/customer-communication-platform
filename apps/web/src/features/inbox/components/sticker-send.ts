@@ -1,6 +1,8 @@
 import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
 
+import { newClientTempId } from "./reply-box/utils";
+
 /**
  * POST a sticker pick.
  *
@@ -23,8 +25,14 @@ export async function sendSticker(
         conversationId,
         stickerId: sticker.id,
         ...(sticker.imageUrl ? { imageUrl: sticker.imageUrl } : {}),
-        // Idempotency: a double-tap on the tile must not send two stickers.
-        clientTempId: `sticker-${sticker.id}-${conversationId}`,
+        // Idempotency, per ATTEMPT — the same fresh-id-per-send the composer
+        // mints. The server's lock keys on (workspace, user, conversation,
+        // clientTempId) and caches a SUCCESS for 5 minutes, so a deterministic
+        // id made "send that sticker again" within the window replay the first
+        // result: no second sticker, no error, nothing on screen. Double-tap is
+        // already blocked by the picker's `sending` gate; this id only has to
+        // dedupe a re-POST of THIS attempt.
+        clientTempId: newClientTempId(),
       }),
     });
     if (!res.ok) {

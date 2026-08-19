@@ -43,8 +43,11 @@ export function AiSuggestionBar({ conversationId }: { conversationId: string }) 
   const load = useCallback(async () => {
     const res = await apiFetch(`/api/ai-assistant/conversations/${conversationId}/overview`);
     if (!res.ok) return;
-    const data = (await res.json()) as { suggestion?: Suggestion | null };
-    const next = data.suggestion ?? null;
+    const data = (await res.json()) as { state?: string; suggestion?: Suggestion | null };
+    // `state: "disabled"` = the workspace never enabled the assistant, so no AI
+    // chrome may render — including a draft left over from before it was turned
+    // off, whose Regenerate would drive an LLM call the workspace opted out of.
+    const next = data.state === "disabled" ? null : data.suggestion ?? null;
     // Re-seed the textarea only for a DIFFERENT draft: a re-read of the draft
     // already open (socket frame, reconnect convergence) must not discard the
     // agent's in-progress edit.

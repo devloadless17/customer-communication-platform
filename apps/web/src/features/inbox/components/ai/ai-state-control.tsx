@@ -2,9 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { apiErrorMessageFrom, NETWORK_ERROR_MESSAGE } from "@ccp/shared/api/error-message";
+
 import { useSocketReconnect } from "@/hooks/use-socket-reconnect";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { getClientSocket } from "@/lib/socket-client";
+import { toast } from "@/lib/toast";
 
 /**
  * Conversation-header AI state chip + actions (placement map §4):
@@ -87,17 +90,29 @@ export function AiStateControl({
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
 
+  // Never rejects: `apiFetch` THROWS on a 401 / network failure, and the call
+  // site fires this as `void act(...)` — an unhandled rejection left the chip
+  // unchanged with nothing on screen to say the pause/resume didn't happen.
   async function act(action: string) {
     setOpen(false);
-    const res = await apiFetch(`/api/ai-assistant/conversations/${conversationId}/state`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ action }),
-    });
-    if (res.ok) {
+    try {
+      const res = await apiFetch(`/api/ai-assistant/conversations/${conversationId}/state`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as
+          | { error?: unknown; detail?: unknown }
+          | null;
+        toast.error(apiErrorMessageFrom(body, "Couldn't change the AI state."));
+        return;
+      }
       const data = (await res.json()) as { state?: { state?: State } };
       if (data.state?.state) setState(data.state.state);
       else void load();
+    } catch {
+      toast.error(NETWORK_ERROR_MESSAGE);
     }
   }
 
