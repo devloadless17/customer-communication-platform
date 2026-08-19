@@ -38,8 +38,10 @@ Resume state: if a session is cut, continue from the first section below not mar
 | Live phase: batched e2e | RUN 1 DONE — **592 passed / 11 failed**. Green: batches 0,1,2,6,7. Failed: 3,4,5,8. |
 | Live phase: rerun of failing batches | DONE — all 4 re-run alone on fresh stacks; see "Live-phase results" below. |
 | Memory | `full-system-audit-2026-08-19.md` written + indexed |
-| Live phase: meta / multiaccount / uiux | meta + multiaccount PASS; uiux running |
-| Final gate chain | pending (re-run `pnpm check` + api vitest before finishing — both were green at 6f02970a) |
+| Live phase: meta / multiaccount / uiux | ALL PASS — meta 173, multiaccount 46, uiux 98 (3 real WCAG AA contrast bugs found + fixed, a10d31ea) |
+| Two-session realtime spec | ADDED (f01b1e03) — 2 open findings recorded as `test.fixme` |
+| Cleanup before push | DONE (2c2377f3) — stale VERIFICATION docs, dead CLAUDE.md reference, audit scratch files, 1.7 GB merged worktree |
+| Final gate chain | **PASS at 2c2377f3** — `pnpm check` exit 0 (all 8 checkers), api vitest 148 files / 1560 tests |
 
 ## Gate history
 - 2026-08-19 post-Wave-1-fixes: `pnpm check` exit 0; api vitest 1559/1559; partial-index tripwire green.
