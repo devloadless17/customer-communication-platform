@@ -4559,7 +4559,20 @@ async function buildCardsForSend(
             },
       ...(card.body ? { body: card.body.map(resolve) } : {}),
       ...(card.buttons
-        ? { buttons: card.buttons.map((b) => ({ ...b, text: resolve(b.text) })) }
+        ? {
+            // URL suffixes are percent-encoded AFTER token resolution with the
+            // same identity-passthrough encoder the top-level buttons use — a
+            // resolved token can carry the space/`:`/`|` characters Meta
+            // rejects unencoded. Cards never carry auth OTP codes, so there is
+            // no exemption here.
+            buttons: card.buttons.map((b) => {
+              const text = resolve(b.text);
+              return {
+                ...b,
+                text: b.subType === "url" ? encodeUrlButtonValue(text) : text,
+              };
+            }),
+          }
         : {}),
     })),
   );

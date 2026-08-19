@@ -515,7 +515,11 @@ export function requiredCarouselCards(
         (header?.format ?? "").toUpperCase() === "VIDEO"
           ? ("video" as const)
           : ("image" as const),
-      bodyVarCount: positionalPlaceholderIndices(cardBody?.text ?? "").length,
+      // MAX index, same rule as the main body (`countTemplatePlaceholders`) —
+      // values are supplied positionally 1..N, so an occurrence count
+      // over-demands when a placeholder repeats ("{{1}} … {{1}}" takes ONE
+      // value) and builds a wrong wire shape.
+      bodyVarCount: countTemplatePlaceholders(cardBody?.text ?? ""),
       buttons: buttons.flatMap<{
         index: number;
         subType: "url" | "quick_reply" | "copy_code";
@@ -594,6 +598,11 @@ function validateCarousel(
         `${label}'s body is ${bodyText.length} characters — a card caps at ${CAROUSEL_LIMITS.cardBodyMaxLength}.`,
       );
     }
+    // Card body placeholders obey the same 1..N-no-gaps rule as the main body,
+    // and `requiredCarouselCards` reads the MAX index — a gap would demand a
+    // send-time value for a placeholder the card never renders.
+    const bodyIndices = positionalPlaceholderIndices(bodyText);
+    if (bodyIndices.length > 0) validateConsecutive("carousel", bodyIndices, push);
 
     const buttons = cardButtons?.buttons ?? [];
     if (buttons.length > CAROUSEL_LIMITS.maxButtonsPerCard) {

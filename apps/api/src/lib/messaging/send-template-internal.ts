@@ -588,12 +588,19 @@ export async function sendTemplateInternal(
   const cardsForSend = args.variables.cards
     ? await Promise.all(
         args.variables.cards.map(async (card) => {
+          // A card's dynamic URL suffix gets the same identity-passthrough
+          // percent-encoding as the top-level buttons above. Cards never carry
+          // an auth OTP code (auth templates have no carousel), so there is no
+          // otpKeys exemption here.
+          const buttons = card.buttons?.map((b) =>
+            b.subType === "url" ? { ...b, text: encodeUrlButtonValue(b.text) } : b,
+          );
           const link = card.headerMedia.link;
-          if (card.headerMedia.id || !link || !blobStorage.isOwnUrl(link)) return card;
-          return {
-            ...card,
-            headerMedia: { ...card.headerMedia, link: await blobStorage.presignGetUrl(link) },
-          };
+          const headerMedia =
+            card.headerMedia.id || !link || !blobStorage.isOwnUrl(link)
+              ? card.headerMedia
+              : { ...card.headerMedia, link: await blobStorage.presignGetUrl(link) };
+          return { ...card, headerMedia, ...(buttons ? { buttons } : {}) };
         }),
       )
     : undefined;

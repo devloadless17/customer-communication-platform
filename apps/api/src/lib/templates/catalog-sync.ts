@@ -132,6 +132,9 @@ export async function syncTemplateCatalog(workspaceId: string): Promise<CatalogS
     if (config.wabaAccountId !== waba.id) {
       result.failed.push({
         wabaId: waba.externalWabaId,
+        // `failed[].error` is a per-WABA report string (siblings carry raw
+        // `err.message`), not the HTTP envelope.
+        // error-key-checker: column-not-envelope
         error: `resolved credentials point at a different WABA (${config.wabaId ?? "none"})`,
       });
       continue;

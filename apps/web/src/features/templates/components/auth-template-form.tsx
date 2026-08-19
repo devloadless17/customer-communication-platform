@@ -212,6 +212,8 @@ export function AuthTemplateForm() {
     otpType,
     addSecurity,
     expiryMinutes,
+    ttlSeconds,
+    ttlValid,
     needsApps,
     apps,
     zeroTapTerms,

@@ -1180,6 +1180,7 @@ export function TemplateForm({
                 draft={carousel}
                 onChange={setCarousel}
                 issues={issuesFor("carousel")}
+                editingTemplateId={editing?.id ?? null}
               />
             </Section>
           )}

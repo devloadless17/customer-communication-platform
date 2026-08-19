@@ -112,11 +112,14 @@ export function CarouselEditor({
   draft,
   onChange,
   issues,
+  editingTemplateId = null,
 }: {
   draft: CarouselDraft;
   onChange: (next: CarouselDraft) => void;
   /** Messages from the shared validator, rendered verbatim. */
   issues: string[];
+  /** Set on an EDIT — card uploads then scope by template, not accountId. */
+  editingTemplateId?: string | null;
 }) {
   const patch = useCallback(
     (p: Partial<CarouselDraft>) => onChange({ ...draft, ...p }),
@@ -249,6 +252,7 @@ export function CarouselEditor({
               index={i}
               card={card}
               draft={draft}
+              editingTemplateId={editingTemplateId}
               onPatch={(p) => patchCard(card.id, p)}
               onRemove={
                 draft.cards.length > CAROUSEL_LIMITS.minCards
@@ -311,12 +315,14 @@ function CardRow({
   index,
   card,
   draft,
+  editingTemplateId,
   onPatch,
   onRemove,
 }: {
   index: number;
   card: CarouselCardDraft;
   draft: CarouselDraft;
+  editingTemplateId: string | null;
   onPatch: (p: Partial<CarouselCardDraft>) => void;
   /** Absent while at the 2-card minimum. */
   onRemove?: () => void;
@@ -331,6 +337,12 @@ function CardRow({
   const templateAccountQuery = templateAccountId
     ? `?accountId=${encodeURIComponent(templateAccountId)}`
     : "";
+  // On an EDIT, name the template instead of the account: the server resolves
+  // the WABA from the row rather than trusting a query param a link is free to
+  // drop — same rule as the form's own header upload (onHeaderFileChange).
+  const uploadQuery = editingTemplateId
+    ? `?templateId=${encodeURIComponent(editingTemplateId)}`
+    : templateAccountQuery;
 
   const upload = useCallback(
     async (file: File) => {
@@ -344,10 +356,10 @@ function CardRow({
         const fd = new FormData();
         fd.append("file", file);
         const res = await apiFetch(
-          // Same account scope the template-form's own uploads carry — the
-          // header asset must be uploaded under the app the template's WABA
-          // account uses, read from the page URL the templates view stamped.
-          `/api/workspace/whatsapp/templates/upload-media${templateAccountQuery}`,
+          // Same scope the template-form's own uploads carry — templateId on
+          // an edit, the page URL's accountId on a create — so the card asset
+          // is minted under the app the template's WABA account uses.
+          `/api/workspace/whatsapp/templates/upload-media${uploadQuery}`,
           {
             method: "POST",
             body: fd,
@@ -377,7 +389,7 @@ function CardRow({
         setUploading(false);
       }
     },
-    [onPatch, templateAccountQuery],
+    [onPatch, uploadQuery],
   );
 
   return (
