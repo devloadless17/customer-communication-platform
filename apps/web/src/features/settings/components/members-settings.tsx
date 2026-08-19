@@ -730,7 +730,13 @@ function UserRow({
             {roleLabel(user.role)}
           </Badge>
         )}
-        {(manageAccount || canDelete) && (
+        {/* `!isSelf` is part of the CONDITION, not just of the items: every entry
+            below is either hidden for your own row (reset password, delete) or
+            rendered disabled (disable sign-in — you may not lock yourself out).
+            Without it the trigger still appeared on your own row and opened a
+            menu with nothing actionable in it, which reads as a button that does
+            nothing. A control that can never act should not be offered. */}
+        {!isSelf && (manageAccount || canDelete) && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
