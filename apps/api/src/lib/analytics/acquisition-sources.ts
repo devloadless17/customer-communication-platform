@@ -61,7 +61,7 @@ export interface AcquisitionSourceRow {
 
 export interface AcquisitionSourcesReport {
   rows: AcquisitionSourceRow[];
-  /** Contacts whose first inbound carried NO attribution at all. */
+  /** Directory contacts who arrived in the window carrying NO attribution at all. */
   organic: number;
 }
 
@@ -203,12 +203,24 @@ export async function acquisitionSources(
   // workspace-wide while the rows narrowed was the same
   // numerator-and-denominator-from-different-questions mistake the share column
   // in the panel avoids.
+  //
+  // Same for the WINDOW, and it was wrong the same way: the attributed side
+  // counts contacts ACQUIRED in [since, until], so organic must count arrivals
+  // in that window too — unbounded, it counted every directory contact the
+  // workspace has ever had and overstated organic (and every share percentage
+  // with it). Bounded on `Contact.createdAt`, which is when the contact entered
+  // the directory: the closest thing the table carries to "arrived", riding the
+  // (workspaceId, createdAt) index instead of a per-contact MIN over Message.
+  // The NOT EXISTS stays ALL-TIME on purpose — a contact whose ad click landed
+  // before the window is attributed, not organic, and must not be counted twice.
   const organicRows = await db.$queryRaw<{ organic: bigint }[]>`
     SELECT count(*) AS organic
     FROM "Contact" c
     WHERE c."workspaceId" = ${workspaceId}
       AND c."deletedAt" IS NULL
       AND ${DIRECTORY_CONTACT_SQL}
+      AND c."createdAt" >= ${since}
+      AND c."createdAt" <= ${until}
       AND (${opts.channel ?? null}::text IS NULL OR c."identityChannel"::text = ${opts.channel ?? null})
       AND NOT EXISTS (
         SELECT 1

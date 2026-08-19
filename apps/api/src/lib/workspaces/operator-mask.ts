@@ -52,6 +52,33 @@ export async function operatorActorIds(
 }
 
 /**
+ * Drop the PLATFORM OPERATOR from a workforce roster.
+ *
+ * Activity-derived agent aggregates create a row for any userId that appears in
+ * the numbers — deliberately, so a departed member keeps their history as
+ * "Former member". The operator lands there too the moment they reply or close
+ * while helping a client, and they must never be counted as staff (CLAUDE.md
+ * §18: present to administer, workforce in no tenant). Real former members are
+ * untouched — only a superAdmin holding no membership here is removed.
+ *
+ * One definition for both report tabs: the overview's Agents panel and
+ * /reports/team disagreeing about who the team IS is exactly the drift this
+ * prevents.
+ */
+export async function withoutOperatorRows<T extends { userId: string }>(
+  db: Db,
+  workspaceId: string,
+  rows: T[],
+): Promise<T[]> {
+  const operators = await operatorActorIds(
+    db,
+    rows.map((r) => r.userId),
+    [workspaceId],
+  );
+  return operators.size === 0 ? rows : rows.filter((r) => !operators.has(r.userId));
+}
+
+/**
  * Resolve ONE actor's display name for persistence (the Notification write
  * sites), masking the operator. Returns null when the user no longer exists —
  * same contract as the bare `user.findUnique` lookups this replaces.

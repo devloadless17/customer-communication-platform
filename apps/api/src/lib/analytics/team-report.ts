@@ -9,6 +9,7 @@ import {
   validateReportRange,
   type ReportRange,
 } from "@/lib/analytics/reports";
+import { withoutOperatorRows } from "@/lib/workspaces/operator-mask";
 import { TICKET_ACTIVE_STATUSES } from "@ccp/shared/tickets/types";
 import type { TicketStatus } from "@prisma/client";
 import type {
@@ -638,25 +639,10 @@ async function queryTeamAgents(
     row(p.userId).onlineMinutes = p._sum.onlineMinutes ?? 0;
   }
 
-  // OPERATOR EXCLUSION. The activity-derived merge loops above create rows for
-  // any userId that appears in the aggregates — deliberately, so genuinely
-  // departed members keep their history as "Former member". But the platform
-  // operator (a superAdmin acting with no membership row — see
-  // lib/workspaces/operator-mask.ts) also lands here when they reply or close
-  // while helping a client, and they must never be counted as workforce
-  // (CLAUDE.md §18: present to administer, never counted as staff). Drop only
-  // the non-roster rows that belong to a superAdmin; real former members keep
-  // their "Former member" row.
-  const nonRosterIds = [...byId.values()].filter((r) => r.name === null).map((r) => r.userId);
-  if (nonRosterIds.length > 0) {
-    const supers = await db.user.findMany({
-      where: { id: { in: nonRosterIds }, isSuperAdmin: true },
-      select: { id: true },
-    });
-    for (const s of supers) byId.delete(s.id);
-  }
-
-  return [...byId.values()];
+  // OPERATOR EXCLUSION — shared with the overview's Agents panel
+  // (lib/workspaces/operator-mask.ts), so the two tabs cannot disagree about
+  // who the team is.
+  return withoutOperatorRows(db, workspaceId, [...byId.values()]);
 }
 
 /**

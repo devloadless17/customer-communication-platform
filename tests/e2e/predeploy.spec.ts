@@ -132,6 +132,23 @@ test.describe("auth", () => {
   });
 });
 
+// ─── 2b. The Meta data-deletion policy page is reachable logged OUT ──────
+// This URL is what Meta is given for consumer data deletion, so its entire
+// audience has no session. An empty storageState is the whole point: with a
+// cookie the page renders either way, and the gate regression (a 307 to /login)
+// is invisible.
+test.describe("public policy pages", () => {
+  test.use({ storageState: { cookies: [], origins: [] } });
+
+  test("/privacy/data-deletion serves 200 with no session", async ({ page }) => {
+    const resp = await page.goto("/privacy/data-deletion", {
+      waitUntil: "domcontentloaded",
+    });
+    expect(resp?.status(), "/privacy/data-deletion status").toBe(200);
+    expect(page.url(), "must not bounce to /login").toContain("/privacy/data-deletion");
+  });
+});
+
 // ─── 3. /inbox mounts clean (with pre-authed storageState) ───────────────
 test("/inbox mounts without errors (pre-authed)", async ({ page }) => {
   const health = trackHealth(page);

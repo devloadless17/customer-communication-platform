@@ -367,7 +367,12 @@ export default function proxy(req: NextRequest): NextResponse {
     // content (no getSession, no privileged data) so prospective partners can
     // read it before signing up. Without this the cookie gate 307s them to
     // /login, contradicting the page's stated intent.
-    pathname.startsWith("/docs");
+    pathname.startsWith("/docs") ||
+    // Policy pages are public for the same reason and by necessity: this is the
+    // URL handed to Meta for consumer data deletion, so its entire audience is
+    // logged-out consumers. It renders no privileged data (no getSession), and
+    // the cookie gate 307'd every one of them to /login.
+    pathname.startsWith("/privacy");
   const isPublicApi =
     pathname.startsWith("/api/auth") ||
     pathname.startsWith("/api/webhooks") ||

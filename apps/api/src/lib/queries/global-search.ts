@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { OPERATOR_DISPLAY_NAME, operatorActorIds } from "@/lib/workspaces/operator-mask";
 import type {
   ContactSearchHit,
   ContactSearchPage,
@@ -476,6 +477,7 @@ export async function searchAllNotes(
       conversationId: true,
       body: true,
       timestamp: true,
+      authorUserId: true,
       author: { select: { name: true } },
       conversation: {
         select: { contact: { select: { name: true, avatarUrl: true } } },
@@ -491,13 +493,26 @@ export async function searchAllNotes(
       ? encodeMessageCursor({ timestamp: last.timestamp, id: last.id })
       : null;
 
+  // OPERATOR MASK (lib/workspaces/operator-mask.ts): this hit resolves the
+  // author's name SERVER-side, so the platform operator's real name would reach
+  // the tenant — every other note surface ships only the id and lets the client
+  // resolve it against the roster (which renders "Support" for a non-member).
+  const masked = await operatorActorIds(
+    db,
+    sliced.map((n) => n.authorUserId),
+    [workspaceId],
+  );
+
   const items: NoteSearchHit[] = sliced.map((n) => {
     const contact = n.conversation.contact;
     return {
       noteId: n.id,
       conversationId: n.conversationId,
       contactName: contact?.name ?? "Unknown",
-      authorName: n.author?.name ?? null,
+      authorName:
+        n.authorUserId && masked.has(n.authorUserId)
+          ? OPERATOR_DISPLAY_NAME
+          : (n.author?.name ?? null),
       snippet: snippet(n.body),
       timestamp: n.timestamp.toISOString(),
       ...(contact?.avatarUrl ? { contactAvatarUrl: contact.avatarUrl } : {}),

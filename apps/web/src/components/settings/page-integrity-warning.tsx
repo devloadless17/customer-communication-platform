@@ -2,6 +2,8 @@ import { AlertOctagon, TriangleAlert } from "lucide-react";
 
 import { cn } from "@ccp/shared/utils";
 
+import { LocalTime } from "@/components/local-time";
+
 /**
  * PAGE INTEGRITY — Meta's own explanation of why this Page is (or is about to
  * be) unable to message, shown before the first send fails.
@@ -96,12 +98,19 @@ export function PageIntegrityWarning({
       {integrity.blocksMessaging && (
         <p className="text-xs text-muted-foreground">
           Replies and broadcasts on this Page will fail until it lifts
-          {integrity.restrictedUntil
-            ? // Deliberately the raw date rather than a countdown: this is read
-              // once, and a relative "in 2 days" goes stale on a settings page
-              // nobody re-opens.
-              ` — Meta says ${new Date(integrity.restrictedUntil).toLocaleString()}`
-            : ". Meta gave no end date"}
+          {integrity.restrictedUntil ? (
+            // Deliberately the raw date rather than a countdown: this is read
+            // once, and a relative "in 2 days" goes stale on a settings page
+            // nobody re-opens. Rendered through <LocalTime>, never
+            // toLocaleString() — the server and the browser resolve different
+            // locales/zones and the mismatch is a hydration error.
+            <>
+              {" — Meta says "}
+              <LocalTime iso={integrity.restrictedUntil} format="localeString" />
+            </>
+          ) : (
+            ". Meta gave no end date"
+          )}
           .
         </p>
       )}

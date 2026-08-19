@@ -1,6 +1,7 @@
 import "server-only";
 
 import { headers } from "next/headers";
+import { unstable_rethrow } from "next/navigation";
 
 import { ApiError } from "../api-client";
 
@@ -49,6 +50,12 @@ export async function soft<T>(
   try {
     return await load();
   } catch (err) {
+    // Next signals redirect() / notFound() by THROWING. Swallowing those turns
+    // an intended bounce (the api client redirects to /logout on a 401) into a
+    // degraded page that renders as if the session were fine — and it made the
+    // 401 branch below unreachable, since the loader never surfaced an ApiError.
+    unstable_rethrow(err);
+
     // A 401 here is never "no data" — it means the route is unreachable for a
     // session that IS authenticated (a missing guard, a wrong role, an expired
     // cookie mid-render). Call it out separately: it is the single most

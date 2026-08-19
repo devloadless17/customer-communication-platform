@@ -1,6 +1,8 @@
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
+import { channelAccountDisplayName } from "@/lib/channel-accounts/display";
+import { withoutOperatorRows } from "@/lib/workspaces/operator-mask";
 import type { WorkspaceReport } from "@ccp/shared/dtos";
 
 /**
@@ -266,14 +268,22 @@ async function queryAccounts(workspaceId: string, from: Date, to: Date, accountI
     Array<{
       accountId: string | null;
       channel: string;
-      name: string | null;
+      label: string | null;
+      externalAccountId: string | null;
+      config: Prisma.JsonValue;
       inbound: number;
       outbound: number;
     }>
   >(Prisma.sql`
     SELECT COALESCE(m."channelConnectionId", c."channelConnectionId") AS "accountId",
            m.channel::text                                           AS channel,
-           COALESCE(cc.label, cc."externalAccountId")                 AS name,
+           -- The naming columns travel raw; the RULE lives in TypeScript
+           -- (lib/channel-accounts/display.ts), so this panel can't invent a
+           -- fourth answer to "what is this number called" and show a raw Meta
+           -- id where the account filter above it shows the real number.
+           cc.label                                                  AS label,
+           cc."externalAccountId"                                    AS "externalAccountId",
+           cc.config                                                 AS config,
            count(*) FILTER (WHERE m.direction = 'in')::int            AS inbound,
            count(*) FILTER (WHERE m.direction = 'out')::int           AS outbound
     FROM   "Message" m
@@ -283,10 +293,16 @@ async function queryAccounts(workspaceId: string, from: Date, to: Date, accountI
     WHERE  m."workspaceId" = ${workspaceId}
       AND  m."timestamp" >= ${from} AND m."timestamp" < ${to}
       ${messageAccountWhere(accountId)}
-    GROUP  BY 1, 2, 3
+    GROUP  BY 1, 2, 3, 4, 5
     ORDER  BY (count(*)) DESC
   `);
-  return rows;
+  return rows.map(({ label, externalAccountId, config, ...r }) => ({
+    ...r,
+    name:
+      externalAccountId === null
+        ? null
+        : channelAccountDisplayName({ label, externalAccountId, config }),
+  }));
 }
 
 async function queryConversationCounts(
@@ -430,9 +446,13 @@ async function queryAgents(workspaceId: string, from: Date, to: Date, accountId?
   // Names resolved at read time; a departed member (no User row match) keeps
   // the aggregate under a null name rather than vanishing from the totals.
   const nameById = new Map(users.map((u) => [u.id, u.name]));
-  return [...byId.values()]
+  const rows = [...byId.values()]
     .map((r) => ({ ...r, name: nameById.get(r.userId) ?? null }))
     .sort((a, b) => b.messagesSent - a.messagesSent);
+  // OPERATOR EXCLUSION — the same rule /reports/team applies, from the same
+  // place (lib/workspaces/operator-mask.ts): the platform operator helping a
+  // client is never this workspace's workforce.
+  return withoutOperatorRows(db, workspaceId, rows);
 }
 
 async function querySla(workspaceId: string, from: Date, to: Date, accountId?: string) {
