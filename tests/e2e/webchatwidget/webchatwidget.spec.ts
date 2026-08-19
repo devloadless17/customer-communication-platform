@@ -112,8 +112,23 @@ async function mountWidget(page: Page, publicKey: string): Promise<void> {
     .waitFor({ state: "visible", timeout: 15_000 });
 }
 
-/** Fill/dismiss the optional pre-chat form if it's showing. */
+/**
+ * Fill/dismiss the optional pre-chat form if it's showing.
+ *
+ * SETTLE FIRST. The widget renders the form only once the socket has handshaken
+ * and `ready` has landed, so a bare `isVisible()` right after an action that
+ * re-opens the session (⋯ → End chat → "Start new chat session", which
+ * disconnects and re-handshakes under a rotated visitor id) answers "no" before
+ * the form exists — the click is skipped, the composer legitimately stays
+ * hidden behind the un-submitted form, and the NEXT step fails on a textarea
+ * that was never meant to be reachable yet. `mountWidget` already waits on this
+ * exact pair for the same reason; the restart path had no equivalent.
+ */
 async function pastPreChat(page: Page, email?: string): Promise<void> {
+  await page
+    .locator(".composer textarea, .form input")
+    .first()
+    .waitFor({ state: "visible", timeout: 15_000 });
   const start = page.getByText("Start chat");
   if (await start.isVisible().catch(() => false)) {
     if (email) await page.locator(".form input").first().fill(email);
@@ -1399,7 +1414,7 @@ test("pre-chat: a custom (non identity) field lands on the contact's customField
           select: { contact: { select: { name: true, firstName: true, lastName: true, language: true, customFields: true } } },
         });
         const cf = (c?.contact.customFields ?? {}) as Record<string, string>;
-        return cf.company === "Acme Corp" && c?.contact.language === "French" ? c : null;
+        return cf.company === "Acme Corp" ? c : null;
       },
       { timeoutMs: 15_000, label: "customFields + known field applied" },
     );
@@ -1407,14 +1422,23 @@ test("pre-chat: a custom (non identity) field lands on the contact's customField
     // The name field also splits into first/last (first word → first, rest → last).
     expect(conv?.contact.firstName).toBe("Custom");
     expect(conv?.contact.lastName).toBe("Person");
-    expect(conv?.contact.language).toBe("French");
+    // "French" is PROSE, and `Contact.language` is a BCP-47 code column that the
+    // panel, templates and workflows all read as a code — so the pre-chat
+    // deliberately DROPS it rather than poisoning the column
+    // (lib/identity/webchat-prechat.ts: "a wrong code is worse than none").
+    // A visitor typing "fr" would set it; "French" sets nothing. This assertion
+    // used to expect the prose to land, and predates that rule by a month —
+    // it broke on 2026-08-17 and went unseen because the batched e2e gate was
+    // not run again until the 2026-08-19 audit.
+    expect(conv?.contact.language).toBeNull();
     // The unknown field became a custom field with a definition (renders in panel)…
     const def = await db().contactFieldDefinition.findFirst({
       where: { workspaceId, key: "company" },
       select: { label: true },
     });
     expect(def?.label).toBe("Company");
-    // …and the KNOWN field did NOT leak into customFields as a duplicate key.
+    // …and the KNOWN field did NOT leak into customFields as a duplicate key
+    // (dropped by the column rule above, not re-homed).
     const cf = (conv?.contact.customFields ?? {}) as Record<string, string>;
     expect(cf.language).toBeUndefined();
   } finally {
