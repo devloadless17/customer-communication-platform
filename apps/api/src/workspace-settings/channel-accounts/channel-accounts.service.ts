@@ -7,6 +7,7 @@ import {
 import type { Prisma } from "@prisma/client";
 
 import { invalidateProviderConfig } from "@/lib/providers/config";
+import { scrubViewReferences } from "@/lib/inbox-views/scrub";
 import { invalidateWabaAnalytics } from "@/lib/analytics/waba-analytics";
 import { decryptSecret } from "@/lib/crypto/envelope";
 import { getMetaConnection } from "@/lib/providers/meta-connection";
@@ -473,6 +474,10 @@ export class ChannelAccountsService {
 
     await this.db.$transaction(async (tx) => {
       await tx.channelConnection.delete({ where: { id } });
+      // Same transaction as the delete: a saved view scoped to this account
+      // would keep filtering on an id no conversation can carry (the FK nulls
+      // `Conversation.channelConnectionId`) and render empty forever.
+      await scrubViewReferences(tx, workspaceId, { channelAccountIds: [id] });
       if (!target.isDefault) return;
       // Promote only a VIABLE successor. `setDefault` requires `isActive`, and
       // `normalizeDefaultAccount` additionally hunts for a real

@@ -7,7 +7,7 @@ import {
 
 import { TAG_COLORS, type Tag, type TagColor } from "@ccp/shared/types";
 
-import { Prisma } from "@prisma/client";
+import { scrubViewReferences } from "@/lib/inbox-views/scrub";
 
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
@@ -142,34 +142,11 @@ export class TagsService {
     // inside `InboxView.criteria`, and `inboxViewWhereClauses` turns it into a
     // predicate that can never match: in `tagMatch: "all"` mode the view
     // returns an empty inbox forever, with nothing on screen explaining why —
-    // and a SHARED view does that for the whole workspace.
+    // and a SHARED view does that for the whole workspace. Every other catalog
+    // delete calls the same helper.
     await this.db.$transaction(async (tx) => {
       await tx.tag.delete({ where: { id } });
-
-      const views = await tx.inboxView.findMany({
-        where: { workspaceId },
-        select: { id: true, filters: true },
-      });
-      for (const view of views) {
-        const filters = view.filters as Record<string, unknown> | null;
-        const tagIds = filters?.tagIds;
-        if (!Array.isArray(tagIds) || !tagIds.includes(id)) continue;
-        const next: Record<string, unknown> = { ...filters };
-        const remaining = tagIds.filter((t) => t !== id);
-        if (remaining.length > 0) {
-          next.tagIds = remaining;
-        } else {
-          // Drop the key entirely rather than leaving `tagIds: []` — an absent
-          // key is what "no tag filter" means everywhere else in the document,
-          // and it takes `tagMatch` with it so the view reads as unfiltered.
-          delete next.tagIds;
-          delete next.tagMatch;
-        }
-        await tx.inboxView.update({
-          where: { id: view.id },
-          data: { filters: next as Prisma.InputJsonValue },
-        });
-      }
+      await scrubViewReferences(tx, workspaceId, { tagIds: [id] });
     });
 
     // Only the tags frame: saved views are not event-driven (nothing in the

@@ -8,6 +8,7 @@ import {
 
 import { TAG_COLORS, type ContactStage, type TagColor } from "@ccp/shared/types";
 
+import { scrubViewReferences } from "@/lib/inbox-views/scrub";
 import { invalidateDefaultStageCache } from "@/lib/queries/stages";
 
 import { EventBus } from "../../events/event-bus.module";
@@ -211,6 +212,9 @@ export class StagesService {
           }
         }
         await tx.contactStage.delete({ where: { id } });
+        // Same transaction as the delete: a saved view still naming this stage
+        // would filter on an id nothing can carry and render empty forever.
+        await scrubViewReferences(tx, workspaceId, { stageIds: [id] });
       },
       { isolationLevel: "Serializable" },
     );

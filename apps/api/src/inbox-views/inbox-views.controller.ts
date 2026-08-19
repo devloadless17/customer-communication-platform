@@ -67,15 +67,10 @@ export class InboxViewsController {
   @RateLimit({ perMinute: 600 })
   async viewCounts(@CurrentSession() session: ApiSession) {
     const views = await this.views.list(actorFromSession(session));
-    // Resolve dangling ids first so a badge can never disagree with the list
-    // it labels — both paths run the same stored document through the same
-    // resolver.
-    const resolved = await Promise.all(
-      views.map(async (v) => ({
-        id: v.id,
-        filters: await this.views.resolveFilters(session.workspaceId, v.filters),
-      })),
-    );
+    // `list` already resolved dangling ids, batched over the whole visible set,
+    // so a badge can never disagree with the list it labels — both paths run
+    // the same stored document through the same resolver.
+    const resolved = views.map((v) => ({ id: v.id, filters: v.resolvedFilters ?? v.filters }));
     const counts = await this.counts.countAll(session.workspaceId, resolved, session);
     return { counts };
   }

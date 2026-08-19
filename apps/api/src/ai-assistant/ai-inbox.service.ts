@@ -16,7 +16,7 @@ import { getInboundText, loadReplyContext } from "@/lib/ai/reply-context";
 import { generateReply } from "@/lib/ai/reply-service";
 import { configEnabled, loadAiConfig } from "@/lib/ai/runtime-config";
 import { summarizeRange } from "@/lib/ai/summary-job";
-import { persistSuggestion } from "@/lib/ai/suggestion-store";
+import { persistSuggestion, unexpiredPendingWhere } from "@/lib/ai/suggestion-store";
 import {
   renderDraftAudio,
   sendSuggestionAsVoice,
@@ -74,7 +74,8 @@ export class AiInboxService {
       loadAiConfig(workspaceId),
       this.db.aiConversationState.findUnique({ where: { conversationId } }),
       this.db.aiReplySuggestion.findFirst({
-        where: { workspaceId, conversationId, state: "pending" },
+        // Expired drafts are never offered — see unexpiredPendingWhere().
+        where: { workspaceId, conversationId, ...unexpiredPendingWhere() },
         orderBy: { createdAt: "desc" },
       }),
       this.db.conversationSessionSummary.findFirst({
@@ -186,6 +187,12 @@ export class AiInboxService {
     if (s.state !== "pending") {
       throw new ConflictException({ error: "suggestion_already_decided", state: s.state });
     }
+    // A draft past its TTL answers a message the thread has moved on from, so it
+    // is no longer sendable. Rejecting one stays allowed — an agent holding a
+    // stale panel must still be able to clear it.
+    if (action === "accept" && s.expiresAt.getTime() <= Date.now()) {
+      throw new ConflictException({ error: "suggestion_expired" });
+    }
 
     if (action === "reject") {
       const rejected = await this.db.aiReplySuggestion.update({
@@ -226,7 +233,9 @@ export class AiInboxService {
     // provably-pre-send validation error below, so a send that may have reached
     // Meta is never re-attempted.
     const claim = await this.db.aiReplySuggestion.updateMany({
-      where: { id, workspaceId, state: "pending" },
+      // Expiry rides on the CAS itself, so a draft that lapsed between the read
+      // above and this write cannot be sent by the winning request either.
+      where: { id, workspaceId, ...unexpiredPendingWhere() },
       data: {
         state: targetState,
         editedText: edited || null,
@@ -239,6 +248,8 @@ export class AiInboxService {
         where: { id, workspaceId },
         select: { state: true },
       });
+      // Still pending ⇒ the CAS lost on expiry, not on a concurrent decision.
+      if (cur?.state === "pending") throw new ConflictException({ error: "suggestion_expired" });
       throw new ConflictException({
         error: "suggestion_already_decided",
         state: cur?.state ?? "unknown",

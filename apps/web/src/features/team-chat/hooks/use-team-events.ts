@@ -540,6 +540,15 @@ export function useTeamEvents(
     loadedCountRef.current = conversations.length;
   }, [conversations]);
 
+  // Bumped by the filter/account-switch effect below. `loadMore` captures it
+  // (and the cursor it paged from) so a page fetched under the PREVIOUS
+  // filter's cursor can't append its rows onto the new slice — and can't
+  // install a cursor that belongs to neither list. Same guard pair the
+  // contacts browser keeps: the generation catches a filter switch, the
+  // cursor catches a page-1 refetch that started before this call and so
+  // shares our generation.
+  const listGenerationRef = useRef(0);
+
   const loadMore = useCallback(() => {
     const cursor = cursorRef.current;
     if (!cursor) return;
@@ -569,12 +578,16 @@ export function useTeamEvents(
       return;
     }
     setLoadingMore(true);
+    const generation = listGenerationRef.current;
     const params = filterParams(filterRef.current, accountIdRef.current);
     params.set("cursor", cursor);
     fetchWithSessionGuard(`/api/conversations?${params.toString()}`)
       .then((r) => (r.ok ? (r.json() as Promise<CursorPage<ConversationWithRefs>>) : null))
       .then((page) => {
         if (!page) return;
+        // Superseded by a filter/account switch (generation) or by a page-1
+        // refetch that installed a different cursor (see above) — discard.
+        if (listGenerationRef.current !== generation || cursorRef.current !== cursor) return;
         setConversations((prev) => {
           // Dedupe in case a realtime event already prepended one of these.
           const seen = new Set(prev.map((c) => c.conversation.id));
@@ -633,6 +646,9 @@ export function useTeamEvents(
     }
     if (lastFilterKeyRef.current === filterKey) return;
     lastFilterKeyRef.current = filterKey;
+    // A page already in flight from `loadMore` was fetched with the PREVIOUS
+    // filter's cursor — `cancelled` below only covers this effect's own fetch.
+    listGenerationRef.current += 1;
 
     let cancelled = false;
 

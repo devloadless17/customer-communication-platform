@@ -8,6 +8,7 @@ import {
 
 import { isReservedFieldKey } from "@ccp/shared/contacts/reserved-fields";
 import { invalidateSelectFieldDisplayCache } from "@/lib/contact-fields/select-values";
+import { scrubViewReferences } from "@/lib/inbox-views/scrub";
 import {
   TAG_COLORS,
   type ContactFieldDefinition,
@@ -352,16 +353,24 @@ export class ContactFieldsService {
     // ownership, but the DELETE itself carries the workspaceId predicate so a bare-id
     // delete can never remove another tenant's definition. deleteMany returns a
     // count we assert is non-zero.
-    const [, deleted] = await this.db.$transaction([
-      this.db.$executeRaw`
+    //
+    // Interactive tx because the saved-view scrub below rides in it: a view
+    // filtering on this field would keep a predicate on a key no contact
+    // carries and render empty forever (lib/inbox-views/scrub.ts).
+    await this.db.$transaction(async (tx) => {
+      await tx.$executeRaw`
         UPDATE "Contact"
         SET "customFields" = "customFields" - ${def.key}
         WHERE "workspaceId" = ${workspaceId}
           AND "customFields" ? ${def.key}
-      `,
-      this.db.contactFieldDefinition.deleteMany({ where: { id, workspaceId } }),
-    ]);
-    if (deleted.count === 0) throw new NotFoundException({ error: "not_found" });
+      `;
+      const deleted = await tx.contactFieldDefinition.deleteMany({
+        where: { id, workspaceId },
+      });
+      // Lost a race with a concurrent delete — roll the strip back with it.
+      if (deleted.count === 0) throw new NotFoundException({ error: "not_found" });
+      await scrubViewReferences(tx, workspaceId, { fieldKeys: [def.key] });
+    });
 
     // The workflow/broadcast token layer memoizes the select-field catalog
     // for display (lib/contact-fields/select-values.ts) — bust it so a
@@ -581,6 +590,9 @@ export class ContactFieldsService {
             where: { id: optionId, fieldId, workspaceId },
           });
           if (deleted.count === 0) throw new NotFoundException({ error: "not_found" });
+          // A saved view can select this option inside its `fields[]` entry;
+          // the entry's field survives, so only the dead option leaves.
+          await scrubViewReferences(tx, workspaceId, { fieldOptionIds: [optionId] });
         },
         { isolationLevel: "Serializable" },
       );
@@ -621,6 +633,11 @@ export class ContactFieldsService {
           where: { id: optionId, fieldId, workspaceId },
         });
         if (deleted.count === 0) throw new NotFoundException({ error: "not_found" });
+        // Same scrub as the refuse path above: the option is gone from the
+        // catalog, so it must not linger as a criterion no contact can match.
+        // (A `moveTo` target is NOT substituted in — a view saying "Source is
+        // Ad" must not silently become "Source is Referral".)
+        await scrubViewReferences(tx, workspaceId, { fieldOptionIds: [optionId] });
       });
     }
     // The workflow/broadcast token layer memoizes the select-field catalog

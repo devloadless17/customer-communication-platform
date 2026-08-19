@@ -15,6 +15,7 @@ import {
 import { recentWebhookRejection } from "@/lib/providers/channel-health";
 import { getMetaConnection } from "@/lib/providers/meta-connection";
 import { assertChannelDisconnectConfirmed } from "@/lib/providers/assert-channel-disconnect";
+import { scrubViewReferences } from "@/lib/inbox-views/scrub";
 
 import {
   blocksMessaging,
@@ -892,9 +893,14 @@ export class MessengerService {
     // Page id and a token, and both die with the row.
     const rows = await this.db.channelConnection.findMany({
       where: { workspaceId, channel: CHANNEL },
-      select: { config: true, secrets: true },
+      select: { id: true, config: true, secrets: true },
     });
     await this.db.channelConnection.deleteMany({ where: { workspaceId, channel: CHANNEL } });
+    // A saved view scoped to one of these Pages now names an id nothing can
+    // carry — it would render empty forever (lib/inbox-views/scrub.ts).
+    await scrubViewReferences(this.db, workspaceId, {
+      channelAccountIds: rows.map((r) => r.id),
+    });
     invalidateMessengerConfig(workspaceId);
     // Tell Meta to stop delivering. The per-ACCOUNT removal path has released
     // the Page subscription since multi-account shipped; this channel-wide route

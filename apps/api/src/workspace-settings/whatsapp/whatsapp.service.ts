@@ -83,6 +83,7 @@ import {
   templateIdsWithLabel,
 } from "@/lib/templates/labels";
 import { assertChannelDisconnectConfirmed } from "@/lib/providers/assert-channel-disconnect";
+import { scrubViewReferences } from "@/lib/inbox-views/scrub";
 
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
@@ -1345,7 +1346,7 @@ export class WhatsappService {
     // the webhook-subscription release below, and gone afterwards.
     const departing = await this.db.channelConnection.findMany({
       where: { workspaceId, channel: META_PROVIDER },
-      select: { secrets: true, wabaAccount: { select: { externalWabaId: true } } },
+      select: { id: true, secrets: true, wabaAccount: { select: { externalWabaId: true } } },
     });
     // Drop the connection row entirely (wipes creds + verify token, matching
     // the old "null every meta_* column" behavior). Historical messages are
@@ -1353,6 +1354,12 @@ export class WhatsappService {
     // not-yet-connected team is a no-op rather than a 404.
     await this.db.channelConnection.deleteMany({
       where: { workspaceId, channel: META_PROVIDER },
+    });
+    // A saved view scoped to one of these numbers now names an id nothing can
+    // carry — it would render empty forever. Same scrub the per-account remove
+    // path runs (lib/inbox-views/scrub.ts).
+    await scrubViewReferences(this.db, workspaceId, {
+      channelAccountIds: departing.map((r) => r.id),
     });
     // Release every WABA subscription the channel held. The per-account
     // remove path has released since 2026-07-29; this channel-wide disconnect

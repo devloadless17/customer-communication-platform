@@ -49,9 +49,16 @@ export function useConversationAttachments(
   refresh: () => void;
 } {
   const [state, setState] = useState<State>(INITIAL);
-  // Active fetch controller — aborted on chat-switch / kind-change /
-  // unmount so a slow first-page request doesn't land into the next view.
+  // TWO controllers, deliberately. Page-1 fetches ("replace" / "silent") share
+  // one — a newer one supersedes an older because both write page 1 — while
+  // "load more" gets its own. `silent` is driven by live socket frames, so one
+  // shared controller let inbound traffic the agent never triggered abort their
+  // in-flight Load-more page, which then silently never arrived. An append is
+  // additive and cannot stale-overwrite, so nothing but a reset needs to cancel
+  // it. Both are aborted on chat-switch / kind-change / unmount so a slow
+  // request doesn't land into the next view.
   const controllerRef = useRef<AbortController | null>(null);
+  const appendControllerRef = useRef<AbortController | null>(null);
 
   // Fetch modes:
   //   "replace" — chat-switch / kind-change / manual refresh: reset to a
@@ -70,13 +77,20 @@ export function useConversationAttachments(
         setState({ ...INITIAL, loading: false });
         return;
       }
-      controllerRef.current?.abort();
       const ctrl = new AbortController();
-      controllerRef.current = ctrl;
       if (mode === "append") {
+        appendControllerRef.current?.abort();
+        appendControllerRef.current = ctrl;
         setState((s) => ({ ...s, loadingMore: true }));
-      } else if (mode === "replace") {
-        setState({ ...INITIAL, loading: true });
+      } else {
+        controllerRef.current?.abort();
+        controllerRef.current = ctrl;
+        if (mode === "replace") {
+          // A reset drops the list AND the cursor, so an in-flight append is
+          // stale by definition. A "silent" merge keeps both — it leaves it be.
+          appendControllerRef.current?.abort();
+          setState({ ...INITIAL, loading: true });
+        }
       }
       // "silent": leave state untouched until the merge below — no flash.
       try {
@@ -143,7 +157,10 @@ export function useConversationAttachments(
   // Fetch first page on mount + whenever conversationId / kind changes.
   useEffect(() => {
     void fetchPage(null, "replace");
-    return () => controllerRef.current?.abort();
+    return () => {
+      controllerRef.current?.abort();
+      appendControllerRef.current?.abort();
+    };
   }, [fetchPage]);
 
   // Live invalidation: a new media message landed (or a pending one finished

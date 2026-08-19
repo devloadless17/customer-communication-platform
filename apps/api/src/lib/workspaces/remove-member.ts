@@ -4,6 +4,7 @@ import { assignByPolicy } from "@/lib/assignment/apply";
 import { invalidateAssignmentCache } from "@/lib/assignment/resolve";
 import { assignConversation } from "@/lib/conversations/mutations";
 import { publish } from "@/lib/events/bus";
+import { scrubViewReferences } from "@/lib/inbox-views/scrub";
 
 /**
  * Everything that has to happen when someone STOPS being a member of a
@@ -314,6 +315,14 @@ async function clearGrants(
       })
       .catch(() => undefined),
   ]);
+
+  // Saved views naming them by assignee. Their own personal views are gone
+  // above; what remains is SHARED views (and colleagues' personal ones) whose
+  // `assignee.userIds` still lists someone who cannot open the workspace — a
+  // predicate no conversation can satisfy, so the view renders empty for
+  // everyone. AFTER the deleteMany above so the two don't race for the same
+  // rows. Best-effort like every write here.
+  await scrubViewReferences(db, workspaceId, { userIds: [userId] }).catch(() => undefined);
 
   // Policy pointers are plain ids with NO foreign key (deliberately — a deleted
   // user must degrade a policy, never cascade into it), so nothing clears them

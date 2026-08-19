@@ -129,7 +129,22 @@ export interface InboxView {
   visibility: InboxViewVisibility;
   createdById: string;
   createdByName?: string | null;
+  /** What the author SAVED — the document the builder edits. */
   filters: InboxViewFilters;
+  /**
+   * The same document with dangling ids dropped (`INBOX_VIEW_DANGLING_POLICY`)
+   * — what anything EVALUATING the view must read, including
+   * `matchesInboxViewFilters`. Present on the LIST endpoints only, where the
+   * server resolves the whole visible set in one batch; absent on the
+   * single-view create/update/get responses, whose callers are editing rather
+   * than matching. Read it as `resolvedFilters ?? filters`.
+   *
+   * Two documents rather than one because they answer different questions: a
+   * builder that edited the resolved one would silently discard the author's
+   * criteria the moment a tag was deleted, while a matcher that read the stored
+   * one splices rows out of a view the server's own refetch keeps them in.
+   */
+  resolvedFilters?: InboxViewFilters;
   position: number;
   isEditable: boolean;
   createdAt: string;

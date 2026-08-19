@@ -18,9 +18,17 @@ Resume state: if a session is cut, continue from the first section below not mar
 | Wave 2 reviews + verify (U4, U3, U8, U9) | DONE — 28 findings, 10 confirmed |
 | Sweeps A (S2, S3, S5, S6, S7) | DONE — 21 findings |
 | Wave 1 fixes | LANDED + gates green + COMMITTED (acf77c2d, e594e559, 1fc6c86f, e9053362, eeb415d9, 0a59a8eb) |
-| Wave 2 fixes (workflows/broadcasts/auth) | RE-RUNNING (session limit killed first attempt) |
-| settings-secrets fix (S7-2) | RE-RUNNING |
-| Wave 3 (U6, U11, U5, U12) | RUNNING (wf_55178551-13b) |
+| Wave 2 fixes (workflows/broadcasts/auth) | LANDED + gates green + COMMITTED (dc2a973c, a82bd095, fc40f675) |
+| settings-secrets fix (S7-2) | LANDED + COMMITTED (9e0c0551) |
+| Sweeps B (S1, S4, S10, S12, S13) | DONE — 38 findings (1 critical, 5 high) |
+| S1 TENANCY RESULT | **1,778 Prisma call sites + 84 raw SQL + 312 @Param handlers audited: ZERO unscoped-and-request-reachable queries.** 309/312 handlers carry session/API-key scope; the 3 exceptions are credential-gated public surfaces (invite token, HMAC'd Meta webhook, HMAC'd workflow webhook). All raw SQL parameterized. checker allowlist matches schema exactly. Only finding: no MECHANICAL CI control exists (TEN-01, medium). |
+| S12-2 critical (conversation delete cascades into tickets + shares) | FIXED + COMMITTED 4055a283 |
+| Sweeps B fixes (batch 1: S12-3, S13-01..04, S10-1, S10-3) | RUNNING (wf_a3326006-f75) |
+| Sweeps B deferred to after Wave-3 fleet (file collisions) | S12-1 (/v1 tag delete skips view scrub, HIGH), S4-01..S4-14 (docs accuracy + parity), S12-4 (AI retention sweeper) |
+| Wave 3 reviews + verify (U6, U11, U5, U12) | DONE — 44 findings, 25 CONFIRMED (1 critical, 3 high), 0 refuted |
+| Wave 3 critical/high direct-reads + fixes | COMMITTED 0cc465c6 (U11-01 critical, U6-1 cross-workspace) |
+| Wave 3 fixes (remaining 21) | LANDED — gates green (`pnpm check` exit 0), typecheck clean both apps |
+| Wave 4 reviews (U13, U14) | RUNNING (wf_dc4978bc-3bb) |
 | Wave 4 (U13, U14) + S1/S4/S9..S13 | pending |
 | Low-findings pass (62 collected) | pending — tests/AUDIT-2026-08-19/low-findings-backlog.md |
 | Live phase 1–8 | pending |
@@ -28,6 +36,13 @@ Resume state: if a session is cut, continue from the first section below not mar
 
 ## Gate history
 - 2026-08-19 post-Wave-1-fixes: `pnpm check` exit 0; api vitest 1559/1559; partial-index tripwire green.
+- 2026-08-19 post-Wave-2-fixes + settings-secrets: `pnpm check` exit 0; api vitest 148 files / 1559 tests; migration `20260819060000_workspace_deleting_claim` applied to the dev DB.
+
+## Accepted trade-offs recorded during fix-review (do not re-flag)
+- `Workspace.deletingAt` excludes a mid-delete workspace from `resolveActiveWorkspaceId`. A member whose ONLY workspace is being deleted resolves to null and is logged out. Correct: the workspace is being destroyed. The org still keeps ≥1 workspace for everyone else.
+- Messenger/Instagram read `SECRET_SAVED_SENTINEL` as "not typed" rather than restoring the stored plaintext: restoring a stored Page token would re-enter the `sourceToken` derivation chain the code forbids (a Page token cannot re-derive a Page token). Byte-identical to the blank optional override their forms already send.
+- `manual_trigger.allowedRoles` is not enforced for `/v1` callers: an API key is not a person and holds no workspace role; it is gated by scopes.
+- Set-based drift reconcilers can transiently revert a concurrent live bump within one statement (S3-3). Inherent to the reconciler pattern the handbook mandates; self-heals on the next sweep.
 
 ## Findings
 

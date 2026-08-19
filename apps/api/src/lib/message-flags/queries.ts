@@ -10,6 +10,8 @@ import type {
 } from "@ccp/shared/message-flags/types";
 import { isMessageFlagSource } from "@ccp/shared/message-flags/types";
 
+import { maskPhoneLikeName } from "@/lib/external-shapes";
+
 /**
  * Read side of message flags — the SELECT shapes, the row→wire mappers, and
  * the triage queue query.
@@ -139,6 +141,15 @@ export interface ListFlagsFilter {
    * whoever flagged it left behind.
    */
   search?: string;
+  /**
+   * `/v1` scope gates, both off for in-app callers (a session's visibility
+   * boundary is `filter.visibility`, above). The queue row carries two things
+   * an API key may not hold the scope for: the contact's identity — which falls
+   * back to the raw phone number when they have never given a name — and the
+   * flagged message's own text.
+   */
+  maskContactPii?: boolean;
+  omitMessageExcerpt?: boolean;
 }
 
 /**
@@ -208,22 +219,29 @@ export async function listFlags(
   const nextCursor = rows.length > take && last ? encodeCursor(last.createdAt, last.id) : null;
 
   return {
-    items: page.map((row) => ({
-      ...mapFlag(row),
-      contactId: row.conversation.contact.id,
+    items: page.map((row) => {
       // Falls back to the phone number, then a placeholder — a WhatsApp contact
       // that has never given a name has neither, and a blank queue row is
       // unusable. (Ephemeral widget visitors are handled the same way: they get
       // a phone-less placeholder rather than being hidden, because the queue is
       // about the MESSAGE, not the directory.)
-      contactName:
+      const contactName =
         row.conversation.contact.name ||
         row.conversation.contact.phoneNumber ||
-        "Unknown contact",
-      messageExcerpt: excerpt(row.message.body || row.message.mediaCaption || ""),
-      messageTimestamp: row.message.timestamp.toISOString(),
-      channel: row.conversation.channel,
-    })),
+        "Unknown contact";
+      return {
+        ...mapFlag(row),
+        contactId: row.conversation.contact.id,
+        contactName: filter.maskContactPii
+          ? maskPhoneLikeName(contactName, row.conversation.contact.phoneNumber)
+          : contactName,
+        messageExcerpt: filter.omitMessageExcerpt
+          ? ""
+          : excerpt(row.message.body || row.message.mediaCaption || ""),
+        messageTimestamp: row.message.timestamp.toISOString(),
+        channel: row.conversation.channel,
+      };
+    }),
     nextCursor,
   };
 }

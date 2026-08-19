@@ -92,7 +92,14 @@ export function InboxViewsProvider({
   // an edit in another tab). Compared by id+updatedAt rather than by
   // reference: the SSR payload is a fresh array on every render, so a
   // reference check would clobber local optimistic state constantly.
-  const seedKey = initialViews.map((v) => `${v.id}:${v.updatedAt}`).join(",");
+  //
+  // The RESOLVED document is part of the key: deleting a stage or a teammate
+  // changes what a view MATCHES without touching any view row, so `updatedAt`
+  // alone would leave the live matcher evaluating against ids the server has
+  // already dropped — the exact disagreement `resolvedFilters` exists to close.
+  const seedKey = initialViews
+    .map((v) => `${v.id}:${v.updatedAt}:${JSON.stringify(v.resolvedFilters ?? v.filters)}`)
+    .join(",");
   const lastSeedKeyRef = useRef(seedKey);
   useEffect(() => {
     if (lastSeedKeyRef.current === seedKey) return;
@@ -222,8 +229,14 @@ export function InboxViewsProvider({
     setViews(next);
   }, []);
 
+  // The RESOLVED document, not the stored one: matching is evaluation, and a
+  // view naming a deleted stage / teammate / option must mean here exactly what
+  // it means in the server's WHERE (which runs the same resolver) — otherwise a
+  // socket event splices a row out of a list a refetch immediately puts back.
+  // Absent on the single-view create/update responses, whose document is
+  // freshly authored against live options; fall back to it there.
   const filtersById = useMemo(
-    () => Object.fromEntries(views.map((v) => [v.id, v.filters])),
+    () => Object.fromEntries(views.map((v) => [v.id, v.resolvedFilters ?? v.filters])),
     [views],
   );
 

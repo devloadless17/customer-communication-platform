@@ -536,31 +536,40 @@ export class AssignmentService {
       if (!policy) throw new BadRequestException({ error: "policy_not_found" });
     }
 
-    // The visibility flag lives on Team, so it is split out of the settings
-    // patch and written separately (both inside the same request, so the admin
-    // sees one atomic-looking save).
+    // The visibility flag lives on Workspace, not AssignmentSettings, so the
+    // save spans two rows. Both go in ONE transaction, with the optimistic-CAS
+    // updateMany FIRST: written separately and first, a stale save flipped a
+    // SECURITY boundary for the whole workspace (and ran the full revocation)
+    // and then reported 409 — the change applied, the admin told it hadn't.
     const { expectedVersion, agentConversationVisibility, ...fields } = input;
-    if (agentConversationVisibility !== undefined) {
-      await this.db.workspace.update({
-        where: { id: workspaceId },
-        data: { agentConversationVisibility },
-      });
-      // Full revocation, immediately: the registered invalidator (see
-      // realtime.gateway.ts) busts the workspace's HTTP/handshake session
-      // caches, busts the emitter scope cache, pushes a catalog tick so every
-      // tab re-derives its restricted flag, then force-disconnects the
-      // workspace's sockets — whose re-handshake now reads post-flip state.
-      invalidateTeamVisibilityCaches(workspaceId);
-    }
     const data = Object.fromEntries(
       Object.entries(fields).filter(([, v]) => v !== undefined),
     );
-    const { count } = await this.db.assignmentSettings.updateMany({
-      where: { workspaceId, ...(expectedVersion ? { version: expectedVersion } : {}) },
-      data: { ...data, version: { increment: 1 } },
+    const applied = await this.db.$transaction(async (tx) => {
+      const { count } = await tx.assignmentSettings.updateMany({
+        where: { workspaceId, ...(expectedVersion ? { version: expectedVersion } : {}) },
+        data: { ...data, version: { increment: 1 } },
+      });
+      if (count === 0) return false;
+      if (agentConversationVisibility !== undefined) {
+        await tx.workspace.update({
+          where: { id: workspaceId },
+          data: { agentConversationVisibility },
+        });
+      }
+      return true;
     });
-    if (count === 0) throw new ConflictException({ error: "version_conflict" });
+    if (!applied) throw new ConflictException({ error: "version_conflict" });
 
+    if (agentConversationVisibility !== undefined) {
+      // Full revocation, immediately, and only once the flip is COMMITTED: the
+      // registered invalidator (see realtime.gateway.ts) busts the workspace's
+      // HTTP/handshake session caches, busts the emitter scope cache, pushes a
+      // catalog tick so every tab re-derives its restricted flag, then
+      // force-disconnects the workspace's sockets — whose re-handshake now
+      // reads post-flip state.
+      invalidateTeamVisibilityCaches(workspaceId);
+    }
     invalidateAssignmentCache(workspaceId);
     const settings = await this.db.assignmentSettings.findUnique({ where: { workspaceId } });
     return { settings };

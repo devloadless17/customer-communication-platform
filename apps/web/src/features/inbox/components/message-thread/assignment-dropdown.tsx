@@ -70,6 +70,15 @@ export function AssignmentDropdown({
   currentUserId: string;
 }) {
   const [pending, setPending] = useState(false);
+  // WHO MAY RECEIVE WORK. `teamMembers` is the full roster — deactivated users
+  // ride along in it so historical attribution (`prevUser`, the assignee chip)
+  // still resolves their name — but assigning to one is refused server-side
+  // (`invalid_user`, see lib/conversations/mutations.ts). Offer only the live
+  // roster, exactly as the inbox sub-sidebar does.
+  const assignableMembers = useMemo(() => {
+    const active = teamMembers.filter((u) => u.isActive);
+    return canAssignOthers ? active : active.filter((u) => u.id === currentUserId);
+  }, [teamMembers, canAssignOthers, currentUserId]);
   // Live online + availability for the team so the dropdown rows can show a
   // small "Away/Busy/Offline" cue. The hook is cheap (shared socket + one
   // listener per signal); subscribing it directly here avoids threading
@@ -249,9 +258,7 @@ export function AssignmentDropdown({
           </DropdownMenuItem>
         )}
         <AssignableMembers
-          teamMembers={
-            canAssignOthers ? teamMembers : teamMembers.filter((u) => u.id === currentUserId)
-          }
+          teamMembers={assignableMembers}
           currentId={currentId}
           onlineUserIds={onlineUserIds}
           availabilityByUserId={availabilityByUserId}

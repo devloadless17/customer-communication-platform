@@ -80,6 +80,21 @@ export function actorFromSession(session: {
   };
 }
 
+/**
+ * The workspace's LIVE ids for every dimension a filter document can name.
+ *
+ * Loaded once for a SET of documents so resolving every view in the sidebar
+ * costs five id-only lookups, not five per view.
+ */
+interface LiveViewRefs {
+  stageIds: Set<string>;
+  tagIds: Set<string>;
+  userIds: Set<string>;
+  accountIds: Set<string>;
+  /** `ContactFieldDefinition.key` → the ids of its live select options. */
+  fieldOptionIds: Map<string, Set<string>>;
+}
+
 @Injectable()
 export class InboxViewsService {
   constructor(
@@ -117,6 +132,14 @@ export class InboxViewsService {
   /**
    * Views this session can see: every shared view in the workspace, plus the
    * caller's own personal ones.
+   *
+   * Carries BOTH documents: `filters` is what the author saved (what the
+   * builder edits) and `resolvedFilters` is that document with dangling ids
+   * dropped (what anything EVALUATING the view must read). The client's live
+   * row-matcher used the stored one, so a socket event spliced rows out of a
+   * view naming a deleted stage / teammate / option while a refetch — which
+   * runs through `resolveFilters` — kept them. One batched resolution for the
+   * whole visible set, so this stays five id-only lookups per request.
    */
   async list(actor: InboxViewActor): Promise<InboxView[]> {
     const rows = await this.db.inboxView.findMany({
@@ -127,7 +150,12 @@ export class InboxViewsService {
       select: InboxViewsService.SELECT,
     });
     const canManageShared = actor.canManageShared;
-    return rows.map((r) => this.toWire(r, actor.userId, canManageShared));
+    const views = rows.map((r) => this.toWire(r, actor.userId, canManageShared));
+    const resolved = await this.resolveFiltersMany(
+      actor.workspaceId,
+      views.map((v) => v.filters),
+    );
+    return views.map((v, i) => ({ ...v, resolvedFilters: resolved[i]! }));
   }
 
   /**
@@ -135,7 +163,7 @@ export class InboxViewsService {
    * `?viewId=` into a filter document.
    *
    * Returns the STORED filters. Dangling-id cleanup happens in
-   * `resolveFilters` because it costs three extra queries, so callers opt in.
+   * `resolveFilters` because it costs five extra queries, so callers opt in.
    *
    * (This used to say the list path was "the only caller that needs it". Not
    * true: `GET /inbox-views/counts` resolves too, deliberately — a badge that
@@ -295,8 +323,8 @@ export class InboxViewsService {
 
   /**
    * Resolve a view's stored filters into a document safe to turn into SQL,
-   * dropping references to tags / stages / users / select-field options that
-   * no longer exist.
+   * dropping references to tags / stages / users / accounts / select-field
+   * options that no longer exist.
    *
    * Why drop rather than match-nothing: deleting one tag of five would
    * otherwise empty the view completely, which reads as "the inbox is broken"
@@ -304,91 +332,140 @@ export class InboxViewsService {
    * recoverable by editing it. Policy stated once in
    * `INBOX_VIEW_DANGLING_POLICY`.
    *
-   * Four cheap id-only lookups, and only for the fields actually present —
-   * a view with no tag/stage/user filter costs nothing.
+   * Five cheap id-only lookups, and only for the fields actually present —
+   * a view with no tag/stage/user/account filter costs nothing.
    */
   async resolveFilters(
     workspaceId: string,
     filters: InboxViewFilters,
   ): Promise<InboxViewFilters> {
-    const wantsStages = !!filters.stageIds?.length;
-    const wantsTags = !!filters.tagIds?.length;
-    const wantsFields = !!filters.fields?.length;
-    const assignee = filters.assignee;
-    const wantsUsers = assignee?.kind === "users" && assignee.userIds.length > 0;
-    if (!wantsStages && !wantsTags && !wantsUsers && !wantsFields) return filters;
+    const [resolved] = await this.resolveFiltersMany(workspaceId, [filters]);
+    return resolved!;
+  }
 
-    const [stages, tags, users, fieldDefs] = await Promise.all([
-      wantsStages
+  /**
+   * `resolveFilters` for a SET of documents — one lookup per dimension over the
+   * union of their ids, instead of five queries per view. The sidebar resolves
+   * up to sixty views on every list/counts call, so the batch is what keeps
+   * that a fixed cost.
+   */
+  async resolveFiltersMany(
+    workspaceId: string,
+    documents: InboxViewFilters[],
+  ): Promise<InboxViewFilters[]> {
+    const stageIds = new Set<string>();
+    const tagIds = new Set<string>();
+    const userIds = new Set<string>();
+    const accountIds = new Set<string>();
+    const fieldKeys = new Set<string>();
+    for (const f of documents) {
+      for (const id of f.stageIds ?? []) stageIds.add(id);
+      for (const id of f.tagIds ?? []) tagIds.add(id);
+      if (f.assignee?.kind === "users") for (const id of f.assignee.userIds) userIds.add(id);
+      for (const id of f.channelAccountIds ?? []) accountIds.add(id);
+      for (const entry of f.fields ?? []) fieldKeys.add(entry.key);
+    }
+    if (
+      !stageIds.size &&
+      !tagIds.size &&
+      !userIds.size &&
+      !accountIds.size &&
+      !fieldKeys.size
+    ) {
+      return documents;
+    }
+
+    const [stages, tags, users, accounts, fieldDefs] = await Promise.all([
+      stageIds.size
         ? this.db.contactStage.findMany({
-            where: { workspaceId, id: { in: filters.stageIds! } },
+            where: { workspaceId, id: { in: [...stageIds] } },
             select: { id: true },
           })
         : Promise.resolve([]),
-      wantsTags
+      tagIds.size
         ? this.db.tag.findMany({
-            where: { workspaceId, id: { in: filters.tagIds! } },
+            where: { workspaceId, id: { in: [...tagIds] } },
             select: { id: true },
           })
         : Promise.resolve([]),
-      wantsUsers
+      userIds.size
         ? this.db.workspaceMember.findMany({
-            where: {
-              workspaceId,
-              userId: { in: (assignee as { userIds: string[] }).userIds },
-            },
+            where: { workspaceId, userId: { in: [...userIds] } },
             select: { userId: true },
           })
         : Promise.resolve([]),
-      wantsFields
+      // Deliberately NOT filtered on `isActive`: a deactivated account still
+      // owns its threads and is still offered by the builder, so only a
+      // DISCONNECTED (deleted) account is dangling.
+      accountIds.size
+        ? this.db.channelConnection.findMany({
+            where: { workspaceId, id: { in: [...accountIds] } },
+            select: { id: true },
+          })
+        : Promise.resolve([]),
+      fieldKeys.size
         ? this.db.contactFieldDefinition.findMany({
-            where: {
-              workspaceId,
-              key: { in: filters.fields!.map((f) => f.key) },
-              type: "select",
-            },
+            where: { workspaceId, key: { in: [...fieldKeys] }, type: "select" },
             select: { key: true, options: { select: { id: true } } },
           })
         : Promise.resolve([]),
     ]);
 
+    const live: LiveViewRefs = {
+      stageIds: new Set(stages.map((s) => s.id)),
+      tagIds: new Set(tags.map((t) => t.id)),
+      userIds: new Set(users.map((m) => m.userId)),
+      accountIds: new Set(accounts.map((a) => a.id)),
+      fieldOptionIds: new Map(
+        fieldDefs.map((d) => [d.key, new Set(d.options.map((o) => o.id))]),
+      ),
+    };
+    return documents.map((f) => this.applyLiveRefs(f, live));
+  }
+
+  /** Pure half of the resolution — the drop policy, applied to one document. */
+  private applyLiveRefs(
+    filters: InboxViewFilters,
+    live: LiveViewRefs,
+  ): InboxViewFilters {
     const resolved: InboxViewFilters = { ...filters };
 
-    if (wantsStages) {
-      const live = new Set(stages.map((s) => s.id));
-      const kept = filters.stageIds!.filter((id) => live.has(id));
+    if (filters.stageIds?.length) {
+      const kept = filters.stageIds.filter((id) => live.stageIds.has(id));
       if (kept.length) resolved.stageIds = kept;
       else delete resolved.stageIds;
     }
-    if (wantsTags) {
-      const live = new Set(tags.map((t) => t.id));
-      const kept = filters.tagIds!.filter((id) => live.has(id));
+    if (filters.tagIds?.length) {
+      const kept = filters.tagIds.filter((id) => live.tagIds.has(id));
       if (kept.length) resolved.tagIds = kept;
       else delete resolved.tagIds;
     }
-    if (wantsUsers) {
-      const live = new Set(users.map((m) => m.userId));
-      const kept = (assignee as { userIds: string[] }).userIds.filter((id) =>
-        live.has(id),
-      );
+    // Same drop policy as stages/tags: a number an admin disconnected would
+    // otherwise leave an id matching no conversation, silently emptying the
+    // view for the whole workspace.
+    if (filters.channelAccountIds?.length) {
+      const kept = filters.channelAccountIds.filter((id) => live.accountIds.has(id));
+      if (kept.length) resolved.channelAccountIds = kept;
+      else delete resolved.channelAccountIds;
+    }
+    const assignee = filters.assignee;
+    if (assignee?.kind === "users" && assignee.userIds.length) {
+      const kept = assignee.userIds.filter((id) => live.userIds.has(id));
       // An empty survivor list means every named teammate left the workspace.
       // Falling back to `anyone` (rather than dropping the field) keeps the
       // view's intent legible in the builder — it still says "assigned to",
       // just to nobody in particular.
       resolved.assignee = kept.length ? { kind: "users", userIds: kept } : { kind: "anyone" };
     }
-    if (wantsFields) {
+    if (filters.fields?.length) {
       // Same drop policy: a deleted field or option widens the view visibly
       // instead of silently emptying it. Entry-level: dead key drops the whole
       // entry; dead option ids drop from the entry; an emptied entry drops.
-      const liveByKey = new Map(
-        fieldDefs.map((d) => [d.key, new Set(d.options.map((o) => o.id))]),
-      );
-      const kept = filters
-        .fields!.map((f) => {
-          const live = liveByKey.get(f.key);
-          if (!live) return null;
-          const optionIds = f.optionIds.filter((id) => live.has(id));
+      const kept = filters.fields
+        .map((f) => {
+          const liveOptions = live.fieldOptionIds.get(f.key);
+          if (!liveOptions) return null;
+          const optionIds = f.optionIds.filter((id) => liveOptions.has(id));
           return optionIds.length ? { key: f.key, optionIds } : null;
         })
         .filter((f): f is { key: string; optionIds: string[] } => f !== null);

@@ -15,6 +15,7 @@ import {
 import { recentWebhookRejection } from "@/lib/providers/channel-health";
 import { getMetaConnection } from "@/lib/providers/meta-connection";
 import { assertChannelDisconnectConfirmed } from "@/lib/providers/assert-channel-disconnect";
+import { scrubViewReferences } from "@/lib/inbox-views/scrub";
 
 import { getInstagramSendConfig } from "@/lib/providers/instagram-config";
 import { instagramProvider } from "@/lib/providers/instagram";
@@ -622,9 +623,14 @@ export class InstagramService {
     // Read before deleting — the Page id and the token both die with the row.
     const rows = await this.db.channelConnection.findMany({
       where: { workspaceId, channel: CHANNEL },
-      select: { config: true, secrets: true },
+      select: { id: true, config: true, secrets: true },
     });
     await this.db.channelConnection.deleteMany({ where: { workspaceId, channel: CHANNEL } });
+    // A saved view scoped to one of these accounts now names an id nothing can
+    // carry — it would render empty forever (lib/inbox-views/scrub.ts).
+    await scrubViewReferences(this.db, workspaceId, {
+      channelAccountIds: rows.map((r) => r.id),
+    });
     invalidateInstagramConfig(workspaceId);
     // Same gap as the Messenger channel-wide disconnect: the per-account removal
     // path releases the Page subscription, this route never did, so Meta kept
