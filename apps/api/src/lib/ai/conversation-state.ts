@@ -37,25 +37,39 @@ function emitState(workspaceId: string, conversationId: string, state: AiConvSta
   void publish({ type: "ai.state_changed", workspaceId, conversationId, state }).catch(() => {});
 }
 
+/**
+ * `conversationId` is the only unique on this table, so every write below adds
+ * `workspaceId` as a non-unique filter (§7: workspaceId in every where). A
+ * mismatch can only mean a caller resolved the conversation outside its tenant,
+ * which must be loud rather than silently adopted.
+ */
 async function ensureState(workspaceId: string, conversationId: string): Promise<AiConvStateRow> {
   const existing = await db.aiConversationState.findUnique({ where: { conversationId } });
-  if (existing) return existing as AiConvStateRow;
+  if (existing) {
+    if (existing.workspaceId !== workspaceId) {
+      throw new Error(`ai state workspace mismatch for conversation ${conversationId}`);
+    }
+    return existing as AiConvStateRow;
+  }
   try {
     return (await db.aiConversationState.create({
       data: { workspaceId, conversationId, state: "ai_active" },
     })) as AiConvStateRow;
   } catch (err) {
     if ((err as { code?: string })?.code === "P2002") {
-      const row = await db.aiConversationState.findUnique({ where: { conversationId } });
+      const row = await db.aiConversationState.findFirst({ where: { conversationId, workspaceId } });
       if (row) return row as AiConvStateRow;
     }
     throw err;
   }
 }
 
-export async function getState(conversationId: string): Promise<AiConvStateRow | null> {
-  return (await db.aiConversationState.findUnique({
-    where: { conversationId },
+export async function getState(
+  workspaceId: string,
+  conversationId: string,
+): Promise<AiConvStateRow | null> {
+  return (await db.aiConversationState.findFirst({
+    where: { conversationId, workspaceId },
   })) as AiConvStateRow | null;
 }
 
@@ -72,7 +86,7 @@ export async function onHumanReply(
   const s = await ensureState(workspaceId, conversationId);
   if (s.state === "ai_active") {
     const row = (await db.aiConversationState.update({
-      where: { conversationId },
+      where: { conversationId, workspaceId },
       data: {
         state: "human_active",
         stateChangedAt: new Date(),
@@ -85,7 +99,7 @@ export async function onHumanReply(
   }
   // human_active / ai_paused / disabled: just reset the auto-reply counter.
   return (await db.aiConversationState.update({
-    where: { conversationId },
+    where: { conversationId, workspaceId },
     data: { autoReplyCount: 0 },
   })) as AiConvStateRow;
 }
@@ -101,7 +115,7 @@ export async function onCustomerInbound(
   const s = await ensureState(workspaceId, conversationId);
   if (s.state === "human_active") {
     const row = (await db.aiConversationState.update({
-      where: { conversationId },
+      where: { conversationId, workspaceId },
       data: { state: "ai_active", stateChangedAt: new Date(), autoReplyCount: 0 },
     })) as AiConvStateRow;
     emitState(workspaceId, conversationId, "ai_active");
@@ -115,7 +129,7 @@ export async function onCustomerInbound(
 export async function pauseByAgent(workspaceId: string, conversationId: string, userId: string) {
   await ensureState(workspaceId, conversationId);
   const row = await db.aiConversationState.update({
-    where: { conversationId },
+    where: { conversationId, workspaceId },
     data: { state: "ai_paused", pausedByUserId: userId, pausedAt: new Date(), stateChangedAt: new Date() },
   });
   emitState(workspaceId, conversationId, "ai_paused");
@@ -125,7 +139,7 @@ export async function pauseByAgent(workspaceId: string, conversationId: string, 
 export async function resumeByAgent(workspaceId: string, conversationId: string) {
   await ensureState(workspaceId, conversationId);
   const row = await db.aiConversationState.update({
-    where: { conversationId },
+    where: { conversationId, workspaceId },
     data: { state: "ai_active", pausedByUserId: null, pausedAt: null, stateChangedAt: new Date(), autoReplyCount: 0 },
   });
   emitState(workspaceId, conversationId, "ai_active");
@@ -136,7 +150,7 @@ export async function resumeByAgent(workspaceId: string, conversationId: string)
 export async function takeOverByAgent(workspaceId: string, conversationId: string, userId: string) {
   await ensureState(workspaceId, conversationId);
   const row = await db.aiConversationState.update({
-    where: { conversationId },
+    where: { conversationId, workspaceId },
     data: { state: "human_active", pausedByUserId: userId, stateChangedAt: new Date() },
   });
   emitState(workspaceId, conversationId, "human_active");
@@ -154,7 +168,7 @@ export async function takeOverByAgent(workspaceId: string, conversationId: strin
  */
 export async function resumeOnReopen(workspaceId: string, conversationId: string): Promise<boolean> {
   const res = await db.aiConversationState.updateMany({
-    where: { conversationId, state: "ai_paused" },
+    where: { conversationId, workspaceId, state: "ai_paused" },
     data: {
       state: "ai_active",
       pausedByUserId: null,
@@ -181,7 +195,7 @@ export async function handoffToHuman(
 ) {
   await ensureState(workspaceId, conversationId);
   const row = await db.aiConversationState.update({
-    where: { conversationId },
+    where: { conversationId, workspaceId },
     data: {
       state: "ai_paused",
       pausedByUserId: agentUserId,
@@ -207,16 +221,16 @@ export async function escalateToHuman(
   const s = await ensureState(workspaceId, conversationId);
   if (s.state === "ai_paused" || s.state === "disabled") return s;
   const row = (await db.aiConversationState.update({
-    where: { conversationId },
+    where: { conversationId, workspaceId },
     data: { state: "ai_paused", pausedByUserId: null, pausedAt: new Date(), stateChangedAt: new Date() },
   })) as AiConvStateRow;
   emitState(workspaceId, conversationId, "ai_paused");
   return row;
 }
 
-export async function incrementAutoReply(conversationId: string) {
+export async function incrementAutoReply(workspaceId: string, conversationId: string) {
   return db.aiConversationState.update({
-    where: { conversationId },
+    where: { conversationId, workspaceId },
     data: { autoReplyCount: { increment: 1 } },
   });
 }

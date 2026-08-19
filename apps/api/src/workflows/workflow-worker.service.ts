@@ -165,6 +165,10 @@ import {
   startMessageRawPayloadRetentionSweeper,
   stopMessageRawPayloadRetentionSweeper,
 } from "@/lib/sweepers/message-rawpayload-retention";
+import {
+  startAiRetentionSweeper,
+  stopAiRetentionSweeper,
+} from "@/lib/sweepers/ai-retention";
 import { WorkspaceRootService } from "../workspace-settings/workspace-root.service";
 
 /**
@@ -208,8 +212,10 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private outboundSendAttemptRetentionStarted = false;
   private workflowRunRetentionStarted = false;
   private conversationEventRetentionStarted = false;
+  private notificationRetentionStarted = false;
   private agentPresenceSamplerStarted = false;
   private webchatVisitorRetentionStarted = false;
+  private aiRetentionSweeperStarted = false;
   private messageRawPayloadRetentionStarted = false;
   private broadcastScheduleWorkerStarted = false;
   private broadcastScheduleDriftSweeperStarted = false;
@@ -312,20 +318,29 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       startContactDriftSweeper();
       this.contactDriftSweeperStarted = true;
       this.logger.log("Contact lastInboundAt drift sweeper started");
-
+    } catch (err) {
+      this.logger.error("Failed to start contact-drift sweeper", err);
+    }
+    // Its OWN try, like every sibling — a shared try skipped the later starts
+    // entirely and left an earlier one running with its stop-flag false.
+    try {
       // Links any contact with no Customer yet (unified identity, §6) — 60s
       // reconciler covering every non-inline create path.
       startCustomerLinkSweeper();
       this.customerLinkSweeperStarted = true;
-
+      this.logger.log("Customer link sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start customer-link sweeper", err);
+    }
+    try {
       // Moves conversations off agents who went offline, for teams that opted
       // in (AssignmentSettings.reassignOnOffline). No-ops entirely when this
       // process can't see socket presence.
       startAssignmentRebalanceSweeper();
       this.assignmentRebalanceSweeperStarted = true;
-      this.logger.log("Customer link sweeper started");
+      this.logger.log("Assignment rebalance sweeper started");
     } catch (err) {
-      this.logger.error("Failed to start contact-drift sweeper", err);
+      this.logger.error("Failed to start assignment-rebalance sweeper", err);
     }
     try {
       // Daily reconciler for the Conversation analytics MESSAGE COUNTERS
@@ -463,11 +478,19 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       // via CONVERSATION_EVENT_RETENTION_DAYS). N2 in
       // tests/VERIFICATION-2026-07-29.md.
       startConversationEventRetentionSweeper();
-      startNotificationRetentionSweeper();
       this.conversationEventRetentionStarted = true;
       this.logger.log("Conversation event retention sweeper started");
     } catch (err) {
       this.logger.error("Failed to start conversation-event retention sweeper", err);
+    }
+    // Its OWN try + flag, like every sibling.
+    try {
+      // Daily retention on per-user Notification rows.
+      startNotificationRetentionSweeper();
+      this.notificationRetentionStarted = true;
+      this.logger.log("Notification retention sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start notification retention sweeper", err);
     }
 
     try {
@@ -479,6 +502,17 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       this.logger.log("Webchat visitor retention sweeper started");
     } catch (err) {
       this.logger.error("Failed to start webchat-visitor retention sweeper", err);
+    }
+    try {
+      // Daily retention + orphan reclaim for the native AI subsystem. Its
+      // conversationId/messageId columns carry no FK by design, so nothing else
+      // reclaims a row whose thread is gone, and the voice-draft blobs are
+      // prefix-excluded from blob-orphan. 90-day window (AI_RETENTION_DAYS).
+      startAiRetentionSweeper();
+      this.aiRetentionSweeperStarted = true;
+      this.logger.log("AI retention sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start ai-retention sweeper", err);
     }
     try {
       // 5-minute online-time sampler behind the team report's "Online" column
@@ -674,9 +708,10 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       );
     }
     try {
-      if (this.conversationEventRetentionStarted)
+      if (this.conversationEventRetentionStarted) {
         stopConversationEventRetentionSweeper();
-        stopNotificationRetentionSweeper();
+      }
+      if (this.notificationRetentionStarted) stopNotificationRetentionSweeper();
       if (this.agentPresenceSamplerStarted) stopAgentPresenceSampler();
       if (this.webchatVisitorRetentionStarted) stopWebchatVisitorRetentionSweeper();
       if (this.messageRawPayloadRetentionStarted)
@@ -684,6 +719,13 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.warn(
         `stopConversationEventRetentionSweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    try {
+      if (this.aiRetentionSweeperStarted) stopAiRetentionSweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopAiRetentionSweeper threw: ${err instanceof Error ? err.message : err}`,
       );
     }
     try {
@@ -756,9 +798,15 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     }
     try {
       if (this.customerLinkSweeperStarted) stopCustomerLinkSweeper();
-      if (this.assignmentRebalanceSweeperStarted) stopAssignmentRebalanceSweeper();
     } catch (err) {
       this.logger.warn(`stopCustomerLinkSweeper threw: ${err instanceof Error ? err.message : err}`);
+    }
+    try {
+      if (this.assignmentRebalanceSweeperStarted) stopAssignmentRebalanceSweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopAssignmentRebalanceSweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
     }
     try {
       if (this.analyticsDriftSweeperStarted) stopConversationAnalyticsDriftSweeper();

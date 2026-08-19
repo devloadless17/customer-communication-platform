@@ -170,16 +170,20 @@ async function selectRetriable(
     },
   });
 
-  // Prune resolved/expired entries so the bookkeeping maps track only live rows.
-  const liveIds = new Set([
-    ...metaRows.map((r) => r.id),
-    ...inAppRows.map((r) => r.id),
-  ]);
-  for (const id of lastAttemptAt.keys()) {
-    if (!liveIds.has(id)) lastAttemptAt.delete(id);
-  }
-  for (const id of attemptCounts.keys()) {
-    if (!liveIds.has(id)) attemptCounts.delete(id);
+  // Prune bookkeeping for rows that can no longer be candidates, keyed on the
+  // last ATTEMPT time — NOT on absence from this tick's candidate set. Every
+  // attempt writes the row, and both queries exclude rows touched within
+  // INFLIGHT_GRACE_MS, so a row drops out of the candidate set for minutes
+  // after each try: pruning on absence handed a permanently-failing in-app row
+  // a fresh MAX_INAPP_ATTEMPTS budget on the next tick, and the paid-STT
+  // ceiling never bound. An entry older than the in-app horizon can never
+  // return (the horizon bounds the candidate window), so it is safe to forget.
+  const forgetBefore = now - INAPP_HORIZON_MS;
+  for (const [id, at] of lastAttemptAt) {
+    if (at < forgetBefore) {
+      lastAttemptAt.delete(id);
+      attemptCounts.delete(id);
+    }
   }
 
   const meta = metaRows
