@@ -11,11 +11,20 @@ if (existsSync(".env")) {
   process.loadEnvFile(".env");
 }
 
-// Superadmin bootstrap credentials. Hardcoded by choice (single-operator
-// pilot). The deploy runs this on every push as an idempotent upsert, so the
-// row is always present + re-asserted. Change after first login.
-const email = "ali@loadless.ai";
-const password = "loadless";
+// Superadmin BOOTSTRAP credentials — used only when the account does not exist
+// yet. `SUPERADMIN_PASSWORD` overrides the fallback literal so a real
+// deployment never has to be born holding a password that is public in this
+// repository.
+//
+// THE PASSWORD IS WRITTEN ON CREATE ONLY. It used to ride the upsert's UPDATE
+// branch as well, and the deploy workflow runs this seed on EVERY push to
+// production — so the operator's rotated password was silently reverted to the
+// literal below on the next deploy, on the one account that may enter ANY
+// workspace on the box (see OPERATOR MODE, CLAUDE.md §18). The old comment
+// here said "change after first login"; the code then undid exactly that.
+// (Audit 2026-08-19.)
+const email = process.env.SUPERADMIN_EMAIL ?? "ali@loadless.ai";
+const password = process.env.SUPERADMIN_PASSWORD ?? "loadless";
 const NAME = "Ali";
 
 // Pass the connection string directly instead of a pre-built `pg.Pool`. The
@@ -109,6 +118,11 @@ async function main() {
     update: {
       isSuperAdmin: true,
       name: NAME,
+      // DELIBERATE break-glass: an operator who deactivates themselves would
+      // otherwise be locked out of the platform they administer with no
+      // in-product way back. Unlike the password (which this seed no longer
+      // re-asserts), reactivating grants nothing on its own — signing in still
+      // requires the current password.
       deactivatedAt: null,
       // Heals a row seeded between the default flip and this fix.
       emailVerified: true,
@@ -124,7 +138,7 @@ async function main() {
   // "credential", accountId = email). Mirror the hash here so signin works on
   // a freshly-seeded DB — the old per-migration backfill is gone after the
   // init-migration squash.
-  await db.account.upsert({
+  const credential = await db.account.upsert({
     where: { providerId_accountId: { providerId: "credential", accountId: email } },
     create: {
       userId: user.id,
@@ -132,8 +146,19 @@ async function main() {
       accountId: email,
       password: passwordHash,
     },
-    update: { password: passwordHash, userId: user.id },
+    // NO `password` here — see the constant's note. Re-asserting it on every
+    // deploy reverted the operator's rotated password to a literal published in
+    // this repository. `userId` is safe to re-assert: it only re-points a
+    // credential row at the user row this same seed just upserted.
+    update: { userId: user.id },
   });
+  if (credential.password === passwordHash && !process.env.SUPERADMIN_PASSWORD) {
+    console.warn(
+      `[seed-superadmin] ${email} is using the built-in bootstrap password. ` +
+        `Change it after first login, or set SUPERADMIN_PASSWORD before seeding a ` +
+        `real deployment — this account can enter every workspace on the box.`,
+    );
+  }
 
   // Default #general channel. The schema documents this as auto-created at
   // team setup, and /team redirects to it on first login; without this row
