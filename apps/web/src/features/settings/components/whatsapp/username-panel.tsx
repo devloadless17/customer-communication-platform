@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { AtSign, Loader2, Save, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
+import { apiErrorMessage, apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
@@ -60,12 +61,9 @@ export function UsernamePanel({
     try {
       const res = await apiFetch(`/api/workspace/whatsapp/username${query}`);
       if (!res.ok) {
-        const data = (await res.json().catch(() => null)) as
-          | { error?: string; detail?: string }
-          | null;
-        throw new Error(
-          [data?.error, data?.detail].filter(Boolean).join(": ") || `HTTP ${res.status}`,
-        );
+        // `detail` → humanized key → fallback. The old join put the raw
+        // snake_case key in front of copy written for a person.
+        throw new Error(await apiErrorMessage(res, "Couldn't load the username"));
       }
       const data = (await res.json()) as UsernameState;
       setState(data);
@@ -120,9 +118,8 @@ export function UsernamePanel({
           if (ok) await save("force_transfer");
           return;
         }
-        throw new Error(
-          [data?.error, data?.detail].filter(Boolean).join(": ") || `HTTP ${res.status}`,
-        );
+        // Parsed already for the branch above, so the from-body variant.
+        throw new Error(apiErrorMessageFrom(data, "Couldn't save the username"));
       }
       const data = (await res.json()) as { username: string };
       setState((s) => ({ username: data.username, suggestions: s?.suggestions ?? [] }));
@@ -152,12 +149,7 @@ export function UsernamePanel({
         method: "DELETE",
       });
       if (!res.ok) {
-        const data = (await res.json().catch(() => null)) as
-          | { error?: string; detail?: string }
-          | null;
-        throw new Error(
-          [data?.error, data?.detail].filter(Boolean).join(": ") || `HTTP ${res.status}`,
-        );
+        throw new Error(await apiErrorMessage(res, "Couldn't remove the username"));
       }
       setState((s) => ({ username: null, suggestions: s?.suggestions ?? [] }));
       setDraft("");

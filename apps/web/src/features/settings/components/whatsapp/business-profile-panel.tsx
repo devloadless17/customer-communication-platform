@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { BadgeCheck, Loader2, Save, Store } from "lucide-react";
 import { toast } from "sonner";
 
+import { apiErrorMessage } from "@ccp/shared/api/error-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -106,12 +107,9 @@ export function BusinessProfilePanel({
     try {
       const res = await apiFetch(`/api/workspace/whatsapp/profile${query}`);
       if (!res.ok) {
-        const data = (await res.json().catch(() => null)) as
-          | { error?: string; detail?: string }
-          | null;
-        throw new Error(
-          [data?.error, data?.detail].filter(Boolean).join(": ") || `HTTP ${res.status}`,
-        );
+        // `detail` → humanized key → fallback. The old join put the raw
+        // snake_case key in front of copy written for a person.
+        throw new Error(await apiErrorMessage(res, "Couldn't load the profile"));
       }
       const data = (await res.json()) as { profile: Profile };
       setProfile(data.profile);
@@ -172,12 +170,7 @@ export function BusinessProfilePanel({
         body: JSON.stringify(patch),
       });
       if (!res.ok) {
-        const data = (await res.json().catch(() => null)) as
-          | { error?: string; detail?: string }
-          | null;
-        throw new Error(
-          [data?.error, data?.detail].filter(Boolean).join(": ") || `HTTP ${res.status}`,
-        );
+        throw new Error(await apiErrorMessage(res, "Couldn't save the profile"));
       }
       // The server reads the profile back from Meta rather than echoing what we
       // sent, so this is what Meta actually stored.

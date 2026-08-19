@@ -21,6 +21,7 @@ import {
   PageSubscriptionWarning,
   type PageSubscription,
 } from "@/components/settings/page-subscription-warning";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
 
@@ -101,11 +102,10 @@ export function InstagramSettings({
         error?: string;
         detail?: string;
       };
-      setError(
-        [data.error, data.detail && `(${data.detail.slice(0, 200)})`]
-          .filter(Boolean)
-          .join(" ") || "Failed to save",
-      );
+      // `detail` → humanized key → fallback. The old join led with the raw
+      // snake_case key and put the sentence the server wrote for a person in
+      // brackets behind it.
+      setError(apiErrorMessageFrom(data, "Failed to save"));
       return false;
     }
     return true;
@@ -204,7 +204,10 @@ export function InstagramSettings({
               >
                 {current.connected ? "Connected" : "Not connected"}
               </p>
-              {current.connected && (
+              {/* A non-admin is told CONNECTED (from the member-open account
+                  directory) but never the account id — render the identity line
+                  only when there is one. */}
+              {current.connected && current.igId && (
                 <p className="text-xs text-muted-foreground">
                   {current.igUsername ? `@${current.igUsername}` : "Account"} · {current.igId}
                   {current.pageName ? ` · via ${current.pageName}` : ""}

@@ -96,6 +96,13 @@ export interface ChannelAccountHealth {
   qualityRating: string | null;
   /** STANDARD (~80 msg/s) | HIGH (~1,000 msg/s) — per number. */
   throughputLevel: string | null;
+  /**
+   * COEXISTENCE (`is_on_biz_app`): the number is also in use in the WhatsApp
+   * Business app, which Meta hard-caps at 20 msg/s OUTSIDE the throughput
+   * ladder above — Meta still reports a level for it. Rendering the level alone
+   * promised such a number ~80 or ~1,000 msg/s it will never get.
+   */
+  isOnBusinessApp: boolean | null;
   /** Cloud API registration state (Meta `status`, raw) — per number.
    *  Non-CONNECTED means every send fails; drives the "Not registered" pill. */
   registrationStatus: string | null;
@@ -236,6 +243,7 @@ export class ChannelAccountsService {
         createdAt: true,
         qualityRating: true,
         throughputLevel: true,
+        isOnBusinessApp: true,
         registrationStatus: true,
         messagingHealthUpdatedAt: true,
       },
@@ -268,6 +276,7 @@ export class ChannelAccountsService {
           : {
               qualityRating: r.qualityRating,
               throughputLevel: r.throughputLevel,
+              isOnBusinessApp: r.isOnBusinessApp,
               registrationStatus: r.registrationStatus,
               updatedAt: r.messagingHealthUpdatedAt?.toISOString() ?? null,
               portfolio: r.wabaAccount?.portfolio

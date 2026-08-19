@@ -5,6 +5,7 @@ import { Gauge, Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { cn } from "@ccp/shared/utils";
+import { apiErrorMessage, NETWORK_ERROR_MESSAGE } from "@ccp/shared/api/error-message";
 import { Button } from "@/components/ui/button";
 import { LocalTime } from "@/components/local-time";
 import { apiFetch } from "@/lib/api/client-fetch";
@@ -31,6 +32,9 @@ interface Health {
   recentUniqueRecipients: number | null;
   remainingDailyBudget: number | null;
   throughputLevel: string | null;
+  /** Coexistence (`is_on_biz_app`) — Meta hard-caps the number at 20 msg/s,
+   *  outside the ladder `throughputLevel` reports. Null = never polled. */
+  isOnBusinessApp: boolean | null;
   externalPortfolioId: string | null;
   portfolioAccountCount: number;
   /** Meta's raw portfolio `verification_status` ("verified" | "not_verified" | …). */
@@ -56,7 +60,9 @@ interface Health {
   messagingHealthUpdatedAt: string | null;
 }
 
-/** Meta publishes ~80 msg/s for STANDARD and up to ~1,000 for HIGH. */
+/** Meta publishes ~80 msg/s for STANDARD and up to ~1,000 for HIGH. A
+ *  COEXISTENCE number sits OUTSIDE this ladder (hard 20 msg/s) even though Meta
+ *  reports a level for it — never render this without checking that flag. */
 const THROUGHPUT_LABEL: Record<string, string> = {
   STANDARD: "Standard · up to ~80 messages/second",
   HIGH: "High · up to ~1,000 messages/second",
@@ -154,6 +160,7 @@ export function MessagingHealthPanel({
 }) {
   const [health, setHealth] = useState<Health | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
   const accountQuery = accountId
@@ -163,11 +170,18 @@ export function MessagingHealthPanel({
   const load = useCallback(async () => {
     try {
       const res = await apiFetch(`/api/broadcasts/messaging-health${accountQuery}`);
-      if (!res.ok) return;
+      if (!res.ok) {
+        setError(await apiErrorMessage(res, "Couldn't load the messaging limits."));
+        return;
+      }
       setHealth((await res.json()) as Health);
+      setError(null);
     } catch {
-      // Leave the last good value on screen. A transient blip must not blank a
-      // panel whose whole job is to state the current limits.
+      // Leave the last good value on screen — a transient blip must not blank a
+      // panel whose whole job is to state the current limits — but SAY so: with
+      // nothing loaded yet this used to render nothing at all, and a panel that
+      // silently isn't there reads as "this workspace has no limits".
+      setError(NETWORK_ERROR_MESSAGE);
     } finally {
       setLoading(false);
     }
@@ -204,7 +218,34 @@ export function MessagingHealthPanel({
     // Fixed height so the panel doesn't shift the page when it lands.
     return <div className="h-40 animate-pulse rounded-xl border border-border bg-muted/30" />;
   }
-  if (!health) return null;
+  if (!health) {
+    return (
+      <section className="rounded-xl border border-border bg-card p-5">
+        <h2 className="flex items-center gap-2 text-sm font-semibold">
+          <Gauge className="size-4 text-muted-foreground" />
+          Messaging health
+        </h2>
+        <p className="mt-2 text-xs text-muted-foreground">
+          {error ?? "Couldn't load the messaging limits."} Sends aren&apos;t
+          pre-checked against a limit while this is unavailable — Meta still
+          enforces the real one.
+        </p>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="mt-3"
+          onClick={() => {
+            setLoading(true);
+            void load();
+          }}
+        >
+          <RefreshCw className="size-3.5" />
+          Try again
+        </Button>
+      </section>
+    );
+  }
 
   const used = health.recentUniqueRecipients;
   const cap = health.messagingDailyCap;
@@ -252,6 +293,14 @@ export function MessagingHealthPanel({
           </Button>
         )}
       </header>
+
+      {/* Loaded once, then a later read failed: the figures below are STALE and
+          the panel says so rather than presenting them as current. */}
+      {error && (
+        <p className="mt-3 rounded-lg border border-warning-border bg-warning-bg px-3 py-2 text-2xs text-warning-fg">
+          {error} These are the last figures we loaded.
+        </p>
+      )}
 
       {/* An ACTIVE messaging restriction outranks everything on this panel —
           sends are being rejected right now. Shown even without a snapshot;
@@ -435,9 +484,25 @@ export function MessagingHealthPanel({
 
             <dt className="text-muted-foreground">Throughput</dt>
             <dd>
-              {health.throughputLevel
-                ? (THROUGHPUT_LABEL[health.throughputLevel] ?? health.throughputLevel)
-                : "Unknown"}
+              {/* Coexistence WINS over the reported level, exactly as the send
+                  pacer does (`resolveSendRate`) — Meta still reports
+                  STANDARD/HIGH for a number that is also in use in the WhatsApp
+                  Business app while hard-capping it at 20 msg/s. */}
+              {health.isOnBusinessApp === true ? (
+                <>
+                  Coexistence · capped at 20 messages/second
+                  <span className="ml-2 text-muted-foreground">
+                    This number is also in use in the WhatsApp Business app, and
+                    Meta holds those to 20 messages/second whatever level it
+                    reports
+                    {health.throughputLevel ? ` (${health.throughputLevel})` : ""}.
+                  </span>
+                </>
+              ) : health.throughputLevel ? (
+                (THROUGHPUT_LABEL[health.throughputLevel] ?? health.throughputLevel)
+              ) : (
+                "Unknown"
+              )}
             </dd>
 
             <dt className="text-muted-foreground">Business portfolio</dt>

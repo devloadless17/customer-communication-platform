@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Loader2, Search as SearchIcon, X } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
+import { apiErrorMessage, NETWORK_ERROR_MESSAGE } from "@ccp/shared/api/error-message";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { initials } from "@ccp/shared/utils";
 import type { TeamChannelMessageDto } from "@ccp/shared/team-chat/types";
@@ -45,6 +46,9 @@ export function ChannelSearch({
 }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<TeamChannelMessageDto[] | null>(null);
+  // A failed search is not an empty one: reporting "No matches." for a request
+  // that never answered tells someone their message isn't there when it is.
+  const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -62,6 +66,7 @@ export function ChannelSearch({
     const q = query.trim();
     if (q.length < 2) {
       setResults(null);
+      setError(null);
       return;
     }
     let cancelled = false;
@@ -73,14 +78,25 @@ export function ChannelSearch({
         );
         if (cancelled) return;
         if (!res.ok) {
-          setResults([]);
+          setResults(null);
+          setError(await apiErrorMessage(res, "Search didn't run."));
           return;
         }
         const page = (await res.json()) as {
           items: TeamChannelMessageDto[];
           nextCursor: string | null;
         };
-        if (!cancelled) setResults(page.items);
+        if (!cancelled) {
+          setResults(page.items);
+          setError(null);
+        }
+      } catch {
+        // fetchWithSessionGuard THROWS on a network failure (and on a 401, which
+        // it handles by bouncing) — unguarded, that left the spinner spinning.
+        if (!cancelled) {
+          setResults(null);
+          setError(NETWORK_ERROR_MESSAGE);
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -119,6 +135,12 @@ export function ChannelSearch({
           <X className="size-4" />
         </button>
       </div>
+
+      {error && (
+        <div className="border-t border-border px-4 py-6 text-center text-xs text-destructive">
+          {error}
+        </div>
+      )}
 
       {results !== null && (
         <div className="max-h-72 overflow-y-auto border-t border-border">

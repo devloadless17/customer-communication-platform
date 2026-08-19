@@ -7,6 +7,7 @@ import { Hash, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { apiErrorMessage, apiErrorMessageFrom, NETWORK_ERROR_MESSAGE } from "@ccp/shared/api/error-message";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { toast } from "@/lib/toast";
 import type { TeamChannelBrowseItemDto } from "@ccp/shared/team-chat/types";
@@ -24,6 +25,9 @@ export function BrowseChannelsDialog({ onClose }: { onClose: () => void }) {
   const [query, setQuery] = useState("");
   const [items, setItems] = useState<TeamChannelBrowseItemDto[]>([]);
   const [loading, setLoading] = useState(true);
+  // A failed listing is not an empty one: "No public channels yet." for a
+  // request that never answered reads as "your team has none".
+  const [error, setError] = useState<string | null>(null);
   const [joiningId, setJoiningId] = useState<string | null>(null);
 
   // Debounced fetch — same 200ms cadence as the other search surfaces.
@@ -33,12 +37,23 @@ export function BrowseChannelsDialog({ onClose }: { onClose: () => void }) {
       setLoading(true);
       const qs = query.trim() ? `?q=${encodeURIComponent(query.trim())}` : "";
       void fetchWithSessionGuard(`/api/team-chat/channels/browse${qs}`)
-        .then((r) => (r.ok ? r.json() : null))
-        .then((res) => {
+        .then(async (r) => {
           if (cancelled) return;
-          setItems((res?.items ?? []) as TeamChannelBrowseItemDto[]);
+          if (!r.ok) {
+            setItems([]);
+            setError(await apiErrorMessage(r, "Couldn't load the channel list."));
+            return;
+          }
+          const res = (await r.json()) as { items?: TeamChannelBrowseItemDto[] };
+          setItems(res.items ?? []);
+          setError(null);
         })
-        .catch(() => {})
+        .catch(() => {
+          if (!cancelled) {
+            setItems([]);
+            setError(NETWORK_ERROR_MESSAGE);
+          }
+        })
         .finally(() => {
           if (!cancelled) setLoading(false);
         });
@@ -58,8 +73,11 @@ export function BrowseChannelsDialog({ onClose }: { onClose: () => void }) {
           { method: "POST" },
         );
         if (!res.ok) {
-          const json = (await res.json().catch(() => ({}))) as { detail?: string };
-          toast.error(json.detail ?? "Couldn't join that channel.");
+          const json = (await res.json().catch(() => ({}))) as {
+            error?: string;
+            detail?: string;
+          };
+          toast.error(apiErrorMessageFrom(json, "Couldn't join that channel."));
           return;
         }
         // AWAIT the join before navigating. The workspace emits
@@ -105,6 +123,8 @@ export function BrowseChannelsDialog({ onClose }: { onClose: () => void }) {
             <div className="py-6 text-center text-xs text-muted-foreground">
               Loading…
             </div>
+          ) : error ? (
+            <div className="py-6 text-center text-xs text-destructive">{error}</div>
           ) : items.length === 0 ? (
             <div className="py-6 text-center text-xs text-muted-foreground">
               {query ? "No public channels match that search." : "No public channels yet."}

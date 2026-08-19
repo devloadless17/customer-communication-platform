@@ -389,6 +389,13 @@ function buildCurl(example: CurlExample, origin: string, token: string | null): 
   // expands when the placeholder is used; other lines stay single-quoted since
   // their values are literal.
   const lines = [`curl -X ${example.method} '${url}' \\`, `  -H "Authorization: Bearer ${auth}"`];
+  // Route-required headers (today: `Idempotency-Key` on sends, without which
+  // the request 400s). Double-quoted like the Authorization line so a value
+  // carrying a shell substitution — `$(uuidgen)` — actually expands.
+  for (const [name, value] of Object.entries(example.headers ?? {})) {
+    lines[lines.length - 1] += " \\";
+    lines.push(`  -H "${name}: ${value}"`);
+  }
   if (example.body) {
     lines[lines.length - 1] += " \\";
     lines.push(`  -H 'Content-Type: application/json' \\`);

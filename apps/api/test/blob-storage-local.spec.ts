@@ -148,7 +148,8 @@ describe("local blob driver", () => {
     await expect(localProvider.getObject(KEY)).rejects.toBeInstanceOf(
       BlobObjectNotFoundError,
     );
-    // A missing key must never throw — same contract as R2's delete.
-    await expect(localProvider.delete(KEY)).resolves.toBeUndefined();
+    // A missing key must never throw and counts as removed (no failed keys) —
+    // same contract as R2's delete.
+    await expect(localProvider.delete(KEY)).resolves.toEqual([]);
   });
 });

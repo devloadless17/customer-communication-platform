@@ -36,6 +36,14 @@ export interface CurlExample {
   path: string;
   /** Optional JSON request body. Sent compact-stringified in `-d`. */
   body?: Record<string, unknown>;
+  /**
+   * Extra headers the ROUTE requires. `Content-Type` is added automatically
+   * with a body — this is for the ones a copied example fails without, which
+   * today means `Idempotency-Key` on every /v1 send (CLAUDE.md §8: a send is
+   * non-idempotent and bills the workspace, so the header is mandatory and the
+   * route 400s without it).
+   */
+  headers?: Record<string, string>;
 }
 
 export const N8N_PRESET: IntegrationPreset = {
@@ -76,6 +84,11 @@ export const N8N_PRESET: IntegrationPreset = {
       method: "POST",
       path: "/api/external/v1/messages",
       body: { contact: { phone: "+15555550100" }, text: "Hello from n8n" },
+      // REQUIRED on every send — without it the route 400s, so an example
+      // that omitted it never worked once. A shell command substitution keeps
+      // the pasted line copy-safe: a re-run mints a new key rather than
+      // replaying the first one.
+      headers: { "Idempotency-Key": "$(uuidgen)" },
     },
   ],
 };

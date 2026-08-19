@@ -7,6 +7,7 @@ import { Check, Copy, Loader2, PlugZap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/layouts/page-header";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
 
@@ -76,11 +77,10 @@ export function MetaSettings({
       warnings?: string[];
     };
     if (!res.ok) {
-      setError(
-        [data.error, data.detail && `(${data.detail.slice(0, 200)})`]
-          .filter(Boolean)
-          .join(" ") || "Failed to save",
-      );
+      // `detail` → humanized key → fallback. The old join led with the raw
+      // snake_case key and put the sentence the server wrote for a person in
+      // brackets behind it.
+      setError(apiErrorMessageFrom(data, "Failed to save"));
       return null;
     }
     return { resynced: data.resynced ?? [], warnings: data.warnings ?? [] };

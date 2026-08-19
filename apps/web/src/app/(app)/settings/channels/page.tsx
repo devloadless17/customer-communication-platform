@@ -27,7 +27,9 @@ interface CardModel {
   channel?: Channel;
   icon?: ReactNode;
   connected: boolean;
-  status: "connected" | "not_connected" | "coming_soon";
+  /** `unknown` = this viewer has no route that can answer it (see below) — a
+   *  different state from "not connected", which is an answer. */
+  status: "connected" | "not_connected" | "unknown" | "coming_soon";
   /**
    * How many accounts are connected on this channel, and what one is called.
    * A workspace can hold several WhatsApp numbers / Pages / handles, and the
@@ -72,6 +74,22 @@ export default async function ChannelsCatalogPage() {
     for (const a of directory) {
       accountCounts.set(a.channel, (accountCounts.get(a.channel) ?? 0) + 1);
     }
+  } else {
+    // Every `getTeam*Config` above is admin-only, so a non-admin used to read
+    // "Not connected" on every card while their inbox was taking messages on
+    // all of them. Connectedness is not a credential: the member-open account
+    // directory answers it for the Meta channels. The Meta app and the widget
+    // list have no member-open equivalent, so those two cards say "unknown"
+    // rather than guessing (see `status` below).
+    const directory = await soft("channel-account directory", [], () =>
+      listChannelAccountDirectory(),
+    );
+    for (const a of directory) {
+      accountCounts.set(a.channel, (accountCounts.get(a.channel) ?? 0) + 1);
+    }
+    wa = (accountCounts.get("whatsapp") ?? 0) > 0;
+    msgr = (accountCounts.get("messenger") ?? 0) > 0;
+    ig = (accountCounts.get("instagram") ?? 0) > 0;
   }
 
   const live: CardModel[] = [
@@ -119,7 +137,8 @@ export default async function ChannelsCatalogPage() {
         "Embed a chat widget on any website — one per site. Visitor messages land in your inbox.",
       href: "/settings/webchatwidget",
       connected: widgetCount > 0,
-      status: widgetCount > 0 ? "connected" : "not_connected",
+      // The widget list is admin-only and has no directory equivalent.
+      status: !canManage ? "unknown" : widgetCount > 0 ? "connected" : "not_connected",
       accountCount: widgetCount,
       accountNoun: "widget",
     },
@@ -167,7 +186,8 @@ export default async function ChannelsCatalogPage() {
       </span>
     ),
     connected: metaReady,
-    status: metaReady ? "connected" : "not_connected",
+    // The app's credentials are admin-only, and nothing member-open describes them.
+    status: !canManage ? "unknown" : metaReady ? "connected" : "not_connected",
   };
 
   return (
@@ -313,6 +333,13 @@ function StatusPill({ status }: { status: CardModel["status"] }) {
       <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-2xs font-medium text-emerald-600">
         <span className="size-1.5 rounded-full bg-emerald-500" />
         Connected
+      </span>
+    );
+  }
+  if (status === "unknown") {
+    return (
+      <span className="rounded-full border border-dashed px-2 py-0.5 text-2xs font-medium text-muted-foreground">
+        Admins only
       </span>
     );
   }

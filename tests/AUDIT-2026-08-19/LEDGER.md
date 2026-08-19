@@ -33,7 +33,9 @@ Resume state: if a session is cut, continue from the first section below not mar
 | Cleanup fleet (S4 docs, S12-4 AI retention, 97 lows) | RUNNING (wf_cfee02b9-577) |
 | E2E gate completeness | FIXED + COMMITTED a09a5efd — 3 root specs (incl. contacts-segments) were never run by the batched gate; now batched + self-checking |
 | Wave 4 (U13, U14) + S1/S4/S9..S13 | pending |
-| Low-findings pass (62 collected) | pending — tests/AUDIT-2026-08-19/low-findings-backlog.md |
+| Low-findings pass (97 collected) | DONE — committed 1ecec952 |
+| S11 coverage-manifest diff | DONE — 792/1103 files explicitly attested by wave reviewers; **311 never opened**. Follow-up pass reviewed all of them (337 files incl. corroboration), 253 clean, 51 findings, 15 CONFIRMED. Coverage is now provable. |
+| Coverage-gap fixes | RUNNING (wf_7fc56d9a-cca) |
 | Live phase 1–8 | pending |
 | Final gate chain | pending |
 

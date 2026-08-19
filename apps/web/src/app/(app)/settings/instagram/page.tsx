@@ -1,7 +1,9 @@
 import { getSession } from "@/lib/auth/current-user";
 import {
   getTeamInstagramConfig,
+  listChannelAccountDirectory,
   listChannelAccounts,
+  type ChannelAccountDirectoryEntry,
   type ChannelAccountView,
 } from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
@@ -47,8 +49,18 @@ export default async function InstagramSettingsPage() {
       webhookSubscription: config.webhookSubscription,
     };
   } else {
+    // Whether the channel is CONNECTED is not a credential, and hardcoding
+    // `false` told an agent the account was disconnected while their inbox was
+    // taking DMs on it. The member-open account directory answers it without
+    // decrypting anything; the handle and ids below stay withheld, because the
+    // directory's display name may be an admin's label rather than the @handle.
+    const directory = await soft(
+      "channel-account directory",
+      [] as ChannelAccountDirectoryEntry[],
+      () => listChannelAccountDirectory(),
+    );
     current = {
-      connected: false,
+      connected: directory.some((a) => a.channel === "instagram"),
       igId: null,
       igUsername: null,
       pageId: null,

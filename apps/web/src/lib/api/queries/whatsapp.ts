@@ -59,6 +59,9 @@ export interface ChannelAccountView {
 export interface ChannelAccountHealth {
   qualityRating: string | null;
   throughputLevel: string | null;
+  /** Coexistence (`is_on_biz_app`): Meta hard-caps this number at 20 msg/s,
+   *  OUTSIDE the throughput ladder it still reports a level for. */
+  isOnBusinessApp: boolean | null;
   /** Cloud API registration state (Meta `status`, raw) — non-CONNECTED means
    *  every send from this number fails. */
   registrationStatus: string | null;

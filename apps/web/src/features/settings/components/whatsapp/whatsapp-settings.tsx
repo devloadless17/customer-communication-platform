@@ -20,6 +20,7 @@ import { LocalTime } from "@/components/local-time";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/layouts/page-header";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 import { apiFetch } from "@/lib/api/client-fetch";
 import type { ChannelAccountView } from "@/lib/api/queries";
 import { ChannelAccountsPanel } from "@/features/channels/components/channel-accounts-panel";
@@ -152,11 +153,10 @@ export function WhatsappSettings({
         error?: string;
         detail?: string;
       };
-      setError(
-        [data.error, data.detail && `(${data.detail.slice(0, 200)})`]
-          .filter(Boolean)
-          .join(" ") || "Failed to save",
-      );
+      // `detail` → humanized key → fallback. The old join led with the raw
+      // snake_case key and put the sentence the server wrote for a person in
+      // brackets behind it.
+      setError(apiErrorMessageFrom(data, "Failed to save"));
       return false;
     }
     const ok = (await res.json().catch(() => ({}))) as { warnings?: string[] };

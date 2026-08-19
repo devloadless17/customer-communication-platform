@@ -1427,6 +1427,14 @@ export interface MessagingHealthSummary {
   recentUniqueRecipients: number | null;
   remainingDailyBudget: number | null;
   throughputLevel: string | null;
+  /**
+   * COEXISTENCE (`is_on_biz_app`) — the number is also in use in the WhatsApp
+   * Business app. Meta hard-caps those at 20 msg/s OUTSIDE the throughput
+   * ladder while still reporting a level for them (see `resolveSendRate`), so
+   * a reader that renders `throughputLevel` alone states a ceiling 4-50x the
+   * real one. Null = never polled; treated as not-coexistence, like the gate.
+   */
+  isOnBusinessApp: boolean | null;
   externalPortfolioId: string | null;
   portfolioAccountCount: number;
   /** The account these figures describe; null = the channel default. */
@@ -1506,6 +1514,7 @@ export async function getMessagingHealthSummary(
     recentUniqueRecipients: used,
     remainingDailyBudget: used === null || cap === null ? null : Math.max(0, cap - used),
     throughputLevel: health?.throughputLevel ?? null,
+    isOnBusinessApp: health?.isOnBusinessApp ?? null,
     externalPortfolioId: health?.externalPortfolioId ?? null,
     portfolioAccountCount: health?.portfolioAccountCount ?? 0,
     /** Which account these figures describe — so the UI never has to guess. */

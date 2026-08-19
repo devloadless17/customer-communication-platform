@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Copy, Download, Loader2, Plus, QrCode, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
+import { apiErrorMessage } from "@ccp/shared/api/error-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api/client-fetch";
@@ -56,12 +57,10 @@ export function QrCodesPanel({
     try {
       const res = await apiFetch(`/api/workspace/whatsapp/qr-codes${query}`);
       if (!res.ok) {
-        const data = (await res.json().catch(() => null)) as
-          | { error?: string; detail?: string }
-          | null;
-        throw new Error(
-          [data?.error, data?.detail].filter(Boolean).join(": ") || `HTTP ${res.status}`,
-        );
+        // `detail` → humanized key → fallback. Joining the raw key onto the
+        // sentence put `qr_code_read_failed:` in front of copy already written
+        // for a person.
+        throw new Error(await apiErrorMessage(res, "Couldn't load QR codes"));
       }
       setCodes(((await res.json()) as { codes: QrCode[] }).codes);
     } catch (err) {
@@ -89,12 +88,7 @@ export function QrCodesPanel({
         body: JSON.stringify({ prefilledMessage: draft.trim(), imageFormat: "SVG" }),
       });
       if (!res.ok) {
-        const data = (await res.json().catch(() => null)) as
-          | { error?: string; detail?: string }
-          | null;
-        throw new Error(
-          [data?.error, data?.detail].filter(Boolean).join(": ") || `HTTP ${res.status}`,
-        );
+        throw new Error(await apiErrorMessage(res, "Couldn't create the QR code"));
       }
       const { code } = (await res.json()) as { code: QrCode };
       setCodes((cur) => [code, ...(cur ?? [])]);
@@ -124,7 +118,7 @@ export function QrCodesPanel({
         `/api/workspace/whatsapp/qr-codes/${encodeURIComponent(target.code)}${query}`,
         { method: "DELETE" },
       );
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error(await apiErrorMessage(res, "Couldn't delete the QR code"));
       setCodes((cur) => (cur ?? []).filter((c) => c.code !== target.code));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't delete the QR code");

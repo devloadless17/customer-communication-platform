@@ -53,6 +53,9 @@ export function PolicyCard({
   onChanged: () => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
+  // Seeded once and deliberately never re-synced from the prop — a re-sync
+  // would discard edits in progress. The CAS token is therefore read from the
+  // PROP at save time, not from here; see `save()`.
   const [draft, setDraft] = useState<PolicyRow>(policy);
   const [saving, setSaving] = useState(false);
 
@@ -124,7 +127,11 @@ export function PolicyCard({
               maxOpen: m.maxOpen,
               enabled: m.enabled,
             })),
-          expectedVersion: draft.version,
+          // From the PROP: the card is keyed by policy.id, so it is not
+          // remounted when the parent refetches, and the draft's copy of the
+          // version stayed at whatever it was on first mount. Every save after
+          // the first then 409'd against this user's OWN previous save.
+          expectedVersion: policy.version,
         }),
       });
       if (res.status === 409) {

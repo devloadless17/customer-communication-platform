@@ -1,7 +1,9 @@
 import { getSession } from "@/lib/auth/current-user";
 import {
   getTeamMessengerConfig,
+  listChannelAccountDirectory,
   listChannelAccounts,
+  type ChannelAccountDirectoryEntry,
   type ChannelAccountView,
 } from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
@@ -46,10 +48,20 @@ export default async function MessengerSettingsPage() {
       webhookSubscription: config.webhookSubscription,
     };
   } else {
+    // Whether the channel is CONNECTED is not a credential, and hardcoding
+    // `false` told an agent the Page was disconnected while their inbox was
+    // taking messages on it. The member-open account directory answers it
+    // without decrypting anything — the ids and secrets stay withheld below.
+    const directory = await soft(
+      "channel-account directory",
+      [] as ChannelAccountDirectoryEntry[],
+      () => listChannelAccountDirectory(),
+    );
+    const page = directory.find((a) => a.channel === "messenger");
     current = {
-      connected: false,
+      connected: Boolean(page),
       pageId: null,
-      pageName: null,
+      pageName: page?.name ?? null,
       appId: null,
       verifyToken: null,
       pageAccessToken: null,

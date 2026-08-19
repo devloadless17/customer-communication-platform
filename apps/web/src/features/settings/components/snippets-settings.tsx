@@ -14,6 +14,7 @@ import {
   X,
 } from "lucide-react";
 
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -413,9 +414,9 @@ function SnippetEditor({
         detail?: string;
       };
       if (!res.ok || !data.ok) {
-        throw new Error(
-          [data.error, data.detail].filter(Boolean).join(": ") || `HTTP ${res.status}`,
-        );
+        // `detail` → humanized key → fallback, instead of prefixing the copy
+        // the server wrote with its own snake_case key.
+        throw new Error(apiErrorMessageFrom(data, `Couldn't save (HTTP ${res.status})`));
       }
       const id = isNew ? (data.id ?? snippet.id) : snippet.id;
       onSaved({

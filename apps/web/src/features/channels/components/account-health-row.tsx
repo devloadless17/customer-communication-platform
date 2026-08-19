@@ -26,6 +26,9 @@ export function AccountHealthRow({
 }) {
   const quality = health.qualityRating;
   const throughput = health.throughputLevel;
+  // The number is ALSO in use in the WhatsApp Business app — a hard 20 msg/s
+  // ceiling Meta applies outside the throughput ladder it still reports.
+  const coexistence = health.isOnBusinessApp === true;
   // Non-CONNECTED = every send from this number fails. The pill renders for
   // exactly that case; a CONNECTED number is the silent normal, like an
   // APPROVED display name.
@@ -37,7 +40,15 @@ export function AccountHealthRow({
 
   // Nothing captured yet — say so plainly rather than rendering an empty row
   // that reads as "all clear".
-  if (!quality && !throughput && !health.updatedAt && !nameProblem && !namePending && !notRegistered) {
+  if (
+    !quality &&
+    !throughput &&
+    !coexistence &&
+    !health.updatedAt &&
+    !nameProblem &&
+    !namePending &&
+    !notRegistered
+  ) {
     return (
       <p className="mt-1 text-3xs text-muted-foreground">
         No health snapshot yet — Meta pushes these as they change, or press Refresh.
@@ -80,15 +91,21 @@ export function AccountHealthRow({
         </span>
       )}
 
-      {throughput && (
+      {(throughput || coexistence) && (
         <span className="inline-flex items-center gap-1">
           <span className="text-muted-foreground">Throughput</span>
           <span className="font-medium text-foreground/80">
-            {throughput === "HIGH"
-              ? "High · up to ~1,000 msg/s"
-              : throughput === "STANDARD"
-                ? "Standard · up to ~80 msg/s"
-                : throughput}
+            {/* Coexistence WINS over the level, exactly as the send pacer does
+                (`resolveSendRate`): Meta still reports STANDARD/HIGH for a
+                number that is also in use in the WhatsApp Business app, while
+                hard-capping it at 20 msg/s outside that ladder. */}
+            {coexistence
+              ? "Coexistence · capped at 20 msg/s by Meta"
+              : throughput === "HIGH"
+                ? "High · up to ~1,000 msg/s"
+                : throughput === "STANDARD"
+                  ? "Standard · up to ~80 msg/s"
+                  : throughput}
           </span>
         </span>
       )}

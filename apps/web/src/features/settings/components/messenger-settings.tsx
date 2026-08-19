@@ -23,6 +23,7 @@ import {
   PageIntegrityWarning,
   type PageIntegrity,
 } from "@/components/settings/page-integrity-warning";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { CHANNEL_CAPABILITIES } from "@ccp/shared/providers/capabilities";
 import { EntryPointsPanel } from "@/features/channels/components/entry-points-panel";
@@ -101,11 +102,10 @@ export function MessengerSettings({
         error?: string;
         detail?: string;
       };
-      setError(
-        [data.error, data.detail && `(${data.detail.slice(0, 200)})`]
-          .filter(Boolean)
-          .join(" ") || "Failed to save",
-      );
+      // `detail` → humanized key → fallback. The old join led with the raw
+      // snake_case key and put the sentence the server wrote for a person in
+      // brackets behind it.
+      setError(apiErrorMessageFrom(data, "Failed to save"));
       return false;
     }
     return true;
@@ -193,9 +193,14 @@ export function MessengerSettings({
               >
                 {current.connected ? "Connected" : "Not connected"}
               </p>
-              {current.connected && (
+              {/* A non-admin is told CONNECTED (from the member-open account
+                  directory) but never the Page id — render only what is known
+                  rather than a dangling separator. */}
+              {current.connected && (current.pageName || current.pageId) && (
                 <p className="text-xs text-muted-foreground">
-                  {current.pageName ?? "Page"} · {current.pageId}
+                  {[current.pageName ?? "Page", current.pageId]
+                    .filter(Boolean)
+                    .join(" · ")}
                 </p>
               )}
             </div>
@@ -416,7 +421,10 @@ function CallingCard({ pageName }: { pageName: string | null }) {
         detail?: string;
       };
       if (!res.ok || !data.ok) {
-        setResult({ ok: false, error: data.detail || data.error || `Failed (HTTP ${res.status})` });
+        setResult({
+          ok: false,
+          error: apiErrorMessageFrom(data, `Failed (HTTP ${res.status})`),
+        });
         return;
       }
       const featureEnabled = data.raw?.featureEnabled === true;
