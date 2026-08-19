@@ -190,13 +190,20 @@ export const localProvider: BlobStorageProvider = {
     return stableObjectUrl(resolveKey(keyOrUrl, "presign"));
   },
 
-  async delete(keys: string | string[]): Promise<void> {
+  async delete(keys: string | string[]): Promise<string[]> {
     const list = (Array.isArray(keys) ? keys : [keys]).filter(Boolean);
+    const failed: string[] = [];
     for (const key of list) {
-      // force: true — a missing key must never throw (same contract as R2).
-      await rm(bytesPath(key), { force: true }).catch(() => undefined);
-      await rm(typePath(key), { force: true }).catch(() => undefined);
+      // force: true — a missing key must never throw (same contract as R2). A
+      // real failure (permissions, EBUSY) is reported back, never thrown.
+      try {
+        await rm(bytesPath(key), { force: true });
+        await rm(typePath(key), { force: true });
+      } catch {
+        failed.push(key);
+      }
     }
+    return failed;
   },
 
   async fetch(keyOrUrl: string): Promise<{ bytes: Uint8Array; mimeType: string }> {

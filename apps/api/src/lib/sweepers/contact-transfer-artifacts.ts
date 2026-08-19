@@ -113,11 +113,17 @@ async function reapAbandonedUploads(): Promise<void> {
   const orphans = candidates.filter((k) => !inUse.has(k));
   if (orphans.length === 0) return;
 
-  try {
-    await blobStorage.delete(orphans);
-    console.warn(`[sweeper.contact-transfer] reclaimed ${orphans.length} abandoned upload(s)`);
-  } catch (err) {
-    console.error("[sweeper.contact-transfer] abandoned-upload delete failed", err);
+  // `delete` never throws — it REPORTS the keys it couldn't remove, so the log
+  // says what actually happened instead of always claiming success.
+  const failed = await blobStorage.delete(orphans);
+  const reclaimed = orphans.length - failed.length;
+  if (reclaimed > 0) {
+    console.warn(`[sweeper.contact-transfer] reclaimed ${reclaimed} abandoned upload(s)`);
+  }
+  if (failed.length > 0) {
+    console.error(
+      `[sweeper.contact-transfer] ${failed.length} abandoned upload(s) survived deletion — retrying next tick`,
+    );
   }
 }
 
@@ -155,24 +161,35 @@ async function reapExpired(): Promise<void> {
   });
   if (rows.length === 0) return;
 
-  const keys = rows
-    .flatMap((r) => [r.sourceKey, r.artifactKey, r.errorArtifactKey])
-    .filter((k): k is string => Boolean(k));
+  const perRow = rows.map((r) => ({
+    id: r.id,
+    keys: [r.sourceKey, r.artifactKey, r.errorArtifactKey].filter(
+      (k): k is string => Boolean(k),
+    ),
+  }));
+  const keys = perRow.flatMap((r) => r.keys);
 
-  if (keys.length > 0) {
-    // Delete the objects BEFORE the rows. If this throws, the rows survive and
-    // the next tick retries — the opposite order would orphan the objects with
-    // nothing left pointing at them, which is exactly what the blob-orphan
-    // sweeper exists to clean up and what we'd rather not create.
-    try {
-      await blobStorage.delete(keys);
-    } catch (err) {
-      console.error("[sweeper.contact-transfer] artifact delete failed", err);
-      return;
-    }
+  // Delete the objects BEFORE the rows, and drop ONLY the rows whose objects
+  // are confirmed gone. `blobStorage.delete` never throws — it returns the keys
+  // it could not remove — so that list is the ONLY signal an object survived.
+  // Deleting the row anyway strands a full contact-book export in the bucket
+  // with nothing pointing at it: blob-orphan deliberately prefix-excludes
+  // `contact-exports/`+`contact-imports/` because THIS sweeper owns them, and
+  // reapAbandonedUploads only matches `staged-` keys. The rest wait for the
+  // next tick.
+  const failed = keys.length > 0 ? new Set(await blobStorage.delete(keys)) : new Set<string>();
+
+  const reapable = perRow.filter((r) => r.keys.every((k) => !failed.has(k)));
+  if (failed.size > 0) {
+    console.error(
+      `[sweeper.contact-transfer] ${failed.size} artifact(s) survived deletion — keeping ${
+        perRow.length - reapable.length
+      } job row(s) for the next tick`,
+    );
   }
+  if (reapable.length === 0) return;
 
-  await db.contactTransferJob.deleteMany({ where: { id: { in: rows.map((r) => r.id) } } });
+  await db.contactTransferJob.deleteMany({ where: { id: { in: reapable.map((r) => r.id) } } });
 }
 
 async function runTick(label: string): Promise<void> {

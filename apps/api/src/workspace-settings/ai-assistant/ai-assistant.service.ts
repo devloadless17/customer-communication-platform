@@ -102,19 +102,34 @@ export class AiAssistantService {
     });
 
     if (existing) {
-      if (
-        expectedConfigVersion !== undefined &&
-        existing.configVersion !== expectedConfigVersion
-      ) {
-        throw new ConflictException({
-          error: "config_version_conflict",
-          currentVersion: existing.configVersion,
+      if (expectedConfigVersion === undefined) {
+        // No guard asked for — last write wins, but the bump is still atomic so
+        // two saves can't land on the same configVersion (it stamps every
+        // AiAssistantInteraction).
+        return this.db.aiAssistantConfig.update({
+          where: { workspaceId },
+          data: { ...data, configVersion: { increment: 1 } },
         });
       }
-      return this.db.aiAssistantConfig.update({
-        where: { workspaceId },
-        data: { ...data, configVersion: existing.configVersion + 1 },
+      // The version travels in the WHERE, not a JS compare after the read: a
+      // read-then-write lets two concurrent saves both pass the check and the
+      // second silently overwrite the first. `updateMany` is the shape that
+      // takes a non-unique predicate (the CAS used elsewhere in this codebase).
+      const res = await this.db.aiAssistantConfig.updateMany({
+        where: { workspaceId, configVersion: expectedConfigVersion },
+        data: { ...data, configVersion: expectedConfigVersion + 1 },
       });
+      if (res.count === 0) {
+        const current = await this.db.aiAssistantConfig.findUnique({
+          where: { workspaceId },
+          select: { configVersion: true },
+        });
+        throw new ConflictException({
+          error: "config_version_conflict",
+          currentVersion: current?.configVersion ?? existing.configVersion,
+        });
+      }
+      return this.db.aiAssistantConfig.findUniqueOrThrow({ where: { workspaceId } });
     }
 
     try {
@@ -123,14 +138,11 @@ export class AiAssistantService {
       });
     } catch (err) {
       // Lost a create race (unique workspaceId) — fall through to an update.
+      // Increment rather than read-then-set, same reason as above.
       if ((err as { code?: string })?.code === "P2002") {
-        const cur = await this.db.aiAssistantConfig.findUnique({
-          where: { workspaceId },
-          select: { configVersion: true },
-        });
         return this.db.aiAssistantConfig.update({
           where: { workspaceId },
-          data: { ...data, configVersion: (cur?.configVersion ?? 0) + 1 },
+          data: { ...data, configVersion: { increment: 1 } },
         });
       }
       throw err;

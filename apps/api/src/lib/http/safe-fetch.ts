@@ -457,6 +457,12 @@ export interface SafeFetchOptions extends Omit<RequestInit, "redirect"> {
  * The redirect cap is intentionally lower than Node's default (20). Almost
  * every legitimate webhook receiver is a direct endpoint; 3 hops covers
  * the rare CDN/load-balancer chain.
+ *
+ * A followed hop never changes the request: 307/308 keep method+body, and a
+ * demoting 301/302/303 is REFUSED (SsrfBlockedError, kind `redirect`) when the
+ * request carries a body — see the loop. Sensitive headers are still stripped
+ * on every hop, so an authenticated 307 arrives unauthenticated and the
+ * receiver's 401 reaches the caller as a real status.
  */
 export async function safeFetch(url: string, opts: SafeFetchOptions = {}): Promise<Response> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -525,10 +531,27 @@ export async function safeFetch(url: string, opts: SafeFetchOptions = {}): Promi
       throw new SsrfBlockedError(loc, "redirect target is not a valid URL");
     }
 
-    // 303 always demotes to GET with no body. 301/302/307/308 follow HTTP
-    // semantics — 307/308 preserve method+body; 301/302 historically demote
-    // to GET, which is the safer default here.
-    if (res.status === 303 || res.status === 301 || res.status === 302) {
+    // A redirect must never silently change WHAT we sent. 307/308 preserve
+    // method+body by definition, so they follow unchanged. 301/302/303 demote
+    // to a bodyless GET — for a body-bearing request that means the payload is
+    // never delivered anywhere, and the redirect target's response is then
+    // handed back as if it were the answer to the original request (the
+    // workflow `http_request` step POSTs a JSON envelope and would report a
+    // green step that sent nothing). So a demoting redirect is REFUSED for a
+    // non-GET/body-bearing request instead of followed: the caller gets a
+    // permanent SsrfBlockedError naming the cause. Bodyless GET/HEAD callers
+    // keep the old behaviour — there is nothing to lose in the demotion.
+    if (res.status === 301 || res.status === 302 || res.status === 303) {
+      const bodyBearing =
+        (currentBody != null && currentBody !== "") ||
+        (currentMethod !== "GET" && currentMethod !== "HEAD");
+      if (bodyBearing) {
+        throw new SsrfBlockedError(
+          currentUrl,
+          `${res.status} redirect would drop the ${currentMethod} body — point the request at the final URL`,
+          "redirect",
+        );
+      }
       currentMethod = "GET";
       currentBody = undefined;
     }

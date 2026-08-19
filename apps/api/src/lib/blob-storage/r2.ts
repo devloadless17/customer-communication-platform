@@ -271,35 +271,45 @@ export const r2Provider: BlobStorageProvider = {
     });
   },
 
-  async delete(keys: string | string[]): Promise<void> {
+  async delete(keys: string | string[]): Promise<string[]> {
     const list = (Array.isArray(keys) ? keys : [keys]).filter(Boolean);
-    if (list.length === 0) return;
-    try {
-      // DeleteObjects caps at 1000 keys/request. Batch defensively.
-      for (let i = 0; i < list.length; i += 1000) {
-        const batch = list.slice(i, i + 1000);
-        await getClient().send(
+    if (list.length === 0) return [];
+    const failed: string[] = [];
+    // DeleteObjects caps at 1000 keys/request. Batch defensively, and keep the
+    // try INSIDE the loop so one failing batch doesn't skip the rest.
+    for (let i = 0; i < list.length; i += 1000) {
+      const batch = list.slice(i, i + 1000);
+      try {
+        const res = await getClient().send(
           new DeleteObjectsCommand({
             Bucket: bucket(),
             Delete: { Objects: batch.map((Key) => ({ Key })), Quiet: true },
           }),
         );
+        // Quiet mode reports only failures; a key absent from Errors is gone
+        // (S3 counts an already-missing key as deleted).
+        for (const e of res.Errors ?? []) {
+          if (e.Key) failed.push(e.Key);
+        }
+      } catch (err) {
+        // Same contract as the old disk deleteMedia: never throw. A missing or
+        // already-deleted key must not block the surrounding domain delete.
+        // Structured warning so a burst (R2 outage) is greppable; the orphan
+        // sweeper reconciles eventually — and the keys come back to the caller
+        // so one that owns the last pointer can hold its row.
+        failed.push(...batch);
+        console.warn(
+          JSON.stringify({
+            event: "blob.delete_failed",
+            severity: "warn",
+            provider: "r2",
+            keyCount: batch.length,
+            message: err instanceof Error ? err.message : String(err),
+          }),
+        );
       }
-    } catch (err) {
-      // Same contract as the old disk deleteMedia: never throw. A missing or
-      // already-deleted key must not block the surrounding domain delete.
-      // Structured warning so a burst (R2 outage) is greppable; the orphan
-      // sweeper reconciles eventually.
-      console.warn(
-        JSON.stringify({
-          event: "blob.delete_failed",
-          severity: "warn",
-          provider: "r2",
-          keyCount: list.length,
-          message: err instanceof Error ? err.message : String(err),
-        }),
-      );
     }
+    return failed;
   },
 
   async fetch(keyOrUrl: string): Promise<{ bytes: Uint8Array; mimeType: string }> {

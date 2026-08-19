@@ -134,8 +134,19 @@ export interface BlobStorageProvider {
     keyOrUrl: string,
     opts?: { ttlSeconds?: number; downloadFilename?: string },
   ): Promise<string>;
-  /** Delete one or many keys. Idempotent — missing keys must NOT throw. */
-  delete(keys: string | string[]): Promise<void>;
+  /**
+   * Delete one or many keys. Idempotent — a missing key counts as removed and
+   * must NOT throw; a provider failure must NOT throw either (a swallowed
+   * delete must never block the surrounding domain write).
+   *
+   * Returns the keys that could NOT be removed — empty means every key is
+   * confirmed gone. Most callers ignore it (the blob-orphan sweeper reconciles
+   * them later), but a caller that is about to drop the LAST pointer to the
+   * object — the contact-transfer sweeper deleting its job rows — must keep the
+   * rows whose keys come back here, or a full-PII export sits in the bucket
+   * with nothing left to find it by.
+   */
+  delete(keys: string | string[]): Promise<string[]>;
   /**
    * Fetch the bytes back (used by the forward path so we can re-upload to Meta).
    * Implementations can short-circuit by GET'ing the public URL.
