@@ -219,7 +219,12 @@ export const getSession = cache(async (): Promise<Session> => {
             organization: {
               select: {
                 name: true,
-                workspaces: { orderBy: { createdAt: "asc" }, select: { id: true, name: true } },
+                // Same `deletingAt` filter as every other switcher list.
+                workspaces: {
+                  where: { deletingAt: null },
+                  orderBy: { createdAt: "asc" },
+                  select: { id: true, name: true },
+                },
               },
             },
           },

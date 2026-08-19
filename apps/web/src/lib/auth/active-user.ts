@@ -51,12 +51,19 @@ export const loadActiveUser = cache(async (userId: string) => {
       //
       // `workspaces` is the switcher's list for an ORG OWNER/ADMIN, who may open
       // any workspace in their org regardless of membership. Ordered to match
-      // the API's `GET /api/workspaces` so the two render the same sequence.
+      // the API's `GET /api/workspaces` so the two render the same sequence —
+      // and filtered the same way: a workspace claimed for deletion is
+      // mid-drain, and this list also answers the org-scoped beyond-membership
+      // probe in current-user.ts, which must not resolve one.
       organization: {
         select: {
           status: true,
           name: true,
-          workspaces: { orderBy: { createdAt: "asc" }, select: { id: true, name: true } },
+          workspaces: {
+            where: { deletingAt: null },
+            orderBy: { createdAt: "asc" },
+            select: { id: true, name: true },
+          },
         },
       },
       // Active workspace + effective role come from membership now (mirrors the

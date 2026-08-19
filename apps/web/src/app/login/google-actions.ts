@@ -20,9 +20,13 @@ export async function startGoogleSignIn(formData: FormData): Promise<void> {
   const raw = String(formData.get("next") ?? "/inbox");
   // Open-redirect guard, same rule the login page applies to `?next=`: only a
   // same-site absolute path. `//evil.com` is a protocol-relative URL and would
-  // send the user off-site with a valid session in hand.
+  // send the user off-site with a valid session in hand — and so is `/\evil.com`
+  // once a URL parser normalizes the backslash, which is why the backslash check
+  // is part of the rule rather than an extra (see safeNext in ./actions.ts).
   const next =
-    raw.startsWith("/") && !raw.startsWith("//") && raw !== "/" ? raw : "/inbox";
+    raw.startsWith("/") && !raw.startsWith("//") && !raw.includes("\\") && raw !== "/"
+      ? raw
+      : "/inbox";
 
   // Only the SIGNUP page may create a new account (and, with it, an
   // Organization). The provider has `disableImplicitSignUp: true`, so a

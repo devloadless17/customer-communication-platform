@@ -643,6 +643,21 @@ model Workspace {
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
+  // DELETE-IN-PROGRESS tombstone. NOT a soft delete: the row is destroyed for
+  // real minutes later, and nothing ever un-deletes a workspace.
+  //
+  // It exists because the "an org must keep at least one workspace" guard and
+  // the actual delete cannot share one transaction — `WorkspaceRootService
+  // .destroy` pre-drains Message in batches and would hold the org row lock for
+  // minutes (see WorkspacesService.remove). So the guard COMMITS its decision
+  // and the delete happens after it: two concurrent removes of DIFFERENT
+  // workspaces in a 2-workspace org each counted 2, each passed, and the org
+  // was left with zero workspaces and no screen to open. The claim is stamped
+  // inside the org-lock transaction and the remaining-count predicate ignores
+  // stamped rows, so the second caller sees 1 and is refused. Cleared if the
+  // destroy fails, since the workspace is then still real.
+  deletingAt     DateTime?
+
   // Per-workspace channel credentials live in `ChannelConnection`, one row per
   // (workspaceId, channel, externalAccountId). Adding a channel = insert a row,
   // not add a column-set. CLAUDE.md rule #6.

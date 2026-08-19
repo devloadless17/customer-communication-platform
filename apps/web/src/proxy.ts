@@ -44,6 +44,12 @@ const RATE_LIMITED_POSTS: Record<string, number> = {
   // day's sends. 5 covers a genuine typo-and-retry; nothing legitimate needs
   // more.
   "/forgot-password": 5,
+  // Same mail quota, same reasoning: `resendCodeAction` sends a verification
+  // code on every POST. It needs a session, which caps who can fire it, but a
+  // held-open signup tab can still drain the day's sends one click at a time.
+  // The limit covers `verifyCodeAction` on the same path, which is fine — it is
+  // a 6-digit guess against a code Better Auth already attempt-limits.
+  "/verify": 5,
 };
 const RATE_WINDOW_MS = 10 * 60 * 1000;
 // Tighter window for the per-IP login limit (5 attempts / 1 minute).

@@ -2,6 +2,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
 
+import { parseChainDepth } from "@/lib/workflows/events";
+
 /**
  * Per-request correlation ID, propagated implicitly through async boundaries
  * via Node's AsyncLocalStorage. Lets log lines from any hot-path code be
@@ -145,13 +147,15 @@ export function correlationMiddleware() {
     res.setHeader("X-Request-Id", id);
     // Seed the inbound cross-system chain depth (X-CCP-Depth) so the outbound-
     // webhook subscriber can stamp depth+1 on deliveries for events this
-    // request causes. Mirrors parseChainDepth in lib/workflows/events.ts
-    // (inlined so this foundational util keeps zero workflows dependency):
-    // absent / invalid / non-positive → 0.
+    // request causes. `parseChainDepth` itself, not a copy of it: the inlined
+    // copy that used to sit here read a garbage header as 0 while its comment
+    // claimed to mirror the shared parser — so a partner bouncing our webhook
+    // back with `X-CCP-Depth: -1` reset the loop counter through this path
+    // exactly as the fail-CLOSED rule exists to prevent.
     const rawDepth = req.headers["x-ccp-depth"];
-    const depthStr = Array.isArray(rawDepth) ? rawDepth[0] : rawDepth;
-    const parsedDepth = depthStr ? Number.parseInt(depthStr, 10) : NaN;
-    const chainDepth = Number.isFinite(parsedDepth) && parsedDepth > 0 ? parsedDepth : 0;
+    const chainDepth = parseChainDepth(
+      Array.isArray(rawDepth) ? rawDepth[0] : rawDepth,
+    );
     als.run(
       { requestId: id, chainDepth, flags: { idempotentReplay: false } },
       () => next(),

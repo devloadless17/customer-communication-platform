@@ -118,6 +118,8 @@ export interface BeyondMembershipInput {
   countWorkspaces: (where: {
     id: string;
     organizationId?: string;
+    /** Excludes a workspace whose delete is already running — see below. */
+    deletingAt?: null;
   }) => Promise<number>;
 }
 
@@ -169,7 +171,12 @@ export function makeCanAccessBeyondMembership(
       // MULTI-operator platform, this branch must gate on an active grant row
       // instead of on the flag — the shape is already here, it just has to
       // consult `OperatorAccess` rather than `countWorkspaces`.
-      return (await input.countWorkspaces({ id: wsId })) > 0;
+      //
+      // `deletingAt: null` here and in the org-admin branch below: a workspace
+      // that has been claimed for deletion is mid-drain and must not become
+      // anyone's active workspace — a `ccp.ws` cookie pointing at it would
+      // otherwise resolve into an inbox whose rows are vanishing under it.
+      return (await input.countWorkspaces({ id: wsId, deletingAt: null })) > 0;
     }
     if (input.isOrgAdmin) {
       // ORG-SCOPED, DB-VERIFIED, AND NOT NEGOTIABLE. Trusting an unscoped "is
@@ -180,6 +187,7 @@ export function makeCanAccessBeyondMembership(
         (await input.countWorkspaces({
           id: wsId,
           organizationId: input.organizationId,
+          deletingAt: null,
         })) > 0
       );
     }
@@ -252,7 +260,16 @@ export function readActiveWorkspaceCookie(
     const eq = part.indexOf("=");
     if (eq === -1) continue;
     if (part.slice(0, eq).trim() !== ACTIVE_WORKSPACE_COOKIE) continue;
-    const value = decodeURIComponent(part.slice(eq + 1).trim());
+    // A malformed percent-escape (`ccp.ws=%zz`) makes decodeURIComponent throw
+    // URIError. Uncaught, that is a 500 on EVERY request and socket handshake
+    // from that browser, with no way for the user to clear it. Treat garbage as
+    // "no choice" — resolution falls through to the stored/first workspace.
+    let value: string;
+    try {
+      value = decodeURIComponent(part.slice(eq + 1).trim());
+    } catch {
+      return null;
+    }
     return value.length > 0 ? value : null;
   }
   return null;

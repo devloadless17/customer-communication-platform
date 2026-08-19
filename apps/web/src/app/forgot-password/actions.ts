@@ -4,6 +4,8 @@ import { redirect } from "next/navigation";
 
 import { auth } from "@/lib/auth/better-auth";
 import { validatePasswordStructure } from "@/lib/auth/password";
+import { fireSessionInvalidated } from "@/lib/auth/session-invalidation";
+import { db } from "@/lib/db";
 import { checkEmailPolicy } from "@ccp/shared/auth/email-policy";
 
 /**
@@ -94,6 +96,14 @@ export async function resetPasswordAction(
       sent: true,
     };
   }
+
+  // `revokeSessionsOnPasswordReset` only deletes the Session ROWS. NestJS holds
+  // a 15s per-process session cache and the intruder's live sockets, neither of
+  // which reads that table again until the TTL lapses — so without this bridge
+  // the account whose password was just reset under duress keeps streaming to
+  // whoever stole it. Same call change-password makes for the same reason.
+  const user = await db.user.findUnique({ where: { email }, select: { id: true } });
+  if (user) await fireSessionInvalidated(user.id, "password-change");
 
   // Deliberately NOT auto-signed-in. Better Auth revokes the account's other
   // sessions on a password reset (via `revokeSessionsOnPasswordReset` in

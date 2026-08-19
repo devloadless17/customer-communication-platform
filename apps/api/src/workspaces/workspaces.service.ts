@@ -89,8 +89,11 @@ export class WorkspacesService {
         )?.organizationId ?? session.organizationId
       : session.organizationId;
 
+    // `deletingAt: null` — a workspace whose destroy is running is already
+    // unopenable (its rows are being drained), so offering it in the switcher
+    // only produces a click into a half-deleted inbox.
     const all = await this.db.workspace.findMany({
-      where: { organizationId: scopeOrganizationId },
+      where: { organizationId: scopeOrganizationId, deletingAt: null },
       orderBy: { createdAt: "asc" },
       select: { id: true, name: true },
     });
@@ -487,22 +490,39 @@ export class WorkspacesService {
     this.assertCanManage(session);
     await this.assertInOrg(session, workspaceId);
 
-    // Serialize the count + delete under a `SELECT … FOR UPDATE` on the ORG
+    // Serialize the count + THE CLAIM under a `SELECT … FOR UPDATE` on the ORG
     // row (the invariant is org-level: "keep ≥1 workspace"). Without it, two
     // concurrent deletes of the last two workspaces each see `remaining = 2
     // (> 1)` and both commit, leaving the org with ZERO workspaces — nothing to
-    // open. Members are collected inside the tx BEFORE the cascade removes
+    // open. The lock alone is NOT enough, because the delete itself happens
+    // minutes later outside this transaction (see the comment below it): what
+    // is serialized here is the `deletingAt` claim, and the count ignores
+    // already-claimed rows so the second caller sees the org's true remaining
+    // total. Members are collected inside the tx BEFORE the cascade removes
     // their WorkspaceMember rows, so we still know whose session went stale.
     const members = await this.db.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Organization" WHERE id = ${session.organizationId} FOR UPDATE`;
       const remaining = await tx.workspace.count({
-        where: { organizationId: session.organizationId },
+        where: { organizationId: session.organizationId, deletingAt: null },
       });
       if (remaining <= 1) {
         throw new BadRequestException({
           error: "last_workspace",
           detail:
             "An organization must keep at least one workspace — every screen in the app is scoped to one, so deleting the last leaves nothing to open.",
+        });
+      }
+      // Conditional on `deletingAt: null` so a second request for the SAME
+      // workspace can't start a concurrent destroy of rows the first is
+      // already draining.
+      const claimed = await tx.workspace.updateMany({
+        where: { id: workspaceId, deletingAt: null },
+        data: { deletingAt: new Date() },
+      });
+      if (claimed.count === 0) {
+        throw new BadRequestException({
+          error: "workspace_deleting",
+          detail: "This workspace is already being deleted.",
         });
       }
       const m = await tx.workspaceMember.findMany({
@@ -534,7 +554,18 @@ export class WorkspacesService {
     // The org-lock transaction above stays: it is what makes the
     // "an org must keep one workspace" check race-safe. Only the destruction
     // moved out of it.
-    await this.workspaceRoot.destroy(workspaceId, "workspace-delete");
+    try {
+      await this.workspaceRoot.destroy(workspaceId, "workspace-delete");
+    } catch (err) {
+      // The destroy failed, so the workspace is still real and still counts
+      // toward the org's minimum — release the claim or the org can be talked
+      // down to zero openable workspaces by a delete that never happened.
+      // `updateMany` because a partial failure may already have taken the row.
+      await this.db.workspace
+        .updateMany({ where: { id: workspaceId }, data: { deletingAt: null } })
+        .catch(() => undefined);
+      throw err;
+    }
 
     // `Session.activeWorkspaceId` has no FK (a per-device preference, not a
     // relation), so it survives the cascade pointing at a dead id. Clear it or

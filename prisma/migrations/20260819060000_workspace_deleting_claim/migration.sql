@@ -1,0 +1,19 @@
+-- Workspace delete-in-progress claim.
+--
+-- The "an organization must keep at least one workspace" guard and the delete
+-- itself cannot share one transaction: `WorkspaceRootService.destroy` drains
+-- `Message` in batches and would hold the organization row lock for minutes.
+-- So the guard committed its decision and the delete happened afterwards —
+-- which meant two concurrent removes of DIFFERENT workspaces in a
+-- two-workspace org each counted 2, each passed, and the org was left with
+-- zero workspaces and no screen to open. (Audit 2026-08-19, U4-2.)
+--
+-- The claim is stamped inside the org-lock transaction and the remaining-count
+-- predicate ignores stamped rows, so the second caller sees 1 and is refused.
+-- Nullable with no default: an unstamped row is a live workspace, which is
+-- every existing row. Cleared if the destroy fails, since the workspace is
+-- then still real.
+--
+-- No index: every read of this column is already id- or organizationId-scoped
+-- and those indexes exist.
+ALTER TABLE "Workspace" ADD COLUMN "deletingAt" TIMESTAMP(3);
