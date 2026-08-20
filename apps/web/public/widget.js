@@ -1983,7 +1983,24 @@
       if (mime) mrOpts.mimeType = mime;
       var mr = new MediaRecorder(stream, mrOpts);
       var chunks = [];
-      mr.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
+      // THE BAR MUST NOT LIE. getUserMedia resolves when the track is CREATED,
+      // which on a cold device (worst of all a Bluetooth headset switching
+      // profiles) is well before the first sample arrives — so a bar shown the
+      // instant start() returns invites the visitor to talk into a mic that
+      // isn't live yet, and the opening words are simply not in the file. The
+      // encoder's first real chunk is the honest signal that audio is flowing,
+      // so the bar waits for it. Nothing is lost during that wait: the recorder
+      // is already running, so this delays the UI, never the audio. The
+      // timeslice on start() below is what makes that chunk arrive at all —
+      // with no argument, ondataavailable fires only at stop.
+      var revealed = false;
+      function revealRecBar() {
+        if (revealed || !S.recording) return;
+        revealed = true;
+        micBtn.classList.add("rec");
+        showRecBar();
+      }
+      mr.ondataavailable = function (e) { if (e.data && e.data.size) { chunks.push(e.data); revealRecBar(); } };
       mr.onstop = function () {
         stream.getTracks().forEach(function (t) { t.stop(); });
         var blob = new Blob(chunks, { type: mr.mimeType || "audio/webm" });
@@ -2005,7 +2022,12 @@
         }
       };
       S.recording = { mr: mr, send: false };
-      mr.start(); recStart = Date.now(); micBtn.classList.add("rec"); showRecBar();
+      // 100ms slice: the wait above is bounded by it, so it is the bar's
+      // start-up latency (~112ms measured in Chromium — reads as instant).
+      mr.start(100); recStart = Date.now();
+      // A browser that never emits a chunk must not leave the visitor with no
+      // bar and no way to stop; show it anyway after a beat.
+      setTimeout(revealRecBar, 1500);
     }).catch(function () { recStarting = false; toast("Microphone access denied."); });
   }
   function stopRecord(send) { if (!S.recording) return; S.recording.send = send; try { S.recording.mr.stop(); } catch (_e) { teardownRec(); } }

@@ -53,6 +53,66 @@ const MAX_RECORDING_SEC = 300; // 5 minutes
 const LEVEL_SAMPLE_MS = 33;
 /** Show the remaining-time countdown in the bar once within this window. */
 const COUNTDOWN_FROM_SEC = 15;
+/** MediaRecorder timeslice. Small on purpose: the first `dataavailable` is our
+ *  proof that audio is really flowing (see the reveal wait in startInner), and
+ *  the bar can't appear until it lands — so the slice length IS the bar's
+ *  start-up latency. Measured in Chromium the first chunk arrives ~15ms after
+ *  the slice elapses (~112ms), and end-to-end in the app the bar shows ~360ms
+ *  after the click with the mic warm — the rest is opening the device, which we
+ *  now wait through instead of talking over. Don't raise this without
+ *  re-measuring: at the old 250 the chunk alone took ~290ms. */
+const CHUNK_MS = 100;
+/** Give up waiting for that first chunk after this long and show the bar
+ *  anyway. A browser that never emits one would otherwise leave the agent
+ *  staring at a composer that silently did nothing. */
+const CAPTURE_READY_TIMEOUT_MS = 1500;
+
+/**
+ * Record RAW — every browser DSP stage OFF.
+ *
+ * This is the fix for "the first few words I said aren't in the recording".
+ * With the default `{ audio: true }` Chrome runs its full WebRTC processing
+ * chain on the capture stream, and every stage of it needs to converge before
+ * it passes speech through cleanly: auto-gain ramps up from a low starting
+ * gain, and the noise suppressor spends its opening moments learning a noise
+ * profile — so speech that starts immediately is partly gated as "noise" and
+ * partly gain-ramped into inaudibility. The agent hears the clip back and the
+ * first words are gone.
+ *
+ * A voice note has no far end, so none of it is buying us anything: echo
+ * cancellation in particular has no reference signal to cancel and misfires
+ * when the page is playing audio. The web-chat widget already reached this
+ * exact conclusion from the customer-side report (see the same constant in
+ * `apps/web/public/widget.js`); the inbox recorder simply never got the fix.
+ *
+ * `{ audio: true }` stays as a fallback for browsers that reject the object
+ * form of the constraint.
+ */
+const RAW_MIC_CONSTRAINTS: MediaTrackConstraints = {
+  echoCancellation: false,
+  noiseSuppression: false,
+  autoGainControl: false,
+};
+
+async function openMicStream(): Promise<MediaStream> {
+  try {
+    return await navigator.mediaDevices.getUserMedia({ audio: RAW_MIC_CONSTRAINTS });
+  } catch (err) {
+    const name = err instanceof Error ? err.name : "";
+    // A denial or an absent device is final — retrying re-fails and can
+    // re-prompt. Only an unsupported CONSTRAINT is worth a second attempt.
+    if (
+      name === "NotAllowedError" ||
+      name === "PermissionDeniedError" ||
+      name === "NotFoundError"
+    ) {
+      throw err;
+    }
+    return await navigator.mediaDevices.getUserMedia({ audio: true });
+  }
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 function pickRecorderMime(): string | null {
   if (typeof MediaRecorder === "undefined") return null;
@@ -235,7 +295,7 @@ export function useVoiceRecorder(opts: {
 
     let stream: MediaStream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await openMicStream();
     } catch (err) {
       const name = err instanceof Error ? err.name : "";
       const message =
@@ -276,17 +336,24 @@ export function useVoiceRecorder(opts: {
     // 120Hz display was ~36,000 full composer renders instead of the ~9,000
     // this comment budgets for. The rAF pump stays (it self-throttles in
     // background tabs); only the setState is gated.
-    const AudioCtxCtor: typeof AudioContext | undefined =
-      typeof window !== "undefined"
-        ? (window.AudioContext ??
-          (window as unknown as { webkitAudioContext?: typeof AudioContext })
-            .webkitAudioContext)
-        : undefined;
-    if (AudioCtxCtor) {
+    //
+    // Called AFTER recorder.start(): building an AudioContext over the capture
+    // stream can make the browser renegotiate the device, and doing that in the
+    // window where the recorder is trying to latch onto its first samples is
+    // asking for a gap at the front of the clip. The meter is decoration; the
+    // audio is not, so the audio goes first.
+    const attachAnalyser = (micStream: MediaStream): void => {
+      const AudioCtxCtor: typeof AudioContext | undefined =
+        typeof window !== "undefined"
+          ? (window.AudioContext ??
+            (window as unknown as { webkitAudioContext?: typeof AudioContext })
+              .webkitAudioContext)
+          : undefined;
+      if (!AudioCtxCtor) return;
       try {
         const ctx = new AudioCtxCtor();
         audioCtxRef.current = ctx;
-        const source = ctx.createMediaStreamSource(stream);
+        const source = ctx.createMediaStreamSource(micStream);
         const analyser = ctx.createAnalyser();
         analyser.fftSize = 256;
         analyser.smoothingTimeConstant = 0.6;
@@ -323,14 +390,55 @@ export function useVoiceRecorder(opts: {
       } catch {
         // Analyser failure is non-fatal — the bar just stays flat.
       }
-    }
+    };
 
     const recorder = new MediaRecorder(stream, { mimeType: mime });
+    // Resolves the moment the encoder hands back real audio. That is the only
+    // honest signal we have that the microphone is actually delivering samples:
+    // getUserMedia resolves when the track is CREATED, which on a cold device
+    // (and worst of all on a Bluetooth headset switching profiles) is well
+    // before the first sample arrives.
+    let markCapturing: (() => void) | null = null;
+    const capturing = new Promise<void>((resolve) => {
+      markCapturing = resolve;
+    });
     recorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
+      if (e.data && e.data.size > 0) {
+        chunksRef.current.push(e.data);
+        markCapturing?.();
+        markCapturing = null;
+      }
     };
     recorderRef.current = recorder;
+
+    try {
+      recorder.start(CHUNK_MS);
+    } catch (err) {
+      cleanup();
+      onErrorRef.current(
+        err instanceof Error ? err.message : "Couldn't start recording.",
+      );
+      return;
+    }
+    // Capture is live from here, so this is the timer's origin — the bar shows
+    // up a few frames later already reading the correct elapsed time.
     startedAtRef.current = Date.now();
+
+    attachAnalyser(stream);
+
+    // THE BAR MUST NOT LIE. Everything above only proves we ASKED to record;
+    // the agent, meanwhile, reads the bar as "talk now". Wait for the encoder's
+    // first real chunk before showing it, so anything said once it appears is
+    // genuinely captured. Nothing is lost during the wait — the recorder is
+    // already running, so this delays the UI, never the audio.
+    await Promise.race([capturing, sleep(CAPTURE_READY_TIMEOUT_MS)]);
+
+    // The host may have unmounted (chat switch) or torn down during that wait.
+    // The unmount effect stops the recorder and runs cleanup, which nulls
+    // recorderRef — so a mismatch here means this recording is already dead and
+    // showing a bar for it would strand the UI.
+    if (disposedRef.current || recorderRef.current !== recorder) return;
+
     setDurationSec(0);
     tickRef.current = window.setInterval(() => {
       const elapsed = Math.floor((Date.now() - startedAtRef.current) / 1000);
@@ -344,16 +452,6 @@ export function useVoiceRecorder(opts: {
       }
       setDurationSec(elapsed);
     }, 250);
-
-    try {
-      recorder.start(250);
-    } catch (err) {
-      cleanup();
-      onErrorRef.current(
-        err instanceof Error ? err.message : "Couldn't start recording.",
-      );
-      return;
-    }
     setIsRecording(true);
   };
 
