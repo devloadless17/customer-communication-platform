@@ -623,6 +623,10 @@ export interface ReplySnapshot {
   direction: MessageDirection;
   /** Authoring teammate's name on outbound; null on inbound. */
   senderName: string | null;
+  /** Who authored the original. Carried so the OPERATOR MASK (CLAUDE.md §18)
+   *  can be applied as a post-pass over mapped DTOs rather than threaded
+   *  through every message mapper — see `maskMessageActors`. */
+  senderUserId?: string | null;
   /** When the original was a media message, what kind. */
   mediaKind?: MediaKind;
   /**
@@ -1087,12 +1091,21 @@ export interface ConversationActivityEvent {
   id: string;
   conversationId: string;
   kind: ConversationEventKind;
-  /** Display name of the actor; null when system/automation. */
+  /** Display name of the actor; null when system/automation. Masked to
+   *  "Support" for the platform operator (CLAUDE.md §18) — so it is a LABEL,
+   *  never an identity: compare `actorUserId` when you mean "the same person". */
   actorName: string | null;
+  /** The acting user, when there was one. Present so the timeline can tell
+   *  "assigned to themselves" from "assigned to someone with the same display
+   *  name" — a real distinction once every operator action reads "Support". */
+  actorUserId?: string | null;
   actorKind: ActivityActorKind;
   /** Pre-resolved target-user name for `assigned` (the new assignee), null on
    *  unassign. Other kinds leave it undefined. */
   assignedToName?: string | null;
+  /** The new assignee's id, alongside the pre-resolved name — same reason as
+   *  `actorUserId`. Undefined on kinds other than `assigned`. */
+  assignedToUserId?: string | null;
   /** Pre-resolved workflow name when `actorKind === "workflow"` (the automation
    *  that caused the change). null when the workflow was since deleted (the row
    *  kept its `workflowId` but the name can't be resolved) → the timeline falls

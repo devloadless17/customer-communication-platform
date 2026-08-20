@@ -323,8 +323,11 @@ export class ConversationsController {
     //
     // Gated HERE rather than inside `ConversationsService.markRead` so the
     // shared `markConversationRead` (lib/conversations/mutations.ts) and its
-    // other callers — the /v1 route, mark-read-on-agent-send — stay untouched:
-    // this is a property of WHO is asking, which only the controller knows.
+    // other callers stay untouched: this is a property of WHO is asking, which
+    // only the controller knows. (The send path is gated too, in
+    // `onAgentSendSideEffects` — note the read RECEIPT lives only in THIS
+    // route's service, so the send path never risked blue ticks, only the
+    // team-wide badge.)
     //
     // Returns ok, not a 403: the client calls this on every visible thread
     // mount and an error would surface as a broken inbox for the operator.

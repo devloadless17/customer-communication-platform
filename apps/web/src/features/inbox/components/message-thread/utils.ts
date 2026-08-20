@@ -2,30 +2,28 @@ import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 import type { User } from "@ccp/shared/types";
 
 /**
- * What the workspace's own team sees where an actor id doesn't resolve to one
- * of their members.
+ * What the inbox prints for an actor id that isn't in the workspace roster.
  *
- * In practice that is the PLATFORM OPERATOR. They act in the workspace holding
- * no `WorkspaceMember` row — which is the whole point of operator mode, since
- * membership is what excludes them from assignment pools, availability and seat
- * counts — so `/api/users` (the query that defines "who is in this workspace")
- * deliberately omits them and their id arrives here unresolvable.
+ * NOT "Support", and that distinction is the whole point. This fallback used to
+ * mean "the platform operator", inferred from a roster miss — but a roster miss
+ * has a much more common cause: a teammate whose membership was revoked keeps
+ * their `User` row AND everything they authored, while `/api/users` (which
+ * defines who is in this workspace) filters on membership. So every note, reply
+ * and call an EX-TEAMMATE ever made started reading "Support", telling a
+ * customer the platform vendor wrote their internal notes.
  *
- * A DELETED teammate is not this case: those FKs are `onDelete: SetNull`, so
- * the id is null and still reads "Removed user" below.
- *
- * Named rather than personal, deliberately: the tenant's team has no
- * relationship with the operator as a person, and a real name invites a reply
- * to a stranger. The operator sees "Support" on their own messages too — mildly
- * odd for them, correct for everyone else, and not worth threading the current
- * user through six call sites to special-case.
+ * Only the SERVER can tell those two apart — it can check `isSuperAdmin`
+ * alongside the membership — so that is where the operator mask now lives
+ * (`apps/api/src/lib/workspaces/operator-mask.ts`), and an operator's name
+ * arrives here already reading "Support". Anything still unresolved at this
+ * point is a former member, or a brief roster load race.
  */
-export const UNKNOWN_ACTOR_NAME = "Support";
+export const UNKNOWN_ACTOR_NAME = "Former member";
 
 /**
  * Synthesize a placeholder user for the inbox UI in three cases:
- *   - We don't have the row in our local `memberById` map — the platform
- *     operator (see `UNKNOWN_ACTOR_NAME`), or a rare load race.
+ *   - The actor isn't in our local `memberById` map — a former member, or a
+ *     rare load race (see `UNKNOWN_ACTOR_NAME`).
  *   - The note/message was authored by a teammate who has been hard-deleted
  *     (authorUserId / senderUserId is now NULL in the DB).
  *   - We want to render "Removed user" without crashing.

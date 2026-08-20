@@ -80,6 +80,7 @@ import {
 import { resolveFieldTokens } from "@ccp/shared/field-tokens";
 
 import { DbService } from "../db/db.service";
+import { actorNameMasker } from "@/lib/workspaces/operator-mask";
 import { EventBus } from "../events/event-bus.module";
 import type {
   AudienceInput,
@@ -1655,6 +1656,10 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     const totalCount = pageMode
       ? await this.db.broadcast.count({ where })
       : undefined;
+    // OPERATOR MASK (CLAUDE.md §18). A broadcast is the highest-blast-radius
+    // thing the operator can do in a tenant, so "who sent this" is exactly the
+    // line a client reads afterwards — and it must not name a stranger.
+    const maskName = await actorNameMasker(this.db, [workspaceId], page.map((b) => b.createdById));
     return {
       broadcasts: page.map((b) => ({
         id: b.id,
@@ -1676,7 +1681,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         sentCount: b.sentCount,
         failedCount: b.failedCount,
         createdById: b.createdById,
-        createdByName: b.createdBy?.name ?? "Removed user",
+        createdByName: maskName(b.createdById, b.createdBy?.name) ?? "Removed user",
         channelConnectionId: b.channelConnectionId,
         // Null = the number was since disconnected (SetNull FK) or the row
         // predates account stamping — the UI renders a "removed" fallback.
@@ -1910,6 +1915,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         })
       : null;
 
+    const maskName = await actorNameMasker(this.db, [workspaceId], [row.createdById]);
     return {
       id: row.id,
       // Message identity — freeform / People (customer-mode) broadcasts have no
@@ -1946,7 +1952,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       failedCount: row.failedCount,
       lastError: row.lastError,
       createdById: row.createdById,
-      createdByName: row.createdBy?.name ?? "Removed user",
+      createdByName: maskName(row.createdById, row.createdBy?.name) ?? "Removed user",
       channelConnectionId: row.channelConnectionId,
       accountName: this.accountDisplayName(row.channelConnection),
       createdAt: row.createdAt.toISOString(),

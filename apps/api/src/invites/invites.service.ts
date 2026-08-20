@@ -19,6 +19,7 @@ import type { Role } from "@ccp/shared/types";
 import { EventBus } from "../events/event-bus.module";
 import type { ApiSession } from "../auth/session.guard";
 import { DbService } from "../db/db.service";
+import { actorNameMasker } from "@/lib/workspaces/operator-mask";
 import type { AcceptInviteInput, CreateInviteInput } from "./invites.schemas";
 import { joinDefaultChannel } from "@/lib/team-chat/default-channel";
 
@@ -78,14 +79,39 @@ export class InvitesService {
   async resolveTargetWorkspace(
     session: Pick<
       ApiSession,
-      "workspaceId" | "organizationId" | "orgRole" | "isSuperAdmin" | "userId"
+      | "workspaceId"
+      | "organizationId"
+      | "orgRole"
+      | "isSuperAdmin"
+      | "isOperator"
+      | "userId"
     >,
     requested: string | undefined,
   ): Promise<string> {
     if (!requested || requested === session.workspaceId) return session.workspaceId;
 
+    // WHICH ORG bounds "a sibling workspace"? The caller's own — EXCEPT in
+    // OPERATOR MODE, where `session.organizationId` is the platform anchor and
+    // not the tenant the operator is standing in (CLAUDE.md §18). Both scopes
+    // used to live in this one method, and the result was incoherent: omitting
+    // the id staffed the TENANT (`session.workspaceId`, the early return above),
+    // naming a sibling of that tenant 404'd, and naming one of the operator's
+    // OWN workspaces succeeded — an invite meant for a customer quietly landing
+    // in the operator's org.
+    //
+    // Resolved from the ACTIVE workspace so both branches of this method agree
+    // about which organization they are staffing. One extra read, operator-only.
+    const scopeOrganizationId = session.isOperator
+      ? (
+          await this.db.workspace.findUnique({
+            where: { id: session.workspaceId },
+            select: { organizationId: true },
+          })
+        )?.organizationId ?? session.organizationId
+      : session.organizationId;
+
     const inOrg = await this.db.workspace.count({
-      where: { id: requested, organizationId: session.organizationId },
+      where: { id: requested, organizationId: scopeOrganizationId },
     });
     // 404, not 403 — a 403 would confirm the workspace exists to someone
     // outside the org that owns it.
@@ -121,16 +147,20 @@ export class InvitesService {
         role: true,
         expiresAt: true,
         createdAt: true,
+        createdById: true,
         createdBy: { select: { name: true } },
       },
     });
+    // OPERATOR MASK (CLAUDE.md §18) — inviting a client's first admin is core
+    // onboarding, so "Invited by" is a surface the operator reliably lands on.
+    const maskName = await actorNameMasker(this.db, [workspaceId], rows.map((r) => r.createdById));
     return rows.map((r) => ({
       id: r.id,
       email: r.email,
       role: r.role as Role,
       expiresAt: r.expiresAt.toISOString(),
       createdAt: r.createdAt.toISOString(),
-      createdByName: r.createdBy?.name ?? "Removed user",
+      createdByName: maskName(r.createdById, r.createdBy?.name) ?? "Removed user",
     }));
   }
 

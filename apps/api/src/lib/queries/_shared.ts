@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { actorNameMasker, OPERATOR_DISPLAY_NAME } from "@/lib/workspaces/operator-mask";
 import { type MessageFlagRow, mapFlag } from "@/lib/message-flags/queries";
 import { normalizeStringMap } from "@/lib/normalize-string-map";
 import {
@@ -61,6 +62,7 @@ export const REPLY_TO_INCLUDE = {
     // Drives the quoted-reply video thumbnail — present only when ingest
     // extracted a poster frame (NULL on outbound/older video; absent then).
     mediaThumbnailUrl: true,
+    senderUserId: true,
     sender: { select: { name: true } },
   },
 } as const;
@@ -71,8 +73,52 @@ type ReplyToRow = {
   direction: string;
   mediaKind: string | null;
   mediaThumbnailUrl: string | null;
+  senderUserId: string | null;
   sender: { name: string } | null;
 };
+
+/**
+ * OPERATOR MASK for the QUOTED-REPLY pill (CLAUDE.md §18), as a post-pass over
+ * mapped messages.
+ *
+ * The bubble's own sender name is resolved client-side from the roster, so an
+ * operator's message already reads "Support" there — but the quote under a
+ * reply is resolved SERVER-side by joining the original's sender, and it was
+ * printing the operator's real name directly beneath a bubble labelled
+ * "Support". The same join feeds `reply_to.sender_name` on outbound webhooks.
+ *
+ * A post-pass rather than a parameter on `mapMessage`: that mapper has call
+ * sites in four files, and an optional argument is one forgotten call site away
+ * from a leak. No query and no mutation unless a quoted sender really is a
+ * masked operator.
+ */
+/** `maskMessageActors` as a one-liner for the `map(mapMessage)` call sites. */
+export async function maskedMessages<T extends { replyTo?: ReplySnapshot | null }>(
+  workspaceId: string,
+  messages: T[],
+): Promise<T[]> {
+  await maskMessageActors(db, workspaceId, messages);
+  return messages;
+}
+
+export async function maskMessageActors(
+  db: Parameters<typeof actorNameMasker>[0],
+  workspaceId: string,
+  messages: Array<{ replyTo?: ReplySnapshot | null }>,
+): Promise<void> {
+  const replies = messages
+    .map((m) => m.replyTo)
+    .filter((r): r is ReplySnapshot => !!r);
+  if (replies.length === 0) return;
+  const maskName = await actorNameMasker(
+    db,
+    [workspaceId],
+    replies.map((r) => r.senderUserId),
+  );
+  for (const r of replies) {
+    r.senderName = maskName(r.senderUserId, r.senderName);
+  }
+}
 
 export function mapReplySnapshot(row: ReplyToRow | null | undefined): ReplySnapshot | null {
   if (!row) return null;
@@ -91,6 +137,7 @@ export function mapReplySnapshot(row: ReplyToRow | null | undefined): ReplySnaps
     body: row.body.slice(0, 200),
     direction: row.direction as MessageDirection,
     senderName: row.sender?.name ?? null,
+    senderUserId: row.senderUserId,
     ...(row.mediaKind ? { mediaKind: row.mediaKind as MediaKind } : {}),
     ...(thumbnailUrl ? { thumbnailUrl } : {}),
   };
@@ -168,9 +215,22 @@ export function mapUser(u: MappableUser, workspaceId: string): User {
     // a DISPLAY dto — it never grants anything (every real gate reads the
     // session, not this field).
     role: (u.workspaceMemberships[0]?.role ?? "agent") as Role,
-    name: u.name,
-    email: u.email,
-    avatarUrl: u.avatarUrl ?? undefined,
+    // OPERATOR MASK (CLAUDE.md §18), computed with ZERO extra queries: this
+    // select already carries `isSuperAdmin` and the membership filtered to THIS
+    // workspace, which is exactly the `isOperatorAccess` predicate. Checking
+    // both matters — masking on "no membership row" alone would relabel a
+    // FORMER member (whose `User` row and authored history both survive a
+    // membership revoke) as the platform vendor, which is the same mistake the
+    // web's roster-miss fallback used to make.
+    //
+    // No live path reaches this with an operator today (assignment is
+    // membership-validated everywhere, and `/api/users` filters on membership),
+    // so this is a standing guard rather than a fix: it is the mapper every
+    // future actor DTO will reach for, and `email` here is the only place the
+    // operator's address could have escaped.
+    ...(u.isSuperAdmin && u.workspaceMemberships.length === 0
+      ? { name: OPERATOR_DISPLAY_NAME, email: "", avatarUrl: undefined }
+      : { name: u.name, email: u.email, avatarUrl: u.avatarUrl ?? undefined }),
     createdAt: u.createdAt.toISOString(),
     isActive: u.deactivatedAt === null,
     ...(u.availabilityStatus
@@ -603,8 +663,10 @@ export function mapActivityEvent(
 
   const after = asJsonObject(e.after);
   let assignedToName: string | null | undefined;
+  let assignedToUserId: string | null | undefined;
   if (e.kind === "assigned") {
     const toId = after?.assignedUserId;
+    assignedToUserId = typeof toId === "string" ? toId : null;
     assignedToName =
       typeof toId === "string"
         ? assigneeNameById?.get(toId) ?? null
@@ -616,11 +678,12 @@ export function mapActivityEvent(
     conversationId: e.conversationId,
     kind: e.kind as ConversationEventKind,
     actorName,
+    actorUserId: e.userId,
     actorKind,
     before: asJsonObject(e.before),
     after,
     at: e.at.toISOString(),
-    ...(assignedToName !== undefined ? { assignedToName } : {}),
+    ...(assignedToName !== undefined ? { assignedToName, assignedToUserId } : {}),
     ...(actorWorkflowName !== undefined ? { actorWorkflowName } : {}),
   };
 }

@@ -58,6 +58,12 @@ export interface OperatorAccessEntry {
   operatorEmail: string | null;
   workspaceId: string;
   workspaceName: string | null;
+  /** "enter" for a crossing; a recorded high-blast-radius action otherwise
+   *  ("broadcast_send", "api_key_create", "outbound_webhook_create",
+   *  "contact_export") -- see `recordOperatorAction` on the API side. */
+  action: string;
+  /** Action-shaped context (a broadcast name, a key label, a webhook URL). */
+  detail: Record<string, unknown> | null;
   createdAt: string;
 }
 

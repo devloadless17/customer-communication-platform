@@ -5,6 +5,7 @@ import {
   parseStoredFieldFilters,
 } from "@/lib/contact-fields/filter-where";
 import { db } from "@/lib/db";
+import { actorNameMasker } from "@/lib/workspaces/operator-mask";
 import type { AudienceGroupDto } from "@ccp/shared/dtos";
 import type { Channel, ContactFieldFilter, Tag, TagColor } from "@ccp/shared/types";
 import { BROADCASTABLE_CHANNELS } from "@ccp/shared/providers/capabilities";
@@ -161,6 +162,10 @@ export async function listAudienceGroups(workspaceId: string): Promise<AudienceG
     countByGroup.set(entry[0], { total: entry[1], manual: existing?.manual ?? 0 });
   }
 
+  // OPERATOR MASK (CLAUDE.md §18) — the platform operator can build an audience
+  // while onboarding a client, and their real name must not become part of that
+  // client's campaign history.
+  const maskName = await actorNameMasker(db, [workspaceId], rows.map((g) => g.createdById));
   return rows.map((g) => ({
     id: g.id,
     workspaceId: g.workspaceId,
@@ -172,7 +177,7 @@ export async function listAudienceGroups(workspaceId: string): Promise<AudienceG
     manualContactCount: countByGroup.get(g.id)?.manual ?? 0,
     memberCount: countByGroup.get(g.id)?.total ?? 0,
     createdById: g.createdById,
-    createdByName: g.createdBy?.name ?? "Removed user",
+    createdByName: maskName(g.createdById, g.createdBy?.name) ?? "Removed user",
     createdAt: g.createdAt.toISOString(),
     updatedAt: g.updatedAt.toISOString(),
   }));
@@ -201,6 +206,7 @@ export async function getAudienceGroup(
     manualContactIds: g.contacts.map((c) => c.id),
     fieldFilters,
   });
+  const maskName = await actorNameMasker(db, [workspaceId], [g.createdById]);
   return {
     id: g.id,
     workspaceId: g.workspaceId,
@@ -213,7 +219,7 @@ export async function getAudienceGroup(
     manualContactCount: g.contacts.length,
     memberCount,
     createdById: g.createdById,
-    createdByName: g.createdBy?.name ?? "Removed user",
+    createdByName: maskName(g.createdById, g.createdBy?.name) ?? "Removed user",
     createdAt: g.createdAt.toISOString(),
     updatedAt: g.updatedAt.toISOString(),
   };

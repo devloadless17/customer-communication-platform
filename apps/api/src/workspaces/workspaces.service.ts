@@ -149,18 +149,22 @@ export class WorkspacesService {
    * page is unusable without it. MUTATING any of it is gated separately
    * (`assertCanManage`).
    *
-   * OPERATOR MODE CAVEAT, deliberate and safe: this reads `session.organizationId`,
-   * which for an operator inside a client's workspace is still their OWN platform
-   * anchor — so Settings → Organization describes the operator's org, not the
-   * client's. Confusing to look at, but it is the CORRECT behaviour to leave
-   * alone: every sibling write here (`renameOrganization`, `create`,
-   * `setMembership`) is scoped the same way, so the page and its buttons agree.
-   * Re-pointing the READ at the entered org without re-pointing the writes would
-   * render a client's organization with controls that mutate the operator's —
-   * strictly worse than being merely confusing. Onboarding work happens in
-   * Workspace settings (channels, keys), which IS correctly scoped.
+   * REFUSED IN OPERATOR MODE (`assertNotOperator`). This reads
+   * `session.organizationId`, which for an operator inside a client's workspace
+   * is still their OWN platform anchor — so this page described the operator's
+   * organization while the rest of the same Settings surface (People, Invites,
+   * channels) correctly addressed the tenant.
+   *
+   * An earlier version of this comment argued that was safe because the reads
+   * and the writes were scoped identically. They are, and it did not help: the
+   * page is read by someone looking at a customer's data, and `remove()` turned
+   * the confusion into a destroyed workspace of the operator's own. Onboarding
+   * needs Workspace settings (channels, keys), which IS tenant-scoped; managing
+   * the operator's own organization belongs in the (platform) shell, where no
+   * tenant is on screen to confuse it with.
    */
   async organization(session: ApiSession): Promise<OrganizationOverview> {
+    this.assertNotOperator(session);
     const org = await this.db.organization.findUniqueOrThrow({
       where: { id: session.organizationId },
       select: {
@@ -225,6 +229,7 @@ export class WorkspacesService {
   }
 
   async renameOrganization(session: ApiSession, name: string): Promise<{ name: string }> {
+    this.assertNotOperator(session);
     this.assertCanManage(session);
     const org = await this.db.organization.update({
       where: { id: session.organizationId },
@@ -244,6 +249,7 @@ export class WorkspacesService {
    * created here is identical to a signup's.
    */
   async create(session: ApiSession, name: string): Promise<{ id: string; name: string }> {
+    this.assertNotOperator(session);
     this.assertCanManage(session);
 
     // The cap is per-organisation and SUPER-ADMIN controlled
@@ -290,6 +296,7 @@ export class WorkspacesService {
     workspaceId: string,
     name: string,
   ): Promise<{ id: string; name: string }> {
+    this.assertNotOperator(session);
     this.assertCanManage(session);
     await this.assertInOrg(session, workspaceId);
     const workspace = await this.db.workspace.update({
@@ -324,6 +331,7 @@ export class WorkspacesService {
     userId: string,
     role: "admin" | "manager" | "agent" | null,
   ): Promise<void> {
+    this.assertNotOperator(session);
     this.assertCanManage(session);
     await this.assertInOrg(session, workspaceId);
 
@@ -487,6 +495,7 @@ export class WorkspacesService {
    * backstop, not the prompt.
    */
   async remove(session: ApiSession, workspaceId: string): Promise<void> {
+    this.assertNotOperator(session);
     this.assertCanManage(session);
     await this.assertInOrg(session, workspaceId);
 
@@ -588,6 +597,41 @@ export class WorkspacesService {
     return (
       session.isSuperAdmin || session.orgRole === "owner" || session.orgRole === "admin"
     );
+  }
+
+  /**
+   * Refuse an ORGANIZATION-shaped action while in OPERATOR MODE.
+   *
+   * Every method in this class that manages an organization reads
+   * `session.organizationId` — which, for the platform operator standing inside
+   * a CUSTOMER's workspace, is still their own platform anchor (CLAUDE.md §18).
+   * So the Organization surface described, and its buttons MUTATED, the
+   * operator's own org while the rest of the same Settings page (People,
+   * Invites, channels) correctly addressed the tenant. Two tabs of one page
+   * disagreeing about which company they mean is bad enough; `remove()` made it
+   * dangerous, because `assertInOrg` 404s the tenant's workspace id and ACCEPTS
+   * the operator's own — one click from a page about Acme destroying a workspace
+   * of the operator's, cascade and R2 blobs included.
+   *
+   * This used to carry a docblock arguing the behaviour was "deliberate and
+   * safe" because the reads and the writes were scoped the same way. That is
+   * true and beside the point: internal consistency does not help someone
+   * looking at a client's data. REFUSING is the honest answer — the operator
+   * manages their own organization from the (platform) shell, where there is no
+   * tenant on screen to confuse it with.
+   *
+   * Not merged into `assertCanManage`: that one answers "may this ROLE manage an
+   * org", this one answers "is this the right ORG to be managing". Collapsing
+   * them would hide a tenancy question inside a permission check.
+   */
+  private assertNotOperator(session: ApiSession): void {
+    if (session.isOperator) {
+      throw new ForbiddenException({
+        error: "operator_mode_unavailable",
+        detail:
+          "Organization settings aren't available while you're in a customer's workspace. Manage your own organization from the platform console.",
+      });
+    }
   }
 
   private assertCanManage(session: ApiSession): void {

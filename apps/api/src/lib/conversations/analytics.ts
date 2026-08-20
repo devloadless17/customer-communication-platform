@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { operatorActorIds } from "@/lib/workspaces/operator-mask";
 
 /**
  * Conversation analytics — incremental updates to the counters and
@@ -130,6 +131,26 @@ export async function trackOnOutboundMessage(args: OnOutboundMessageArgs): Promi
   // The firstResponseAt + firstResponseByUserId pair already use
   // predicate-gated updateMany, which keeps "first writer wins" correct.
   try {
+    // OPERATOR EXCLUSION (CLAUDE.md, section 18) - the same "don't register,
+    // rather than filter" rule presence applies. `responsesCount` and the
+    // first-response stamp are AGENT-attributed metrics: the per-agent report
+    // tables drop the operator via `withoutOperatorRows`, so counting their
+    // sends into the workspace-level aggregates made the headline number and
+    // the sum of the agent rows disagree by a gap the tenant cannot explain
+    // (the missing responses were "answered" by someone the report is designed
+    // to be unable to name). `outgoingMessagesCount` still increments below -
+    // the message really was sent and the drift sweeper recomputes it from
+    // rows. One indexed read on a fire-and-forget path; empty-set short-circuit
+    // makes it free for every workflow/system send (null sender).
+    const operatorIds = await operatorActorIds(db, [args.senderUserId], [args.workspaceId]);
+    const senderIsOperator = args.senderUserId !== null && operatorIds.has(args.senderUserId);
+    if (senderIsOperator) {
+      await db.conversation.updateMany({
+        where: { id: args.conversationId, workspaceId: args.workspaceId },
+        data: { outgoingMessagesCount: { increment: 1 } },
+      });
+      return;
+    }
     const result = await db.conversation.updateMany({
       where: {
         id: args.conversationId,

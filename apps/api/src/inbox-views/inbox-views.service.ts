@@ -18,6 +18,7 @@ import { resolvePermissions } from "@ccp/shared/auth/permissions";
 import type { Role } from "@ccp/shared/types";
 
 import { DbService } from "../db/db.service";
+import { actorNameMasker } from "@/lib/workspaces/operator-mask";
 import { EventBus } from "../events/event-bus.module";
 import type {
   CreateInboxViewInput,
@@ -150,7 +151,12 @@ export class InboxViewsService {
       select: InboxViewsService.SELECT,
     });
     const canManageShared = actor.canManageShared;
-    const views = rows.map((r) => this.toWire(r, actor.userId, canManageShared));
+    const maskName = await actorNameMasker(
+      this.db,
+      [actor.workspaceId],
+      rows.map((r) => r.createdById),
+    );
+    const views = rows.map((r) => this.toWire(r, actor.userId, canManageShared, maskName));
     const resolved = await this.resolveFiltersMany(
       actor.workspaceId,
       views.map((v) => v.filters),
@@ -180,7 +186,7 @@ export class InboxViewsService {
       select: InboxViewsService.SELECT,
     });
     if (!row) throw new NotFoundException({ error: "inbox_view_not_found" });
-    return this.toWire(row, actor.userId, actor.canManageShared);
+    return this.toWire(row, actor.userId, actor.canManageShared, await this.maskFor(actor, row.createdById));
   }
 
   async create(actor: InboxViewActor, input: CreateInboxViewInput): Promise<InboxView> {
@@ -219,7 +225,7 @@ export class InboxViewsService {
         select: InboxViewsService.SELECT,
       });
       if (visibility === "shared") await this.publishSharedTick(actor.workspaceId);
-      return this.toWire(row, actor.userId, actor.canManageShared);
+      return this.toWire(row, actor.userId, actor.canManageShared, await this.maskFor(actor, row.createdById));
     } catch (err) {
       throw this.mapDuplicateName(err, visibility);
     }
@@ -272,7 +278,7 @@ export class InboxViewsService {
       if (existing.visibility === "shared" || nextVisibility === "shared") {
         await this.publishSharedTick(actor.workspaceId);
       }
-      return this.toWire(row, actor.userId, actor.canManageShared);
+      return this.toWire(row, actor.userId, actor.canManageShared, await this.maskFor(actor, row.createdById));
     } catch (err) {
       throw this.mapDuplicateName(err, nextVisibility);
     }
@@ -609,12 +615,24 @@ export class InboxViewsService {
     return err;
   }
 
+  /**
+   * `maskName` is the OPERATOR MASK (CLAUDE.md §18), and it is REQUIRED rather
+   * than optional: a shared view names its author on the rail for the whole
+   * team, and an optional argument is one forgotten call site away from putting
+   * the platform operator's real name there. Resolve it with `actorNameMasker`.
+   */
+  /** One-row convenience over `actorNameMasker` for the single-view paths. */
+  private maskFor(actor: InboxViewActor, createdById: string | null) {
+    return actorNameMasker(this.db, [actor.workspaceId], [createdById]);
+  }
+
   private toWire(
     row: Prisma.InboxViewGetPayload<{ select: typeof InboxViewsService.SELECT }>,
     /** `null` for an API-key actor — it owns no personal views, so nothing
      *  can ever be "mine" to it. */
     viewerUserId: string | null,
     canManageShared: boolean,
+    maskName: (id: string | null | undefined, name: string | null | undefined) => string | null,
   ): InboxView {
     return {
       id: row.id,
@@ -624,7 +642,7 @@ export class InboxViewsService {
       icon: row.icon,
       visibility: row.visibility as InboxViewVisibility,
       createdById: row.createdById ?? "",
-      createdByName: row.createdBy?.name ?? null,
+      createdByName: maskName(row.createdById, row.createdBy?.name),
       filters: (row.filters ?? {}) as InboxViewFilters,
       position: row.position,
       isEditable:

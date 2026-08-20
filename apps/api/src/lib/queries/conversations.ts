@@ -18,6 +18,7 @@ import {
   mapConversation,
   assignedUserSelect,
   mapMessage,
+  maskedMessages,
   mapNote,
   mapUser,
   REPLY_TO_INCLUDE,
@@ -527,7 +528,7 @@ export async function getConversationWithRefs(
         tagIds: row.contact.tags.map((t) => t.id),
       },
       assignedUser: row.assignedUser ? mapUser(row.assignedUser, workspaceId) : null,
-      messages: messagesAsc.map(mapMessage),
+      messages: await maskedMessages(workspaceId, messagesAsc.map(mapMessage)),
       notes: row.notes.map(mapNote),
       events,
       calls: callsAsc,
@@ -696,7 +697,7 @@ export async function listOlderMessages(
   const nextCursor =
     hasMore && oldest ? encodeMessageCursor({ timestamp: oldest.timestamp, id: oldest.id }) : null;
 
-  return { items: itemsAsc.map(mapMessage), nextCursor };
+  return { items: await maskedMessages(workspaceId, itemsAsc.map(mapMessage)), nextCursor };
 }
 
 /**
@@ -816,7 +817,7 @@ export async function listNewerMessages(
   });
 
   const hasMore = rows.length > take;
-  const items = (hasMore ? rows.slice(0, take) : rows).map(mapMessage);
+  const items = await maskedMessages(workspaceId, (hasMore ? rows.slice(0, take) : rows).map(mapMessage));
 
   return {
     items,
@@ -916,5 +917,5 @@ export async function listConversationAttachments(
       ? encodeMessageCursor({ timestamp: oldest.timestamp, id: oldest.id })
       : null;
 
-  return { items: items.map(mapMessage), nextCursor };
+  return { items: await maskedMessages(workspaceId, items.map(mapMessage)), nextCursor };
 }

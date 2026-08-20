@@ -286,8 +286,10 @@ export default async function PlatformOrganizationDetailPage({
                       {entry.operatorName ?? entry.userId}
                     </span>
                     <span className="text-muted-foreground">
-                      {" entered "}
+                      {" "}
+                      {operatorActionLabel(entry.action)}{" "}
                       {entry.workspaceName ?? "a deleted workspace"}
+                      {detailSuffix(entry.detail)}
                     </span>
                   </div>
                   {entry.operatorEmail && (
@@ -315,6 +317,31 @@ export default async function PlatformOrganizationDetailPage({
       </div>
     </div>
   );
+}
+
+/** The log's verb, per recorded action -- reads as a sentence with the
+ *  workspace name that follows ("Ali sent a broadcast in Acme Support"). */
+function operatorActionLabel(action: string): string {
+  switch (action) {
+    case "broadcast_send":
+      return "sent a broadcast in";
+    case "api_key_create":
+      return "created an API key in";
+    case "outbound_webhook_create":
+      return "created an outbound webhook in";
+    case "contact_export":
+      return "exported contacts from";
+    default:
+      return "entered";
+  }
+}
+
+/** One short parenthetical from the writer-shaped detail, when it names
+ *  something a human would recognize. */
+function detailSuffix(detail: Record<string, unknown> | null): string {
+  if (!detail) return "";
+  const named = detail.name ?? detail.url ?? detail.rotatedKeyId;
+  return typeof named === "string" && named.length > 0 ? ` (${named})` : "";
 }
 
 function Stat({ label, value }: { label: string; value: number }) {

@@ -73,6 +73,7 @@ import {
 } from "@/lib/conversations/visibility";
 
 import { DbService } from "../db/db.service";
+import { actorNameMasker } from "@/lib/workspaces/operator-mask";
 import { EventBus } from "../events/event-bus.module";
 import type { ApiSession } from "../auth/session.guard";
 
@@ -2483,6 +2484,7 @@ export class CallsService {
         // in the contact panel answers "who took this call" and "which of our
         // numbers", exactly like the team-wide Calls page. Without these the
         // panel would need a second round-trip per row to say anything useful.
+        initiatedByUserId: true,
         initiatedBy: { select: { name: true } },
         answeredBy: { select: { name: true } },
         conversation: {
@@ -2497,6 +2499,13 @@ export class CallsService {
     });
     const hasMore = rows.length > take;
     const page = hasMore ? rows.slice(0, take) : rows;
+    // OPERATOR MASK (CLAUDE.md §18) — an operator placing a test call would
+    // otherwise sign the client's call history with their real name.
+    const maskName = await actorNameMasker(
+      this.db,
+      [session.workspaceId],
+      page.flatMap((c) => [c.initiatedByUserId, c.answeredByUserId]),
+    );
     const items: ConversationCallRow[] = page.map((c) => ({
       ...serializeCall(c),
       channel: c.channel,
@@ -2506,8 +2515,8 @@ export class CallsService {
         endedAt: c.endedAt,
         channelConnectionConfig: c.conversation.channelConnection?.config ?? null,
       }),
-      initiatedByName: c.initiatedBy?.name ?? null,
-      answeredByName: c.answeredBy?.name ?? null,
+      initiatedByName: maskName(c.initiatedByUserId, c.initiatedBy?.name),
+      answeredByName: maskName(c.answeredByUserId, c.answeredBy?.name),
       connected:
         c.answeredAt !== null ||
         (c.durationSeconds !== null && c.durationSeconds > 0),
@@ -2661,6 +2670,11 @@ export class CallsService {
     });
     const hasMore = rows.length > take;
     const page = hasMore ? rows.slice(0, take) : rows;
+    const maskName = await actorNameMasker(
+      this.db,
+      [session.workspaceId],
+      page.flatMap((c) => [c.initiatedBy?.id, c.answeredBy?.id]),
+    );
     const items: TeamCallRow[] = page.map((c) => ({
       id: c.id,
       conversationId: c.conversationId,
@@ -2669,8 +2683,8 @@ export class CallsService {
       contactPhone: c.conversation.contact?.phoneNumber ?? null,
       direction: c.direction === "in" ? ("in" as const) : ("out" as const),
       status: c.status,
-      initiatedByName: c.initiatedBy?.name ?? null,
-      answeredByName: c.answeredBy?.name ?? null,
+      initiatedByName: maskName(c.initiatedBy?.id, c.initiatedBy?.name),
+      answeredByName: maskName(c.answeredBy?.id, c.answeredBy?.name),
       ringingAt: c.ringingAt.toISOString(),
       durationSeconds: c.durationSeconds,
       connected:

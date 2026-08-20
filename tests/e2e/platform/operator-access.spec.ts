@@ -104,6 +104,14 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
+  // Leave operator mode — the durable Session.activeWorkspaceId outlives this
+  // spec's contexts (see operator-identity.spec.ts for the full note).
+  await db()
+    .session.updateMany({
+      where: { userId: operatorUserId },
+      data: { activeWorkspaceId: null },
+    })
+    .catch(() => undefined);
   // Deleting the ORG cascades to its workspace, its rows, its users AND its
   // OperatorAccess log (the row's only FK).
   await db()

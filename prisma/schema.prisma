@@ -623,6 +623,22 @@ model OperatorAccess {
   // may be deleted while the fact that it was entered stays true.
   enteredWorkspaceId String
 
+  // WHAT was done. "enter" (the default, and every pre-existing row) records
+  // crossing into the tenant; the high-blast-radius actions the operator can
+  // take INSIDE one record themselves too -- "broadcast_send", "api_key_create",
+  // "outbound_webhook_create", "contact_export" -- because those spend the
+  // tenant's money or mint a lasting capability, and "the operator was here"
+  // is not the same accountability as "the operator sent 1,204 messages".
+  // A String rather than an enum: the set grows with product surface, and an
+  // enum migration per new action is ceremony the append-only log doesn't need.
+  // `recordOperatorAction` (lib/workspaces/operator-log.ts) is the one writer.
+  action String @default("enter")
+
+  // Action-specific context, shaped by the writer: a broadcast id and recipient
+  // count, an API key label -- enough for the audit panel to say what happened
+  // without joining tables that may since have been deleted.
+  detail Json?
+
   createdAt DateTime @default(now())
 
   // The audit panel reads "recent entries into THIS org, newest first". `sort:

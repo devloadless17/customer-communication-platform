@@ -5,6 +5,8 @@ import { RequireRole } from "../../auth/role.guard";
 import type { ApiSession } from "../../auth/session.guard";
 import { RateLimit } from "../../common/rate-limit.interceptor";
 import { zBody } from "../../common/zod-validation.pipe";
+import { DbService } from "../../db/db.service";
+import { recordOperatorAction } from "@/lib/workspaces/operator-log";
 import { ApiKeysService } from "./api-keys.service";
 import { CreateApiKeySchema, type CreateApiKeyInput } from "./api-keys.schemas";
 
@@ -22,7 +24,10 @@ import { CreateApiKeySchema, type CreateApiKeyInput } from "./api-keys.schemas";
 @Controller("api/workspace/api-keys")
 @RequireRole("admin")
 export class ApiKeysController {
-  constructor(private readonly keys: ApiKeysService) {}
+  constructor(
+    private readonly keys: ApiKeysService,
+    private readonly db: DbService,
+  ) {}
 
   @Get()
   async list(@CurrentSession() session: ApiSession) {
@@ -35,6 +40,17 @@ export class ApiKeysController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateApiKeySchema)) body: CreateApiKeyInput,
   ) {
+    // OPERATOR ACTION LOG (CLAUDE.md §18): a key is a lasting credential to the
+    // tenant's data, so an operator minting one is recorded — awaited BEFORE
+    // the mint, so a failed record fails the action, never the other way round.
+    if (session.isOperator) {
+      await recordOperatorAction(this.db, {
+        userId: session.userId,
+        workspaceId: session.workspaceId,
+        action: "api_key_create",
+        detail: { name: body.name },
+      });
+    }
     return this.keys.create(session.workspaceId, session.userId, body);
   }
 
@@ -50,6 +66,15 @@ export class ApiKeysController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
+    // A rotation mints a new plaintext token too — same accountability as create.
+    if (session.isOperator) {
+      await recordOperatorAction(this.db, {
+        userId: session.userId,
+        workspaceId: session.workspaceId,
+        action: "api_key_create",
+        detail: { rotatedKeyId: id },
+      });
+    }
     return this.keys.rotate(session.workspaceId, session.userId, id);
   }
 

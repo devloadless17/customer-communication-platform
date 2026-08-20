@@ -1,8 +1,9 @@
 import { db } from "@/lib/db";
+import { actorNameMasker } from "@/lib/workspaces/operator-mask";
 import type { MessageSearchHit, MessageSearchPage } from "@ccp/shared/dtos";
 import type { MediaKind, Message, MessageDirection } from "@ccp/shared/types";
 
-import { clampTake, mapMessage, REPLY_TO_INCLUDE } from "./_shared";
+import { clampTake, mapMessage, maskedMessages, REPLY_TO_INCLUDE } from "./_shared";
 import { encodeMessageCursor, parseMessageCursor } from "./_cursors";
 
 // DTO shapes live in @ccp/shared/dtos.
@@ -79,6 +80,7 @@ export async function searchConversationMessages(
       timestamp: true,
       mediaCaption: true,
       mediaKind: true,
+      senderUserId: true,
       sender: { select: { name: true } },
     },
   });
@@ -91,12 +93,15 @@ export async function searchConversationMessages(
       ? encodeMessageCursor({ timestamp: last.timestamp, id: last.id })
       : null;
 
+  // OPERATOR MASK (CLAUDE.md §18) — in-thread search is a second path to the
+  // same message bubbles, so it has to agree with the thread about who sent one.
+  const maskName = await actorNameMasker(db, [workspaceId], sliced.map((r) => r.senderUserId));
   const items: MessageSearchHit[] = sliced.map((r) => ({
     id: r.id,
     body: r.body,
     direction: r.direction as MessageDirection,
     timestamp: r.timestamp.toISOString(),
-    senderName: r.sender?.name ?? null,
+    senderName: maskName(r.senderUserId, r.sender?.name),
     ...(r.mediaCaption ? { mediaCaption: r.mediaCaption } : {}),
     ...(r.mediaKind ? { mediaKind: r.mediaKind as MediaKind } : {}),
   }));
@@ -166,7 +171,7 @@ export async function loadMessageContextWindow(
   const hasMoreOlder = olderRows.length > before;
   const olderDesc = hasMoreOlder ? olderRows.slice(0, before) : olderRows;
   const olderAsc = [...olderDesc].reverse();
-  const messages = [...olderAsc, ...anchorAndNewer].map(mapMessage);
+  const messages = await maskedMessages(workspaceId, [...olderAsc, ...anchorAndNewer].map(mapMessage));
 
   const oldest = olderAsc[0];
   const nextOlderCursor =

@@ -1840,7 +1840,15 @@ export async function fillActiveTicketAssignee(
     select: { id: true },
   });
   if (!ticket) return;
-  await updateTicket(sharedDb, {
+  // `updateTicket` REPORTS failure, it doesn't throw — so the caller's
+  // `.catch()` never fires and a refused fill used to vanish without trace. The
+  // refusal that actually happens is `assignee_not_found`: the assignee must be
+  // a workspace member, and a non-member (the platform operator, §18) or a
+  // just-removed member fails that gate. The conversation-side claim is now
+  // gated on the same membership fact (`onAgentSendSideEffects`), so the two
+  // can no longer disagree — but a discarded outcome is how that disagreement
+  // stayed invisible, so say it out loud instead.
+  const filled = await updateTicket(sharedDb, {
     workspaceId,
     ticketId: ticket.id,
     actor: {},
@@ -1855,4 +1863,9 @@ export async function fillActiveTicketAssignee(
     silent: true,
     skipOutboundWebhook: true,
   });
+  if (!filled.ok) {
+    console.warn(
+      `[tickets] fillActiveTicketAssignee: ticket ${ticket.id} not filled for ${userId} (${filled.reason})`,
+    );
+  }
 }

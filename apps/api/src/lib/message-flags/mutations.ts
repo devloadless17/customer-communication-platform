@@ -3,7 +3,7 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 import type { MessageFlag, MessageFlagSource, MessageFlagStatus } from "@ccp/shared/types";
 import { kickOutbox, publishInTx } from "@/lib/events/outbox";
 
-import { MESSAGE_FLAG_SELECT, mapFlag } from "./queries";
+import { MESSAGE_FLAG_SELECT, mapFlag, maskFlagActors } from "./queries";
 
 /**
  * Write side of message flags — the ONLY place a `MessageFlag` row is created,
@@ -204,7 +204,7 @@ async function raiseFlagOnce(
     }
 
     const openFlagCount = await bumpOpenFlagCount(tx, conversationId, delta);
-    const flag = await readFlag(tx, flagId);
+    const flag = await readFlag(tx, flagId, args.workspaceId);
     if (!suppressPublish) {
       await publishFlagEvent(tx, { args, flag, openFlagCount, action, conversationId });
     }
@@ -318,7 +318,7 @@ export async function updateFlag(db: Db, args: UpdateFlagArgs): Promise<FlagMuta
         : 0;
 
     const openFlagCount = await bumpOpenFlagCount(tx, existing.conversationId, delta);
-    const flag = await readFlag(tx, existing.id);
+    const flag = await readFlag(tx, existing.id, args.workspaceId);
     // Derive the action from the TRANSITION that actually happened, never from
     // the post-state alone. Deriving it from `flag.status` was wrong in both
     // directions: editing the note on an already-resolved flag reported
@@ -370,7 +370,7 @@ export async function removeFlag(db: Db, args: RemoveFlagArgs): Promise<FlagMuta
     // Read the full shape BEFORE deleting — the event payload (and therefore
     // the socket frame, the audit row, and the webhook body) still needs to say
     // WHAT was removed.
-    const flag = await readFlag(tx, existing.id);
+    const flag = await readFlag(tx, existing.id, args.workspaceId);
 
     // Delete and learn the status IN ONE STATEMENT. The obvious version — CAS
     // on the status we read outside the transaction, then fall back to an
@@ -406,12 +406,13 @@ export async function removeFlag(db: Db, args: RemoveFlagArgs): Promise<FlagMuta
 
 type TxClient = Parameters<Parameters<Db["$transaction"]>[0]>[0];
 
-async function readFlag(tx: TxClient, id: string): Promise<MessageFlag> {
+async function readFlag(tx: TxClient, id: string, workspaceId: string): Promise<MessageFlag> {
   const row = await tx.messageFlag.findUniqueOrThrow({
     where: { id },
     select: MESSAGE_FLAG_SELECT,
   });
-  return mapFlag(row);
+  const [flag] = await maskFlagActors(tx, workspaceId, [mapFlag(row)]);
+  return flag!;
 }
 
 /**

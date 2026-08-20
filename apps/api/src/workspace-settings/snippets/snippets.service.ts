@@ -7,6 +7,7 @@ import {
 
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
+import { actorNameMasker } from "@/lib/workspaces/operator-mask";
 import type {
   CreateSnippetInput,
   UpdateSnippetInput,
@@ -39,13 +40,16 @@ export class SnippetsService {
       orderBy: [{ label: "asc" }],
       include: { createdBy: { select: { id: true, name: true } } },
     });
+    // OPERATOR MASK (CLAUDE.md §18) — an operator writing a snippet during
+    // onboarding must not sign it with their real name.
+    const maskName = await actorNameMasker(this.db, [workspaceId], rows.map((r) => r.createdById));
     return rows.map((r) => ({
       id: r.id,
       name: r.name,
       label: r.label,
       body: r.body,
       createdById: r.createdById,
-      createdByName: r.createdBy?.name ?? "Removed user",
+      createdByName: maskName(r.createdById, r.createdBy?.name) ?? "Removed user",
       updatedAt: r.updatedAt.toISOString(),
     }));
   }

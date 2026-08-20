@@ -84,7 +84,12 @@ function describe(e: ConversationActivityEvent): {
         };
       }
       // Self-assign reads more naturally as "assigned to themselves".
-      const toSelf = toName === e.actorName;
+      //
+      // Compared by ID, not by NAME. Two different people can share a display
+      // name, and since the operator mask prints every platform action as
+      // "Support" (CLAUDE.md §18), a real member actually called Support would
+      // have collapsed every assignment they touched into "self-assigned".
+      const toSelf = !!e.actorUserId && e.assignedToUserId === e.actorUserId;
       return {
         icon: UserPlus,
         text: toSelf ? (

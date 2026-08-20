@@ -38,6 +38,8 @@ import {
   type RetryBroadcastInput,
 } from "./broadcasts.schemas";
 import { BroadcastsService } from "./broadcasts.service";
+import { DbService } from "../db/db.service";
+import { recordOperatorAction } from "@/lib/workspaces/operator-log";
 
 /**
  * Broadcasts: create, list, detail, delete.
@@ -60,7 +62,10 @@ import { BroadcastsService } from "./broadcasts.service";
 // sessions to match. Product decision 2026-08-10.
 @DenyRestrictedViewer()
 export class BroadcastsController {
-  constructor(private readonly broadcasts: BroadcastsService) {}
+  constructor(
+    private readonly broadcasts: BroadcastsService,
+    private readonly db: DbService,
+  ) {}
 
   @Post()
   @RequireCapability("broadcasts:manage")
@@ -74,6 +79,18 @@ export class BroadcastsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateBroadcastSchema)) body: CreateBroadcastInput,
   ) {
+    // OPERATOR ACTION LOG (CLAUDE.md, section 18): a broadcast spends the
+    // tenant's money at contact-book scale with no unsend, so an operator
+    // launching one is recorded - awaited BEFORE the create, so a failed record
+    // fails the launch rather than allowing an unlogged one.
+    if (session.isOperator) {
+      await recordOperatorAction(this.db, {
+        userId: session.userId,
+        workspaceId: session.workspaceId,
+        action: "broadcast_send",
+        detail: { name: body.name ?? null },
+      });
+    }
     const { broadcastId, totalCount, scheduled } = await this.broadcasts.create(
       session.workspaceId,
       session.userId,

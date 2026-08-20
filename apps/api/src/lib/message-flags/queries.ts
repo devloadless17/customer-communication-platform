@@ -9,6 +9,7 @@ import type {
   MessageFlagStatus,
 } from "@ccp/shared/message-flags/types";
 import { isMessageFlagSource } from "@ccp/shared/message-flags/types";
+import { actorNameMasker } from "@/lib/workspaces/operator-mask";
 
 import { maskPhoneLikeName } from "@/lib/external-shapes";
 
@@ -22,7 +23,7 @@ import { maskPhoneLikeName } from "@/lib/external-shapes";
  */
 
 /** Minimal Prisma surface these helpers touch. */
-type Db = Pick<PrismaClient, "messageFlag" | "messageFlagDefinition">;
+type Db = Pick<PrismaClient, "messageFlag" | "messageFlagDefinition" | "user">;
 
 /**
  * How much of the flagged message the queue row shows. Truncated in SQL-land
@@ -93,6 +94,38 @@ export function mapFlagDefinition(row: DefinitionRow): MessageFlagDefinition {
     archived: row.archived,
     sortOrder: row.sortOrder,
   };
+}
+
+/**
+ * OPERATOR MASK for flag actors (CLAUDE.md §18), as a post-pass over mapped
+ * DTOs — the same shape as team chat's `maskMessageAuthors`, and for the same
+ * reason: three actor names per flag (raised by / assigned to / resolved by)
+ * across two call sites, and an optional mapper argument is one forgotten call
+ * site away from a leak.
+ *
+ * `assignedToName` can never be the operator in practice (assignment is
+ * membership-validated), but it is masked anyway: the cost is nothing, and a
+ * field left out "because it's unreachable" is how the next reachable path
+ * arrives unnoticed.
+ *
+ * No query and no mutation unless an actor really is a masked operator.
+ */
+export async function maskFlagActors<T extends MessageFlag>(
+  db: Pick<PrismaClient, "user">,
+  workspaceId: string,
+  flags: T[],
+): Promise<T[]> {
+  const maskName = await actorNameMasker(
+    db,
+    [workspaceId],
+    flags.flatMap((f) => [f.createdById, f.assignedToId, f.resolvedById]),
+  );
+  for (const f of flags) {
+    f.createdByName = maskName(f.createdById, f.createdByName);
+    f.assignedToName = maskName(f.assignedToId, f.assignedToName);
+    f.resolvedByName = maskName(f.resolvedById, f.resolvedByName);
+  }
+  return flags;
 }
 
 export function mapFlag(row: MessageFlagRow): MessageFlag {
@@ -218,32 +251,31 @@ export async function listFlags(
   const last = page.at(-1);
   const nextCursor = rows.length > take && last ? encodeCursor(last.createdAt, last.id) : null;
 
-  return {
-    items: page.map((row) => {
-      // Falls back to the phone number, then a placeholder — a WhatsApp contact
-      // that has never given a name has neither, and a blank queue row is
-      // unusable. (Ephemeral widget visitors are handled the same way: they get
-      // a phone-less placeholder rather than being hidden, because the queue is
-      // about the MESSAGE, not the directory.)
-      const contactName =
-        row.conversation.contact.name ||
-        row.conversation.contact.phoneNumber ||
-        "Unknown contact";
-      return {
-        ...mapFlag(row),
-        contactId: row.conversation.contact.id,
-        contactName: filter.maskContactPii
-          ? maskPhoneLikeName(contactName, row.conversation.contact.phoneNumber)
-          : contactName,
-        messageExcerpt: filter.omitMessageExcerpt
-          ? ""
-          : excerpt(row.message.body || row.message.mediaCaption || ""),
-        messageTimestamp: row.message.timestamp.toISOString(),
-        channel: row.conversation.channel,
-      };
-    }),
-    nextCursor,
-  };
+  const items = page.map((row) => {
+    // Falls back to the phone number, then a placeholder — a WhatsApp contact
+    // that has never given a name has neither, and a blank queue row is
+    // unusable. (Ephemeral widget visitors are handled the same way: they get
+    // a phone-less placeholder rather than being hidden, because the queue is
+    // about the MESSAGE, not the directory.)
+    const contactName =
+      row.conversation.contact.name ||
+      row.conversation.contact.phoneNumber ||
+      "Unknown contact";
+    return {
+      ...mapFlag(row),
+      contactId: row.conversation.contact.id,
+      contactName: filter.maskContactPii
+        ? maskPhoneLikeName(contactName, row.conversation.contact.phoneNumber)
+        : contactName,
+      messageExcerpt: filter.omitMessageExcerpt
+        ? ""
+        : excerpt(row.message.body || row.message.mediaCaption || ""),
+      messageTimestamp: row.message.timestamp.toISOString(),
+      channel: row.conversation.channel,
+    };
+  });
+  await maskFlagActors(db, workspaceId, items);
+  return { items, nextCursor };
 }
 
 /**

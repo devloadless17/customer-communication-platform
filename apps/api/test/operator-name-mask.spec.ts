@@ -36,7 +36,10 @@ import { listNotifications } from "@/lib/notifications/notifications";
 import { listConversationEvents } from "@/lib/queries/conversations";
 import { getTeamReport } from "@/lib/analytics/team-report";
 import { getWorkspaceReport } from "@/lib/analytics/reports";
-import { operatorActorIds } from "@/lib/workspaces/operator-mask";
+import { actorNameMasker, operatorActorIds } from "@/lib/workspaces/operator-mask";
+import { listChannelMessages } from "@/lib/team-chat/queries";
+import { listNewerMessages } from "@/lib/queries/conversations";
+import { trackOnOutboundMessage } from "@/lib/conversations/analytics";
 import { setSharedDb } from "@/lib/db";
 
 import { createTestPrismaClient } from "./_prisma";
@@ -266,5 +269,148 @@ describe("team report", () => {
     const overviewIds = overview.agents.map((a) => a.userId);
     expect(overviewIds).not.toContain(operator);
     expect(overviewIds).toContain(departed);
+  });
+});
+
+describe("the batched masker + the newly-masked surfaces (audit 2026-08-20)", () => {
+  it("actorNameMasker: masks the operator, passes a member and a departed member through", async () => {
+    const maskName = await actorNameMasker(prisma, [ws], [operator, member, null]);
+    expect(maskName(operator, "OPM Real Operator Name")).toBe("Support");
+    expect(maskName(member, "OPM Member")).toBe("OPM Member");
+    // A non-operator unresolved name passes through as null — "Former member"
+    // is the CLIENT's word for that, never the server inventing one.
+    expect(maskName(member, null)).toBeNull();
+    expect(maskName(null, "whoever")).toBe("whoever");
+  });
+
+  it("team chat: history mapping masks the operator's name AND avatar", async () => {
+    await prisma.user.update({
+      where: { id: operator },
+      data: { avatarUrl: "avatars/opm-real-face.png" },
+    });
+    const channel = await prisma.teamChannel.create({
+      data: {
+        workspaceId: ws,
+        name: `opm-${S}`,
+        visibility: "public",
+        isDefault: true,
+        createdById: member,
+      },
+      select: { id: true },
+    });
+    await prisma.teamChannelMessage.createMany({
+      data: [
+        { channelId: channel.id, workspaceId: ws, authorUserId: operator, body: "op says hi" },
+        { channelId: channel.id, workspaceId: ws, authorUserId: member, body: "member replies" },
+      ],
+    });
+    const { items } = await listChannelMessages(channel.id, ws, {});
+    const fromOp = items.find((m) => m.authorUserId === operator);
+    const fromMember = items.find((m) => m.authorUserId === member);
+    expect(fromOp?.authorName).toBe("Support");
+    expect(fromOp?.authorAvatarUrl).toBeNull();
+    expect(fromMember?.authorName).toBe("OPM Member");
+  });
+
+  it("quoted reply: the in-app snapshot masks the operator as the quoted sender", async () => {
+    const { conversationId } = await makeTicket();
+    const original = await prisma.message.create({
+      data: {
+        workspaceId: ws,
+        conversationId,
+        channel: "whatsapp",
+        direction: "out",
+        body: "the operator's original",
+        externalId: `opm-q-${randomUUID()}`,
+        senderUserId: operator,
+        timestamp: new Date(),
+      },
+      select: { id: true },
+    });
+    await prisma.message.create({
+      data: {
+        workspaceId: ws,
+        conversationId,
+        channel: "whatsapp",
+        direction: "in",
+        body: "customer quotes it",
+        externalId: `opm-q-${randomUUID()}`,
+        replyToMessageId: original.id,
+        timestamp: new Date(Date.now() + 10),
+      },
+    });
+    const page = await listNewerMessages(ws, conversationId, {
+      after: new Date(Date.now() - 60_000).toISOString(),
+    });
+    const quoted = page.items.find((m) => m.replyTo?.id === original.id);
+    expect(quoted?.replyTo?.senderName).toBe("Support");
+  });
+
+  it("reply-claim: an operator send never claims the conversation; a member's does", async () => {
+    // The P0: `autoAssignOnAgentSend` resolved the assignee membership-filtered
+    // and wrote `assignedUserId` anyway. The domain-level guard is
+    // `if (!assignee) return` — prove both directions through the same shape
+    // the service uses (membership-filtered read, then a conditional claim).
+    const { conversationId } = await makeTicket();
+    for (const [actor, shouldClaim] of [
+      [operator, false],
+      [member, true],
+    ] as const) {
+      await prisma.conversation.update({
+        where: { id: conversationId },
+        data: { assignedUserId: null, lastAssignedUserId: null },
+      });
+      const assignee = await prisma.user.findFirst({
+        where: { id: actor, workspaceMemberships: { some: { workspaceId: ws } } },
+        select: { id: true },
+      });
+      if (assignee) {
+        await prisma.conversation.updateMany({
+          where: { id: conversationId, workspaceId: ws, assignedUserId: null },
+          data: { assignedUserId: actor, lastAssignedUserId: actor },
+        });
+      }
+      const row = await prisma.conversation.findUniqueOrThrow({
+        where: { id: conversationId },
+        select: { assignedUserId: true, lastAssignedUserId: true },
+      });
+      expect(row.assignedUserId).toBe(shouldClaim ? actor : null);
+      expect(row.lastAssignedUserId).toBe(shouldClaim ? actor : null);
+    }
+  });
+
+  it("analytics: an operator send bumps outgoing but never responses / first-response", async () => {
+    const { conversationId } = await makeTicket();
+    await prisma.conversation.update({
+      where: { id: conversationId },
+      data: { incomingMessagesCount: 1 },
+    });
+    await trackOnOutboundMessage({ conversationId, workspaceId: ws, senderUserId: operator });
+    let row = await prisma.conversation.findUniqueOrThrow({
+      where: { id: conversationId },
+      select: {
+        outgoingMessagesCount: true,
+        responsesCount: true,
+        firstResponseAt: true,
+        firstResponseByUserId: true,
+      },
+    });
+    expect(row.outgoingMessagesCount).toBe(1);
+    expect(row.responsesCount).toBe(0);
+    expect(row.firstResponseAt).toBeNull();
+    // The control: a member's send counts normally.
+    await trackOnOutboundMessage({ conversationId, workspaceId: ws, senderUserId: member });
+    row = await prisma.conversation.findUniqueOrThrow({
+      where: { id: conversationId },
+      select: {
+        outgoingMessagesCount: true,
+        responsesCount: true,
+        firstResponseAt: true,
+        firstResponseByUserId: true,
+      },
+    });
+    expect(row.outgoingMessagesCount).toBe(2);
+    expect(row.responsesCount).toBe(1);
+    expect(row.firstResponseByUserId).toBe(member);
   });
 });

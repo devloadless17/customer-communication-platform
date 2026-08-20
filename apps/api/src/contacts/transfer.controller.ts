@@ -30,6 +30,8 @@ import { RequireCapability } from "../auth/capability.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { DenyRestrictedViewer } from "../auth/restricted-viewer.guard";
 import { SessionGuard } from "../auth/session.guard";
+import { DbService } from "../db/db.service";
+import { recordOperatorAction } from "@/lib/workspaces/operator-log";
 import type { ApiSession } from "../auth/session.guard";
 import { zBody, zQuery } from "../common/zod-validation.pipe";
 import {
@@ -64,7 +66,10 @@ import { ContactTransferService } from "./transfer.service";
 @Controller("api/contacts")
 @UseGuards(SessionGuard)
 export class ContactTransferController {
-  constructor(private readonly transfers: ContactTransferService) {}
+  constructor(
+    private readonly transfers: ContactTransferService,
+    private readonly db: DbService,
+  ) {}
 
   @Post("import/preview")
   @RequireCapability("contacts:import")
@@ -123,6 +128,16 @@ export class ContactTransferController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateExportSchema)) body: CreateExportInput,
   ) {
+    // OPERATOR ACTION LOG (CLAUDE.md §18): an export moves the tenant's whole
+    // contact book out of the platform, so an operator running one is recorded
+    // — awaited BEFORE the job starts, so a failed record fails the action.
+    if (session.isOperator) {
+      await recordOperatorAction(this.db, {
+        userId: session.userId,
+        workspaceId: session.workspaceId,
+        action: "contact_export",
+      });
+    }
     return this.transfers.startExport({
       workspaceId: session.workspaceId,
       userId: session.userId,

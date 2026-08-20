@@ -20,6 +20,7 @@ import {
 } from "@ccp/shared/outbound-webhooks/public-events";
 
 import { DbService } from "../db/db.service";
+import { actorNameMasker } from "@/lib/workspaces/operator-mask";
 import { runWithConcurrency } from "../common/concurrency";
 import { getChainDepth, getCorrelationId, getOutboxDispatchId } from "../common/correlation";
 import { enqueueWebhookDelivery } from "@/lib/outbound-webhooks/queue";
@@ -508,9 +509,19 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
         body: true,
         direction: true,
         mediaKind: true,
+        senderUserId: true,
         sender: { select: { name: true } },
       },
     });
+    // OPERATOR MASK (CLAUDE.md §18). This join carries no membership filter, so
+    // it was the one webhook field that shipped the platform operator's REAL
+    // name to a tenant's partner endpoint — the in-app twin lives in
+    // `lib/queries/_shared.ts`.
+    const maskName = await actorNameMasker(
+      this.db,
+      [workspaceId],
+      quotedRows.map((q) => q.senderUserId),
+    );
     for (const q of quotedRows) {
       const targets = quotedIdToTargets.get(q.id);
       if (!targets) continue;
@@ -520,7 +531,8 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
         direction: q.direction === "out" ? "out" : "in",
         // Authoring teammate's name on an outbound quote; null on inbound
         // (the contact has no User row) — same convention as ReplySnapshot.
-        sender_name: q.direction === "out" ? q.sender?.name ?? null : null,
+        sender_name:
+          q.direction === "out" ? maskName(q.senderUserId, q.sender?.name) : null,
         media_kind: q.mediaKind ?? null,
       };
       for (const msg of targets) msg.reply_to = reply;
@@ -667,9 +679,21 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
       },
     });
     const byId = new Map(users.map((u) => [u.id, u]));
+    // The membership filter above is what keeps a tenant's partner from
+    // receiving a stranger's name and email — but it also meant an
+    // operator-authored note or assignment shipped a bare `id` with NO name at
+    // all, which is worse than either answer: an integration gets an actor it
+    // can never resolve and no way to know why. Name them "Support", exactly as
+    // the in-app surfaces do, and still withhold the email and the role (those
+    // describe a member of the workspace, which the operator is not).
+    const maskName = await actorNameMasker(this.db, [workspaceId], ids);
     for (const { ref, withEmail } of refs) {
       const u = byId.get(ref.id as string);
-      if (!u) continue;
+      if (!u) {
+        const masked = maskName(ref.id as string, null);
+        if (masked) ref.name = masked;
+        continue;
+      }
       ref.name = u.name;
       if (withEmail) {
         ref.email = u.email;
@@ -680,7 +704,13 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     }
     for (const note of noteBlocks) {
       const u = byId.get(note.author_user_id as string);
-      if (!u) continue;
+      if (!u) {
+        // Same reasoning as the refs above — name the operator, withhold the
+        // email (an address the tenant's partner has no business writing to).
+        const masked = maskName(note.author_user_id as string, null);
+        if (masked) note.author_name = masked;
+        continue;
+      }
       note.author_name = u.name;
       note.author_email = u.email;
     }

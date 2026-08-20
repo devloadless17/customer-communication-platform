@@ -151,7 +151,11 @@ export default async function AppShellLayout({
               workspaces={workspaces}
               organizationName={organizationName}
               isOperatorMode={isOperatorMode}
-              canManageAvailability={permissions["availability:manage"]}
+              // Read-only in operator mode: availability is a WORKSPACE-member
+              // fact (the API resolves it through the membership row), so the
+              // operator has none here to set — the POST would 404. Their
+              // status dot still renders from their own user row.
+              canManageAvailability={permissions["availability:manage"] && !isOperatorMode}
               canViewReports={permissions["teamActivity:view"]}
               restrictedViewer={
                 user.role === "agent" && team.agentConversationVisibility === "assigned"

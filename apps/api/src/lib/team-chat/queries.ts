@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
+import { actorNameMasker, OPERATOR_DISPLAY_NAME } from "@/lib/workspaces/operator-mask";
 import { stripMentionMarkup } from "@ccp/shared/team-chat/mentions";
 import type {
   ChannelMessagesAroundPage,
@@ -138,6 +139,45 @@ export function mapMessage(row: MessageRow): TeamChannelMessageDto {
 }
 
 /**
+ * OPERATOR MASK for team chat (CLAUDE.md §18), applied as a post-pass over
+ * already-mapped DTOs.
+ *
+ * Team chat is the tenant's PRIVATE STAFF ROOM, and its message rows are the
+ * only ones in the product that carry an author's avatar as well as their name —
+ * so an unmasked read put the platform operator's real identity and face in
+ * front of the customer's team. `#general` is implicitly open to anyone who can
+ * reach the workspace (`channel-guards.ts`), which is exactly how a non-member
+ * operator ends up posting there.
+ *
+ * A post-pass rather than a parameter on `mapMessage`: nine call sites map
+ * messages, and an optional argument is an optional argument — one forgotten
+ * call site is one leak. This mutates the DTOs in place and is a no-op (and
+ * costs no query) unless an author is actually a masked operator.
+ *
+ * The live socket frame does the same masking from the session in
+ * `channel-messages.service.ts`, because it never touches the DB.
+ */
+export async function maskMessageAuthors<T extends { authorUserId: string | null; authorName: string | null; authorAvatarUrl: string | null }>(
+  workspaceId: string,
+  items: T[],
+): Promise<T[]> {
+  const maskName = await actorNameMasker(
+    db,
+    [workspaceId],
+    items.map((m) => m.authorUserId),
+  );
+  for (const m of items) {
+    const masked = maskName(m.authorUserId, m.authorName);
+    if (masked === OPERATOR_DISPLAY_NAME && m.authorName !== OPERATOR_DISPLAY_NAME) {
+      m.authorName = masked;
+      // An avatar identifies as surely as a name.
+      m.authorAvatarUrl = null;
+    }
+  }
+  return items;
+}
+
+/**
  * Load a message by id with the full include surface. Used by the socket
  * emit code path after a mutation so the wire payload is the same shape
  * the SSR pages return. Returns null when the row doesn't exist or doesn't
@@ -151,7 +191,9 @@ export async function loadMessageForEmit(
     where: { id: messageId, workspaceId },
     include: MESSAGE_INCLUDE,
   });
-  return row ? mapMessage(row) : null;
+  if (!row) return null;
+  const [masked] = await maskMessageAuthors(workspaceId, [mapMessage(row)]);
+  return masked ?? null;
 }
 
 // ===========================================================================
@@ -597,7 +639,7 @@ export async function listChannelMessages(
 
   const hasMore = rows.length > take;
   const slice = hasMore ? rows.slice(0, take) : rows;
-  const items = slice.map(mapMessage).reverse(); // oldest-first for the UI
+  const items = await maskMessageAuthors(workspaceId, slice.map(mapMessage).reverse()); // oldest-first for the UI
   const nextCursor =
     hasMore && slice.length > 0
       ? encodeCursor(slice[slice.length - 1]!.createdAt, slice[slice.length - 1]!.id)
@@ -675,11 +717,11 @@ export async function listChannelMessagesAround(
   const newerSlice = hasMoreAfter ? newerRows.slice(0, half) : newerRows;
 
   // Reverse older (was DESC for keyset) so the final array is asc.
-  const items = [
+  const items = await maskMessageAuthors(workspaceId, [
     ...olderSlice.map(mapMessage).reverse(),
     mapMessage(anchorRow),
     ...newerSlice.map(mapMessage),
-  ];
+  ]);
 
   // Cursors are AT the boundary of the loaded slice so the next paginate
   // call will exclude what we already have.
@@ -746,7 +788,7 @@ export async function listChannelMessagesAfter(
   });
   const hasMore = rows.length > limit;
   const slice = hasMore ? rows.slice(0, limit) : rows;
-  const items = slice.map(mapMessage);
+  const items = await maskMessageAuthors(workspaceId, slice.map(mapMessage));
   const nextCursor =
     hasMore && slice.length > 0
       ? encodeCursor(slice[slice.length - 1]!.createdAt, slice[slice.length - 1]!.id)
@@ -792,7 +834,7 @@ export async function listThreadReplies(
   });
   const hasMore = rows.length > take;
   const slice = hasMore ? rows.slice(0, take) : rows;
-  const items = slice.map(mapMessage);
+  const items = await maskMessageAuthors(workspaceId, slice.map(mapMessage));
   const nextCursor =
     hasMore && slice.length > 0
       ? encodeCursor(slice[slice.length - 1]!.createdAt, slice[slice.length - 1]!.id)
@@ -846,7 +888,7 @@ export async function searchChannelMessages(
   // Keep search results newest-first — different from the main feed (which
   // reverses to oldest-first for ascending render). Search UX surfaces the
   // most-recent match at the top of the list.
-  const items = slice.map(mapMessage);
+  const items = await maskMessageAuthors(workspaceId, slice.map(mapMessage));
   const nextCursor =
     hasMore && slice.length > 0
       ? encodeCursor(slice[slice.length - 1]!.createdAt, slice[slice.length - 1]!.id)
@@ -925,6 +967,12 @@ export async function searchAllChannels(
     // which are the only rows with a null name.
     channelName: row.channel.name ?? "",
   }));
+  // Search reaches across every channel the viewer can see, so it is the widest
+  // path an operator-authored message travels on. Mask the nested DTOs in place.
+  await maskMessageAuthors(
+    workspaceId,
+    items.map((i) => i.message),
+  );
   const nextCursor =
     hasMore && slice.length > 0
       ? encodeCursor(slice[slice.length - 1]!.createdAt, slice[slice.length - 1]!.id)
@@ -952,13 +1000,21 @@ export async function listChannelPins(
       message: { include: MESSAGE_INCLUDE },
     },
   });
-  return rows.map((p) => ({
+  // Two actors per pin — whoever wrote the message and whoever pinned it — and
+  // the operator can be either.
+  const maskName = await actorNameMasker(db, [workspaceId], rows.map((p) => p.pinnedById));
+  const pins = rows.map((p) => ({
     messageId: p.messageId,
     pinnedAt: p.pinnedAt.toISOString(),
     pinnedById: p.pinnedById,
-    pinnedByName: p.pinnedBy?.name ?? null,
+    pinnedByName: maskName(p.pinnedById, p.pinnedBy?.name),
     message: mapMessage(p.message),
   }));
+  await maskMessageAuthors(
+    workspaceId,
+    pins.map((p) => p.message),
+  );
+  return pins;
 }
 
 // ===========================================================================

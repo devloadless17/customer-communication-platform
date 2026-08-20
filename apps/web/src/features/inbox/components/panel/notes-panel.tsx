@@ -7,6 +7,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { LocalTime } from "@/components/local-time";
 import { initials } from "@ccp/shared/utils";
 import type { InternalNote, User } from "@ccp/shared/types";
+import { unknownAuthor } from "../message-thread/utils";
 
 /**
  * The conversation's internal notes, newest first.
@@ -47,7 +48,12 @@ export function NotesPanel({
   return (
     <ul className="flex flex-col gap-1.5 p-3">
       {sorted.map((n) => {
-        const author = n.authorUserId ? memberById.get(n.authorUserId) : null;
+        // Same resolution as the thread's note card. These two disagreed —
+        // the thread said one thing and this panel said "Removed user" for the
+        // very same note — because each had its own fallback.
+        const author =
+          (n.authorUserId ? memberById.get(n.authorUserId) : null) ??
+          unknownAuthor(n.authorUserId ?? null);
         return (
           <li key={n.id}>
             {/* The whole card jumps — same affordance as a flag row, so the
@@ -74,11 +80,11 @@ export function NotesPanel({
                     <AvatarImage src={author.avatarUrl} alt="" />
                   ) : null}
                   <AvatarFallback seed={author?.id ?? n.id} className="text-4xs">
-                    {initials(author?.name ?? "?")}
+                    {initials(author.name)}
                   </AvatarFallback>
                 </Avatar>
                 <span className="truncate font-medium">
-                  {author?.name ?? "Removed user"}
+                  {author.name}
                 </span>
                 <span className="opacity-50">·</span>
                 <span className="shrink-0 opacity-70">

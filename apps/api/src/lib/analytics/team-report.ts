@@ -306,9 +306,19 @@ export async function getTeamLiveSnapshot(
     if (r.user_id) row(r.user_id).activeCalls = r.count;
   }
 
+  // OPERATOR EXCLUSION - same rule as the aggregate tables above
+  // (`withoutOperatorRows`). An operator-initiated test call would otherwise
+  // put an unnamed row in the live strip: the roster can't resolve them, so
+  // the tenant sees activity attributed to nobody.
+  const agents = await withoutOperatorRows(
+    db,
+    workspaceId,
+    [...byUser.entries()].map(([userId, v]) => ({ userId, ...v })),
+  );
+
   return {
     generatedAt: new Date().toISOString(),
-    agents: [...byUser.entries()].map(([userId, v]) => ({ userId, ...v })),
+    agents,
   };
 }
 

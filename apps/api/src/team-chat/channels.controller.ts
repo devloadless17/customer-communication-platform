@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import {
   BadRequestException,
   Body,
+  ForbiddenException,
   Controller,
   Delete,
   Get,
@@ -223,6 +224,16 @@ export class ChannelsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateChannelSchema)) body: CreateChannelInput,
   ) {
+    // OPERATOR MODE: refused. Creating a channel writes a `TeamChannelMember`
+    // row for the creator - and "the operator holds no membership row" is the
+    // invariant the whole design rests on (CLAUDE.md, section 18). A
+    // TeamChannelMember is not a WorkspaceMember, but it puts the operator in
+    // rosters and peer resolution permanently. Posting in #general stays
+    // possible (implicitly open, masked); OWNING chat structure in a tenant's
+    // staff room is not the operator's job.
+    if (session.isOperator) {
+      throw new ForbiddenException({ error: "operator_mode_unavailable" });
+    }
     const channel = await this.channels.create(session.workspaceId, session.userId, session.role, body);
     return { channel };
   }
@@ -238,6 +249,13 @@ export class ChannelsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateDmSchema)) body: CreateDmInput,
   ) {
+    // OPERATOR MODE: refused, same reasoning as create() above - a DM writes a
+    // TeamChannelMember row for BOTH participants, leaving the operator as a
+    // durable peer in the tenant's DM list. The operator talks to a client's
+    // team through the ticket thread or the conversation notes, both masked.
+    if (session.isOperator) {
+      throw new ForbiddenException({ error: "operator_mode_unavailable" });
+    }
     const channel = await this.channels.createOrGetDm(
       session.workspaceId,
       session.userId,
@@ -252,6 +270,11 @@ export class ChannelsController {
    */
   @Post(":id/join")
   async join(@CurrentSession() session: ApiSession, @Param("id") id: string) {
+    // OPERATOR MODE: refused - joining writes the same TeamChannelMember row
+    // create() and createDm() refuse to write. Default channels need no join.
+    if (session.isOperator) {
+      throw new ForbiddenException({ error: "operator_mode_unavailable" });
+    }
     const { joined } = await this.channels.joinPublicChannel(
       session.workspaceId,
       session.userId,

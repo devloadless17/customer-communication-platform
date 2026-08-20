@@ -13,6 +13,8 @@ import { CurrentSession } from "../../auth/current-session.decorator";
 import { RequireRole } from "../../auth/role.guard";
 import type { ApiSession } from "../../auth/session.guard";
 import { zBody, zQuery } from "../../common/zod-validation.pipe";
+import { DbService } from "../../db/db.service";
+import { recordOperatorAction } from "@/lib/workspaces/operator-log";
 import { OutboundWebhooksService } from "./outbound-webhooks.service";
 import {
   CreateOutboundWebhookSchema,
@@ -39,7 +41,10 @@ import {
 @Controller("api/workspace/outbound-webhooks")
 @RequireRole("admin")
 export class OutboundWebhooksController {
-  constructor(private readonly webhooks: OutboundWebhooksService) {}
+  constructor(
+    private readonly webhooks: OutboundWebhooksService,
+    private readonly db: DbService,
+  ) {}
 
   @Get()
   async list(@CurrentSession() session: ApiSession) {
@@ -52,6 +57,17 @@ export class OutboundWebhooksController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateOutboundWebhookSchema)) body: CreateOutboundWebhookInput,
   ) {
+    // OPERATOR ACTION LOG (CLAUDE.md §18): a webhook points the tenant's event
+    // stream at an external URL, so an operator creating one is recorded —
+    // awaited BEFORE the create, so a failed record fails the action.
+    if (session.isOperator) {
+      await recordOperatorAction(this.db, {
+        userId: session.userId,
+        workspaceId: session.workspaceId,
+        action: "outbound_webhook_create",
+        detail: { url: body.url },
+      });
+    }
     return this.webhooks.create(session.workspaceId, session.userId, body);
   }
 

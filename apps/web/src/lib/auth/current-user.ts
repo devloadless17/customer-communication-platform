@@ -10,6 +10,7 @@ import { db } from "@/lib/db";
 import {
   ACTIVE_WORKSPACE_COOKIE,
   makeCanAccessBeyondMembership,
+  OPERATOR_DISPLAY_NAME,
   resolveActiveWorkspaceId,
 } from "@ccp/shared/auth/active-workspace";
 import { resolvePermissions } from "@ccp/shared/auth/permissions";
@@ -238,9 +239,18 @@ export const getSession = cache(async (): Promise<Session> => {
       workspaceId: activeWorkspaceId,
       role: effectiveRole,
       isSuperAdmin: row.isSuperAdmin,
-      name: row.name,
-      email: row.email,
-      avatarUrl: row.avatarUrl ?? undefined,
+      // OPERATOR MODE wears the mask in its OWN chrome too. Every optimistic
+      // surface (activity pills, the reply bubble's sender label) stamps
+      // `currentUser.name` before the server answers, and the server's answer
+      // for an operator is "Support" (CLAUDE.md §18) — so an unmasked session
+      // flashed the operator's real name for a beat and then flipped it. One
+      // masked field here beats eight masked call sites, and it means the
+      // operator sees the tenant's exact view of their actions, which is the
+      // honest preview. The switcher's "Operator mode" badge is what says who
+      // they really are; `user.id` stays real for every identity comparison.
+      ...(isOperatorMode
+        ? { name: OPERATOR_DISPLAY_NAME, email: row.email, avatarUrl: undefined }
+        : { name: row.name, email: row.email, avatarUrl: row.avatarUrl ?? undefined }),
       // `loadActiveUser` already gated on deactivatedAt === null, so any row
       // that reaches here is active. Spelled out so the type lines up with
       // `User`.

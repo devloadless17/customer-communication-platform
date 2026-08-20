@@ -33,6 +33,7 @@ import type { Role } from "@ccp/shared/types";
 import { EventBus } from "../events/event-bus.module";
 import { DbService } from "../db/db.service";
 import type { ApiSession } from "../auth/session.guard";
+import { OPERATOR_DISPLAY_NAME } from "@/lib/workspaces/operator-mask";
 import type { TeamChannelMessageDto } from "@ccp/shared/team-chat/types";
 import type {
   EditChannelMessageInput,
@@ -1050,8 +1051,14 @@ function buildFreshMessageDto(args: {
     channelId: args.channelId,
     workspaceId: args.workspaceId,
     authorUserId: args.session.userId,
-    authorName: args.session.name,
-    authorAvatarUrl: args.session.avatarUrl,
+    // OPERATOR MASK (CLAUDE.md §18). Team chat is the tenant's private staff
+    // room, and this frame is built straight off the session — so an operator
+    // posting here reached the tenant's screen under their real name AND their
+    // real face, the only surface in the product that leaked an avatar. No
+    // query needed: the session already knows. The history path
+    // (`lib/team-chat/queries.ts`) masks the same two fields from the DB side.
+    authorName: args.session.isOperator ? OPERATOR_DISPLAY_NAME : args.session.name,
+    authorAvatarUrl: args.session.isOperator ? null : args.session.avatarUrl,
     body: args.body,
     editedAt: null,
     threadRootId: args.threadRootId ?? null,

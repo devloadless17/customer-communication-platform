@@ -144,6 +144,8 @@ export class AdminOperatorAccessController {
         id: true,
         userId: true,
         enteredWorkspaceId: true,
+        action: true,
+        detail: true,
         createdAt: true,
       },
     });
@@ -172,6 +174,11 @@ export class AdminOperatorAccessController {
         operatorEmail: operatorById.get(r.userId)?.email ?? null,
         workspaceId: r.enteredWorkspaceId,
         workspaceName: workspaceById.get(r.enteredWorkspaceId) ?? null,
+        // "enter" for a crossing; the recorded high-blast-radius actions
+        // (broadcast_send, api_key_create, outbound_webhook_create,
+        // contact_export) otherwise -- see `recordOperatorAction`.
+        action: r.action,
+        detail: r.detail,
         createdAt: r.createdAt.toISOString(),
       })),
     };

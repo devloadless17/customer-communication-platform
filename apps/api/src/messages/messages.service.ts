@@ -319,6 +319,67 @@ export class MessagesService {
   }
 
   /**
+   * The "a human agent is engaging this thread" side effects of a send, behind
+   * the ONE precondition they all share: the sender is actually a member of
+   * this workspace.
+   *
+   * WHY THIS GATE EXISTS. Every effect below attributes the send to a member of
+   * the tenant's workforce — it claims the thread for them, clears the team's
+   * unread on their behalf, and pauses the workspace's AI Autopilot because a
+   * human took over. The PLATFORM OPERATOR (CLAUDE.md §18) sends into a tenant's
+   * thread while holding no `WorkspaceMember` row, and every one of those
+   * statements is false for them.
+   *
+   * The claim was the damaging one. `autoAssignOnAgentSend` is a deliberate
+   * local re-implementation of `assignConversation`, so it never reached that
+   * function's membership gate (`lib/conversations/mutations.ts`, which returns
+   * `invalid_user`) — it resolved the assignee WITH a membership filter, got
+   * null, and wrote `assignedUserId` anyway. That left the tenant's conversation
+   * owned by a non-member: invisible to their whole agent workforce under
+   * `agentConversationVisibility: "assigned"` (it matches no agent and is not in
+   * Unassigned either), with `lastAssignedUserId` silently poisoning
+   * `preferPreviousAgent` continuity for that customer, and a refetch rendering
+   * the operator's REAL name and email through `mapUser` — straight past the
+   * "Support" mask. The same claim 400s from the assignee dropdown, so replying
+   * did what the UI refuses to do.
+   *
+   * ONE membership read, not one per effect, and it is the live DB fact rather
+   * than a session-derived flag: a member removed between the send and this
+   * callback must not be written as an assignee either — the same dangling-owner
+   * bug, reachable without any operator involved.
+   *
+   * Accepted consequence, stated so it isn't read as an oversight: an operator's
+   * reply no longer promotes a pending/closed thread to `open`, because claim and
+   * promote share one CAS. The operator sets status explicitly — the alternative
+   * is splitting that transaction for a case that should be rare.
+   */
+  private onAgentSendSideEffects(
+    workspaceId: string,
+    userId: string,
+    conversationId: string,
+  ): void {
+    void (async () => {
+      try {
+        const member = await this.db.workspaceMember.count({
+          where: { userId, workspaceId },
+        });
+        if (member === 0) return;
+      } catch (err) {
+        // Fail CLOSED. These are conveniences; skipping them costs a stale
+        // unread badge that the next mark-read converges, while guessing "member"
+        // on a DB blip is what writes the dangling assignee this gate exists to
+        // prevent.
+        this.logger.debug(
+          `onAgentSendSideEffects membership check failed for ${conversationId}: ${String(err)}`,
+        );
+        return;
+      }
+      this.markReadOnAgentSend(workspaceId, userId, conversationId);
+      this.autoAssignOnAgentSend(workspaceId, userId, conversationId);
+    })();
+  }
+
+  /**
    * A human agent sending a reply is unambiguous proof they've viewed the
    * thread, so clear team-wide unread on send. This closes the gap where the
    * client's mark-read-on-mount is skipped because its CACHED unread snapshot
@@ -530,17 +591,28 @@ export class MessagesService {
             workspaceMemberships: { where: { workspaceId }, select: { role: true }, take: 1 },
           },
         });
-        const assignedUser: User | null = assignee
-          ? {
-              id: assignee.id,
-              workspaceId,
-              role: assignee.workspaceMemberships[0]?.role ?? "agent",
-              name: assignee.name,
-              email: assignee.email,
-              avatarUrl: assignee.avatarUrl ?? undefined,
-              isActive: assignee.deactivatedAt === null,
-            }
-          : null;
+        // NEVER claim for someone this query couldn't find. The lookup is
+        // membership-filtered, so a null here means the sender is not a member of
+        // this workspace — the platform operator (CLAUDE.md §18), or a member
+        // removed between the send and this callback. Writing `assignedUserId`
+        // anyway is what left tenants with a thread owned by a non-member:
+        // invisible under `agentConversationVisibility: "assigned"`, with
+        // `lastAssignedUserId` poisoning `preferPreviousAgent`, and an event
+        // carrying `assignedUser: null` beside a non-null `newAssignedUserId`.
+        //
+        // `onAgentSendSideEffects` already refuses to call this method for a
+        // non-member; this is the same rule stated where the write happens, so a
+        // future caller can't reintroduce the bug by skipping the wrapper.
+        if (!assignee) return;
+        const assignedUser: User = {
+          id: assignee.id,
+          workspaceId,
+          role: assignee.workspaceMemberships[0]?.role ?? "agent",
+          name: assignee.name,
+          email: assignee.email,
+          avatarUrl: assignee.avatarUrl ?? undefined,
+          isActive: assignee.deactivatedAt === null,
+        };
 
         let claimWon = false;
         await this.db.$transaction(async (tx) => {
@@ -573,9 +645,7 @@ export class MessagesService {
               ...convo,
               assignedUserId: userId,
               status: nextStatus,
-              assignedUser: assignee
-                ? { id: assignee.id, name: assignee.name, email: assignee.email }
-                : null,
+              assignedUser: { id: assignee.id, name: assignee.name, email: assignee.email },
             },
             null,
           );
@@ -758,8 +828,7 @@ export class MessagesService {
         // accepted, don't mark-read/assign a message that won't go out). Inside
         // the idempotency callback so a deduped double-click doesn't re-fire
         // them. Fire-and-forget (void); errors self-log.
-        this.markReadOnAgentSend(workspaceId, userId, input.conversationId);
-        this.autoAssignOnAgentSend(workspaceId, userId, input.conversationId);
+        this.onAgentSendSideEffects(workspaceId, userId, input.conversationId);
         return {
           ok: true as const,
           ...(input.clientTempId ? { clientTempId: input.clientTempId } : {}),
@@ -1505,8 +1574,7 @@ export class MessagesService {
         // After validation+enqueue succeeded — mark-read + auto-assign only on
         // an accepted send, not on one the inner path rejected (window closed,
         // missing phone, etc.). See sendText for the full rationale.
-        this.markReadOnAgentSend(workspaceId, userId, form.conversationId);
-        this.autoAssignOnAgentSend(workspaceId, userId, form.conversationId);
+        this.onAgentSendSideEffects(workspaceId, userId, form.conversationId);
         return result;
       },
     );
@@ -3137,8 +3205,7 @@ export class MessagesService {
         }
         const result = await this.sendTemplateInner(workspaceId, userId, input);
         // Engagement side effects only after the send is accepted (see sendText).
-        this.markReadOnAgentSend(workspaceId, userId, input.conversationId);
-        this.autoAssignOnAgentSend(workspaceId, userId, input.conversationId);
+        this.onAgentSendSideEffects(workspaceId, userId, input.conversationId);
         return result;
       },
     );
@@ -3218,8 +3285,7 @@ export class MessagesService {
         const result = await this.sendInteractiveInner(workspaceId, userId, input);
         // Mark-read + auto-assign only after the inner path accepted the send
         // (see sendText) — a rejected interactive send must not claim/reopen.
-        this.markReadOnAgentSend(workspaceId, userId, input.conversationId);
-        this.autoAssignOnAgentSend(workspaceId, userId, input.conversationId);
+        this.onAgentSendSideEffects(workspaceId, userId, input.conversationId);
         return result;
       },
     );
@@ -3327,8 +3393,7 @@ export class MessagesService {
             senderUserId: userId,
             sentVia: "api/messages/location",
           });
-          this.markReadOnAgentSend(workspaceId, userId, input.conversationId);
-          this.autoAssignOnAgentSend(workspaceId, userId, input.conversationId);
+          this.onAgentSendSideEffects(workspaceId, userId, input.conversationId);
           return { messageId: r.messageId };
         } catch (err) {
           this.throwStructuredSendError(err, "location");
@@ -3355,8 +3420,7 @@ export class MessagesService {
             senderUserId: userId,
             sentVia: "api/messages/contact",
           });
-          this.markReadOnAgentSend(workspaceId, userId, input.conversationId);
-          this.autoAssignOnAgentSend(workspaceId, userId, input.conversationId);
+          this.onAgentSendSideEffects(workspaceId, userId, input.conversationId);
           return { messageId: r.messageId };
         } catch (err) {
           this.throwStructuredSendError(err, "contact");
@@ -3387,8 +3451,7 @@ export class MessagesService {
             senderUserId: userId,
             sentVia: "api/messages/sticker",
           });
-          this.markReadOnAgentSend(workspaceId, userId, input.conversationId);
-          this.autoAssignOnAgentSend(workspaceId, userId, input.conversationId);
+          this.onAgentSendSideEffects(workspaceId, userId, input.conversationId);
           return { messageId: r.messageId };
         } catch (err) {
           this.throwStructuredSendError(err, "sticker");
@@ -3423,8 +3486,7 @@ export class MessagesService {
               ? { mode: "structured" as const, template: input.template }
               : { mode: "utility" as const, template: input.template }),
           });
-          this.markReadOnAgentSend(workspaceId, userId, input.conversationId);
-          this.autoAssignOnAgentSend(workspaceId, userId, input.conversationId);
+          this.onAgentSendSideEffects(workspaceId, userId, input.conversationId);
           return { messageId: r.messageId };
         } catch (err) {
           this.throwStructuredSendError(err, "template");

@@ -106,3 +106,41 @@ export async function resolveActorDisplayName(
   }
   return user.name;
 }
+
+/**
+ * THE batched actor-name masker for list/detail DTOs.
+ *
+ * Resolve once per query, then call the returned function wherever a mapper
+ * prints a person:
+ *
+ *   const maskName = await actorNameMasker(db, [workspaceId], rows.map((r) => r.createdById));
+ *   // …
+ *   createdByName: maskName(r.createdById, r.createdBy?.name),
+ *
+ * WHY A FUNCTION AND NOT A `Set`. `operatorActorIds` already returns the set,
+ * and twelve surfaces each hand-rolled the same three lines around it —
+ * `masked.has(id) ? OPERATOR_DISPLAY_NAME : row.rel?.name ?? null` — which is
+ * exactly the kind of repetition that gets forgotten on the thirteenth. Handing
+ * back a resolver makes adoption a one-line change at the query and a
+ * same-shape expression in the mapper, and gives `scripts/check-actor-names.mjs`
+ * a single symbol to look for.
+ *
+ * Cost: zero extra queries when no actor is a superAdmin — `operatorActorIds`
+ * short-circuits on an empty id set and otherwise runs one indexed lookup
+ * filtered to `isSuperAdmin: true`. Safe to call on a hot list path.
+ *
+ * `workspaceIds` is a list because a shared ticket spans workspaces: the
+ * operator is whoever holds no membership in ANY of the workspaces the rows
+ * belong to (see `operatorActorIds`).
+ */
+export async function actorNameMasker(
+  db: Db,
+  workspaceIds: readonly string[],
+  actorIds: Iterable<string | null | undefined>,
+): Promise<(id: string | null | undefined, name: string | null | undefined) => string | null> {
+  const masked = await operatorActorIds(db, actorIds, workspaceIds);
+  return (id, name) => {
+    if (id && masked.has(id)) return OPERATOR_DISPLAY_NAME;
+    return name ?? null;
+  };
+}
