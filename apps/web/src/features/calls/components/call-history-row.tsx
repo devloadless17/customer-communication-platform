@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import Link from "next/link";
 import {
   AudioLines,
   FileText,
@@ -15,10 +14,11 @@ import {
 } from "lucide-react";
 
 import { cn } from "@ccp/shared/utils";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { LocalTime } from "@/components/local-time";
 import { AccountLabel } from "@/features/channels/components/account-label";
 import { RecordingPlayer, TranscriptPanel } from "@/features/calls/call-artifacts";
+import { OpenConversationLink } from "@/features/inbox/contexts/open-conversation-context";
 import type { Channel } from "@ccp/shared/types";
 
 /**
@@ -295,11 +295,21 @@ export function CallHistoryRow({
           </Button>
         )}
         {!compact && (
-          <Button asChild variant="ghost" size="icon" title="Open chat" className="size-8">
-            <Link href={`/inbox?c=${row.conversationId}`} aria-label="Open chat">
-              <MessageSquare className="size-4" />
-            </Link>
-          </Button>
+          // NOT a <Link>: this row also renders INSIDE the inbox shell (the
+          // Calls filter view), where a `/inbox?c=` navigation is silently a
+          // no-op for any chat that matches the last navigated id. See
+          // open-conversation-context.
+          <OpenConversationLink
+            conversationId={row.conversationId}
+            title="Open chat"
+            ariaLabel="Open chat"
+            className={cn(
+              buttonVariants({ variant: "ghost", size: "icon" }),
+              "size-8",
+            )}
+          >
+            <MessageSquare className="size-4" />
+          </OpenConversationLink>
         )}
         {canCall && (
           <Button

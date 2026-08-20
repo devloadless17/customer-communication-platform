@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
 import { AtSign, Check, Loader2, Mail, Pencil, Phone, Plus, Search, Users, X } from "lucide-react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -9,8 +8,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { LocalTime } from "@/components/local-time";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { getClientSocket } from "@/lib/socket-client";
 import { toast } from "@/lib/toast";
 import { AccountLabel } from "@/features/channels/components/account-label";
+import { OpenConversationLink } from "../contexts/open-conversation-context";
 import { CHANNEL_LABEL, ChannelBadge } from "./channel-badge";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
 import type { Channel, ContactListItem } from "@ccp/shared/types";
@@ -118,6 +119,49 @@ export function LinkedChannels({ contactId }: { contactId: string }) {
     setDismissed(new Set());
     void load();
     void loadSuggestions();
+  }, [load, loadSuggestions]);
+
+  // LIVE merges/splits. A merge or a split is a change to who this PERSON is,
+  // and the whole point of a shared inbox is that the rest of the team sees a
+  // change without reloading — but this panel only ever fetched on mount and
+  // after its OWN mutation, so a teammate splitting a channel off left every
+  // other open panel showing the pre-split roster indefinitely.
+  //
+  // The API already announces it: link/unlink publish `contact.updated` for the
+  // re-pointed contact (customers.service.ts), whose docblock says in as many
+  // words that other agents' panels should converge on it. Nothing was
+  // listening.
+  //
+  // Scoped, not blanket: `contact.updated` is a workspace-wide frame and this
+  // panel refetches two endpoints, so it reacts only to a contact it is
+  // actually showing — a channel in this person's roster, or one of the
+  // "same person?" suggestions. Suggestions are included deliberately: when a
+  // teammate links one, this panel both gains the channel AND must drop the
+  // now-stale prompt, otherwise the next agent clicks Link on something that is
+  // already linked.
+  //
+  // The ids are read through a ref so the subscription binds once per contact
+  // instead of re-binding every time the roster or suggestions change.
+  const relevantIdsRef = useRef<Set<string>>(new Set());
+  relevantIdsRef.current = new Set([
+    contactId,
+    ...(profile?.contacts ?? []).map((c) => c.id),
+    ...suggestions.map((x) => x.contactId),
+  ]);
+
+  useEffect(() => {
+    const socket = getClientSocket();
+    const onContactUpdated: Parameters<typeof socket.on<"contact:updated">>[1] = (
+      payload,
+    ) => {
+      if (!relevantIdsRef.current.has(payload.contact.id)) return;
+      void load();
+      void loadSuggestions();
+    };
+    socket.on("contact:updated", onContactUpdated);
+    return () => {
+      socket.off("contact:updated", onContactUpdated);
+    };
   }, [load, loadSuggestions]);
 
   // Debounced contact search for the link picker.
@@ -451,12 +495,13 @@ export function LinkedChannels({ contactId }: { contactId: string }) {
                 Here
               </span>
             ) : c.conversationId ? (
-              <Link
-                href={`/inbox?c=${c.conversationId}`}
+              <OpenConversationLink
+                conversationId={c.conversationId}
                 className="shrink-0 text-2xs font-medium text-primary hover:underline"
+                ariaLabel={`Open ${c.name}'s ${CHANNEL_LABEL[c.identityChannel]} chat`}
               >
                 Open
-              </Link>
+              </OpenConversationLink>
             ) : null}
             {!isActive && (
               <button

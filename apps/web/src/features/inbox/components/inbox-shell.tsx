@@ -49,6 +49,7 @@ import { AiOverviewProvider } from "./ai/ai-overview-context";
 import { ConversationViewersProvider } from "@/features/inbox/contexts/conversation-viewers-context";
 import { MessageThread } from "./message-thread";
 import { ContactPanel } from "./contact-panel";
+import { OpenConversationProvider } from "../contexts/open-conversation-context";
 import { Sheet } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { CallsHistory } from "@/features/calls/components/calls-history";
@@ -1338,6 +1339,7 @@ export function InboxShell({
   });
 
   return (
+    <OpenConversationProvider open={openConversation}>
     <SnippetsProvider snippets={snippets}>
       <MessageFlagsProvider definitions={messageFlagDefinitions}>
       {/* One workspace-wide "who is reading what" subscription, feeding BOTH
@@ -1535,6 +1537,7 @@ export function InboxShell({
       </ConversationViewersProvider>
       </MessageFlagsProvider>
     </SnippetsProvider>
+    </OpenConversationProvider>
   );
 }
 
