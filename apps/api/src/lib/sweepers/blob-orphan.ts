@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { PLAYABLE_AUDIO_SUFFIX } from "@/lib/media/playable-audio";
 import { blobStorage } from "@/lib/blob-storage";
 import { isPoolClosedError, withSweeperMutex } from "@/lib/sweepers/_mutex";
 
@@ -226,7 +227,22 @@ async function sweepOnce(): Promise<void> {
       (k) => k.uploadedAt < ageCutoffMs && !isUrlOnlyBlob(k.key),
     );
     if (eligible.length > 0) {
-      const eligibleKeyList = eligible.map((k) => k.key);
+      // PLAYABLE-AUDIO CACHE. `<key>.m4a` is the lazily-transcoded AAC shadow
+      // of a stored ogg/webm audio object (lib/media/playable-audio.ts) —
+      // deliberately referenced by NO column, because it is a cache. It is
+      // live exactly while its BASE key is live, so the cross-check queries
+      // include each variant's stripped base and the verdict below accepts
+      // either the key itself or its base being referenced. When the base row
+      // dies the variant correctly becomes an orphan and is collected with it.
+      const eligibleKeyList = [
+        ...new Set(
+          eligible.flatMap((k) =>
+            k.key.endsWith(PLAYABLE_AUDIO_SUFFIX)
+              ? [k.key, k.key.slice(0, -PLAYABLE_AUDIO_SUFFIX.length)]
+              : [k.key],
+          ),
+        ),
+      ];
       // Cross-check both customer-message media AND team-chat-message media.
       // Both tables store the R2 object key in `mediaKey`. ALSO cross-
       // check Message.mediaThumbnailKey — video poster frames are stored on a
@@ -289,7 +305,12 @@ async function sweepOnce(): Promise<void> {
         ...ticketHits.map((a) => a.blobKey).filter(Boolean),
       ]);
       for (const k of eligible) {
-        if (!referenced.has(k.key)) orphanKeys.push(k.key);
+        const base = k.key.endsWith(PLAYABLE_AUDIO_SUFFIX)
+          ? k.key.slice(0, -PLAYABLE_AUDIO_SUFFIX.length)
+          : null;
+        if (!referenced.has(k.key) && !(base !== null && referenced.has(base))) {
+          orphanKeys.push(k.key);
+        }
       }
     }
 

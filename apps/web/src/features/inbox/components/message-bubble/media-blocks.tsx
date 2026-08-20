@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 
 import { cn } from "@ccp/shared/utils";
+import { playableAudioUrl } from "@/lib/audio-compat";
 import { downloadAttachment, openAttachment } from "@/features/inbox/lib/open-attachment";
 import { fileIconForName } from "@/features/inbox/lib/file-icon";
 import { MediaLightbox } from "@/features/inbox/components/attachments/media-lightbox";
@@ -555,9 +556,12 @@ function AudioBlock({
       )}
     >
       {/* Hidden <audio> stays in the DOM (a11y + the actual media element). */}
+      {/* `playableAudioUrl` — Safari (macOS + iOS) can't decode ogg/opus voice
+          notes before 18.4; when this browser can't, the URL asks the API for
+          its lazily-transcoded AAC variant. Everyone else streams the original. */}
       <audio
         ref={audioRef}
-        src={media.url}
+        src={playableAudioUrl(media.url, media.mimeType)}
         // `none` — no per-element metadata fetch on mount; bytes load on play.
         // See the matching note on <video> above.
         preload="none"

@@ -204,6 +204,26 @@
   function fmtDay(iso) { var d = iso ? new Date(iso) : new Date(), t = new Date(), y = new Date(t - 864e5); if (d.toDateString() === t.toDateString()) return "Today"; if (d.toDateString() === y.toDateString()) return "Yesterday"; return d.toLocaleDateString([], { month: "short", day: "numeric" }); }
   function newCid() { return "c" + Math.random().toString(36).slice(2) + Date.now().toString(36); }
   function mediaUrl(id, thumb) { return apiBase + "/api/widget/media/" + encodeURIComponent(id) + "?key=" + encodeURIComponent(siteKey) + "&v=" + encodeURIComponent(S.visitorId) + (thumb ? "&thumb=1" : ""); }
+  // Ogg/Opus playback compat. Agent voice notes are stored as ogg/opus, which
+  // Safari — macOS and EVERY iPhone — couldn't decode in <audio> before 18.4
+  // (still buggy after). When this browser can't, audio URLs gain &playable=1
+  // and the server serves a lazily-transcoded AAC variant instead; browsers
+  // that play ogg natively keep the original bytes. Mirror of the agent app's
+  // lib/audio-compat.ts.
+  var oggPlayable = null;
+  function browserPlaysOgg() {
+    if (oggPlayable === null) {
+      try {
+        var el = document.createElement("audio");
+        oggPlayable = el.canPlayType('audio/ogg; codecs="opus"') !== "" || el.canPlayType("audio/ogg") !== "";
+      } catch (_e) { oggPlayable = true; }
+    }
+    return oggPlayable;
+  }
+  function playableAudioUrl(url, mime) {
+    if (!mime || !/^audio\/(ogg|webm)/i.test(mime) || browserPlaysOgg()) return url;
+    return url + "&playable=1";
+  }
 
   // ── styles ───────────────────────────────────────────────────────────────
   var host = el("div", { id: "ccp-webchat-root" });
@@ -1187,7 +1207,7 @@
       var dur = m.media.durationMs ? fmtDur(m.media.durationMs / 1000) : "";
       var nameRow = !m.media.voice && m.media.filename
         ? '<div class="vnname">' + esc(m.media.filename) + "</div>" : "";
-      return '<div class="vn' + (m.media.voice ? "" : " afile") + '" data-src="' + url + '">' +
+      return '<div class="vn' + (m.media.voice ? "" : " afile") + '" data-src="' + playableAudioUrl(url, m.media.mimeType) + '">' +
         '<button class="vnplay" type="button" aria-label="' + (m.media.voice ? "Play voice message" : "Play audio") + '">' + PLAY_SVG + "</button>" +
         '<div class="vnbar">' + nameRow + '<div class="vntrack"><i></i></div><span class="vntime">' + esc(dur) + "</span></div>" +
         "</div>";

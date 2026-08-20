@@ -18,6 +18,7 @@ import { FileInterceptor } from "@nestjs/platform-express";
 import type { Response } from "express";
 
 import { streamBlob } from "../media/stream-blob";
+import { resolvePlayableAudio } from "@/lib/media/playable-audio";
 
 import type { Channel } from "@ccp/shared/types";
 import { LIVE_CHANNELS } from "@ccp/shared/providers/capabilities";
@@ -333,11 +334,22 @@ export class CallsController {
   async streamRecording(
     @CurrentSession() session: ApiSession,
     @Param("callId") callId: string,
+    @Query("playable") playable: string | undefined,
     @Headers("range") range: string | undefined,
     @Res() res: Response,
   ) {
     const ref = await this.calls.getRecordingRef(session, callId);
-    await streamBlob(res, ref.key, range, { downloadFilename: ref.filename });
+    // Recordings are archived as OGG/Opus, which Safari's <audio> can't decode
+    // before 18.4 — `?playable=1` swaps in the lazily-transcoded AAC variant
+    // (lib/media/playable-audio.ts). Mime inferred from the key: recording keys
+    // are minted with a container extension.
+    const key = playable
+      ? await resolvePlayableAudio(
+          ref.key,
+          ref.key.endsWith(".ogg") ? "audio/ogg" : ref.key.endsWith(".webm") ? "audio/webm" : null,
+        )
+      : ref.key;
+    await streamBlob(res, key, range, { downloadFilename: ref.filename });
   }
 
   /** The transcript JSON document — same gates as the recording stream. */

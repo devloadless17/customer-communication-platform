@@ -19,6 +19,7 @@ import { conversationRelationWhere } from "@/lib/conversations/visibility";
 
 import { DbService } from "../db/db.service";
 import { probeBlob, streamBlob } from "./stream-blob";
+import { resolvePlayableAudio } from "@/lib/media/playable-audio";
 
 /**
  * GET /api/media/:messageId
@@ -45,6 +46,7 @@ export class MediaController {
     @Param("messageId") messageId: string,
     @Query("probe") probe: string | undefined,
     @Query("download") download: string | undefined,
+    @Query("playable") playable: string | undefined,
     @Headers("range") range: string | undefined,
     @Res() res: Response,
   ): Promise<void> {
@@ -73,11 +75,19 @@ export class MediaController {
       );
       return;
     }
+    // `?playable=1` — the browser told us its <audio> can't decode ogg/opus
+    // (Safari before 18.4, still buggy after). Serve the lazily-materialized
+    // AAC variant instead; a no-op for anything Safari already plays. See
+    // lib/media/playable-audio.ts. Downloads always get the ORIGINAL bytes.
+    const key =
+      playable && !download
+        ? await resolvePlayableAudio(message.mediaKey, message.mediaMimeType)
+        : message.mediaKey;
     // Default = inline (PDFs/images/video open in-tab). `?download=1` forces a
     // download with a friendly name: the original filename for documents, else
     // a `<kind>.<ext>` derived from the mime (e.g. image.jpg, video.mp4) — never
     // the raw message id.
-    await streamBlob(res, message.mediaKey, range, {
+    await streamBlob(res, key, range, {
       ...(download ? { downloadFilename: downloadNameFor(message) } : {}),
     });
   }

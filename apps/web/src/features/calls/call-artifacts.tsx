@@ -5,6 +5,7 @@ import { Loader2 } from "lucide-react";
 
 import { apiFetch } from "@/lib/api/client-fetch";
 import { BROWSER_API_BASE } from "@/lib/api/browser-base";
+import { playableAudioUrl } from "@/lib/audio-compat";
 
 /**
  * Shared renderers for a call's stored artifacts — the recording player and
@@ -27,7 +28,9 @@ export function RecordingPlayer({ callId }: { callId: string }) {
       // Dev crosses :3000 → :4000, so the session cookie needs credentialed
       // CORS; prod is same-origin and unaffected.
       crossOrigin="use-credentials"
-      src={`${BROWSER_API_BASE}/api/calls/${callId}/recording`}
+      // Recordings are archived as ogg/opus, which Safari can't decode
+      // before 18.4 — the helper swaps in the API's AAC variant there.
+      src={playableAudioUrl(`${BROWSER_API_BASE}/api/calls/${callId}/recording`, "audio/ogg")}
       className="h-9 w-full max-w-md"
     >
       <track kind="captions" />

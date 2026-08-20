@@ -36,6 +36,7 @@ import {
 
 import { DbService } from "../db/db.service";
 import { streamBlob } from "../media/stream-blob";
+import { resolvePlayableAudio } from "@/lib/media/playable-audio";
 import { originAllowed } from "./origin-allow";
 import { WebchatwidgetUploadRateLimitGuard } from "./webchatwidget-rate-limit.guard";
 
@@ -202,6 +203,7 @@ export class WebchatwidgetPublicController {
     @Query("v") visitorId: string | undefined,
     @Query("thumb") thumb: string | undefined,
     @Query("download") download: string | undefined,
+    @Query("playable") playable: string | undefined,
     @Headers("range") range: string | undefined,
     @Res() res: Response,
   ): Promise<void> {
@@ -227,8 +229,13 @@ export class WebchatwidgetPublicController {
       },
     });
     if (!message) throw new NotFoundException({ error: "not_found" });
-    const key = thumb ? message.mediaThumbnailKey : message.mediaKey;
+    let key = thumb ? message.mediaThumbnailKey : message.mediaKey;
     if (!key) throw new NotFoundException({ error: "not_found" });
+    // Visitor-side Safari (macOS and every iPhone before 18.4) can't decode the
+    // agent's ogg/opus voice notes — same compat shim as the inbox media route.
+    if (playable && !thumb && !download) {
+      key = await resolvePlayableAudio(key, message.mediaMimeType);
+    }
     await streamBlob(res, key, range, {
       ...(download && !thumb
         ? { downloadFilename: message.mediaFilename ?? `${message.mediaKind ?? "file"}` }
