@@ -26,7 +26,7 @@ import { MobileSubSidebarProvider } from "@/components/layouts/sub-sidebar";
 import { useSignOutOverlay } from "@/components/auth/signout-overlay";
 import { useLiveTeamName } from "@/hooks/use-live-team-name";
 import { getClientSocket } from "@/lib/socket-client";
-import { roleLabel } from "@ccp/shared/auth/permissions";
+import { standingLabel } from "@ccp/shared/auth/permissions";
 import { resolveAvailabilityStatus } from "@ccp/shared/presence";
 import { cn, initials } from "@ccp/shared/utils";
 import type { Team, User } from "@ccp/shared/types";
@@ -274,7 +274,7 @@ export function MobileShellChrome({
                 {teamName}
               </div>
               <div className="truncate text-2xs text-muted-foreground">
-                {currentUser.name} · {roleLabel(currentUser.role)}
+                {currentUser.name} · {standingLabel(currentUser.role, currentUser.orgRole)}
               </div>
             </div>
           </div>

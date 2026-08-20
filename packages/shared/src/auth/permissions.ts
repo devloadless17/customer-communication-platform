@@ -176,6 +176,25 @@ export function assignableRoles(actor: UserActor): Role[] {
   return [];
 }
 
+/**
+ * How a person's OWN standing reads in their own chrome — the app rail, the
+ * mobile header. Distinct from `roleLabel`, which answers "what is this person
+ * in this WORKSPACE" and stays correct for every roster, report and invite.
+ *
+ * The organization's owner was being shown "Admin" to their own face. That is
+ * not a permissions bug — `resolveSession` deliberately collapses an org owner
+ * to the effective workspace role `admin` (§18), and an org owner IS an
+ * effective admin in every workspace of their org, so nothing here can widen or
+ * narrow what they may do. It is the wrong ANSWER to "who am I": it hides the
+ * one standing that outranks every workspace and owns the tenant.
+ *
+ * Only "owner" is special-cased. An org ADMIN is deliberately still shown their
+ * workspace role: unlike the owner, that is the role that governs them here.
+ */
+export function standingLabel(role: Role, orgRole?: OrgRole): string {
+  return orgRole === "owner" ? "Owner" : roleLabel(role);
+}
+
 /** Pretty label for UI. */
 export function roleLabel(role: Role): string {
   switch (role) {

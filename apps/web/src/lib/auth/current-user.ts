@@ -260,6 +260,10 @@ export const getSession = cache(async (): Promise<Session> => {
       ...(row.availabilityOverrideUntil
         ? { availabilityUntil: row.availabilityOverrideUntil.toISOString() }
         : {}),
+      // Also on the USER dto (not only beside it on the session) so the chrome
+      // that renders "who am I" can name an org owner as the owner — see
+      // `standingLabel`. Same field the roster DTO already carries.
+      orgRole: row.orgRole as OrgRole,
     },
     workspaceId: activeWorkspaceId,
     organizationId: row.organizationId,

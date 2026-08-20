@@ -40,7 +40,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useSignOutOverlay } from "@/components/auth/signout-overlay";
 import { useLiveTeamName } from "@/hooks/use-live-team-name";
-import { canManageUsers, roleLabel } from "@ccp/shared/auth/permissions";
+import { canManageUsers, standingLabel } from "@ccp/shared/auth/permissions";
 import {
   AVAILABILITY_DOT_CLASSES,
   AVAILABILITY_LABELS,
@@ -637,7 +637,7 @@ export function AppRail({
                   {currentUser.name}
                 </p>
                 <p className="truncate text-2xs leading-tight text-muted-foreground whitespace-nowrap">
-                  {roleLabel(currentUser.role)}
+                  {standingLabel(currentUser.role, currentUser.orgRole)}
                 </p>
               </div>
             )}
@@ -797,7 +797,7 @@ function UserMenu({
                 {currentUser.email}
               </span>
               <span className="mt-0.5 text-3xs font-normal text-muted-foreground/80">
-                {roleLabel(currentUser.role)}
+                {standingLabel(currentUser.role, currentUser.orgRole)}
               </span>
             </div>
           </DropdownMenuLabel>
