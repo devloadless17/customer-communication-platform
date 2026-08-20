@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+import { GhostSafeDateInput, localDateTimeValue } from "@/components/ui/ghost-safe-date-input";
 import { AlertTriangle, Check, FileText, Loader2, Send } from "lucide-react";
 
 import { apiFetch } from "@/lib/api/client-fetch";
@@ -445,11 +447,15 @@ export function TemplateFillView({
             >
               Offer expires
             </label>
-            <input
+            {/* GhostSafe — same Safari empty-datetime ghost as the broadcast
+                form's expiry; see ghost-safe-date-input.tsx. */}
+            <GhostSafeDateInput
               id="lto-expiry"
               type="datetime-local"
               value={offerExpiresAt}
-              onChange={(e) => setOfferExpiresAt(e.target.value)}
+              onChange={setOfferExpiresAt}
+              seed={() => localDateTimeValue(24)}
+              emptyLabel="Set expiry…"
               className="w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-sm outline-none transition focus:border-ring focus:ring-2 focus:ring-ring/25"
             />
             <p className="text-2xs text-muted-foreground">

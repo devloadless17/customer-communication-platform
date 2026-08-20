@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+import { GhostSafeDateInput, localDateTimeValue } from "@/components/ui/ghost-safe-date-input";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -1700,11 +1702,17 @@ export function NewBroadcastForm({
                   >
                     Offer expires — the countdown every recipient sees
                   </label>
-                  <input
+                  {/* GhostSafe: Safari paints the current time into an EMPTY
+                      datetime input — the required expiry LOOKED filled while it
+                      silently kept the send button disabled. Unset renders as an
+                      explicit "Set expiry…" that seeds 24h ahead. */}
+                  <GhostSafeDateInput
                     id="broadcast-lto-expiry"
                     type="datetime-local"
                     value={offerExpiresAt}
-                    onChange={(e) => setOfferExpiresAt(e.target.value)}
+                    onChange={setOfferExpiresAt}
+                    seed={() => localDateTimeValue(24)}
+                    emptyLabel="Set expiry…"
                     className="w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-sm outline-none transition focus:border-ring focus:ring-2 focus:ring-ring/25"
                   />
                   {offerExpiresAt && offerExpiryMs === null && (

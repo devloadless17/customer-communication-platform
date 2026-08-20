@@ -14,6 +14,7 @@ import {
 } from "@/features/calls/components/call-history-row";
 import { toast } from "@/lib/toast";
 import { useCallApi } from "@/features/calls/call-provider";
+import { GhostSafeDateInput, todayDateValue } from "@/components/ui/ghost-safe-date-input";
 
 /**
  * Mirrors TeamCallRow in apps/api/src/calls/calls.service.ts — the shared row
@@ -243,12 +244,16 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
           <label htmlFor="calls-from" className="text-2xs font-medium text-muted-foreground">
             From
           </label>
-          <input
+          {/* GhostSafe: Safari paints today's date into an EMPTY date input, so an
+              unset filter looked applied. Unset renders as "Any date" instead. */}
+          <GhostSafeDateInput
             id="calls-from"
             type="date"
             value={from}
             max={to || undefined}
-            onChange={(e) => setFrom(e.target.value)}
+            onChange={setFrom}
+            seed={todayDateValue}
+            emptyLabel="Any date"
             className="h-9 rounded-md border border-border bg-background px-3 text-sm outline-hidden focus-visible:border-foreground/30 focus-visible:ring-2 focus-visible:ring-foreground/10"
           />
         </div>
@@ -256,12 +261,14 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
           <label htmlFor="calls-to" className="text-2xs font-medium text-muted-foreground">
             To
           </label>
-          <input
+          <GhostSafeDateInput
             id="calls-to"
             type="date"
             value={to}
             min={from || undefined}
-            onChange={(e) => setTo(e.target.value)}
+            onChange={setTo}
+            seed={todayDateValue}
+            emptyLabel="Any date"
             className="h-9 rounded-md border border-border bg-background px-3 text-sm outline-hidden focus-visible:border-foreground/30 focus-visible:ring-2 focus-visible:ring-foreground/10"
           />
         </div>

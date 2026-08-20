@@ -6,6 +6,7 @@ import { apiFetch } from "@/lib/api/client-fetch";
 
 import { Section } from "../contact-panel/section";
 import { useAiOverview, type AiSessionSummary } from "./ai-overview-context";
+import { GhostSafeDateInput, todayDateValue } from "@/components/ui/ghost-safe-date-input";
 
 /**
  * Two contact-panel sections, in this order (placement map):
@@ -215,18 +216,24 @@ export function AiConversationPanel({ conversationId }: { conversationId: string
       <Section title="Summary for a date range">
         <div className="space-y-2">
           <div className="flex flex-wrap items-center gap-1.5">
-            <input
+            {/* GhostSafe: Safari paints today's date into an EMPTY date input,
+                so an unset range looked chosen. Unset renders as "Pick…". */}
+            <GhostSafeDateInput
               type="date"
               value={rangeFrom}
-              onChange={(e) => setRangeFrom(e.target.value)}
+              onChange={setRangeFrom}
+              seed={todayDateValue}
+              emptyLabel="Pick a start…"
               className="rounded border border-border bg-background px-1.5 py-1 text-xs"
               aria-label="From date"
             />
             <span className="text-xs text-muted-foreground">to</span>
-            <input
+            <GhostSafeDateInput
               type="date"
               value={rangeTo}
-              onChange={(e) => setRangeTo(e.target.value)}
+              onChange={setRangeTo}
+              seed={todayDateValue}
+              emptyLabel="Pick an end…"
               className="rounded border border-border bg-background px-1.5 py-1 text-xs"
               aria-label="To date"
             />
