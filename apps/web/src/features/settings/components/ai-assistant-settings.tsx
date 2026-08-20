@@ -132,6 +132,29 @@ export function AiAssistantSettings({
   const num = (key: string, fallback: number) =>
     typeof form[key] === "number" ? (form[key] as number) : fallback;
 
+  /**
+   * A RowList's "+ Add" appends `{}` so the person can start typing — but the
+   * API schemas require fields on every row (an FAQ needs its question, a
+   * holiday its date), so ONE forgotten blank row failed the WHOLE save with a
+   * message that named nothing. A row someone never typed into carries no
+   * intent: drop it. Rows with SOME content are kept — half an FAQ is a
+   * mistake the person needs told about (below), not data to silently discard.
+   */
+  const withoutUntouchedRows = (editable: Record<string, unknown>) => {
+    const out = { ...editable };
+    for (const key of ["locations", "faqs", "holidays", "scheduleExceptions"]) {
+      const rows = out[key];
+      if (!Array.isArray(rows)) continue;
+      out[key] = rows.filter(
+        (row) =>
+          row != null &&
+          typeof row === "object" &&
+          Object.values(row).some((v) => typeof v === "string" && v.trim() !== ""),
+      );
+    }
+    return out;
+  };
+
   async function save() {
     setSaving(true);
     try {
@@ -140,12 +163,27 @@ export function AiAssistantSettings({
       const res = await apiFetch("/api/workspace/ai-assistant", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...editable, expectedConfigVersion: version }),
+        body: JSON.stringify({ ...withoutUntouchedRows(editable), expectedConfigVersion: version }),
       });
-      const data = (await res.json().catch(() => ({}))) as { config?: AiConfig; error?: string };
+      const data = (await res.json().catch(() => ({}))) as {
+        config?: AiConfig;
+        error?: string;
+        issues?: Array<{ path?: Array<string | number>; message?: string }>;
+      };
       if (!res.ok || !data.config) {
         if (res.status === 409) {
           toast.error("Someone else changed these settings — reload and try again.");
+        } else if (data.error === "validation_failed" && data.issues?.[0]) {
+          // Name the field. "Validation failed" alone sent a real admin hunting
+          // through seven tabs for an unmarked blank; the Zod issue already
+          // knows exactly where it is.
+          const issue = data.issues[0];
+          const path = (issue.path ?? []).join(".");
+          toast.error(
+            path
+              ? `Can't save — "${path}": ${issue.message ?? "invalid value"}`
+              : apiErrorMessageFrom(data, "Save failed"),
+          );
         } else {
           toast.error(apiErrorMessageFrom(data, "Save failed"));
         }
@@ -521,6 +559,23 @@ function RowList({
   );
 }
 
+/**
+ * A closed day is a "Closed · Set hours" row, NOT a pair of empty time inputs.
+ *
+ * The empty-inputs version hit a documented Safari 16+ bug on macOS: WebKit
+ * paints GHOST text — the current wall-clock time — inside an empty
+ * `<input type="time">` instead of a placeholder, so an org owner on a MacBook
+ * saw "12:05" on days nobody ever set while a Windows admin looking at the
+ * SAME data saw "--:--". Worse, Safari makes an empty time input non-editable
+ * until it has a value, so those fields also couldn't be typed into. (Apple
+ * forums thread 728067; the same class of report as shadcn-ui#6484 and
+ * mui#37226 for date inputs.)
+ *
+ * So: a time input only ever renders WITH a value. "Set hours" seeds 09:00–
+ * 17:00 for the person to adjust, and ✕ closes the day again. This also reads
+ * better than the old "leave a day blank to mark it closed" convention — closed
+ * now looks closed instead of looking like a field you forgot to fill.
+ */
 function WeeklySchedule({
   value,
   onChange,
@@ -528,13 +583,10 @@ function WeeklySchedule({
   value: Record<string, Array<{ open: string; close: string }>>;
   onChange: (v: Record<string, Array<{ open: string; close: string }>>) => void;
 }) {
-  const get = (day: string) => value?.[day]?.[0] ?? { open: "", close: "" };
-  const setDay = (day: string, range: { open: string; close: string }) => {
+  const get = (day: string) => value?.[day]?.[0];
+  const setDay = (day: string, range: { open: string; close: string } | null) => {
     const next = { ...(value ?? {}) };
-    // Keep the row as soon as EITHER end is set so partial entry (pick open,
-    // then close) isn't discarded mid-edit. A day counts as closed only when
-    // both ends are empty.
-    if (range.open || range.close) next[day] = [range];
+    if (range) next[day] = [range];
     else delete next[day];
     onChange(next);
   };
@@ -543,28 +595,54 @@ function WeeklySchedule({
       {DAYS.map(([key, label]) => {
         const r = get(key);
         return (
-          <div key={key} className="flex items-center gap-2">
+          <div key={key} className="flex h-9 items-center gap-2">
             <span className="w-24 text-sm text-muted-foreground">{label}</span>
-            {/* The day name is a sibling <span>, so each time field needs its
-                own name — otherwise a screen reader hears fourteen identical
-                unnamed time inputs with no way to tell Monday from Sunday. */}
-            <Input
-              type="time"
-              aria-label={`${label} — opening time`}
-              value={r.open}
-              onChange={(e) => setDay(key, { ...r, open: e.target.value })}
-            />
-            <span className="text-muted-foreground">–</span>
-            <Input
-              type="time"
-              aria-label={`${label} — closing time`}
-              value={r.close}
-              onChange={(e) => setDay(key, { ...r, close: e.target.value })}
-            />
+            {r ? (
+              <>
+                {/* The day name is a sibling <span>, so each time field needs
+                    its own name — otherwise a screen reader hears fourteen
+                    identical unnamed time inputs with no way to tell Monday
+                    from Sunday. */}
+                <Input
+                  type="time"
+                  aria-label={`${label} — opening time`}
+                  value={r.open}
+                  onChange={(e) => setDay(key, { ...r, open: e.target.value })}
+                />
+                <span className="text-muted-foreground">–</span>
+                <Input
+                  type="time"
+                  aria-label={`${label} — closing time`}
+                  value={r.close}
+                  onChange={(e) => setDay(key, { ...r, close: e.target.value })}
+                />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-label={`Mark ${label} closed`}
+                  title="Mark this day closed"
+                  onClick={() => setDay(key, null)}
+                >
+                  ✕
+                </Button>
+              </>
+            ) : (
+              <>
+                <span className="text-sm text-muted-foreground/70">Closed</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-primary"
+                  onClick={() => setDay(key, { open: "09:00", close: "17:00" })}
+                >
+                  Set hours
+                </Button>
+              </>
+            )}
           </div>
         );
       })}
-      <p className="text-xs text-muted-foreground">Leave a day blank to mark it closed.</p>
+      <p className="text-xs text-muted-foreground">Days without hours are treated as closed.</p>
     </div>
   );
 }
