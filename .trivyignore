@@ -2,6 +2,30 @@
 # The deploy Trivy gate uses `ignore-unfixed: true`, so only FIXABLE HIGH/CRITICAL
 # reach here. Keep this list tiny and justified; re-check on every pnpm bump.
 
+# ---------------------------------------------------------------------------
+# WHEN DOES pnpm ACTUALLY RUN? (read this before writing a new entry)
+#
+# Most entries below turn on it, so the answer is stated ONCE here rather than
+# repeated per entry — three copies of this claim is exactly how it went stale.
+#
+# CORRECTED 2026-08-28. Three entries used to say "pnpm never runs at runtime
+# (the CMD is a direct `node` invocation, no pnpm/sh wrapper)". The Dockerfile
+# CMD is indeed direct node, but docker-compose.yml OVERRIDES it for the api
+# service with `sh -c '(cd /app && pnpm prisma migrate deploy) && exec node …'`.
+# So pnpm DOES run in production — the claim was false as written.
+#
+# The accurate version, which is what the entries below rely on:
+#   - pnpm runs EXACTLY ONCE per container start, before the server exists, as
+#     `pnpm prisma migrate deploy`. It resolves an already-installed local bin
+#     out of the baked image and performs NO install: no registry fetch, no
+#     tarball extraction, no manifest resolution, no lockfile globbing.
+#   - It then `exec`s node, replacing itself — pnpm is not a live process while
+#     the service handles traffic, so nothing a customer sends can reach it.
+#   - At BUILD time pnpm installs with `--frozen-lockfile` from OUR committed
+#     lockfile, so no attacker-supplied manifest or tarball reaches it there.
+# Each entry still carries its OWN reachability argument on top of this.
+# ---------------------------------------------------------------------------
+
 # pnpm — Repository-controlled configDependencies can select a package's native
 # install engine. Fixed ONLY in pnpm 11.5.3 (no 10.x backport per Trivy DB).
 # We pin pnpm to 10.34.x, which clears every OTHER pnpm CVE from this advisory
@@ -22,10 +46,9 @@ CVE-2026-55697
 # apps/api/Dockerfile).
 #
 # Not exploitable here: both are denial-of-service via attacker-supplied input
-# to pnpm ITSELF, and pnpm never runs at runtime (the CMD is a direct `node`
-# invocation, no pnpm/sh wrapper). At build time pnpm only installs from OUR
-# committed lockfile with --frozen-lockfile, so no attacker-controlled tarball
-# or manifest ever reaches its tar/glob code paths.
+# to pnpm ITSELF, and the one pnpm invocation that exists in production installs
+# nothing (see the block at the top) — so no attacker-controlled tarball or
+# manifest ever reaches its tar/glob code paths.
 #
 # OUR OWN copies of these packages ARE patched via pnpm.overrides in the root
 # package.json (brace-expansion 1.1.16 / 2.1.2 / 5.0.8, js-yaml 4.3.0) — this
@@ -51,12 +74,14 @@ CVE-2026-13149
 #
 # Not exploitable here: brace-expansion is reached through minimatch/glob doing
 # FILE PATH matching, and inside the pnpm bundle those patterns are pnpm's own
-# internal globs over our committed lockfile. pnpm never runs at runtime (the
-# CMD is a direct `node` invocation), so no request body or uploaded filename is
-# ever used as a brace pattern.
+# internal globs over our committed lockfile. The one production pnpm invocation
+# installs nothing (see the block at the top), so no request body or uploaded
+# filename is ever used as a brace pattern.
 #
 # DROP BOTH LINES once corepack ships a pnpm bundle with a patched copy.
-# Re-check on every pnpm bump.
+# Re-check on every pnpm bump. (Checked 2026-08-28: pnpm 10.34.5 moves the
+# bundled copy to 2.1.2, still short of the fixed 2.1.4 — bumping clears
+# nothing, so we stay on 10.34.4.)
 CVE-2026-14257
 CVE-2026-69152
 
@@ -67,10 +92,36 @@ CVE-2026-69152
 #
 # Not exploitable here: the SSRF requires attacker control over the address
 # being parsed. The only consumer is pnpm's own proxy stack talking to the
-# registry we configure, at BUILD time; pnpm is never invoked at runtime, and no
-# customer-supplied URL reaches it. The application's own outbound fetches
-# (provider calls, outbound webhooks) go through the SSRF-safe fetch in
-# lib/http, which does not use this package.
+# registry we configure, at BUILD time; the single production pnpm invocation
+# reaches no registry at all (see the block at the top), and no customer-supplied
+# URL reaches it. The application's own outbound fetches (provider calls,
+# outbound webhooks) go through the SSRF-safe fetch in lib/http, which does not
+# use this package.
 #
 # DROP once corepack ships a pnpm bundle on ip-address >= 10.3.1.
+# (Checked 2026-08-28: pnpm 10.34.5 still vendors 10.2.0.)
 CVE-2026-69192
+
+# tar (node-tar) — DoS via a crafted long-path tar archive. Fixed in 7.5.21.
+# Added 2026-08-28, when it began failing every deploy on BOTH images.
+#
+# Same shape as the corepack entries above, and verified to be so rather than
+# assumed: `tar` appears nowhere in pnpm-lock.yaml and nowhere in node_modules —
+# the only copy is 7.5.16 vendored inside corepack's pnpm bundle
+# (/opt/corepack/v1/pnpm/10.34.4/dist/node_modules/tar), which pnpm.overrides
+# cannot reach. It is in the WEB image too for the same reason, not via that
+# image's second npm dep tree.
+#
+# Not exploitable here: node-tar is pnpm's package EXTRACTOR, so reaching it
+# needs pnpm to unpack a tarball an attacker crafted. The one pnpm invocation in
+# production installs nothing (see the block at the top), and the build-time
+# installs take tarballs from our committed lockfile with integrity hashes.
+# Nothing in the running service parses a tar archive at all.
+#
+# Bumping pnpm does NOT fix it today: 10.34.5 (the newest 10.x as of
+# 2026-08-28) still bundles tar 7.5.19, below the fixed 7.5.21, and pnpm 11 is
+# the separate migration described in the first entry. DROP this line once a
+# 10.x bundle ships tar >= 7.5.21 — check with:
+#   npm view pnpm@10 dist.tarball | xargs curl -sL | tar -xzO --wildcards \
+#     '*/dist/node_modules/tar/package.json' | grep '"version"'
+CVE-2026-73566
