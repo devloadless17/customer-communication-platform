@@ -1292,6 +1292,49 @@ jobs:
             fi
             echo "✓ public root https://$APP_DOMAIN/ returned $code"
           fi
+          # The embed script's Cache-Control, asserted where it actually
+          # matters: on the wire, through Caddy. `check:widget-cache` in the
+          # typecheck job proves only that the two SOURCE files agree — it
+          # cannot see a Caddyfile that failed to reload, or a value Next won.
+          #
+          # Split by severity deliberately. A missing or merely different value
+          # is a performance regression, so it WARNS: rolling a whole deploy
+          # back over a cache header would do more harm than the header does.
+          # But `immutable`, or a max-age past an hour, is the one genuinely
+          # UNRECALLABLE mistake here — /widget.js is pasted into customer HTML
+          # once and lives there forever with no hashed URL, so a broken widget
+          # cached that long sits on every customer site with nothing we can do
+          # from our side. That FAILS, and trips the rollback below.
+          if [ -n "${APP_DOMAIN:-}" ]; then
+            cc=$(curl -sS -m 8 -o /dev/null -D - "https://$APP_DOMAIN/widget.js" 2>/dev/null \
+                 | tr -d '\r' | grep -i '^cache-control:' | head -1 | cut -d: -f2- \
+                 | sed 's/^ *//') || true
+            echo "  /widget.js Cache-Control: ${cc:-<none>}"
+            case "$cc" in
+              *immutable*)
+                echo "✗ /widget.js is served immutable — a broken widget would pin on every customer site with no way to recall it"
+                exit 1
+                ;;
+            esac
+            maxage=$(printf '%s' "$cc" | grep -oE 'max-age=[0-9]+' | head -1 | cut -d= -f2) || true
+            case "$maxage" in
+              ''|*[!0-9]*) : ;;
+              *)
+                if [ "$maxage" -gt 3600 ]; then
+                  echo "✗ /widget.js max-age=$maxage exceeds one hour — too long to recall a bad widget"
+                  exit 1
+                fi
+                ;;
+            esac
+            case "$cc" in
+              *stale-while-revalidate*)
+                echo "✓ /widget.js cached with background revalidation"
+                ;;
+              *)
+                echo "⚠ /widget.js Cache-Control is '${cc:-<none>}' — expected stale-while-revalidate. Every customer page view pays a round trip before the bubble paints. Not fatal; see scripts/check-widget-cache.mjs."
+                ;;
+            esac
+          fi
           exit 0
 
       # Warm-up the public origin via the api path through Caddy. The
