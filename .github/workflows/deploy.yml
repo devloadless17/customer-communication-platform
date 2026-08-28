@@ -1306,10 +1306,23 @@ jobs:
           # cached that long sits on every customer site with nothing we can do
           # from our side. That FAILS, and trips the rollback below.
           if [ -n "${APP_DOMAIN:-}" ]; then
-            cc=$(curl -sS -m 8 -o /dev/null -D - "https://$APP_DOMAIN/widget.js" 2>/dev/null \
-                 | tr -d '\r' | grep -i '^cache-control:' | head -1 | cut -d: -f2- \
-                 | sed 's/^ *//') || true
-            echo "  /widget.js Cache-Control: ${cc:-<none>}"
+            hdrs=$(curl -sS -m 8 -o /dev/null -D - "https://$APP_DOMAIN/widget.js" 2>/dev/null \
+                   | tr -d '\r') || true
+            # COUNT the header, don't just read it. Reading only the first one
+            # is blind to the append bug (Caddy's matcher `header` runs before
+            # reverse_proxy writes the upstream's headers, so without the `>`
+            # prefix both values are sent and the browser joins them into one
+            # comma-separated list with every directive twice). The first line
+            # looks perfect in exactly that case, so a value check alone reports
+            # a duplicated header as healthy — counting is the only way to see
+            # it from the outside.
+            n=$(printf '%s\n' "$hdrs" | grep -ci '^cache-control:') || true
+            cc=$(printf '%s\n' "$hdrs" | grep -i '^cache-control:' | head -1 \
+                 | cut -d: -f2- | sed 's/^ *//') || true
+            echo "  /widget.js Cache-Control (x${n:-0}): ${cc:-<none>}"
+            if [ "${n:-0}" -gt 1 ]; then
+              echo "⚠ /widget.js sent Cache-Control ${n} times — Caddy is APPENDING to the upstream header instead of replacing it. The matcher needs the '>' prefix: header @widgetScript >Cache-Control \"...\". See scripts/check-widget-cache.mjs."
+            fi
             case "$cc" in
               *immutable*)
                 echo "✗ /widget.js is served immutable — a broken widget would pin on every customer site with no way to recall it"
