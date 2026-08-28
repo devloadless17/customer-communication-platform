@@ -38,6 +38,15 @@ const PATHS = ["/widget.js", "/widget.min.js"];
  * The Caddy value: a `header @matcher Cache-Control "…"` whose matcher block
  * lists the widget paths. Read the matcher rather than assuming its name, so
  * renaming `@widgetScript` doesn't silently disable this check.
+ *
+ * The field name may carry one of Caddy's operator prefixes (`+` append, `-`
+ * delete, `?` set-if-absent, `>` set-and-defer). `>` is the one this file
+ * actually uses and is REQUIRED in front of a reverse_proxy: a bare `header`
+ * runs before the upstream's response headers are written, so Caddy's value
+ * lands first and Next's is appended after it, and the browser then reads one
+ * comma-joined list with every directive twice. Accept the prefixes rather
+ * than matching a bare field name — this check failed closed the first time
+ * the `>` was added, which is a checker breaking a correct fix.
  */
 function fromCaddy(src) {
   const matchers = new Set();
@@ -50,9 +59,19 @@ function fromCaddy(src) {
     if (PATHS.some((p) => paths.includes(p))) matchers.add(name);
   }
   for (const name of matchers) {
-    const re = new RegExp(`header\\s+@${name}\\s+Cache-Control\\s+"([^"]+)"`);
+    const re = new RegExp(
+      `header\\s+@${name}\\s+([+\\-?>]?)Cache-Control\\s+"([^"]+)"`,
+      "i",
+    );
     const hit = src.match(re);
-    if (hit) return { value: hit[1], matcher: name, paths: [...matchers] };
+    if (hit) {
+      return {
+        value: hit[2],
+        op: hit[1],
+        matcher: name,
+        paths: [...matchers],
+      };
+    }
   }
   return null;
 }
@@ -105,6 +124,32 @@ if (caddy && !next) {
       `      ${NEXT}: "${next.value}"\n` +
       `    Caddy wins in production, so the Next value is the one that silently\n` +
       `    stops describing reality.`,
+  );
+}
+
+// The `>` operator is REQUIRED, and its absence is invisible in every other
+// check here — including the on-the-wire one in deploy.yml. A bare `header`
+// (or `+`, append) runs BEFORE reverse_proxy writes the upstream's response
+// headers, so Caddy's value lands first and Next's is added after it: the
+// browser receives Cache-Control twice and reads it as one comma-joined list
+// with every directive duplicated. Parity still passes (both files say the
+// same thing) and the deploy-time curl still passes (the doubled list still
+// contains stale-while-revalidate), which is precisely why it belongs here.
+// `?` (set-if-absent) is wrong for the opposite reason: Next always sets the
+// header, so ours would never apply and this file's claim that "Caddy wins"
+// would be false. Only `>` — set, deferred until after the proxy writes —
+// actually overrides an upstream header.
+if (caddy && caddy.op !== ">") {
+  problems.push(
+    `${CADDY} sets the widget header with \`${caddy.op || "no operator"}\` — it must be \`>\`.
+` +
+      `    Write: header @${caddy.matcher} >Cache-Control "${caddy.value}"
+` +
+      `    In front of a reverse_proxy a bare (or +) header is APPENDED to the
+` +
+      `    upstream's, so the browser gets Cache-Control twice; ? never applies at
+` +
+      `    all because Next always sets it. Only > defers past the proxy write.`,
   );
 }
 

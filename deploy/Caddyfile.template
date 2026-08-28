@@ -141,12 +141,25 @@ __DOMAIN__ {
 	# changes the URL — `immutable` is therefore safe: browsers will never
 	# refetch a given URL, and the new URL is fetched on the next page load.
 	# `public` lets shared caches (CDN, ISP) store the response too. This
-	# header is set in addition to whatever Next.js emits because Caddy's
-	# `header` directive overrides on conflict — keep them in sync.
+	# header is set in addition to whatever Next.js emits.
+	#
+	# The `>` prefix is LOAD-BEARING and was missing until 2026-08-28. Without
+	# it this directive APPENDS rather than replaces: a plain `header` runs
+	# before `reverse_proxy` writes the upstream's response headers, so Caddy's
+	# value went first and Next's was added after it. Every static asset was
+	# served with `Cache-Control` twice, and a browser reads that as one
+	# comma-joined list with every directive duplicated. `>` means "set, and
+	# defer", which runs the operation after the proxy has written, so the
+	# upstream value is genuinely overwritten. Verified with
+	# `curl -sD - <url> -o /dev/null | grep -ci cache-control` — expect 1.
+	#
+	# Note this is why the site-level `header {}` block above was always fine:
+	# it replaces correctly, and only the matcher form had the ordering
+	# problem.
 	@nextStatic {
 		path /_next/static/*
 	}
-	header @nextStatic Cache-Control "public, max-age=31536000, immutable"
+	header @nextStatic >Cache-Control "public, max-age=31536000, immutable"
 
 	# The embed script. It is the ONE asset customers load on every page view
 	# of their own site, and the only one whose URL can never carry a hash:
@@ -169,15 +182,19 @@ __DOMAIN__ {
 	# pinned.
 	#
 	# Set here AND in next.config.ts, deliberately, following the same pattern
-	# as HSTS and X-Frame-Options above: Caddy wins on conflict so THIS is the
-	# value production serves, while next.config.ts covers the paths that do
-	# not go through Caddy (local Docker stack, `next dev`). Keep the two
-	# values identical — this file already records two incidents caused by
-	# letting them drift (audit 2026-08-11).
+	# as HSTS and X-Frame-Options above: Caddy wins so THIS is the value
+	# production serves, while next.config.ts covers the paths that do not go
+	# through Caddy (local Docker stack, `next dev`). Keep the two values
+	# identical — this file already records two incidents caused by letting
+	# them drift (audit 2026-08-11).
+	#
+	# `>` for the same reason as @nextStatic above: without it Caddy appends to
+	# Next's header instead of replacing it, and the browser receives the whole
+	# directive list twice.
 	@widgetScript {
 		path /widget.js /widget.min.js
 	}
-	header @widgetScript Cache-Control "public, max-age=300, stale-while-revalidate=86400"
+	header @widgetScript >Cache-Control "public, max-age=300, stale-while-revalidate=86400"
 
 	# Access logs to stdout → systemd-journald.
 	log {
