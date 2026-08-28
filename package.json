@@ -30,6 +30,7 @@
     "check:binary-sources": "node scripts/check-binary-sources.mjs",
     "check:appsecret-proof": "node scripts/check-appsecret-proof.mjs",
     "check:api-test-types": "node scripts/check-api-test-types.mjs",
+    "check:widget-cache": "node scripts/check-widget-cache.mjs",
     "db:migrate": "prisma migrate dev",
     "db:reset": "prisma migrate reset",
     "db:seed": "prisma db seed",

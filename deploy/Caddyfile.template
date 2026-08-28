@@ -148,6 +148,37 @@ __DOMAIN__ {
 	}
 	header @nextStatic Cache-Control "public, max-age=31536000, immutable"
 
+	# The embed script. It is the ONE asset customers load on every page view
+	# of their own site, and the only one whose URL can never carry a hash:
+	# `<script src="https://central/widget.js">` is pasted into their HTML once
+	# and lives there forever, so @nextStatic's 1-year `immutable` is not
+	# available to us — it would pin a broken widget on every customer site for
+	# a year with no way to recall it.
+	#
+	# Next serves `public/` with `max-age=0`, so before this every page view
+	# paid a conditional round trip before the widget could boot. The ETag made
+	# the answer a cheap 304, but the trip was not cheap: measured from a real
+	# customer landing page on three cold loads, 453ms, 1775ms and 2252ms. That
+	# sat in front of the bubble appearing, which is why the widget looked slow
+	# and unstable on first paint.
+	#
+	# `stale-while-revalidate` keeps both properties: the browser paints from
+	# cache with ZERO network and refreshes in the background, so a widget
+	# deploy reaches a returning visitor on their NEXT page view rather than
+	# blocking this one. `max-age=300` bounds how long a bad deploy stays
+	# pinned.
+	#
+	# Set here AND in next.config.ts, deliberately, following the same pattern
+	# as HSTS and X-Frame-Options above: Caddy wins on conflict so THIS is the
+	# value production serves, while next.config.ts covers the paths that do
+	# not go through Caddy (local Docker stack, `next dev`). Keep the two
+	# values identical — this file already records two incidents caused by
+	# letting them drift (audit 2026-08-11).
+	@widgetScript {
+		path /widget.js /widget.min.js
+	}
+	header @widgetScript Cache-Control "public, max-age=300, stale-while-revalidate=86400"
+
 	# Access logs to stdout → systemd-journald.
 	log {
 		output stdout

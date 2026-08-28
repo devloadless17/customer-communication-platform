@@ -108,6 +108,13 @@ jobs:
       # repo-wide sweep. A bug once survived an audit that grepped for exactly
       # its call site for this reason. See scripts/check-binary-sources.mjs.
       - run: node scripts/check-binary-sources.mjs
+      # /widget.js is loaded on every page view of every customer site and its
+      # URL can never carry a content hash, so its Cache-Control is set in BOTH
+      # the Caddyfile (what prod serves) and next.config.ts (the paths that
+      # never meet Caddy). Two values that must agree, in two files, is the
+      # shape that drifts — it already did twice here for HSTS and
+      # X-Frame-Options. See scripts/check-widget-cache.mjs.
+      - run: pnpm run check:widget-cache
 
       # A Next.js route handler must destructure the param names its DIRECTORY
       # declares. Typecheck cannot see this — the route's own params interface

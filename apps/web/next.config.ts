@@ -151,6 +151,46 @@ const nextConfig: NextConfig = {
         source: "/:path*",
         headers: securityHeaders,
       },
+      // The embed script is the ONE asset customers load on every page view of
+      // their own site, and it is the only one whose URL can never carry a hash:
+      // `<script src="https://central/widget.js">` is pasted into their HTML
+      // once and lives there forever, so `/_next/static/*`'s 1-year `immutable`
+      // is not available to us.
+      //
+      // Next.js serves `public/` with `Cache-Control: public, max-age=0`, which
+      // means a conditional request on EVERY page view before the widget can
+      // boot. The ETag makes the answer a cheap 304, but the round trip is not
+      // cheap: measured from a customer landing page on three cold loads, the
+      // request took 453ms, 1775ms and 2252ms. That latency is in front of the
+      // bubble appearing, so the widget looked slow and unstable on first paint.
+      //
+      // `stale-while-revalidate` is the fix that keeps both properties: the
+      // browser paints from cache with ZERO network, and refreshes in the
+      // background, so a widget deploy reaches a returning visitor on their next
+      // page view instead of blocking this one. `max-age=300` bounds how long a
+      // bad deploy stays pinned before even a first-time-today visitor
+      // revalidates.
+      //
+      // Both paths are listed literally, not as one pattern: the prod rewrite
+      // above maps `/widget.js` to `/widget.min.js`, so the request can be
+      // matched on either, and a clever `:param(|.min)` pattern is the kind of
+      // thing that silently matches nothing after a path-to-regexp bump.
+      //
+      // deploy/Caddyfile.template sets the SAME value on the same two paths.
+      // That is not redundancy: Caddy overrides the app on conflict, so it is
+      // what production actually serves, and this entry covers the paths that
+      // never meet Caddy (local Docker stack, `next dev`). If you change the
+      // value, change it in both — this pairing already went wrong twice for
+      // HSTS and X-Frame-Options (audit 2026-08-11).
+      ...["/widget.js", "/widget.min.js"].map((source) => ({
+        source,
+        headers: [
+          {
+            key: "Cache-Control",
+            value: "public, max-age=300, stale-while-revalidate=86400",
+          },
+        ],
+      })),
     ];
   },
   // Legacy /automations URLs → /workflows. The migration renamed the
