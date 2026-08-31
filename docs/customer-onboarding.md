@@ -119,6 +119,77 @@ In the customer's App Dashboard.
       `smb_app_state_sync` so replies sent from the phone app, past chats, and
       saved contact names sync into the inbox.
 
+## 4b · Grant EVERYTHING now — while you have access **[Customer + You]**
+
+Do this on the onboarding call, even for channels they will not use for
+months. Every item here needs Business-Settings or App-Dashboard access, and
+you may not have it later. Adding a scope or an asset afterwards means
+regenerating the token — with access you no longer hold.
+
+**Order matters:** add the Messenger + Instagram products/use cases to the app
+BEFORE generating the token, or their permissions will not appear in the
+token dialog at all ("an app admin may need to customize or add a use case").
+
+- [ ] **System user = Admin, token expiry = Never.** An *admin* system user has
+      full access to every asset the portfolio owns by default; an *employee*
+      one needs each asset granted by hand. The token belongs to the BUSINESS,
+      not to the person who clicked Generate — nobody leaving invalidates it.
+      (Meta also offers a 60-day expiring variant; some businesses are forced
+      onto it. If so, diarize the refresh — letting it lapse forfeits it.)
+- [ ] **Assign every asset** to the system user, Full control: the app, every
+      WABA, every Page, every Instagram account. (Redundant for an admin
+      system user, harmless, and it survives a later downgrade.)
+- [ ] **Every scope, in one token:**
+
+      business_management · whatsapp_business_messaging ·
+      whatsapp_business_management · whatsapp_business_manage_events ·
+      pages_messaging · pages_manage_metadata · pages_show_list ·
+      pages_read_engagement · instagram_basic · instagram_manage_messages ·
+      instagram_manage_comments
+
+      `business_management` is a DEPENDENCY of `pages_messaging`,
+      `pages_show_list` and `instagram_manage_messages` — Meta asks you to
+      call that out explicitly in an App Review submission. What each scope
+      buys, and what breaks without it, is documented in
+      [`apps/api/src/workspace-settings/meta/meta.service.ts`](../apps/api/src/workspace-settings/meta/meta.service.ts).
+- [ ] **All three webhook topics**, one callback URL (`/webhooks/meta/<workspaceId>`)
+      + the verify token from `/settings/meta`: `whatsapp_business_account`
+      (fields per phase 4), `page`, and `instagram`. Subscribing a topic later
+      needs dashboard access; subscribing it now costs nothing while the
+      channel is unconnected.
+- [ ] **Generate the FINAL token last**, and have the customer type it straight
+      into `/settings/meta`. Rotating it later requires the access you are
+      trying not to depend on.
+
+## 4c · Switch the app to Live mode **[Customer]**
+
+Meta's webhooks doc: *"Make sure your app is in Live mode; some webhooks will
+not be sent if your app is in Dev mode."* In Development mode, Messenger and
+Instagram deliver messages ONLY for people holding a role on the app — which
+is exactly the "worked with my test account, silent for real customers"
+report. **Check app mode before blaming App Review.**
+
+The toggle sits at the top of the App Dashboard and stays locked until
+Settings → Basic is complete. Each of these is individually marked *required
+to switch your app to Live mode*:
+
+- [ ] **Display Name**
+- [ ] **Contact Email** (and verify it)
+- [ ] **Privacy Policy URL**
+- [ ] **Terms of Service URL**
+- [ ] **App Icon**, 1024×1024 — must not contain Meta logos/trademarks or the
+      words "Facebook"/"FB"
+- [ ] **Category**
+- [ ] **App Purpose / Business Use**
+- [ ] **User Data Deletion** — Meta requires EITHER a data-deletion callback
+      URL OR an instructions URL; a section of the privacy policy is
+      explicitly acceptable. This platform implements the callback at
+      `/webhooks/meta-data-deletion` if they prefer it.
+
+Business Verification is **not** a Live-mode gate ("While verification is not
+required to Go Live, you will not be able to access data you do not own until
+verification is complete") — but see §6d, they need it anyway.
+
 ## 5 · Connect the number — `/settings/whatsapp` **[Customer]**
 
 - [ ] Enter the **Phone Number ID** and the **WhatsApp Business Account ID** —
@@ -163,11 +234,20 @@ In the customer's App Dashboard.
 ## 6b · Adding Messenger / Instagram — the Advanced Access gate **[Customer]**
 
 WhatsApp inbound works as soon as the number is connected — Messenger and
-Instagram do NOT. Meta delivers their `messages` webhooks for the **general
-public** only when the app has **Advanced Access** on the messaging
-permissions. With Standard Access (or in Development mode) webhooks fire
-ONLY for users holding a role on the app — so "worked with my test account,
-silent for real customers" is this gate, every time.
+Instagram do NOT. Two DIFFERENT gates produce the identical symptom ("worked
+with my test account, silent for real customers"), and they are fixed in
+different places. Check them in this order:
+
+1. **App mode.** In Development mode these webhooks fire ONLY for users
+   holding a role on the app. This is the common cause and costs nothing to
+   fix — §4c.
+2. **Advanced Access / App Review.** Standard Access limits data to users with
+   a role on the app or Page. Meta's Messenger overview, however, states App
+   Review is *"not required if you only send and receive messages for your own
+   Facebook Page"* — which is this product's per-client-app shape. So do NOT
+   assume App Review is the blocker: go Live, test from a NON-role account,
+   and only submit if inbound is still silent. (An app serving OTHER
+   businesses' Pages — the Tech Provider direction — does need it.)
 
 - [ ] App switched to **Live** mode (top toggle in the App Dashboard).
 - [ ] **Business verification** completed (Business Settings → Security
@@ -200,6 +280,37 @@ Every row should read `ok` or carry an explained MANUAL remedy (registration,
 phone-app migration). A `DRIFT` that survives a second run is a real bug —
 report it, don't shrug. This tool caught a live tier-clobbering bug on its
 first ever run (2026-08-11).
+
+## 6d · Business verification + billing — the two silent blockers **[Customer]**
+
+Neither blocks the connect flow, and both stop real traffic. Start them on the
+onboarding call because verification takes days.
+
+**Business Verification** (Business Settings → Security Center). Not required
+to go Live, required for everything that matters afterwards:
+
+- Raises the registered-number cap **2 → 20** (a `business_capability_update`
+  webhook carries the new `max_phone_numbers_per_business`).
+- Raises the portfolio messaging limit **250 → 2,000** — verification is one of
+  Meta's named scaling paths, the alternative being 2,000 delivered messages.
+- Is a hard prerequisite for **Advanced Access** on any permission.
+- **Calling needs a messaging limit ≥ 2,000** (Meta error 138015), so
+  verification is effectively a prerequisite for the calling feature.
+- Is one of six criteria for **Official Business Account** (the blue check),
+  alongside ≥30 days on the platform, an approved display name, two-step
+  verification, notability in the press, and policy compliance.
+
+**Billing.** A WABA with no working payment method fails every TEMPLATE send —
+which is every broadcast and every out-of-window reply — with error **131042**.
+That one code covers more than a missing card: payment account not attached,
+credit line over limit or inactive, WABA deleted or suspended, and — easy to
+miss — **timezone not set** or **currency not set** on the WABA. Calling has
+the parallel error **131044**. Non-template messages inside the window are
+free, so a broken billing setup looks fine right up until the first broadcast.
+
+> Two irreversible choices to get right the first time: a WABA's **timezone and
+> currency cannot be edited** once a line of credit is attached, and a credit
+> line cannot be changed afterwards — fixing it means creating a new WABA.
 
 ## 7 · Set expectations for day one **[You]**
 
