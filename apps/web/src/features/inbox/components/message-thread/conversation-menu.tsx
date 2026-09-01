@@ -15,6 +15,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 
 /** Operator-readable copy for the block endpoint's typed error codes. */
 const BLOCK_ERROR_COPY: Record<string, string> = {
@@ -74,7 +75,18 @@ export function ConversationMenu({
         method: "DELETE",
       });
       if (!res.ok) {
-        await alert("Couldn't delete chat", "Please try again.");
+        // Show the server's REASON. A 409 here is a deliberate refusal — the
+        // thread carries tickets, and deleting it would destroy their history
+        // and any department they were escalated to — so "please try again" was
+        // advice that could never work, on the one error the person can act on.
+        const data = (await res.json().catch(() => ({}))) as {
+          error?: string;
+          detail?: string;
+        };
+        await alert(
+          "Couldn't delete chat",
+          apiErrorMessageFrom(data, "Something went wrong. Please try again."),
+        );
         return;
       }
       router.push("/inbox");

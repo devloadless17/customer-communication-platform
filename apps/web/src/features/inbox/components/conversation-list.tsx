@@ -29,6 +29,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { cn } from "@ccp/shared/utils";
 import type {
@@ -210,9 +211,33 @@ function ConversationListImpl({
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ conversationIds: ids }),
       });
+      const data = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        detail?: string;
+        count?: number;
+        skippedWithTickets?: number;
+      };
       if (!res.ok) {
-        await alert("Couldn't delete chats", "Please try again.");
+        // Show the server's REASON — a 409 here means every selected thread
+        // carries a ticket, which is a deliberate refusal, not a hiccup. See
+        // the matching note in conversation-menu.tsx.
+        await alert(
+          "Couldn't delete chats",
+          apiErrorMessageFrom(data, "Something went wrong. Please try again."),
+        );
         return;
+      }
+      // PARTIAL success: the server deletes what it can and reports the rest.
+      // Silence here left ticket-bearing chats sitting in the list looking like
+      // the delete had simply missed them.
+      if (data.skippedWithTickets) {
+        const n = data.skippedWithTickets;
+        await alert(
+          `Deleted ${data.count ?? 0} chat${data.count === 1 ? "" : "s"}`,
+          `${n} chat${n === 1 ? " was" : "s were"} kept because ${n === 1 ? "it carries" : "they carry"} ` +
+            `a ticket. Delete those tickets first — removing the thread would destroy their ` +
+            `history, files, and any department they were escalated to.`,
+        );
       }
       // Server emits conversation:deleted per id; the list state will
       // reconcile through the team-events hook.
