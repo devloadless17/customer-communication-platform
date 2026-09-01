@@ -47,19 +47,23 @@ export interface ReplyPayload {
    */
   complaintConfidence: number;
   /**
-   * An email address the customer stated in their LATEST message, or "". Only
-   * ever written to `Contact.email`, never used as an identity key — see
-   * `captureCustomerEmail`, which re-validates it against a regex because a
+   * Contact details the customer stated in their LATEST message, as
+   * `{ key, value }` pairs keyed by the detail ids listed in the prompt.
+   * Empty when they gave none.
+   *
+   * Only ever written to the matching `Contact` column / custom field, never
+   * used as an identity key — see `captureContactDetails`, which re-validates
+   * every value and ignores any key the admin did not configure, because a
    * model asked for a field will happily invent a plausible one.
    */
-  customerEmail: string;
+  collectedDetails: Array<{ key: string; value: string }>;
   /**
-   * True when replyText asks the customer for their email address. Drives the
-   * ask-once bookkeeping (`AiConversationState.emailRequestedAt`) — the model
-   * is the only thing that knows whether it actually asked, since it is told to
-   * ask only when the moment fits.
+   * The detail id `replyText` actually ASKS for, or "". Drives the ask-once
+   * bookkeeping (`AiConversationState.requestedDetails`) — the model is the
+   * only thing that knows whether it really asked, since it is told to ask
+   * only when the moment fits.
    */
-  askedForEmail: boolean;
+  askedForDetail: string;
 }
 
 // OpenAI strict structured outputs: every property listed in `required`,
@@ -81,8 +85,8 @@ export const REPLY_SCHEMA: Record<string, unknown> = {
     "hallucinationRisk",
     "hallucinationNotes",
     "complaintConfidence",
-    "customerEmail",
-    "askedForEmail",
+    "collectedDetails",
+    "askedForDetail",
   ],
   properties: {
     replyText: { type: "string", description: "The reply to send to the customer." },
@@ -131,15 +135,24 @@ export const REPLY_SCHEMA: Record<string, unknown> = {
       description:
         "Confidence between 0 and 1 that the CUSTOMER's latest message is a complaint (unhappy about the product/service/order, reporting a problem). 0 for a normal question, greeting, or neutral request.",
     },
-    customerEmail: {
+    collectedDetails: {
+      type: "array",
+      description:
+        "Contact details the customer gave in their LATEST message, copied exactly as they wrote them. Use only the detail ids listed under 'This customer's contact details'; omit anything they did not state. Empty array if they gave none. Never guess, complete, or invent a value.",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["key", "value"],
+        properties: {
+          key: { type: "string", description: "The detail id, exactly as listed in the prompt." },
+          value: { type: "string", description: "What the customer wrote, verbatim." },
+        },
+      },
+    },
+    askedForDetail: {
       type: "string",
       description:
-        "An email address the customer gave in their LATEST message, copied exactly as they wrote it. Empty string if they did not give one. Never guess, complete, or invent an address.",
-    },
-    askedForEmail: {
-      type: "boolean",
-      description:
-        "True only if your replyText actually asks the customer for their email address.",
+        "The detail id your replyText actually asks the customer for, exactly as listed in the prompt. Empty string if your reply asks for nothing.",
     },
   },
 };

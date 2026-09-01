@@ -11,10 +11,23 @@ import { loadConversationMeta, loadRecentMessages } from "./thread";
 export async function loadReplyContext(
   workspaceId: string,
   conversationId: string,
+  collectFields: unknown,
 ): Promise<{
   memory: MemoryItem[];
   recentMessages: RecentMessage[];
   details: ContactDetails;
+  /**
+   * Whether anyone (agent or assistant) has already replied in the recent
+   * thread. Drives the `opening` collect timing: an "ask up front" only makes
+   * sense in a reply that opens the conversation.
+   *
+   * Derived from the messages already loaded rather than a separate query or a
+   * session boundary — there ISN'T one to key on, because a conversation is
+   * per-contact and never fragments (§7). A thread that reopens after months
+   * therefore reads as "already replied", so the ask lands at the natural
+   * moment instead of up front; it still lands, which is what matters.
+   */
+  hasRepliedBefore: boolean;
 }> {
   const meta = await loadConversationMeta(conversationId);
   const memory = meta?.customerId
@@ -28,8 +41,13 @@ export async function loadReplyContext(
       ).map((m) => ({ kind: m.kind as string, value: m.value }))
     : [];
   const recentMessages = await loadRecentMessages(conversationId, 20);
-  const details = await loadContactDetails(workspaceId, conversationId);
-  return { memory, recentMessages, details };
+  const details = await loadContactDetails(workspaceId, conversationId, collectFields);
+  return {
+    memory,
+    recentMessages,
+    details,
+    hasRepliedBefore: recentMessages.some((m) => m.direction === "out"),
+  };
 }
 
 /**

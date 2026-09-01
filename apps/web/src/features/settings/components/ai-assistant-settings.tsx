@@ -11,6 +11,11 @@ import { Textarea } from "@/components/ui/textarea";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
 import { apiErrorMessageFrom } from "@ccp/shared/api/error-message";
+import {
+  COLLECT_BUILTIN_TARGETS,
+  parseCollectFields,
+  type CollectFieldSpec,
+} from "@ccp/shared/ai/collect-details";
 
 // Shape is intentionally loose — mirrors the API row; the form only reads/writes
 // the fields it renders. configVersion 0 + id null = never saved yet.
@@ -19,6 +24,11 @@ export interface AiConfig {
   enabled: boolean;
   configVersion: number;
   [k: string]: unknown;
+}
+/** A contact field an admin can point a collect entry at. */
+export interface AiContactField {
+  key: string;
+  label: string;
 }
 export interface AiDocument {
   id: string;
@@ -116,9 +126,12 @@ const TIMEZONE_OPTS: Array<[string, string]> = TIMEZONES.map((t) => [t, t]);
 export function AiAssistantSettings({
   initialConfig,
   initialDocuments,
+  contactFields,
 }: {
   initialConfig: AiConfig;
   initialDocuments: AiDocument[];
+  /** The workspace's custom contact fields, for the "details to collect" picker. */
+  contactFields: AiContactField[];
 }) {
   const [form, setForm] = useState<Record<string, unknown>>({ ...initialConfig });
   const [version, setVersion] = useState<number>(initialConfig.configVersion ?? 0);
@@ -340,8 +353,15 @@ export function AiAssistantSettings({
             <Field label="Wait for customer to finish (seconds, 0 = reply instantly)"><NumberInput value={num("replyWaitSeconds", 0)} step={1} min={0} max={120} onChange={(v) => set("replyWaitSeconds", v)} /></Field>
             <Field label="Human takeover behavior"><SelectInput value={str("humanTakeoverBehavior") || "cancel_and_yield"} onChange={(v) => set("humanTakeoverBehavior", v)} options={TAKEOVER} /></Field>
             <SwitchRow label="Match customer tone" checked={bool("matchCustomerTone")} onChange={(v) => set("matchCustomerTone", v)} />
-            <SwitchRow label="Ask new customers for their email (once)" checked={bool("collectCustomerEmail")} onChange={(v) => set("collectCustomerEmail", v)} />
-            <Field label="Custom instructions" full><Textarea rows={4} value={str("customInstructions")} onChange={(e) => set("customInstructions", e.target.value)} /></Field>
+            <Field label="Details to collect from customers" full>
+              <CollectFieldsEditor
+                rows={parseCollectFields(form.collectFields)}
+                contactFields={contactFields}
+                timing={str("collectTiming") === "opening" ? "opening" : "natural"}
+                onChange={(rows) => set("collectFields", rows)}
+                onTimingChange={(v) => set("collectTiming", v)}
+              />
+            </Field>
           </Grid>
         )}
 
@@ -415,9 +435,9 @@ function NumberInput({ value, onChange, step, min, max }: { value: number; onCha
     />
   );
 }
-function SelectInput({ value, onChange, options }: { value: string; onChange: (v: string) => void; options: Array<[string, string]> }) {
+function SelectInput({ value, onChange, options, ariaLabel }: { value: string; onChange: (v: string) => void; options: Array<[string, string]>; ariaLabel?: string }) {
   return (
-    <Select value={value} onChange={(e) => onChange(e.target.value)}>
+    <Select value={value} onChange={(e) => onChange(e.target.value)} aria-label={ariaLabel}>
       {options.map(([v, label]) => (
         <option key={v} value={v}>
           {label}
@@ -518,6 +538,159 @@ function SwitchRow({ label, checked, onChange }: { label: string; checked: boole
       <span className="text-sm">{label}</span>
       <Switch checked={checked} onCheckedChange={onChange} />
     </label>
+  );
+}
+
+/**
+ * The ordered "details to collect" editor.
+ *
+ * ORDER IS THE FEATURE, which is why this is a reorderable list rather than a
+ * row of switches: the assistant asks for ONE thing per reply, so whatever sits
+ * at the top is what a customer who only ever answers once will be asked for.
+ *
+ * PHONE IS ABSENT BY DESIGN — the option list comes from
+ * `COLLECT_BUILTIN_TARGETS` plus the workspace's own contact fields, and a
+ * phone number a customer types is not vendor-verified. See that module's
+ * header: `Contact.phoneNumber` is an unconditional auto-merge key, so
+ * accepting one here would let a typo fuse two people into one profile.
+ *
+ * A target already in the list is not offered again — asking twice for one
+ * thing is what the API's duplicate check would reject anyway, and a picker
+ * that lets you build an invalid list is a picker that fails on save.
+ */
+function CollectFieldsEditor({
+  rows,
+  contactFields,
+  timing,
+  onChange,
+  onTimingChange,
+}: {
+  rows: CollectFieldSpec[];
+  contactFields: AiContactField[];
+  timing: "opening" | "natural";
+  onChange: (rows: CollectFieldSpec[]) => void;
+  onTimingChange: (v: "opening" | "natural") => void;
+}) {
+  const labelFor = (spec: CollectFieldSpec): string => {
+    if (spec.target !== "custom") {
+      return COLLECT_BUILTIN_TARGETS.find((t) => t.target === spec.target)?.label ?? spec.target;
+    }
+    return contactFields.find((f) => f.key === spec.key)?.label ?? `${spec.key} (deleted)`;
+  };
+
+  const taken = new Set(rows.map((r) => (r.target === "custom" ? `custom:${r.key}` : r.target)));
+  const available: Array<[string, string]> = [
+    ...COLLECT_BUILTIN_TARGETS.filter((t) => !taken.has(t.target)).map(
+      (t) => [t.target, t.label] as [string, string],
+    ),
+    ...contactFields
+      .filter((f) => !taken.has(`custom:${f.key}`))
+      .map((f) => [`custom:${f.key}`, f.label] as [string, string]),
+  ];
+
+  const move = (i: number, delta: number) => {
+    const j = i + delta;
+    if (j < 0 || j >= rows.length) return;
+    const next = rows.slice();
+    [next[i], next[j]] = [next[j]!, next[i]!];
+    onChange(next);
+  };
+
+  const add = (value: string) => {
+    if (!value) return;
+    const spec: CollectFieldSpec = value.startsWith("custom:")
+      ? { target: "custom", key: value.slice("custom:".length) }
+      : { target: value as CollectFieldSpec["target"] };
+    onChange([...rows, spec]);
+  };
+
+  return (
+    <div className="space-y-3">
+      {rows.length === 0 ? (
+        <p className="text-sm text-muted-foreground">
+          The assistant asks for nothing. Add a detail below and it will ask for it once, then
+          save the answer to the contact.
+        </p>
+      ) : (
+        <ol className="space-y-2">
+          {rows.map((row, i) => (
+            <li key={`${row.target}:${row.key ?? ""}`} className="flex items-center gap-2">
+              <span className="w-5 shrink-0 text-sm tabular-nums text-muted-foreground">
+                {i + 1}.
+              </span>
+              <span className="w-40 shrink-0 truncate text-sm">{labelFor(row)}</span>
+              <Input
+                placeholder="Why we're asking (optional) — e.g. so we can send your receipt"
+                value={row.purpose ?? ""}
+                onChange={(e) => {
+                  const next = rows.slice();
+                  next[i] = { ...next[i]!, purpose: e.target.value };
+                  onChange(next);
+                }}
+              />
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-label={`Move ${labelFor(row)} up`}
+                disabled={i === 0}
+                onClick={() => move(i, -1)}
+              >
+                ↑
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-label={`Move ${labelFor(row)} down`}
+                disabled={i === rows.length - 1}
+                onClick={() => move(i, 1)}
+              >
+                ↓
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-label={`Remove ${labelFor(row)}`}
+                onClick={() => onChange(rows.filter((_, j) => j !== i))}
+              >
+                ✕
+              </Button>
+            </li>
+          ))}
+        </ol>
+      )}
+
+      {available.length > 0 && (
+        <div className="max-w-xs">
+          {/* Value resets to "" on every pick so the control reads as an action
+              ("Add a detail…") rather than a selection that already applied. */}
+          <SelectInput
+            value=""
+            onChange={(v) => add(v)}
+            options={[["", "Add a detail…"], ...available]}
+            ariaLabel="Add a detail to collect"
+          />
+        </div>
+      )}
+
+      {rows.length > 0 && (
+        <div className="max-w-md">
+          <p className="mb-1 text-sm font-medium">When to ask</p>
+          <SelectInput
+            value={timing}
+            onChange={(v) => onTimingChange(v === "opening" ? "opening" : "natural")}
+            options={[
+              ["opening", "At the start of a new conversation"],
+              ["natural", "After answering what the customer asked"],
+            ]}
+            ariaLabel="When to ask for contact details"
+          />
+          <p className="mt-1 text-xs text-muted-foreground">
+            One detail per reply, in the order above, and never twice on the same conversation.
+            The assistant skips anything already on the contact.
+          </p>
+        </div>
+      )}
+    </div>
   );
 }
 

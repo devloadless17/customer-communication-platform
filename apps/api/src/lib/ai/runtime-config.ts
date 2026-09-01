@@ -51,13 +51,14 @@ export interface AiConfigRow {
   tone: string;
   matchCustomerTone: boolean;
   replyLength: string;
-  customInstructions: string | null;
   autoReplyMode: "auto_send" | "draft" | "hybrid";
   confidenceThreshold: number;
   maxAutoRepliesPerConv: number;
   humanTakeoverBehavior: string;
   replyWaitSeconds: number;
-  collectCustomerEmail: boolean;
+  /** Ordered `CollectFieldSpec[]` — see @ccp/shared/ai/collect-details. */
+  collectFields: unknown;
+  collectTiming: string;
 
   incomingTranscription: boolean;
   saveTranscript: boolean;

@@ -16,6 +16,7 @@
     "./auth/password-policy": "./src/auth/password-policy.ts",
     "./auth/oauth-error": "./src/auth/oauth-error.ts",
     "./api-keys/scopes": "./src/api-keys/scopes.ts",
+    "./ai/collect-details": "./src/ai/collect-details.ts",
     "./assignment/types": "./src/assignment/types.ts",
     "./contacts/reserved-fields": "./src/contacts/reserved-fields.ts",
     "./contacts/prechat-targets": "./src/contacts/prechat-targets.ts",

@@ -4187,7 +4187,7 @@ export function splitContactName(name: string | null | undefined): {
  * leading +), or an opaque provider id (`vis_…`, a BSUID like `LB.9464…`, a
  * PSID). A real display name that happens to contain digits is untouched.
  */
-function looksLikeIdentityFallback(value: string): boolean {
+export function looksLikeIdentityFallback(value: string): boolean {
   const compact = value.replace(/[\s()+-]/g, "");
   if (compact.length === 0) return false;
   // Pure digits → a phone number.

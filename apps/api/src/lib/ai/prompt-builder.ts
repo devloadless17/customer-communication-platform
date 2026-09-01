@@ -1,5 +1,6 @@
 import { parseTimeOfDay } from "@ccp/shared/work-hours";
 
+import { nextDetailToAsk, type ContactDetails } from "./contact-details";
 import type { AiConfigRow } from "./runtime-config";
 import type { RetrievedChunk } from "./knowledge-retrieval";
 import { lebanesePhraseAnchor } from "./lebanese";
@@ -48,8 +49,13 @@ export interface PromptContext {
   recentMessages: RecentMessage[];
   latestText: string;
   isVoice: boolean;
-  /** Contact details on file + whether we've already asked for the email. */
-  details: { email: string | null; emailRequested: boolean };
+  /** The configured collectible details, resolved against this contact. */
+  details: ContactDetails;
+  /**
+   * Has the assistant (or an agent) already replied on this thread? Drives the
+   * `opening` timing — an "up front" ask is only up front on the first reply.
+   */
+  hasRepliedBefore: boolean;
 }
 
 const DAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
@@ -177,7 +183,6 @@ export function buildSystemPrompt(config: AiConfigRow): string {
     line("Tone", config.tone),
     config.matchCustomerTone ? "- Mirror the customer's tone and formality when appropriate." : "",
     line("Reply length", config.replyLength),
-    line("Custom instructions", config.customInstructions),
   );
 
   const escalation = nonEmpty(
@@ -221,7 +226,7 @@ export function buildSystemPrompt(config: AiConfigRow): string {
     "- Always return the structured fields. `replyText` is the exact message to send. Set `confidence` honestly.",
     "- Set `hallucinationRisk`/`hallucinationNotes` honestly: if replyText states a specific price, policy, order detail, or availability that ISN'T directly supported by the company info or a retrieved knowledge snippet, flag it there instead of silently hoping it's right.",
     "- Set `complaintConfidence` honestly, based on the CUSTOMER's latest message, not your reply: score it high when they express dissatisfaction, report a defect/problem, ask for a refund/compensation, or are frustrated/angry — even if your replyText is calm and helpful. 0 for an ordinary question, greeting, or neutral request.",
-    "- `customerEmail`: if the customer's LATEST message contains an email address — including one spoken out ('john at gmail dot com') or spelled across a couple of messages — return it as a normal address. Otherwise return an empty string. Never guess, complete, or correct one, and never repeat it back to them character by character.",
+    "- `collectedDetails`: if the customer's LATEST message states any of the contact details listed later in this conversation, return each one as `{key, value}` using the detail id given there. An email spoken out ('john at gmail dot com') or spelled across a couple of messages still counts — return it as a normal address. Return an empty array otherwise. Never guess, complete, or correct a value, and never repeat an address back to them character by character.",
     "- `ttsText`: the reply written to be SPOKEN aloud. If Arabic, it MUST be in natural everyday spoken LEBANESE dialect (Beirut) in Arabic script — exactly how a Lebanese person would say it out loud, using Lebanese words and phrasing. NEVER formal Modern Standard Arabic (Fusha), and NEVER Syrian, Egyptian, or Gulf. Otherwise repeat replyText.",
   ]
     .filter((l) => l !== "")
@@ -292,31 +297,79 @@ function renderFaqs(v: unknown): string {
 }
 
 /**
- * The email ask. Lives in the USER turn, not the system prompt, because it is
- * per-customer and changes the moment they answer — putting it in the stable
- * prefix would both break its caching and leave the assistant asking a customer
- * for an address it already has.
+ * The contact-detail ask. Lives in the USER turn, not the system prompt,
+ * because it is per-customer and changes the moment they answer — putting it in
+ * the stable prefix would both break its caching and leave the assistant asking
+ * a customer for something it already has.
  *
- * Three states, one instruction each, and no instruction at all once we have
- * the address — an assistant told about a field it does not need is an
- * assistant that finds a way to mention it.
+ * ONE detail per reply, taken from the admin's ordered list (the first entry
+ * that is neither on file nor already asked). Asking for three things at once
+ * is an interrogation, and a customer who answers only the first leaves the
+ * rest looking ignored.
+ *
+ * The listing of what IS on file is deliberately separate from the ask: the
+ * model needs the values to write a personal reply ("your order ships to
+ * Beirut"), and it needs to be told plainly not to re-ask for them.
+ *
+ * `collectTiming` decides WHEN the first ask lands:
+ *
+ *   opening  — in this reply, up front, whenever the thread has no prior reply.
+ *              The previous version of this prompt effectively forbade every
+ *              moment ("never as your opening line", "say nothing if they only
+ *              greeted you", "not while apologising"), so on an ordinary
+ *              greeting → question → answer thread the ask never fired at all.
+ *              That is what this option exists to make possible.
+ *   natural  — after the customer's actual question has been answered.
  */
 function contactDetails(ctx: PromptContext): string {
-  const { email, emailRequested } = ctx.details;
-  if (email) return `- Email: ${email} (already on file — do NOT ask for it again).`;
-  if (!ctx.config.collectCustomerEmail) return "- Email: not on file.";
-  if (emailRequested) {
-    return nonEmpty(
-      "- Email: not on file. You have ALREADY asked this customer for it once.",
-      "- Do NOT ask again — asking twice is nagging. If they give it now anyway, still return it in `customerEmail`.",
-    );
+  const { details } = ctx.details;
+  if (!details.length) return "- (nothing to collect)";
+
+  const onFile = details.filter((d) => d.onFile);
+  const lines: string[] = [];
+  for (const d of onFile) {
+    lines.push(`- ${d.noun}: ${untrusted(d.value)} — already on file, do NOT ask for it again.`);
   }
-  return nonEmpty(
-    "- Email: not on file.",
-    "- ASK FOR IT ONCE, in this conversation, at the natural moment — after you have answered what they actually came for, never as your opening line and never instead of helping. If they have only greeted you and not asked anything yet, there is nothing to follow up on: greet them back and say nothing about the email. One short, warm sentence in the SAME language and script as the rest of your reply, saying briefly what it is for (so we can follow up / send them confirmations). Keep it optional: if they say no or ignore it, drop it and never bring it up again.",
-    "- Do NOT ask while escalating, apologising, or handling a complaint — it reads as tone-deaf. Answer or hand off, and leave the address for another time.",
-    "- Set `askedForEmail` true ONLY if your reply actually asks.",
+
+  const next = nextDetailToAsk(details);
+  if (!next) {
+    // Everything is either held or already asked. Say so and stop — an
+    // assistant told about a field it must not raise is an assistant that
+    // finds a way to mention it.
+    for (const d of details) {
+      if (!d.onFile) lines.push(`- ${d.noun}: not on file, and you have ALREADY asked once — do NOT ask again.`);
+    }
+    lines.push(
+      "- If the customer volunteers any of these anyway, still return it in `collectedDetails`.",
+    );
+    return nonEmpty(...lines);
+  }
+
+  // Which ids the model may name. Listed even for details we are not asking
+  // for right now, because a customer can volunteer anything at any time.
+  const ids = details.map((d) => `\`${d.key}\` (${d.noun})`).join(", ");
+  const purpose = next.spec.purpose
+    ? ` Say briefly what it is for: ${next.spec.purpose}.`
+    : " If there is an obvious reason (so we can follow up, send a confirmation), say it in a few words; otherwise just ask.";
+
+  const opening = ctx.config.collectTiming === "opening" && !ctx.hasRepliedBefore;
+  lines.push(`- ${next.noun}: NOT on file. ASK FOR IT — once — in THIS reply.`);
+  lines.push(
+    opening
+      ? `- Ask up front, in your opening reply: greet them, ask for their ${next.noun}, and still answer anything they have already asked. One short, warm sentence for the ask.${purpose}`
+      : `- Ask AFTER you have answered what they came for, in the same reply — never instead of helping. One short, warm sentence at the end.${purpose}`,
   );
+  lines.push(
+    `- Write the ask in the SAME language and script as the rest of your reply. Keep it optional: if they decline or ignore it, drop it and never raise it again.`,
+  );
+  lines.push(
+    "- Do NOT ask while escalating to a human or handling a complaint — it reads as tone-deaf. Answer or hand off, and leave it for another time.",
+  );
+  lines.push(`- Ask for ONLY this one thing. Do not ask for anything else in this reply.`);
+  lines.push(
+    `- Set \`askedForDetail\` to "${next.key}" ONLY if your reply actually asks. Detail ids you may use in \`collectedDetails\`: ${ids}.`,
+  );
+  return nonEmpty(...lines);
 }
 
 // --- user turn (volatile) ---
