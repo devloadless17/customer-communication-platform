@@ -608,6 +608,27 @@ export class ConversationsService {
    * Keyset paging does the same total work with a bounded resident set, so
    * peak memory no longer scales with a tenant's history.
    */
+  /**
+   * Blob keys owned by the TICKETS on these conversations.
+   *
+   * Deleting a conversation cascades into its tickets (`Ticket.conversation` is
+   * onDelete: Cascade), which takes their `TicketAttachment` rows with it — but
+   * the FK knows nothing about R2. Without this the evidence files would sit in
+   * the bucket until the orphan sweeper noticed them a day later. Collected
+   * BEFORE the delete, for the same reason as the message media: once the rows
+   * are gone there is nothing left to ask.
+   */
+  private async collectTicketBlobKeys(
+    workspaceId: string,
+    conversationIds: string[],
+  ): Promise<string[]> {
+    const rows = await this.db.ticketAttachment.findMany({
+      where: { ticket: { workspaceId, conversationId: { in: conversationIds } } },
+      select: { blobKey: true },
+    });
+    return rows.map((r) => r.blobKey).filter((k): k is string => Boolean(k));
+  }
+
   private async collectMediaKeys(
     workspaceId: string,
     conversationIds: string[],
@@ -652,7 +673,7 @@ export class ConversationsService {
      * Optional so server-to-server callers (never restricted) can omit it.
      */
     viewer?: ConversationViewer,
-  ): Promise<{ count: number; skippedWithTickets?: number }> {
+  ): Promise<{ count: number; deletedTickets?: number }> {
     // AND the restriction as an independent clause, never a sibling spread —
     // `visibilityWhere` sets `assignedUserId`, and a spread next to
     // `id: { in }` would be fine, but the AND form is what keeps this immune to
@@ -669,33 +690,19 @@ export class ConversationsService {
     if (owned.length === 0) {
       throw new NotFoundException({ error: "no_matching_conversations_in_this_team" });
     }
-    // Same ticket guard as the single delete (S12-2) — the cascade reaches
-    // TicketShare, so one tidy-up here can destroy a sibling workspace's live
-    // work. In BULK the proportionate shape is to SKIP the ticket-bearing
-    // threads rather than refuse the batch: the caller selected many, and
-    // failing all of them because one carries a ticket is the worse outcome.
-    // The response reports what was skipped so the UI can say so.
-    const ticketed = await this.db.ticket.findMany({
-      where: { workspaceId, conversationId: { in: owned.map((c) => c.id) } },
-      select: { conversationId: true },
-      distinct: ["conversationId"],
+    // TICKETS GO WITH THEIR THREADS — see the long note on `remove()`. This
+    // path used to SKIP ticket-bearing conversations and report them; it now
+    // deletes them like any other, and reports how many tickets went with the
+    // batch so the UI can state the consequence plainly.
+    const ownedIds = owned.map((c) => c.id);
+    const deletedTickets = await this.db.ticket.count({
+      where: { workspaceId, conversationId: { in: ownedIds } },
     });
-    const ticketedIds = new Set(
-      ticketed.map((t) => t.conversationId).filter((id): id is string => id !== null),
-    );
-    const ownedIds = owned.map((c) => c.id).filter((id) => !ticketedIds.has(id));
-    if (ownedIds.length === 0) {
-      throw new ConflictException({
-        error: "conversation_has_tickets",
-        detail:
-          "Every selected conversation carries a ticket. Delete those tickets first — " +
-          "deleting the threads would destroy their history, files, and any department " +
-          "they were escalated to.",
-        skippedWithTickets: ticketedIds.size,
-      });
-    }
 
-    const mediaKeys = await this.collectMediaKeys(workspaceId, ownedIds);
+    const mediaKeys = [
+      ...(await this.collectMediaKeys(workspaceId, ownedIds)),
+      ...(await this.collectTicketBlobKeys(workspaceId, ownedIds)),
+    ];
 
     await this.db.conversation.deleteMany({
       where: { workspaceId, id: { in: ownedIds } },
@@ -719,7 +726,7 @@ export class ConversationsService {
       });
     });
 
-    return { count: ownedIds.length, ...(ticketedIds.size ? { skippedWithTickets: ticketedIds.size } : {}) };
+    return { count: ownedIds.length, ...(deletedTickets ? { deletedTickets } : {}) };
   }
 
   /**
@@ -1078,36 +1085,41 @@ export class ConversationsService {
     }
   }
 
-  async remove(workspaceId: string, actorUserId: string, conversationId: string): Promise<void> {
+  async remove(
+    workspaceId: string,
+    actorUserId: string,
+    conversationId: string,
+  ): Promise<{ deletedTickets: number }> {
     const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, workspaceId },
       select: { id: true },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation_not_found" });
 
-    // A ticket is the permanent record of WORK on this thread (§2), and
-    // `Ticket.conversation` is onDelete: Cascade — so this delete would take
-    // every ticket raised on the thread with it, and from each ticket the
-    // cascade continues into its TicketShare (a SIBLING workspace's access),
-    // its cross-department TicketMessage thread, its TicketEvent history and
-    // its TicketAttachment evidence. A guest department would lose work it is
-    // actively doing because the owner tidied a thread, with no signal at all.
-    // Deleting a ticket is its own deliberate, owner-only action; require it
-    // first rather than destroying the record as a side effect. (Audit
-    // 2026-08-19, S12-2 — same class as the retention sweeper's ticket guard.)
+    // TICKETS GO WITH THE THREAD (maintainer decision, 2026-08-20 — this
+    // replaced a hard refusal added by audit 2026-08-19 S12-2).
+    //
+    // `Ticket.conversation` is onDelete: Cascade, so deleting the conversation
+    // takes every ticket raised on it, and from each ticket the cascade
+    // continues into its TicketShare, its cross-department TicketMessage
+    // thread, its TicketEvent history and its TicketAttachment rows. That is
+    // now the INTENDED behaviour: deleting a chat is how you dispose of a
+    // thread and everything about it, and requiring a separate ticket deletion
+    // first made the common case a hunt — the ticket's delete button only
+    // exists on its own detail page, and is hidden on a ticket escalated INTO
+    // the workspace, so there were threads no one could delete at all.
+    //
+    // What makes it safe enough to be a choice rather than a trap: a
+    // TicketShare only ever crosses workspaces INSIDE ONE ORGANIZATION (§2),
+    // never between tenants — so the blast radius belongs to the org taking the
+    // action. The count is returned so the caller can say plainly what was
+    // destroyed, and the UI asks BEFORE the delete rather than explaining
+    // after.
     const ticketCount = await this.db.ticket.count({ where: { workspaceId, conversationId } });
-    if (ticketCount > 0) {
-      throw new ConflictException({
-        error: "conversation_has_tickets",
-        detail:
-          `This conversation carries ${ticketCount} ticket${ticketCount === 1 ? "" : "s"}. ` +
-          `Delete the ticket${ticketCount === 1 ? "" : "s"} first — deleting the thread would ` +
-          `destroy their history, files, and any department they were escalated to.`,
-        ticketCount,
-      });
-    }
-
-    const mediaKeys = await this.collectMediaKeys(workspaceId, [conversationId]);
+    const mediaKeys = [
+      ...(await this.collectMediaKeys(workspaceId, [conversationId])),
+      ...(await this.collectTicketBlobKeys(workspaceId, [conversationId])),
+    ];
 
     // Compound where (id + workspaceId) via deleteMany — Prisma's single `delete`
     // accepts only unique constraints, and Conversation.id alone is the
@@ -1123,7 +1135,7 @@ export class ConversationsService {
     if (count === 0) {
       // Row vanished between findFirst and deleteMany — concurrent delete
       // by another actor. Treat as already-gone success; no fanout needed.
-      return;
+      return { deletedTickets: 0 };
     }
 
     if (mediaKeys.length > 0) {
@@ -1136,6 +1148,7 @@ export class ConversationsService {
       conversationId,
       deletedByUserId: actorUserId,
     });
+    return { deletedTickets: ticketCount };
   }
 
   /**

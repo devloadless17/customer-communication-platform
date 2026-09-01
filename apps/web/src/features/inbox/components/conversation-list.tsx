@@ -199,7 +199,9 @@ function ConversationListImpl({
     const ok = await confirm({
       title: `Delete ${ids.length} chat${ids.length === 1 ? "" : "s"}?`,
       description:
-        "Removes all messages and notes from these threads. The contacts stay. This can't be undone.",
+        "Removes all messages and notes from these threads, along with any tickets " +
+        "raised on them — including their history, files, and any department they " +
+        "were escalated to. The contacts stay. This can't be undone.",
       confirmLabel: "Delete",
       destructive: true,
     });
@@ -215,7 +217,7 @@ function ConversationListImpl({
         error?: string;
         detail?: string;
         count?: number;
-        skippedWithTickets?: number;
+        deletedTickets?: number;
       };
       if (!res.ok) {
         // Show the server's REASON — a 409 here means every selected thread
@@ -227,16 +229,15 @@ function ConversationListImpl({
         );
         return;
       }
-      // PARTIAL success: the server deletes what it can and reports the rest.
-      // Silence here left ticket-bearing chats sitting in the list looking like
-      // the delete had simply missed them.
-      if (data.skippedWithTickets) {
-        const n = data.skippedWithTickets;
+      // Say what went with them. Tickets are deleted alongside their threads
+      // now, and a silent batch that quietly destroyed work items is exactly
+      // the surprise the confirmation above exists to prevent.
+      if (data.deletedTickets) {
+        const n = data.deletedTickets;
         await alert(
           `Deleted ${data.count ?? 0} chat${data.count === 1 ? "" : "s"}`,
-          `${n} chat${n === 1 ? " was" : "s were"} kept because ${n === 1 ? "it carries" : "they carry"} ` +
-            `a ticket. Delete those tickets first — removing the thread would destroy their ` +
-            `history, files, and any department they were escalated to.`,
+          `${n} ticket${n === 1 ? "" : "s"} raised on ${n === 1 ? "one of them" : "them"} ` +
+            `${n === 1 ? "was" : "were"} deleted too.`,
         );
       }
       // Server emits conversation:deleted per id; the list state will

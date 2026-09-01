@@ -3,15 +3,18 @@ import { test, expect } from "@playwright/test";
 import { appAdmin, db } from "../_helpers/db";
 
 /**
- * Deleting a chat that carries a TICKET must say WHY.
+ * Deleting a chat takes its TICKETS with it — and says so BEFORE the click.
  *
- * Reported 2026-08-20: an org admin hit "Couldn't delete chats — Please try
- * again." and retrying never worked. It never could: the server refuses with
- * 409 `conversation_has_tickets` and a written explanation (deleting the thread
- * would destroy the tickets' history, files, and any department they were
- * escalated to — the FK is onDelete: Cascade, so the guard is the ONLY
- * protection). The client discarded the body and rendered generic retry advice,
- * turning a deliberate, actionable refusal into an apparent bug.
+ * History: an org admin hit "Couldn't delete chats — Please try again", which
+ * hid a deliberate refusal (the thread carried a ticket). The message was fixed
+ * first; then the policy itself changed (2026-08-20): requiring a separate
+ * ticket deletion made the common case a hunt, and left threads carrying a
+ * ticket escalated INTO the workspace deletable by nobody, since that ticket's
+ * delete button is hidden there.
+ *
+ * So the consequence moved to where it belongs — the confirmation, before the
+ * destructive click, rather than an error after it. This asserts the warning is
+ * present and that the delete actually goes through with the ticket gone.
  */
 const PREFIX = "e2e_cdr_";
 
@@ -70,29 +73,30 @@ test.afterAll(async () => {
   await db().contact.deleteMany({ where: { workspaceId, name: { startsWith: PREFIX } } });
 });
 
-test("the refusal explains the tickets instead of saying 'try again'", async ({ page }) => {
+test("the confirmation warns about tickets, and the delete takes them with it", async ({
+  page,
+}) => {
   await page.goto(`/inbox?c=${conversationId}`);
   await expect(page.getByText(`${PREFIX}hello`).first()).toBeVisible({ timeout: 30_000 });
 
   await page.getByRole("button", { name: /conversation actions|more/i }).first().click();
   await page.getByRole("menuitem", { name: /delete/i }).first().click();
-  // The dropdown stays mounted behind the confirm dialog, so its Radix overlay
-  // makes Playwright's actionability check see <html> intercepting the pointer.
-  // A real click lands fine (this is how the defect was reported); force past
-  // the harness's strictness rather than weakening the product.
+
+  // The consequence is stated up front — this is the only place someone can
+  // learn that tickets die with the thread.
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText(/tickets raised on it/i, { timeout: 15_000 });
+  await expect(dialog).toContainText(/escalated to/i);
+
   const confirmBtn = page.getByRole("button", { name: /^Delete chat$/ });
   await expect(confirmBtn).toBeVisible();
+  // The dropdown stays mounted behind the dialog, so its Radix overlay makes
+  // Playwright see <html> intercepting the pointer; a real click lands fine.
   await confirmBtn.evaluate((el) => (el as HTMLButtonElement).click());
 
-  // The actionable sentence, not the dead-end retry advice.
-  const dialog = page.getByRole("dialog");
-  await expect(dialog).toContainText(/carries 1 ticket/i, { timeout: 15_000 });
-  await expect(dialog).toContainText(/Delete the ticket/i);
-  await expect(dialog).not.toContainText(/Please try again/i);
-
-  // And the thread survived.
-  await page
-    .getByRole("button", { name: /^OK$/ })
-    .evaluate((el) => (el as HTMLButtonElement).click());
-  expect(await db().conversation.count({ where: { id: conversationId } })).toBe(1);
+  // Gone — thread and ticket both.
+  await expect
+    .poll(() => db().conversation.count({ where: { id: conversationId } }), { timeout: 20_000 })
+    .toBe(0);
+  expect(await db().ticket.count({ where: { workspaceId, subject: `${PREFIX}refund` } })).toBe(0);
 });

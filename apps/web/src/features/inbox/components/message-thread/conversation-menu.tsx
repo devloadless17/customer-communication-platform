@@ -63,8 +63,13 @@ export function ConversationMenu({
   async function deleteConversation() {
     const ok = await confirm({
       title: `Delete this chat with "${contactName}"?`,
+      // Tickets are named up front, not explained afterwards: deleting the
+      // thread takes them with it (and their history, files and escalations),
+      // which is the one consequence someone could not otherwise guess.
       description:
-        "Removes all messages and notes from this thread. The contact stays. This can't be undone.",
+        "Removes all messages and notes from this thread, along with any tickets " +
+        "raised on it — including their history, files, and any department they " +
+        "were escalated to. The contact stays. This can't be undone.",
       confirmLabel: "Delete chat",
       destructive: true,
     });

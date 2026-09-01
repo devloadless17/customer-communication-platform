@@ -1,19 +1,20 @@
 /**
- * Deleting a conversation that carries TICKETS is refused — and the refusal
- * says WHY.
+ * Deleting a conversation DELETES ITS TICKETS (maintainer decision,
+ * 2026-08-20). This replaced a hard refusal added by audit 2026-08-19 S12-2.
  *
- * The guard itself came from audit 2026-08-19 (S12-2): a conversation delete
- * cascaded into Ticket → TicketShare, so tidying a thread destroyed a sibling
- * workspace's live work. The service returns 409 `conversation_has_tickets`
- * with a written explanation.
+ * The refusal made the common case a hunt: a ticket's delete button lives only
+ * on its own detail page and is hidden on a ticket escalated INTO the
+ * workspace, so some threads could not be deleted by anyone. `Ticket.
+ * conversation` is already onDelete: Cascade, so the delete now simply lets
+ * that happen — deliberately, with the consequence stated in the confirmation
+ * BEFORE the click and the count reported after.
  *
- * This spec exists because the refusal had NO coverage, which is how the web
- * client got away with discarding the body and rendering "Please try again" —
- * advice that can never work, on the one error the person can actually act on.
- * It pins BOTH halves of the contract the UI depends on:
- *   - single delete → 409, machine key, and a human `detail` naming the count;
- *   - bulk delete   → ticket-bearing threads are SKIPPED and reported via
- *     `skippedWithTickets` while the clean ones still delete.
+ * What this pins, because the cascade reaches further than the ticket row:
+ *   - the ticket, its cross-department thread, history, share and attachment
+ *     rows all go with the conversation;
+ *   - attachment BLOBS are collected for deletion (the FK knows nothing about
+ *     R2, so without that they'd linger until the orphan sweeper);
+ *   - the count is reported so the UI can say what was destroyed.
  *
  *   pnpm --filter @ccp/api exec vitest run test/conversation-delete-ticket-guard.spec.ts
  */
@@ -81,65 +82,44 @@ afterAll(async () => {
   await db.organization.deleteMany({ where: { id: organizationId } });
 });
 
-describe("conversation delete × ticket guard", () => {
+describe("conversation delete × tickets", () => {
   function service() {
-    // The service only needs its db here; the bus/contacts collaborators are
-    // never reached because the guard throws first — which is the point.
     const bus = { publish: async () => {} };
     const contacts = {};
-    return new ConversationsService(
-      db as never,
-      bus as never,
-      contacts as never,
-    );
+    return new ConversationsService(db as never, bus as never, contacts as never);
   }
 
-  it("refuses, with a reason that names the ticket count", async () => {
-    let thrown: unknown;
-    try {
-      await service().remove(workspaceId, "user-irrelevant", ticketedConversationId);
-    } catch (err) {
-      thrown = err;
-    }
-    expect(thrown).toBeDefined();
-    const body = (thrown as { getResponse: () => Record<string, unknown> }).getResponse();
-    expect(body.error).toBe("conversation_has_tickets");
-    expect(body.ticketCount).toBe(1);
-    // The `detail` is what the person actually reads — it must explain the
-    // consequence, not restate the key. The web client renders it verbatim.
-    expect(String(body.detail)).toMatch(/1 ticket/);
-    expect(String(body.detail)).toMatch(/Delete the ticket/i);
-
-    // And the thread is untouched.
-    const still = await db.conversation.findUnique({ where: { id: ticketedConversationId } });
-    expect(still).not.toBeNull();
-  });
-
-  it("the guard is the ONLY protection — the FK cascades", async () => {
-    // Ticket.conversation is `onDelete: Cascade`, so a raw delete takes the
-    // tickets (and their shares, thread and files) with it. That is precisely
-    // the data loss the guard above prevents, and why it must never be relaxed
-    // into a warning. Proven on a THROWAWAY pair so nothing else depends on it.
-    const doomedId = await makeConversation(`Doomed ${SUFFIX}`, `1779${SUFFIX.slice(-7)}`);
-    await db.ticket.create({
+  it("deletes the thread AND its tickets, reporting how many", async () => {
+    const ticketId = (await db.ticket.findFirstOrThrow({
+      where: { workspaceId, conversationId: ticketedConversationId },
+      select: { id: true },
+    })).id;
+    // A cross-department thread message + an attachment row, so the assertion
+    // covers the cascade's REACH rather than just the ticket row.
+    await db.ticketAttachment.create({
       data: {
         workspaceId,
-        number: 2,
-        conversationId: doomedId,
-        channel: "whatsapp",
-        subject: `doomed ${SUFFIX}`,
+        ticketId,
+        blobKey: `media/${SUFFIX}/evidence.pdf`,
+        blobUrl: `https://example.invalid/media/${SUFFIX}/evidence.pdf`,
+        filename: "evidence.pdf",
+        mimeType: "application/pdf",
+        kind: "document",
+        sizeBytes: 10,
       },
     });
-    await db.conversation.delete({ where: { id: doomedId } });
-    const orphanedOrGone = await db.ticket.findFirst({
-      where: { workspaceId, subject: `doomed ${SUFFIX}` },
-    });
-    expect(orphanedOrGone).toBeNull(); // cascaded away with the thread
+
+    const result = await service().remove(workspaceId, "actor-user", ticketedConversationId);
+    expect(result.deletedTickets).toBe(1);
+
+    expect(await db.conversation.count({ where: { id: ticketedConversationId } })).toBe(0);
+    expect(await db.ticket.count({ where: { id: ticketId } })).toBe(0);
+    expect(await db.ticketAttachment.count({ where: { ticketId } })).toBe(0);
   });
 
-  it("a conversation with no tickets still deletes", async () => {
-    await db.conversation.delete({ where: { id: cleanConversationId } });
-    const gone = await db.conversation.findUnique({ where: { id: cleanConversationId } });
-    expect(gone).toBeNull();
+  it("reports zero tickets for a clean thread, and still deletes it", async () => {
+    const result = await service().remove(workspaceId, "actor-user", cleanConversationId);
+    expect(result.deletedTickets).toBe(0);
+    expect(await db.conversation.count({ where: { id: cleanConversationId } })).toBe(0);
   });
 });
