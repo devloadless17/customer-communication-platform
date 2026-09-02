@@ -325,5 +325,18 @@ free, so a broken billing setup looks fine right up until the first broadcast.
       subscription every 30 minutes and repairs what it can. What it can't
       repair raises a reconnect banner on the settings page — that banner is
       the one signal worth watching.
+- [ ] **Never use the Cloud API number as an OTP destination.** Once a number
+      is registered to Cloud API it cannot be used with the WhatsApp app, so
+      codes sent to it can only arrive through the webhook — and a message
+      another business sends via the API to a number already on the API is
+      delivered as `type: "unsupported"` with **no body at all** (Meta's own
+      documented trigger: *"You use the API to send a message to a number
+      already in use with the API… Cloud API sends the webhook to the owner of
+      the recipient number"*). A received TEMPLATE lands as
+      `unsupported.type: "hsm"` — Meta's internal name for a message template.
+      The code is not recoverable by anyone. Verifying an Instagram/bank/any
+      third-party account? Use email or a different phone. (Coexistence is the
+      one documented exception — the number runs in the business app and the
+      API concurrently — and it needs the pending Tech Provider approval.)
 - [ ] **Invite the team:** workspace members, roles, and assignment policies —
       once the channel is proven.
