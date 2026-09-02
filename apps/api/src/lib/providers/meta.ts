@@ -340,16 +340,25 @@ function placeholderForUnhandledType(m: MetaMessage): string | null {
       return note ? `🛒 Order shared — ${note}` : "🛒 Order shared";
     }
     case "unsupported": {
-      // Meta strips the content for unsupported types; the errors array and
-      // the `unsupported.type` sub-object are the only context. Causes: a
-      // message kind the Cloud API can't represent (poll, pin, group invite,
-      // an edit while Meta's edit delivery is down, …) — named in
-      // `unsupported.type`; or 131060 "currently unavailable" (typically the
-      // first CTWA message to a Coexistence number). Surface both the KIND
-      // and Meta's reason so it's not a context-free "Unsupported message".
+      // Meta's unsupported payload carries NO body — verified against the
+      // webhook reference, whose documented syntax has only from/id/timestamp/
+      // errors/unsupported. So the errors array and `unsupported.type` are the
+      // only context there will ever be; the content is not withheld from us,
+      // it is never sent. Causes: a kind the Cloud API can't represent (poll,
+      // pin, group invite, an edit while Meta's edit delivery is down); a
+      // message another business sent VIA THE API to a number already on the
+      // API ("Cloud API sends the webhook to the owner of the recipient
+      // number") — that one is how an OTP/verification template arrives, as
+      // `hsm`; or 131060 "currently unavailable" (typically the first CTWA
+      // message to a Coexistence number).
       const err = m.errors?.[0];
       const reason = err?.error_data?.details?.trim() || err?.title?.trim();
       const kind = m.unsupported?.type?.trim();
+      const hint = kind ? UNSUPPORTED_KIND_HINTS[kind] : undefined;
+      // 131060 means "currently unavailable", a DIFFERENT thing from 131051
+      // "type not supported" — Meta's own sentence wins there. For 131051 the
+      // details line is generic boilerplate the hint already says better.
+      if (hint && err?.code !== 131060) return `⚠️ Unsupported message — ${hint}`;
       const label = kind
         ? `⚠️ Unsupported message (${kind.replace(/_/g, " ")})`
         : "⚠️ Unsupported message";
@@ -378,6 +387,35 @@ function placeholderForUnhandledType(m: MetaMessage): string | null {
       return m.type ? `Unsupported message (${m.type})` : null;
   }
 }
+
+/**
+ * Human explanation per `unsupported.type` — Meta's enum on the unsupported
+ * webhook (button, edit, gif, group_invite, hsm, keep_in_chat, link_preview,
+ * media_placeholder, pin, poll_creation, poll_update, …).
+ *
+ * The raw value is developer jargon: `hsm` is Meta's internal name for a
+ * message TEMPLATE, `keep_in_chat` is a kept view-once. An agent reading
+ * "⚠️ Unsupported message (hsm) — Message type is currently not supported"
+ * learns nothing about what arrived or whether to chase it, and Meta's own
+ * details line is the same boilerplate for every kind. So map the kinds whose
+ * name doesn't explain itself; everything else falls back to the humanised
+ * enum value, which reads fine on its own (`poll creation`, `group invite`).
+ *
+ * `hsm` earns the longest line because it is the one people report as a bug:
+ * a verification code sent to the connected number renders as an empty
+ * placeholder, and the answer ("the content is never delivered, use another
+ * number") is not guessable from anything on screen.
+ */
+const UNSUPPORTED_KIND_HINTS: Record<string, string> = {
+  hsm: "a template message from another business (e.g. a verification code). WhatsApp never delivers a received template's content to the API, so it cannot be read here — use another number or email for codes",
+  unknown: "a message type WhatsApp doesn't deliver to the API",
+  keep_in_chat: "a view-once message the sender kept",
+  media_placeholder: "media still uploading on the sender's device",
+  group_invite: "a group invite",
+  link_preview: "a link preview",
+  edit: "an edited message",
+  pin: "a pinned message",
+};
 
 /**
  * Build the structured (non-media) payload for a location pin or contact card so
