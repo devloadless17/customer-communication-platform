@@ -215,7 +215,17 @@ export function useVoiceRecorder(opts: {
 
   // Stop any in-flight recording when the host unmounts (chat switch
   // mid-record). Without this the mic tracks stay hot in the background.
+  //
+  // The body RESETS the flag, and that line is load-bearing. React mounts,
+  // unmounts and re-mounts every effect in development (StrictMode), and does
+  // the same in production under Fast Refresh and `<Activity>`. With only the
+  // cleanup writing it, the flag stuck at `true` from the first render: every
+  // recording then got the microphone, saw "disposed" at the post-getUserMedia
+  // guard, silently dropped the stream and returned — no bar, no error, a mic
+  // button that did nothing. The reset restores the flag's actual meaning,
+  // "this mount has ended", rather than "some mount once ended".
   useEffect(() => {
+    disposedRef.current = false;
     return () => {
       disposedRef.current = true;
       try {
