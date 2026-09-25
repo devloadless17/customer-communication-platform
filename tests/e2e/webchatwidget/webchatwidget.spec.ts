@@ -1499,7 +1499,13 @@ test("visitor can drag-resize the panel, and the size survives a refresh", async
   try {
     const v = await ctx.newPage();
     await mountWidget(v, PUBLIC_KEY);
-    const width = (): Promise<number> => v.evaluate(`Math.round(document.getElementById("ccp-webchat-root").shadowRoot.querySelector(".panel").getBoundingClientRect().width)`);
+    // `offsetWidth`, NOT `getBoundingClientRect().width`. The panel opens with a
+    // scale transform (.98 → 1 over 280ms) and a bounding rect INCLUDES the
+    // transform, so a read inside that window measured a ~580px panel a few
+    // pixels narrow — the persisted-size check below then failed by one pixel
+    // on some runs and passed on others. The layout width is the size the
+    // visitor set, whatever the animation is doing.
+    const width = (): Promise<number> => v.evaluate(`document.getElementById("ccp-webchat-root").shadowRoot.querySelector(".panel").offsetWidth`);
     const narrow = await width();
     expect(narrow).toBeLessThan(450); // corner-chat default (~376, sub-pixel varies)
 
