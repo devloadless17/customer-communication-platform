@@ -124,6 +124,12 @@ WORKDIR /tools
 #   - hono < 4.12.25: CORS middleware reflects any Origin with credentials (CVE-2026-54290)
 #   - fast-uri < 3.1.4 (3.x line): ReDoS in URI parsing (CVE-2026-16221)
 #   - deepmerge-ts < 8.0.0: stack exhaustion merging recursive objects (CVE-2026-40345)
+#   - fast-uri < 3.1.6: server-side issue in URI handling (CVE-2026-75899) —
+#     supersedes the 3.1.4 floor above; the range below is the one in force
+#   - mysql2 < 3.22.0: auth plugin downgrade to mysql_clear_password
+#     (GHSA-3f6p-5ww8-9rcr). Nothing here talks to MySQL — it rides in through
+#     prisma's own dependency tree — but it ships in the image, so it is pinned
+#     rather than argued away.
 # These come in via tsx's runtime deps (chokidar → picomatch, esbuild) and
 # prisma's config loader (@prisma/config → effect) + prisma's dev server
 # (prisma → @prisma/dev → @hono/node-server → hono → ... → fast-uri, plus any
@@ -134,7 +140,7 @@ WORKDIR /tools
 # fast-uri pins via the root pnpm.overrides; this keeps the web cli-tools
 # tree (a separate npm install) explicitly patched rather than relying on npm
 # happening to resolve @prisma/dev's `^4.12.8` range to the latest registry version.
-RUN echo '{"name":"cli-tools","private":true,"overrides":{"picomatch":"^4.0.4","effect":"^3.20.0","esbuild":"^0.28.1","hono":"^4.12.25","fast-uri":"^3.1.5","deepmerge-ts":"^8.0.0"}}' > package.json && \
+RUN echo '{"name":"cli-tools","private":true,"overrides":{"picomatch":"^4.0.4","effect":"^3.20.0","esbuild":"^0.28.1","hono":"^4.12.25","fast-uri":"^3.1.6","deepmerge-ts":"^8.0.0","mysql2":"^3.22.0"}}' > package.json && \
     npm install --no-save --no-package-lock --omit=dev \
       prisma@7.8.0 \
       @prisma/client@7.8.0 \
