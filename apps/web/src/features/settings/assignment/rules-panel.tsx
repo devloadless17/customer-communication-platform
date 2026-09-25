@@ -50,10 +50,22 @@ export function RulesPanel({
    * and SUCCEEDED — silently dropping the first pick. The controls are disabled
    * while a save runs, and whatever the server answers replaces this.
    */
-  const [pending, setPending] = useState<{ id: string; body: Partial<RuleRow> } | null>(null);
+  // Keyed by rule: every edit not yet confirmed by the server, per rule, so a
+  // multi-select building its next `conditions` from `shown(rule)` builds on
+  // the LATEST intended state — including a change still waiting to be sent.
+  // The EDIT controls below are deliberately NOT disabled while a save runs
+  // (move / delete / add still are). They were, and that is what actually ate
+  // the second change: a mousedown on the switch blurs the name box, the
+  // rename's save flips `busy`, React re-renders the switch disabled, and the
+  // click then lands on a disabled control and fires nothing — nothing reached
+  // the queue to be saved. Disabling was a stand-in for "don't build on a stale
+  // view"; `pending` + the queue now provide exactly that.
+  const [pending, setPending] = useState<Record<string, Partial<RuleRow>>>({});
   const inFlight = useRef(false);
+  /** Rule edits that arrived while a save was running — merged per rule, sent next. */
+  const queued = useRef(new Map<string, Partial<RuleRow>>());
   const shown = (rule: RuleRow): RuleRow =>
-    pending?.id === rule.id ? { ...rule, ...pending.body } : rule;
+    pending[rule.id] ? { ...rule, ...pending[rule.id] } : rule;
   const defaultPolicy = policies.find((p) => p.isDefault) ?? policies[0];
 
   // Accounts worth offering as a routing condition: only on channels that
@@ -112,18 +124,33 @@ export function RulesPanel({
   };
 
   const patchRule = async (id: string, body: Partial<RuleRow>) => {
+    // One save at a time, and NOTHING DROPPED — the same fix as
+    // AutomationPanel's `patch` (read that note). The name and keyword inputs
+    // are uncontrolled and save on blur, so renaming a rule and then clicking
+    // its switch fires two saves in one gesture; the second used to be
+    // discarded silently, and in the other order the box went on showing a
+    // name the server never received. Now it is queued, merged per rule, and
+    // sent in order. Rule PATCHes carry no version, so there is no stale-
+    // version hazard here — ordering is the whole requirement.
+    queued.current.set(id, { ...queued.current.get(id), ...body });
+    setPending((p) => ({ ...p, [id]: { ...p[id], ...body } }));
     if (inFlight.current) return;
     inFlight.current = true;
-    setPending({ id, body });
     try {
-      await call(`/api/workspace/assignment/rules/${id}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
+      for (;;) {
+        const first = queued.current.entries().next();
+        if (first.done) break;
+        const [nextId, nextBody] = first.value;
+        queued.current.delete(nextId);
+        await call(`/api/workspace/assignment/rules/${nextId}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(nextBody),
+        });
+      }
     } finally {
       inFlight.current = false;
-      setPending(null);
+      setPending({});
     }
   };
 
@@ -157,7 +184,6 @@ export function RulesPanel({
               className="flex-1"
               defaultValue={serverRule.name}
               maxLength={80}
-              disabled={busy}
               onBlur={(e) => {
                 if (e.target.value.trim() && e.target.value !== serverRule.name) {
                   void patchRule(rule.id, { name: e.target.value.trim() });
@@ -166,7 +192,6 @@ export function RulesPanel({
             />
             <Switch
               checked={rule.enabled}
-              disabled={busy}
               onCheckedChange={(v) => void patchRule(rule.id, { enabled: v })}
             />
             <Button
@@ -211,7 +236,6 @@ export function RulesPanel({
                 multiple
                 className="h-auto min-h-24"
                 value={rule.conditions.channels ?? []}
-                disabled={busy}
                 onChange={(e) =>
                   void patchRule(rule.id, {
                     conditions: {
@@ -245,7 +269,6 @@ export function RulesPanel({
                   multiple
                   className="h-auto min-h-24"
                   value={rule.conditions.channelAccountIds ?? []}
-                  disabled={busy}
                   onChange={(e) =>
                     void patchRule(rule.id, {
                       conditions: {
@@ -274,7 +297,6 @@ export function RulesPanel({
               </label>
               <Input
                 defaultValue={(serverRule.conditions.keywords ?? []).join(", ")}
-                disabled={busy}
                 placeholder="refund, cancel, urgent"
                 onBlur={(e) =>
                   void patchRule(rule.id, {
@@ -295,7 +317,6 @@ export function RulesPanel({
               <label className="text-xs font-medium">Then route with</label>
               <Select
                 value={rule.policyId}
-                disabled={busy}
                 onChange={(e) => void patchRule(rule.id, { policyId: e.target.value })}
               >
                 {policies.map((p) => (

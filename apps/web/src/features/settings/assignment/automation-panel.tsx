@@ -53,35 +53,66 @@ export function AutomationPanel({
    * answers — the saved value, a co-admin's value on a 409, the old value on a
    * failure (with its toast) — replaces it.
    */
+  // No control here is disabled while a save runs, on purpose: a mousedown on a
+  // toggle blurs the minutes box, that save flipped `saving`, the toggle
+  // re-rendered disabled, and the click landed on it and fired nothing. Every
+  // control routes through the queued `patch` below, so a change made mid-save
+  // is kept and sent in order — "Saving…" is the feedback, not a locked page.
   const [pending, setPending] = useState<Partial<AssignmentSettingsRow>>({});
   const inFlight = useRef(false);
+  /** Changes that arrived while a save was running — merged, sent next. */
+  const queued = useRef<Partial<AssignmentSettingsRow>>({});
   const view: AssignmentSettingsRow = { ...settings, ...pending };
 
   const patch = async (body: Partial<AssignmentSettingsRow>) => {
-    // One save at a time. Each PATCH carries `settings.version`, which only
-    // advances when the re-fetch lands — so a second change inside the window
-    // went out with a STALE version, earned a 409, and told the person that
-    // "someone else changed these settings" when nobody had. The controls are
-    // disabled while saving; this covers a change that slips in before that
-    // render commits.
+    // One save at a time, and NOTHING DROPPED. A change that arrives mid-save
+    // is queued and coalesced, then sent when the running save finishes.
+    //
+    // It used to be discarded (`if (inFlight) return`). The controls ARE
+    // disabled while saving, but a change can land before that render commits:
+    // typing into "Wait … minutes" and then clicking a toggle fires the input's
+    // blur (a save) and the toggle's change in the same gesture, and the second
+    // one vanished with no feedback. Worse, the input is uncontrolled, so it
+    // kept showing a value the server never received.
+    //
+    // Why one-at-a-time at all: each PATCH carries `expectedVersion`. The
+    // version on `settings` only advances when the re-fetch lands, so a queued
+    // save built from it would earn a 409 and tell the person "someone else
+    // changed these settings" when nobody had. The PATCH response carries the
+    // NEW version, so each queued save uses the one the server just returned.
+    queued.current = { ...queued.current, ...body };
+    setPending((p) => ({ ...p, ...body }));
     if (inFlight.current) return;
     inFlight.current = true;
-    setPending(body);
     setSaving(true);
+    let version = settings.version;
     try {
-      const res = await apiFetch("/api/workspace/assignment/settings", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...body, expectedVersion: settings.version }),
-      });
-      if (res.status === 409) {
-        toast("Someone else changed these settings — reloading");
-        await onChanged();
-        return;
+      while (Object.keys(queued.current).length > 0) {
+        const next = queued.current;
+        queued.current = {};
+        const res = await apiFetch("/api/workspace/assignment/settings", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ ...next, expectedVersion: version }),
+        });
+        if (res.status === 409) {
+          // A genuine conflict: a co-admin saved in between. Whatever is still
+          // queued was built on the view that just went stale, so it is
+          // dropped WITH a message, and the page reloads to the truth.
+          queued.current = {};
+          toast("Someone else changed these settings — reloading");
+          await onChanged();
+          return;
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = (await res.json().catch(() => null)) as {
+          settings?: { version?: number };
+        } | null;
+        version = json?.settings?.version ?? version;
       }
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       await onChanged();
     } catch {
+      queued.current = {};
       toast("Couldn't save — reverted");
       await onChanged();
     } finally {
@@ -114,7 +145,6 @@ export function AutomationPanel({
           label="Assign new conversations automatically"
           hint="A brand-new conversation is routed through your teams as soon as the first message arrives. Off means every new chat waits in the Unassigned queue for someone to claim it."
           checked={view.autoAssignOnNewConversation}
-          disabled={saving}
           onChange={(v) => void patch({ autoAssignOnNewConversation: v })}
         />
         {view.autoAssignOnNewConversation && (
@@ -123,15 +153,13 @@ export function AutomationPanel({
             label="Let the AI handle it first"
             hint="While the AI assistant is answering, don't spend an agent's capacity on the conversation. A human is routed in the moment the AI escalates. Turn this off if you want every conversation to have a named owner from the first message, even while the AI replies."
             checked={view.skipWhenAiHandling}
-            disabled={saving}
-            onChange={(v) => void patch({ skipWhenAiHandling: v })}
+              onChange={(v) => void patch({ skipWhenAiHandling: v })}
           />
         )}
         <Toggle
           label="Assign when an unassigned conversation gets a new message"
           hint="Covers reopened threads and ones a teammate deliberately unassigned. A conversation that already has an owner is never touched."
           checked={view.autoAssignOnReopen}
-          disabled={saving}
           onChange={(v) => void patch({ autoAssignOnReopen: v })}
         />
       </Group>
@@ -143,8 +171,7 @@ export function AutomationPanel({
         <div className="space-y-1.5">
           <Select
             value={view.agentConversationVisibility}
-            disabled={saving}
-            onChange={(e) =>
+              onChange={(e) =>
               void patch({
                 agentConversationVisibility: e.target.value as AssignmentSettingsRow["agentConversationVisibility"],
               })
@@ -179,8 +206,7 @@ export function AutomationPanel({
         <div className="space-y-1.5">
           <Select
             value={view.aiHandoffPolicyId ?? ""}
-            disabled={saving}
-            onChange={(e) => void patch({ aiHandoffPolicyId: e.target.value || null })}
+              onChange={(e) => void patch({ aiHandoffPolicyId: e.target.value || null })}
           >
             <option value="">Use my routing rules (default)</option>
             {policies.map((p) => (
@@ -206,7 +232,6 @@ export function AutomationPanel({
           label="Reassign when an agent goes offline"
           hint="Conversations sitting with someone who has closed the app get re-routed. Only conversations where no agent has replied yet are moved by default, so nobody is pulled out of a live exchange."
           checked={view.reassignOnOffline}
-          disabled={saving}
           onChange={(v) => void patch({ reassignOnOffline: v })}
         />
         {view.reassignOnOffline && (
@@ -219,8 +244,7 @@ export function AutomationPanel({
                 max={1440}
                 className="w-20 text-right"
                 defaultValue={settings.reassignOfflineAfterMinutes}
-                disabled={saving}
-                onBlur={(e) => {
+                      onBlur={(e) => {
                   const value = Number(e.target.value);
                   if (
                     Number.isFinite(value) &&
@@ -241,8 +265,7 @@ export function AutomationPanel({
               label="Only move conversations nobody has replied to yet"
               hint="Strongly recommended. A conversation an agent is mid-exchange on carries context; handing it to someone else mid-sentence is worse for the customer than a short wait."
               checked={view.reassignOfflineOnlyPending}
-              disabled={saving}
-              onChange={(v) => void patch({ reassignOfflineOnlyPending: v })}
+                  onChange={(v) => void patch({ reassignOfflineOnlyPending: v })}
             />
           </>
         )}
@@ -250,7 +273,6 @@ export function AutomationPanel({
           label="Reassign when a teammate is deactivated"
           hint="Their open conversations are routed to someone else immediately. Without this they sit with an account that can no longer log in, and never appear in anyone's queue."
           checked={view.reassignOnDeactivate}
-          disabled={saving}
           onChange={(v) => void patch({ reassignOnDeactivate: v })}
         />
       </Group>

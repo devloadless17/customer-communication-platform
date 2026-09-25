@@ -51,6 +51,7 @@ const BATCHES = [
     "tests/e2e/contacts-segments.spec.ts",
     "tests/e2e/contact-select-fields.spec.ts",
     "tests/e2e/reports-team.spec.ts",
+    "tests/e2e/assignment-settings-saves.spec.ts",
   ],
   // Two real sessions at once — its own batch because it holds a SECOND logged-in
   // browser context for the whole run, and one of its cases deliberately takes
