@@ -6,6 +6,11 @@ import { publish } from "@/lib/events/bus";
 import { assignConversation } from "@/lib/conversations/mutations";
 import { createOutboundMessageIdempotent, isTransient } from "@/lib/messages/idempotent-create";
 import {
+  buildTemplateSentSnapshot,
+  headerMediaColumns,
+  type TemplateSentSnapshot,
+} from "@/lib/templates/sent-snapshot";
+import {
   BsuidPortfolioMismatchError,
   applyBsuidPortfolioGuard,
 } from "@/lib/messaging/bsuid-routing";
@@ -428,6 +433,9 @@ interface BroadcastVariables {
     link?: string;
     id?: string;
     filename?: string;
+    /** App-side only — lets each recipient's thread render the header. */
+    mimeType?: string;
+    sizeBytes?: number;
   };
   /**
    * Carousel cards, campaign-level. The count is fixed by the approved
@@ -1012,10 +1020,29 @@ async function runBroadcast(broadcastId: string): Promise<void> {
 
   // One object rather than three more positional params on an already-8-arg
   // function — and it keeps the three facts that must agree together.
+  const campaignVars = parseVariables(broadcast.variables);
+  const headerFormat = (Array.isArray(template?.components) ? template.components : [])
+    .find((c) => (c as { type?: string }).type === "HEADER") as { format?: string } | undefined;
   const wireFormat: TemplateWireFormat = {
     parameterFormat: templateParameterFormat,
     namedBodyVars,
     ...(namedHeaderVar ? { namedHeaderVar } : {}),
+    sentSnapshot: template
+      ? buildTemplateSentSnapshot(
+          template.components,
+          (campaignVars.buttons ?? []).map((b) =>
+            b.subType === "url" ? { ...b, text: encodeUrlButtonValue(b.text) } : b,
+          ),
+        )
+      : null,
+    headerMediaKind:
+      headerFormat?.format === "IMAGE"
+        ? "image"
+        : headerFormat?.format === "VIDEO"
+          ? "video"
+          : headerFormat?.format === "DOCUMENT"
+            ? "document"
+            : null,
   };
 
   if (template) {
@@ -1776,6 +1803,15 @@ interface TemplateWireFormat {
   namedBodyVars: string[];
   /** The header's single placeholder name, when the header is named-format. */
   namedHeaderVar?: string;
+  /**
+   * The footer + buttons every recipient's thread shows under the body (see
+   * lib/templates/sent-snapshot). Built ONCE per run: a campaign only admits
+   * templates whose buttons need no send-time value (a dynamic one fails the
+   * whole broadcast before the claim), so it is identical for every recipient.
+   */
+  sentSnapshot: TemplateSentSnapshot | null;
+  /** The template's media-header kind, for the header-media columns. */
+  headerMediaKind: "image" | "video" | "document" | null;
 }
 
 async function processOneRecipient(
@@ -2865,6 +2901,14 @@ async function processOneRecipient(
         // Broadcasts remain authoritative via `BroadcastRecipient`; this keeps the
         // two views of the same send consistent.
         ...(broadcast.templateName ? { templateName: broadcast.templateName } : {}),
+        // The rest of the template, so each recipient's thread shows what the
+        // customer received — the same two rules the single-send path applies
+        // (lib/templates/sent-snapshot). The header uses the campaign's STABLE
+        // link, never the run-scoped media id or a presigned url.
+        ...headerMediaColumns(broadcast.workspaceId, wireFormat.headerMediaKind, variables.headerMedia),
+        ...(wireFormat.sentSnapshot
+          ? { structured: wireFormat.sentSnapshot }
+          : {}),
         rawPayload: {
           sentVia: "broadcast",
           broadcastId: broadcast.id,
@@ -4707,7 +4751,14 @@ function parseVariables(v: Prisma.JsonValue): BroadcastVariables {
   const header = typeof obj.header === "string" ? obj.header : undefined;
   let headerMedia: BroadcastVariables["headerMedia"];
   const hm = obj.headerMedia as
-    | { kind?: unknown; link?: unknown; id?: unknown; filename?: unknown }
+    | {
+        kind?: unknown;
+        link?: unknown;
+        id?: unknown;
+        filename?: unknown;
+        mimeType?: unknown;
+        sizeBytes?: unknown;
+      }
     | undefined;
   if (
     hm &&
@@ -4722,6 +4773,10 @@ function parseVariables(v: Prisma.JsonValue): BroadcastVariables {
       ...(typeof hm.id === "string" ? { id: hm.id } : {}),
       ...(typeof hm.link === "string" ? { link: hm.link } : {}),
       ...(typeof hm.filename === "string" ? { filename: hm.filename } : {}),
+      ...(typeof hm.mimeType === "string" ? { mimeType: hm.mimeType } : {}),
+      ...(typeof hm.sizeBytes === "number" && Number.isFinite(hm.sizeBytes)
+        ? { sizeBytes: hm.sizeBytes }
+        : {}),
     };
   }
   let headerLocation: BroadcastVariables["headerLocation"];

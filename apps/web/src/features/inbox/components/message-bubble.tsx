@@ -135,6 +135,7 @@ import { FlagChips } from "./message-bubble/flag-chips";
 import { MediaBlock, StickerImage } from "./message-bubble/media-blocks";
 import { QuotedReply } from "./message-bubble/quoted-reply";
 import { StructuredBlock } from "./message-bubble/structured-block";
+import { TemplateExtras } from "./message-bubble/template-extras";
 
 /**
  * One reaction: an emoji-forward circular badge with a small corner avatar
@@ -564,7 +565,7 @@ function BubbleContent({
               <Ban className="size-3.5 shrink-0" />
               This message was deleted
             </p>
-          ) : message.structured ? (
+          ) : message.structured && message.structured.kind !== "template" ? (
             // Location pin / contact card — a dedicated bubble replacing the
             // plain text placeholder (the placeholder body is still stored for
             // search / list preview, just not rendered here). A STORY reply,
@@ -615,7 +616,14 @@ function BubbleContent({
                   dir="auto"
                   className={cn(
                     "whitespace-pre-wrap wrap-break-word",
-                    media || reply ? "px-2.5 pb-1.5 pt-2" : "",
+                    // A template snapshot puts the bubble on the tight `p-1`
+                    // card padding (any `structured` does), so its body pads
+                    // itself exactly as it does beside media — otherwise a
+                    // text-only template's body sits flush against the edge
+                    // while its footer is indented.
+                    media || reply || message.structured?.kind === "template"
+                      ? "px-2.5 pb-1.5 pt-2"
+                      : "",
                   )}
                 >
                   {searchQuery && searchQuery.trim().length > 0
@@ -641,6 +649,13 @@ function BubbleContent({
                   <Paperclip className="size-3.5 shrink-0" />
                   Attachment unavailable
                 </p>
+              )}
+              {/* A sent template's footer + buttons. The ONE structured kind that
+                  adds to the bubble instead of replacing it — a template is its
+                  header, body, footer and buttons together, which is how
+                  WhatsApp draws it on the customer's phone. */}
+              {message.structured?.kind === "template" && (
+                <TemplateExtras snapshot={message.structured} isOut={isOut} />
               )}
             </>
           )}

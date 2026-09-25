@@ -644,7 +644,50 @@ export interface ReplySnapshot {
  * `body` still carries a human-readable placeholder (for search / list preview /
  * unread), and this drives the rich rendering. Discriminated by `kind`.
  */
+/**
+ * One button of a SENT template, as the customer saw it.
+ *
+ * A `type` alias, not an interface, on purpose: it is stored in a Prisma JSON
+ * column, and Prisma's `InputJsonValue` only accepts object types with an index
+ * signature — which a type alias has implicitly and an interface does not. As an
+ * interface every write site needed an `as unknown as` cast (see
+ * scripts/check-double-assertions.mjs).
+ */
+export type TemplateSentButton = {
+  type:
+    | "url"
+    | "phone"
+    | "quick_reply"
+    | "copy_code"
+    | "otp"
+    | "voice_call"
+    | "catalog"
+    | "flow"
+    | "other";
+  text: string;
+  /** URL buttons: the RESOLVED link — base url + the dynamic suffix this send supplied. */
+  url?: string;
+  /** Phone buttons: the number the button dials. */
+  phone?: string;
+  /** Copy-code (coupon) buttons: the code this send carried. NEVER set for an
+   *  OTP button — that code is a login secret, not something to keep. */
+  code?: string;
+};
+
 export type MessageStructured =
+  | {
+      /**
+       * What a TEMPLATE send put on the customer's screen beyond its body: the
+       * approved footer and the buttons. Unlike every other kind here this one
+       * does NOT replace the bubble — it renders BELOW the header media and body,
+       * which is exactly how WhatsApp lays a template out. Snapshotted at send
+       * time rather than re-read from the template, because a template can be
+       * edited after it was sent and the thread must show what was ACTUALLY sent.
+       */
+      kind: "template";
+      footer?: string;
+      buttons?: TemplateSentButton[];
+    }
   | {
       kind: "location";
       latitude: number;

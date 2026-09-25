@@ -24,6 +24,7 @@ import {
 } from "@/lib/providers/channel-health";
 import { normalizeMetaSendError } from "@/lib/providers/meta-send-error";
 import { parseVariableBindings } from "@ccp/shared/template-bindings";
+import { buildTemplateSentSnapshot, headerMediaColumns } from "@/lib/templates/sent-snapshot";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import {
   countTemplatePlaceholders,
@@ -857,56 +858,13 @@ export async function sendTemplateInternal(
       ? new Date(lastTs.getTime() + 1)
       : receivedAt;
 
-  // The header asset, as REAL media columns — so the agent's own thread shows
-  // what the customer received instead of a bare line of body text. The bubble
-  // renders from `mediaKind` (external-shapes builds `media` off it), and the
-  // bytes already sit in our storage, so this streams same-origin like any
-  // other attachment and costs no extra fetch.
-  //
-  // THREE gates, each load-bearing:
-  //
-  //  1. Our own bucket AND under `media/{workspaceId}/` — `isOwnUrl` vets only
-  //     the HOST, and `/api/media/:id` scopes the MESSAGE, never the key. A
-  //     link is caller-supplied (send body, or a template default an admin
-  //     typed), so without the team-prefix check a workspace could point at a
-  //     sibling tenant's object and read it same-origin. Same rule, same
-  //     reasoning as `isOwnTeamMediaUrl` on the preview route.
-  //  2. The STABLE url, never `headerMediaLink` — that one is presigned for
-  //     Meta and expires, which would leave a broken image in the thread days
-  //     later.
-  //  3. A known mimeType (below) — `mapMessage` only emits the media DTO when
-  //     `mediaKind && mediaMimeType`, so writing the columns without a mime
-  //     produces a row that renders NOWHERE while still occupying a slot in the
-  //     Files tab and drawing a thumbnail on a quoted reply.
-  const ownTeamHeaderKey = (link: string): string | null => {
-    if (!blobStorage.isOwnUrl(link)) return null;
-    const key = blobStorage.keyFromUrl(link);
-    return key && key.startsWith(`media/${args.workspaceId}/`) ? key : null;
-  };
-  const headerMediaBlobKey =
-    suppliedMedia && !suppliedMedia.id && suppliedMedia.link
-      ? ownTeamHeaderKey(suppliedMedia.link)
-      : null;
-  const headerMediaColumns: {
-    mediaKind?: "image" | "video" | "document";
-    mediaKey?: string;
-    mediaUrl?: string;
-    mediaFilename?: string;
-    mediaMimeType?: string;
-    mediaSizeBytes?: number;
-  } =
-    headerMediaKind && headerMediaBlobKey && suppliedMedia?.link && suppliedMedia.mimeType
-      ? {
-          mediaKind: headerMediaKind,
-          mediaKey: headerMediaBlobKey,
-          mediaUrl: suppliedMedia.link,
-          ...(suppliedMedia.filename ? { mediaFilename: suppliedMedia.filename } : {}),
-          mediaMimeType: suppliedMedia.mimeType,
-          ...(suppliedMedia.sizeBytes !== undefined
-            ? { mediaSizeBytes: suppliedMedia.sizeBytes }
-            : {}),
-        }
-      : {};
+  // The header asset as real media columns, and the footer + buttons as a
+  // structured snapshot — so the agent's thread shows the whole template the
+  // customer received, not one line of body text. Both rules live in
+  // lib/templates/sent-snapshot, shared with the broadcast runner; see there for
+  // the three gates on the media and why the snapshot is taken at send time.
+  const headerColumns = headerMediaColumns(args.workspaceId, headerMediaKind, suppliedMedia);
+  const sentSnapshot = buildTemplateSentSnapshot(template.components, effectiveButtons);
 
   const created = await createOutboundMessageIdempotent({
     workspaceId: args.workspaceId,
@@ -917,7 +875,8 @@ export async function sendTemplateInternal(
     direction: "out",
     channel: provider,
     status: "sent",
-    ...headerMediaColumns,
+    ...headerColumns,
+    ...(sentSnapshot ? { structured: sentSnapshot } : {}),
     // Durable template marker. `rawPayload.templateName` below is kept for
     // back-compat, but the rawPayload-retention sweeper COLLAPSES that blob — the
     // same reason `broadcastId` became a real column. This one makes the portfolio
@@ -978,17 +937,18 @@ export async function sendTemplateInternal(
     // everywhere, or it renders nowhere and the bubble is exactly what it was
     // before this feature. A partial row would render nowhere while still
     // consuming a Files-tab slot and drawing a quoted-reply thumbnail.
-    ...(headerMediaColumns.mediaKind && suppliedMedia?.mimeType && suppliedMedia.sizeBytes !== undefined
+    ...(headerColumns.mediaKind && headerColumns.mediaMimeType && headerColumns.mediaSizeBytes !== undefined
       ? {
           media: {
-            kind: headerMediaColumns.mediaKind,
+            kind: headerColumns.mediaKind,
             url: `/api/media/${created.id}`,
-            mimeType: suppliedMedia.mimeType,
-            sizeBytes: suppliedMedia.sizeBytes,
-            ...(suppliedMedia.filename ? { filename: suppliedMedia.filename } : {}),
+            mimeType: headerColumns.mediaMimeType,
+            sizeBytes: headerColumns.mediaSizeBytes,
+            ...(headerColumns.mediaFilename ? { filename: headerColumns.mediaFilename } : {}),
           },
         }
       : {}),
+    ...(sentSnapshot ? { structured: sentSnapshot } : {}),
   };
 
   // Strict-monotonic bump + atomic message.sent publish, unified in

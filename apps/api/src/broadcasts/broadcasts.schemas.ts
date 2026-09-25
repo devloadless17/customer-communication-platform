@@ -92,6 +92,11 @@ export const BroadcastVariablesSchema = z.object({
       kind: z.enum(["image", "video", "document"]),
       link: z.string().url().max(2048),
       filename: z.string().max(255).optional(),
+      // App-side only, never sent to Meta: lets each recipient's thread render
+      // the campaign's header (see lib/templates/sent-snapshot). Optional — a
+      // campaign without them sends identically and simply shows as text.
+      mimeType: z.string().max(255).optional(),
+      sizeBytes: z.number().int().nonnegative().optional(),
     })
     .optional(),
   /**
