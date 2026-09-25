@@ -689,6 +689,23 @@ export type MessageStructured =
       buttons?: TemplateSentButton[];
     }
   | {
+      /**
+       * An inbound message the Cloud API delivered as `type: "unsupported"` —
+       * its payload carries NO body at all (a poll, a view-once, or a template
+       * another business sent to our API number, e.g. a verification code).
+       * These are Meta's facts only; the human explanation of each `type` lives
+       * in the web layer, so it never enters `Message.body`, where keyword
+       * routing rules, search and /v1 would all read it.
+       */
+      kind: "unsupported";
+      /** Meta's `unsupported.type` — `hsm`, `poll_creation`, `keep_in_chat`, … */
+      type?: string;
+      /** Meta's error code — 131051 "type not supported", 131060 "currently unavailable". */
+      code?: number;
+      /** Meta's own sentence for the error. */
+      reason?: string;
+    }
+  | {
       kind: "location";
       latitude: number;
       longitude: number;

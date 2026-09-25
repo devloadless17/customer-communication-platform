@@ -31,7 +31,14 @@ export interface SendTemplateStepConfig {
     header?: string;
     /** Static media for an IMAGE/VIDEO/DOCUMENT template header — a public link
      *  the workflow author sets once (same media for every triggered send). */
-    headerMedia?: { kind: "image" | "video" | "document"; link: string; filename?: string };
+    headerMedia?: {
+      kind: "image" | "video" | "document";
+      link: string;
+      filename?: string;
+      /** App-side only — lets the sent message render its header in the thread. */
+      mimeType?: string;
+      sizeBytes?: number;
+    };
   };
   /** Who to send to. Default = the trigger conversation's contact. A `phone`
    *  target reaches ANY number (auto-creates the contact + conversation) —
@@ -76,7 +83,13 @@ export const sendTemplateStepHandler: StepHandler<SendTemplateStepConfig> = {
     const header = typeof v.header === "string" && v.header.length > 0 ? v.header : undefined;
     let headerMedia: SendTemplateStepConfig["variables"]["headerMedia"];
     const hm = v.headerMedia as
-      | { kind?: unknown; link?: unknown; filename?: unknown }
+      | {
+          kind?: unknown;
+          link?: unknown;
+          filename?: unknown;
+          mimeType?: unknown;
+          sizeBytes?: unknown;
+        }
       | undefined;
     if (hm && typeof hm === "object") {
       if (
@@ -88,6 +101,15 @@ export const sendTemplateStepHandler: StepHandler<SendTemplateStepConfig> = {
           kind: hm.kind,
           link: hm.link,
           ...(typeof hm.filename === "string" ? { filename: hm.filename } : {}),
+          // Carried through rather than rebuilt away: without a mime the sent
+          // message cannot render its header image in the thread (the media
+          // columns are written both-or-neither — lib/templates/sent-snapshot),
+          // so an automated promo read as text while the same send from the
+          // inbox showed the image.
+          ...(typeof hm.mimeType === "string" ? { mimeType: hm.mimeType } : {}),
+          ...(typeof hm.sizeBytes === "number" && Number.isFinite(hm.sizeBytes)
+            ? { sizeBytes: hm.sizeBytes }
+            : {}),
         };
       } else {
         throw new StepConfigError(

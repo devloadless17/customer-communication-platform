@@ -1,10 +1,51 @@
-import { BookOpen, CalendarClock, MapPin, MessageCircle, ShoppingBag } from "lucide-react";
+import {
+  AlertTriangle,
+  BookOpen,
+  CalendarClock,
+  MapPin,
+  MessageCircle,
+  ShoppingBag,
+} from "lucide-react";
 import { LocationMap } from "./location-map";
 import { ContactCard } from "./contact-card";
 import { LocalTime } from "@/components/local-time";
 
 import { cn } from "@ccp/shared/utils";
 import type { MessageStructured } from "@ccp/shared/types";
+
+/**
+ * What an `unsupported` inbound actually WAS, in words an agent can act on.
+ *
+ * Meta's `unsupported.type` is developer jargon — `hsm` is its internal name
+ * for a message TEMPLATE, `keep_in_chat` a kept view-once — and its error
+ * sentence is the same boilerplate for every kind. So the kinds whose name
+ * doesn't explain itself get a sentence; the rest fall back to the humanised
+ * enum value, which reads fine alone ("poll creation", "group invite").
+ *
+ * Presentation, deliberately: it used to be baked into `Message.body` by the
+ * provider, where keyword routing rules, search and /v1 all read it and each
+ * wording froze into the rows ingested while it was current.
+ *
+ * `hsm` gets the longest line because it is the one reported as a bug: a
+ * verification code sent to the connected number arrives as this card, and
+ * the answer — the content is never delivered, use SMS/email for codes — is not
+ * guessable from anything else on screen.
+ */
+const UNSUPPORTED_EXPLANATIONS: ReadonlyMap<string, string> = new Map([
+  [
+    "hsm",
+    "A template message from another business, e.g. a verification code. WhatsApp never delivers a received template's content to the API — ask for codes by SMS or email instead.",
+  ],
+  ["unknown", "A message type WhatsApp doesn't deliver to the API."],
+  ["keep_in_chat", "A view-once message the sender kept."],
+  ["media_placeholder", "Media that was still uploading on the sender's device."],
+  ["group_invite", "A group invite."],
+  ["link_preview", "A link preview."],
+  ["edit", "An edited message."],
+  ["pin", "A pinned message."],
+  ["poll_creation", "A poll."],
+  ["poll_update", "A vote on a poll."],
+]);
 
 /**
  * Rich rendering for structured (non-media) message content — a shared WhatsApp
@@ -18,6 +59,37 @@ export function StructuredBlock({
   structured: MessageStructured;
   isOut: boolean;
 }) {
+  if (structured.kind === "unsupported") {
+    const sub = isOut ? "text-outbound-fg/75" : "text-muted-foreground";
+    // A Map, not an object literal: `type` comes off the wire, so a key like
+    // `constructor` must miss rather than resolve down the prototype chain.
+    const explanation = structured.type
+      ? UNSUPPORTED_EXPLANATIONS.get(structured.type)
+      : undefined;
+    const kindLabel = structured.type ? structured.type.replace(/_/g, " ") : null;
+    return (
+      <div className="flex max-w-xs items-start gap-2 px-2.5 py-2">
+        <AlertTriangle
+          className={cn("mt-0.5 size-4 shrink-0", isOut ? "text-outbound-fg" : "text-amber-500")}
+          aria-hidden
+        />
+        <div className="min-w-0 space-y-0.5">
+          <p className="text-sm font-medium">
+            Unsupported message{kindLabel && !explanation ? ` (${kindLabel})` : ""}
+          </p>
+          {explanation && <p className="text-sm">{explanation}</p>}
+          {/* Meta's own words and code — the only legible record of e.g. 131060
+              once rawPayload is collapsed by the retention sweeper. */}
+          {(structured.reason || structured.code) && (
+            <p className={cn("text-2xs", sub)}>
+              {structured.reason}
+              {structured.code ? ` (${structured.code})` : ""}
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
   if (structured.kind === "location") {
     const { latitude, longitude, name, address } = structured;
     // Open in the OS's default maps app (Google Maps universal query URL).

@@ -895,6 +895,13 @@ export async function listConversationAttachments(
       conversationId,
       mediaKind: { not: null },
       mediaUrl: { not: null },
+      // MUST match the renderer's gate: `mapMessage` emits the media DTO only
+      // when `mediaKind && mediaMimeType`, and both gallery tiles return null
+      // without it. A row passing this query but failing that gate took one of
+      // `take` and drew NOTHING — visible gaps, or for a thread whose only such
+      // rows are these, an empty tab with a live `nextCursor` so "Load more"
+      // kept producing nothing.
+      mediaMimeType: { not: null },
       ...(kindClause ?? {}),
       ...(cursor
         ? {
