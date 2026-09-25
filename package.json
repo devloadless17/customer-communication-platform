@@ -2,7 +2,7 @@
   "name": "customer-communication-platform",
   "version": "0.1.0",
   "private": true,
-  "packageManager": "pnpm@10.34.4",
+  "packageManager": "pnpm@10.34.5",
   "engines": {
     "node": ">=24 <25"
   },
@@ -92,7 +92,9 @@
       "socket.io-parser": "^4.2.7",
       "sharp": "^0.35.0",
       "postcss": "^8.5.12",
-      "deepmerge-ts": "^8.0.0"
+      "deepmerge-ts": "^8.0.0",
+      "@xmldom/xmldom": "^0.8.14",
+      "mysql2": "^3.22.0"
     }
   }
 }
