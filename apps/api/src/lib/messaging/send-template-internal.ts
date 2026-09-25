@@ -568,7 +568,14 @@ export async function sendTemplateInternal(
   // payload build below still sees that field; a stored default never carries
   // one, by design — media ids expire after 30 days and belong to the number
   // that uploaded them.
-  const resolvedHeaderMedia: typeof args.variables.headerMedia =
+  //
+  // `mimeType`/`sizeBytes` ride ALONGSIDE the wire fields rather than on the
+  // provider's `TemplateHeaderMedia`: they never reach Meta, they exist so the
+  // sent message renders in the agent's own thread. The send route's schema and
+  // the saved-default shape both carry them, so they are present at runtime on
+  // either path; the provider contract stays purely about the wire.
+  type HeaderMediaMeta = { mimeType?: string; sizeBytes?: number };
+  const resolvedHeaderMedia: (typeof args.variables.headerMedia & HeaderMediaMeta) | undefined =
     args.variables.headerMedia ??
     // Only when it matches what the template's header actually is — a stale
     // default left behind by an edit that changed the header format must
@@ -850,6 +857,41 @@ export async function sendTemplateInternal(
       ? new Date(lastTs.getTime() + 1)
       : receivedAt;
 
+  // The header asset, as REAL media columns — so the agent's own thread shows
+  // what the customer received instead of a bare line of body text. The bubble
+  // renders from `mediaKind` (external-shapes builds `media` off it), and the
+  // bytes already sit in our storage, so this streams same-origin like any
+  // other attachment and costs no extra fetch.
+  //
+  // Only OUR OWN storage: a foreign link has no object key to stream from, and
+  // the customer's server is not ours to proxy. `suppliedMedia.link` is the
+  // STABLE url deliberately — `headerMediaLink` above is presigned for Meta and
+  // expires, which would leave a broken image in the thread days later.
+  const headerMediaBlobKey =
+    suppliedMedia && !suppliedMedia.id && suppliedMedia.link && blobStorage.isOwnUrl(suppliedMedia.link)
+      ? blobStorage.keyFromUrl(suppliedMedia.link)
+      : null;
+  const headerMediaColumns: {
+    mediaKind?: "image" | "video" | "document";
+    mediaKey?: string;
+    mediaUrl?: string;
+    mediaFilename?: string;
+    mediaMimeType?: string;
+    mediaSizeBytes?: number;
+  } =
+    headerMediaKind && headerMediaBlobKey && suppliedMedia?.link
+      ? {
+          mediaKind: headerMediaKind,
+          mediaKey: headerMediaBlobKey,
+          mediaUrl: suppliedMedia.link,
+          ...(suppliedMedia.filename ? { mediaFilename: suppliedMedia.filename } : {}),
+          ...(suppliedMedia.mimeType ? { mediaMimeType: suppliedMedia.mimeType } : {}),
+          ...(suppliedMedia.sizeBytes !== undefined
+            ? { mediaSizeBytes: suppliedMedia.sizeBytes }
+            : {}),
+        }
+      : {};
+
   const created = await createOutboundMessageIdempotent({
     workspaceId: args.workspaceId,
     conversationId: args.conversationId,
@@ -859,6 +901,7 @@ export async function sendTemplateInternal(
     direction: "out",
     channel: provider,
     status: "sent",
+    ...headerMediaColumns,
     // Durable template marker. `rawPayload.templateName` below is kept for
     // back-compat, but the rawPayload-retention sweeper COLLAPSES that blob — the
     // same reason `broadcastId` became a real column. This one makes the portfolio
@@ -914,6 +957,22 @@ export async function sendTemplateInternal(
       templateName: template.name,
     },
     timestamp: messageTimestamp.toISOString(),
+    // Only when the mime + size are known: `MediaAttachment` requires both, and
+    // a header saved as a template default before those were captured has
+    // neither. The row still carries the media columns either way, so the image
+    // appears once the thread refetches — the frame is the fast path, not the
+    // source of truth.
+    ...(headerMediaColumns.mediaKind && suppliedMedia?.mimeType && suppliedMedia.sizeBytes !== undefined
+      ? {
+          media: {
+            kind: headerMediaColumns.mediaKind,
+            url: `/api/media/${created.id}`,
+            mimeType: suppliedMedia.mimeType,
+            sizeBytes: suppliedMedia.sizeBytes,
+            ...(suppliedMedia.filename ? { filename: suppliedMedia.filename } : {}),
+          },
+        }
+      : {}),
   };
 
   // Strict-monotonic bump + atomic message.sent publish, unified in

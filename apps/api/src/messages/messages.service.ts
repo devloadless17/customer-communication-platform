@@ -3116,7 +3116,17 @@ export class MessagesService {
   async uploadTemplateHeaderMedia(
     workspaceId: string,
     file: Express.Multer.File,
-  ): Promise<{ link: string; kind: "image" | "video" | "document"; filename?: string }> {
+  ): Promise<{
+    link: string;
+    kind: "image" | "video" | "document";
+    filename?: string;
+    // Returned so the SEND can persist them on the message row: the thread
+    // bubble renders media from them, and this request is the only place that
+    // holds the file. Looking them up later would mean fetching the whole
+    // object back out of storage on every template send.
+    mimeType: string;
+    sizeBytes: number;
+  }> {
     // Normalize the mime the same way sendMedia does (strip codec params,
     // lowercase) before mapping to a kind — Meta keys header media strictly.
     const mimeType = normalizeMimeType(file.mimetype);
@@ -3161,6 +3171,8 @@ export class MessagesService {
     return {
       link: result.url,
       kind,
+      mimeType,
+      sizeBytes: result.sizeBytes,
       ...(kind === "document" ? { filename: file.originalname } : {}),
     };
   }

@@ -292,6 +292,9 @@ export function NewBroadcastForm({
     kind: "image" | "video" | "document";
     link: string;
     filename?: string;
+    /** App-side only — never reaches Meta; lets the SENT bubble render. */
+    mimeType?: string;
+    sizeBytes?: number;
   } | null>(null);
   const [cards, setCards] = useState<CarouselCardValue[]>([]);
   const [location, setLocation] = useState({
@@ -551,8 +554,16 @@ export function NewBroadcastForm({
         link: string;
         kind: "image" | "video" | "document";
         filename?: string;
+        mimeType?: string;
+        sizeBytes?: number;
       };
-      setHeaderMedia({ kind: data.kind, link: data.link, filename: data.filename });
+      setHeaderMedia({
+          kind: data.kind,
+          link: data.link,
+          filename: data.filename,
+          ...(data.mimeType ? { mimeType: data.mimeType } : {}),
+          ...(data.sizeBytes !== undefined ? { sizeBytes: data.sizeBytes } : {}),
+        });
     } catch {
       setHeaderMediaError("Upload failed — check your connection and try again.");
     } finally {
@@ -564,7 +575,6 @@ export function NewBroadcastForm({
   // template carries bindings, prefill each input with the matching token so
   // the agent sees the personalization upfront and can override.
   useEffect(() => {
-    setHeaderMedia(null);
     setHeaderMediaError(null);
     // The card COUNT comes from the template, so switching templates reseeds
     // the strip rather than carrying the old one's cards over.
@@ -573,10 +583,21 @@ export function NewBroadcastForm({
     setOfferExpiresAt("");
     setButtonVals({});
     if (!selectedTemplate) {
+      setHeaderMedia(null);
       setBodyVars(Array.from({ length: bodyVarCount }, () => ""));
       setHeaderVar("");
       return;
     }
+    // A media-header template needs an asset on EVERY send, so a campaign to
+    // 10k people needs it once here — the runner uploads it to Meta once for
+    // the whole run and reuses that id per recipient. Seeding it from the
+    // template's saved default means the common campaign (same banner every
+    // time) is one less step, and a CLONE — which carries body variables but
+    // never the asset — stops arriving with an empty header slot.
+    const templateBindings = parseVariableBindings(
+      selectedTemplate.variableBindings as never,
+    );
+    setHeaderMedia(templateBindings.headerMedia ?? null);
     // Clone: on the FIRST reset for the cloned template, use the source's saved
     // values instead of binding tokens. One-shot — a later manual switch falls
     // through to the normal binding-token prefill.
@@ -592,7 +613,7 @@ export function NewBroadcastForm({
       setHeaderVar(headerVarCount > 0 ? cloneHeaderVar ?? "" : "");
       return;
     }
-    const bindings = parseVariableBindings(selectedTemplate.variableBindings as never);
+    const bindings = templateBindings;
     setBodyVars(
       Array.from({ length: bodyVarCount }, (_, i) => tokenForBinding(bindings.body[i])),
     );

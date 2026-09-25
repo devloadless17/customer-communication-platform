@@ -177,10 +177,18 @@ export function VariableBindingsEditor({
         link: string;
         kind: "image" | "video" | "document";
         filename?: string;
+        mimeType?: string;
+        sizeBytes?: number;
       };
       setBindings((cur) => ({
         ...cur,
-        headerMedia: { kind: data.kind, link: data.link, ...(data.filename ? { filename: data.filename } : {}) },
+        headerMedia: {
+          kind: data.kind,
+          link: data.link,
+          ...(data.filename ? { filename: data.filename } : {}),
+          ...(data.mimeType ? { mimeType: data.mimeType } : {}),
+          ...(data.sizeBytes !== undefined ? { sizeBytes: data.sizeBytes } : {}),
+        },
       }));
       setSavedAt(null);
     } catch {

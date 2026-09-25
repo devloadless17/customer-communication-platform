@@ -79,7 +79,14 @@ export function TemplateFillView({
     body: string[];
     bodyNamed?: Array<{ name: string; text: string }>;
     header?: string;
-    headerMedia?: { kind: "image" | "video" | "document"; link: string; filename?: string };
+    headerMedia?: {
+      kind: "image" | "video" | "document";
+      link: string;
+      filename?: string;
+      /** App-side only — never reaches Meta; lets the SENT bubble render. */
+      mimeType?: string;
+      sizeBytes?: number;
+    };
     headerLocation?: { latitude: string; longitude: string; name: string; address: string };
     buttons?: Array<{ index: number; subType: "url" | "copy_code" | "quick_reply"; text: string }>;
     /** Limited-time offer expiry, UNIX ms. Required when the template shows a
@@ -186,6 +193,8 @@ export function TemplateFillView({
     kind: "image" | "video" | "document";
     link: string;
     filename?: string;
+    mimeType?: string;
+    sizeBytes?: number;
   } | null>(savedHeaderMedia);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -243,8 +252,16 @@ export function TemplateFillView({
           link: string;
           kind: "image" | "video" | "document";
           filename?: string;
+          mimeType?: string;
+          sizeBytes?: number;
         };
-        setHeaderMedia({ kind: data.kind, link: data.link, filename: data.filename });
+        setHeaderMedia({
+          kind: data.kind,
+          link: data.link,
+          filename: data.filename,
+          ...(data.mimeType ? { mimeType: data.mimeType } : {}),
+          ...(data.sizeBytes !== undefined ? { sizeBytes: data.sizeBytes } : {}),
+        });
       } catch {
         setUploadError("Upload failed — check your connection and try again.");
       } finally {

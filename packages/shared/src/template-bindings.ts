@@ -58,6 +58,9 @@ export interface TemplateHeaderMedia {
   link: string;
   /** Documents only — what the recipient sees as the file name. */
   filename?: string;
+  /** Captured at upload so the SENT message renders in the agent's thread. */
+  mimeType?: string;
+  sizeBytes?: number;
 }
 
 export interface VariableBindings {
@@ -105,7 +108,18 @@ function parseHeaderMedia(v: unknown): TemplateHeaderMedia | null {
   const link = typeof obj.link === "string" ? obj.link.trim() : "";
   if (!link) return null;
   const filename = typeof obj.filename === "string" ? obj.filename : undefined;
-  return { kind, link, ...(filename ? { filename } : {}) };
+  const mimeType = typeof obj.mimeType === "string" ? obj.mimeType : undefined;
+  const sizeBytes =
+    typeof obj.sizeBytes === "number" && Number.isFinite(obj.sizeBytes) && obj.sizeBytes >= 0
+      ? obj.sizeBytes
+      : undefined;
+  return {
+    kind,
+    link,
+    ...(filename ? { filename } : {}),
+    ...(mimeType ? { mimeType } : {}),
+    ...(sizeBytes !== undefined ? { sizeBytes } : {}),
+  };
 }
 
 function parseOne(v: unknown): VariableBinding | null {
