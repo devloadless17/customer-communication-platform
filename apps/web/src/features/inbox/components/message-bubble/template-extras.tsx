@@ -100,7 +100,12 @@ function TemplateButtonRow({
   const label = (
     <>
       <Icon className="size-3.5 shrink-0" aria-hidden />
-      <span className="truncate">{button.text}</span>
+      {/* dir="auto", like the body and footer: an Arabic label ("اطلب الآن!")
+          otherwise takes the LTR base direction and its "!" / "%" lands on the
+          wrong side — not what the customer's phone shows. */}
+      <span dir="auto" className="truncate">
+        {button.text}
+      </span>
     </>
   );
 
@@ -146,25 +151,34 @@ function CopyCodeRow({
   label: React.ReactNode;
   muted: string;
 }) {
-  const [copied, setCopied] = useState(false);
+  // "copied" | "failed" | null. A rejected clipboard write (no permission, an
+  // insecure context) used to do nothing at all — the agent pressed, saw no
+  // change, and could not tell whether the code was on their clipboard.
+  const [state, setState] = useState<"copied" | "failed" | null>(null);
+  const flash = (next: "copied" | "failed") => {
+    setState(next);
+    window.setTimeout(() => setState(null), 1500);
+  };
   return (
     <button
       type="button"
       title="Copy the code this message carried"
       onClick={() => {
-        void navigator.clipboard?.writeText(code).then(
-          () => {
-            setCopied(true);
-            window.setTimeout(() => setCopied(false), 1500);
-          },
-          () => undefined,
+        if (!navigator.clipboard) {
+          flash("failed");
+          return;
+        }
+        void navigator.clipboard.writeText(code).then(
+          () => flash("copied"),
+          () => flash("failed"),
         );
       }}
       className={cn(className, "flex-col gap-0.5 transition-opacity hover:opacity-80")}
     >
       <span className="flex items-center gap-1.5">
-        {copied ? <Check className="size-3.5 shrink-0" aria-hidden /> : label}
-        {copied && <span>Copied</span>}
+        {state === "copied" ? <Check className="size-3.5 shrink-0" aria-hidden /> : label}
+        {state === "copied" && <span>Copied</span>}
+        {state === "failed" && <span>Couldn&apos;t copy — select the code</span>}
       </span>
       <span className={cn("font-mono text-xs", muted)}>{code}</span>
     </button>

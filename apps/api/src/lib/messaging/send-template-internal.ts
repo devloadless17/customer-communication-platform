@@ -864,7 +864,9 @@ export async function sendTemplateInternal(
   // lib/templates/sent-snapshot, shared with the broadcast runner; see there for
   // the three gates on the media and why the snapshot is taken at send time.
   const headerColumns = headerMediaColumns(args.workspaceId, headerMediaKind, suppliedMedia);
-  const sentSnapshot = buildTemplateSentSnapshot(template.components, effectiveButtons);
+  const sentSnapshot = buildTemplateSentSnapshot(template.components, effectiveButtons, {
+    category: template.category,
+  });
 
   const created = await createOutboundMessageIdempotent({
     workspaceId: args.workspaceId,

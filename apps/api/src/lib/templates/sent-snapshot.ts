@@ -17,7 +17,6 @@
  * thread must keep showing what was actually delivered.
  */
 import type { TemplateSentButton } from "@ccp/shared/types";
-import type { TemplateComponent } from "@ccp/shared/providers/types";
 import { blobStorage } from "@/lib/blob-storage";
 
 /**
@@ -66,45 +65,93 @@ function isHttpUrl(url: string): boolean {
   }
 }
 
+/** Context the snapshot needs beyond the components themselves. */
+export interface SnapshotOptions {
+  /**
+   * The template's category. An AUTHENTICATION template's one-time-code button
+   * is REWRITTEN by Meta to type `URL` at creation, so the stored component
+   * no longer says `OTP` — the category is the only thing that still does.
+   */
+  category?: string | null;
+}
+
 /**
  * The footer + buttons a send showed, or `null` when the template has neither —
  * in which case the row carries no `structured` at all and renders exactly as it
  * always did.
  *
- * `buttonParams` are the values the send actually put on the wire, so a URL
- * button's link is the RESOLVED one the customer taps (base + dynamic suffix),
- * and a coupon button carries the code this send delivered.
+ * NO SEND-TIME SECRET IS KEPT. The row outlives the send by months and every
+ * agent who can open the thread can read it, so:
  *
- * An OTP button deliberately keeps its label only. Its parameter is a login
- * code — a secret the customer uses once — and this row outlives the moment by
- * months, readable by every agent in the workspace.
+ *  - A DYNAMIC url button (one with a `{{…}}` placeholder) keeps its label
+ *    only. Its suffix is a send-time value — an order id, or just as often a
+ *    password-reset or magic-login token — and the resolved link would be both
+ *    readable and CLICKABLE for everyone. Only a STATIC url, written in full in
+ *    the approved template and therefore public by construction, is kept.
+ *  - Every button of an AUTHENTICATION template keeps its label only: its code
+ *    is a login secret, and Meta disguises the button as a plain URL (see
+ *    `SnapshotOptions.category`).
+ *  - A coupon (copy-code) button DOES keep its code: a promo code is meant to be
+ *    shared, and the agent needs it to answer "my code doesn't work".
+ *
+ * Never throws. It runs AFTER Meta has accepted — and billed — the send, so a
+ * malformed stored template must cost the snapshot, never the message row.
  */
 export function buildTemplateSentSnapshot(
   components: unknown,
   buttonParams: readonly SentButtonParam[],
+  opts: SnapshotOptions = {},
 ): TemplateSentSnapshot | null {
-  const comps = Array.isArray(components) ? (components as TemplateComponent[]) : [];
-  const footer = comps.find((c) => c.type === "FOOTER")?.text?.trim() || undefined;
-  const defs = comps.find((c) => c.type === "BUTTONS")?.buttons ?? [];
+  try {
+    return buildSnapshot(components, buttonParams, opts);
+  } catch {
+    return null;
+  }
+}
+
+const isObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+function buildSnapshot(
+  components: unknown,
+  buttonParams: readonly SentButtonParam[],
+  opts: SnapshotOptions,
+): TemplateSentSnapshot | null {
+  // Narrowed field by field rather than cast to TemplateComponent[]: this is a
+  // JSON column, and every read below must survive a row that is not the shape
+  // its type claims.
+  const comps = (Array.isArray(components) ? components : []).filter(isObject);
+  const footerText = comps.find((c) => c.type === "FOOTER")?.text;
+  const footer = typeof footerText === "string" ? footerText.trim() || undefined : undefined;
+  const rawDefs = comps.find((c) => c.type === "BUTTONS")?.buttons;
+  const defs = (Array.isArray(rawDefs) ? rawDefs : []).filter(isObject);
+  const isAuthentication = opts.category?.toUpperCase() === "AUTHENTICATION";
 
   const param = (index: number, subType: string): string | undefined =>
     buttonParams.find((p) => p.index === index && p.subType === subType)?.text;
 
   const buttons: TemplateSentButton[] = [];
   defs.forEach((def, index) => {
-    const type = BUTTON_TYPE[def.type] ?? "other";
-    const text = def.text?.trim() ?? "";
+    const text = typeof def.text === "string" ? def.text.trim() : "";
+    if (isAuthentication) {
+      buttons.push({ type: "otp", text: text || "Copy code" });
+      return;
+    }
+    // `Object.hasOwn`: the type comes out of stored JSON, so a value like
+    // `constructor` must miss rather than resolve down the prototype chain.
+    const type =
+      typeof def.type === "string" && Object.hasOwn(BUTTON_TYPE, def.type)
+        ? BUTTON_TYPE[def.type]!
+        : "other";
     if (type === "url") {
-      const base = def.url ?? "";
-      const suffix = param(index, "url");
-      // One placeholder at most — Meta allows a single variable per URL button,
-      // positional `{{1}}` or named `{{order_id}}`.
-      const url = suffix !== undefined ? base.replace(/\{\{[^}]*\}\}/, suffix) : base;
-      buttons.push({ type, text, ...(isHttpUrl(url) ? { url } : {}) });
+      const url = typeof def.url === "string" ? def.url : "";
+      const dynamic = /\{\{[^}]*\}\}/.test(url);
+      buttons.push({ type, text, ...(!dynamic && isHttpUrl(url) ? { url } : {}) });
       return;
     }
     if (type === "phone") {
-      buttons.push({ type, text, ...(def.phone_number ? { phone: def.phone_number } : {}) });
+      const phone = typeof def.phone_number === "string" ? def.phone_number : undefined;
+      buttons.push({ type, text, ...(phone ? { phone } : {}) });
       return;
     }
     if (type === "copy_code") {
@@ -122,6 +169,28 @@ export function buildTemplateSentSnapshot(
     ...(footer ? { footer } : {}),
     ...(buttons.length > 0 ? { buttons } : {}),
   };
+}
+
+/**
+ * The media kind a template's HEADER declares, or null for a text / location /
+ * absent header. Read from the stored components, tolerant of a malformed row.
+ */
+export function templateHeaderMediaKind(
+  components: unknown,
+): "image" | "video" | "document" | null {
+  const header = (Array.isArray(components) ? components : []).find(
+    (c) => isObject(c) && c.type === "HEADER",
+  ) as { format?: unknown } | undefined;
+  switch (header?.format) {
+    case "IMAGE":
+      return "image";
+    case "VIDEO":
+      return "video";
+    case "DOCUMENT":
+      return "document";
+    default:
+      return null;
+  }
 }
 
 /** The header asset a send supplied, in the shape both send paths hold it. */
@@ -171,12 +240,39 @@ export function headerMediaColumns(
   if (!blobStorage.isOwnUrl(media.link)) return {};
   const key = blobStorage.keyFromUrl(media.link);
   if (!key || !key.startsWith(`media/${workspaceId}/`)) return {};
+  // Template-header assets ONLY. Any object the workspace owns would pass the
+  // gates above — including a customer's inbound photo, whose url /v1 and the
+  // webhooks hand out — and this key goes onto EVERY row the send writes (a
+  // whole broadcast's worth). The conversation-delete path spares exactly the
+  // `/tpl-hdr-` marker and deletes every other key, so a caller pointing a
+  // header at that photo would have made one deleted chat destroy the
+  // customer's original and every other thread's copy of it. Anything else
+  // still SENDS fine; it just isn't pinned to the rows.
+  if (!isSharedTemplateAsset(key)) return {};
+  const size = media.sizeBytes;
   return {
     mediaKind: headerKind,
     mediaKey: key,
     mediaUrl: media.link,
     mediaMimeType: media.mimeType,
     ...(media.filename ? { mediaFilename: media.filename } : {}),
-    ...(media.sizeBytes !== undefined ? { mediaSizeBytes: media.sizeBytes } : {}),
+    // `Message.mediaSizeBytes` is an int4, and this insert runs AFTER Meta
+    // accepted the send. An out-of-range value would throw P2020 there and
+    // cost the whole campaign its inbox rows — so it is dropped, not stored.
+    ...(typeof size === "number" && Number.isInteger(size) && size >= 0 && size <= INT4_MAX
+      ? { mediaSizeBytes: size }
+      : {}),
   };
+}
+
+const INT4_MAX = 2_147_483_647;
+
+/**
+ * A template-header asset: uploaded through `uploadTemplateHeaderMedia`, whose
+ * key segment is `tpl-hdr-<uuid>`. The ONE predicate for "this object is shared
+ * by a template and every message sent with it" — the conversation-delete path
+ * and the blob-orphan sweeper key on the same marker. Change them together.
+ */
+export function isSharedTemplateAsset(key: string): boolean {
+  return key.includes("/tpl-hdr-");
 }

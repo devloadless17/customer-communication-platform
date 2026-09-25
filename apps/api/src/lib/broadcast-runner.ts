@@ -8,6 +8,7 @@ import { createOutboundMessageIdempotent, isTransient } from "@/lib/messages/ide
 import {
   buildTemplateSentSnapshot,
   headerMediaColumns,
+  templateHeaderMediaKind,
   type TemplateSentSnapshot,
 } from "@/lib/templates/sent-snapshot";
 import {
@@ -25,7 +26,7 @@ import {
 } from "@/lib/providers/meta";
 import {
   encodeUrlButtonValue,
-  requiredTemplateButtonParams,
+  uncoveredTemplateButtonParams,
   templateNamedPlaceholders,
 } from "@ccp/shared/template-render";
 import type { MessagingProvider, TemplateCardVariables } from "@ccp/shared/providers/types";
@@ -1021,8 +1022,6 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   // One object rather than three more positional params on an already-8-arg
   // function — and it keeps the three facts that must agree together.
   const campaignVars = parseVariables(broadcast.variables);
-  const headerFormat = (Array.isArray(template?.components) ? template.components : [])
-    .find((c) => (c as { type?: string }).type === "HEADER") as { format?: string } | undefined;
   const wireFormat: TemplateWireFormat = {
     parameterFormat: templateParameterFormat,
     namedBodyVars,
@@ -1033,36 +1032,34 @@ async function runBroadcast(broadcastId: string): Promise<void> {
           (campaignVars.buttons ?? []).map((b) =>
             b.subType === "url" ? { ...b, text: encodeUrlButtonValue(b.text) } : b,
           ),
+          { category: template.category },
         )
       : null,
-    headerMediaKind:
-      headerFormat?.format === "IMAGE"
-        ? "image"
-        : headerFormat?.format === "VIDEO"
-          ? "video"
-          : headerFormat?.format === "DOCUMENT"
-            ? "document"
-            : null,
+    headerMediaKind: template ? templateHeaderMediaKind(template.components) : null,
   };
 
   if (template) {
     // A button carrying a send-time parameter (dynamic URL suffix / coupon
-    // copy-code) still can't be filled from a broadcast — there is no
-    // per-recipient button UI — so Meta would reject every recipient. Fail the
-    // whole broadcast HERE, before the CAS claim and before one message is sent,
-    // rather than burning the audience on a guaranteed rejection.
+    // copy-code) needs a value, or Meta rejects every recipient. Button values
+    // are CAMPAIGN-LEVEL — one code / suffix for everyone — and creation
+    // (broadcasts.service) accepts a template once `variables.buttons` covers
+    // every such button. This gate must ask the SAME question. It used to fail
+    // ANY template with a required button, ignoring what the campaign supplied:
+    // every coupon or dynamic-link campaign creation accepted then failed here,
+    // before the claim, with zero sends — and a retry hit the same wall.
     // Category included: an authentication template's OTP button is rewritten
     // by Meta to type `url`, so it is only recognizable from the category.
-    const requiredButtons = requiredTemplateButtonParams(
+    const uncovered = uncoveredTemplateButtonParams(
       template.components,
       template.category,
+      campaignVars.buttons ?? [],
     );
-    if (requiredButtons.length > 0) {
+    if (uncovered.length > 0) {
       await fail(
         broadcast.id,
-        `Template has button(s) needing a send-time value (${requiredButtons
+        `Template has button(s) needing a send-time value (${uncovered
           .map((b) => `#${b.index + 1} ${b.subType}`)
-          .join(", ")}), which broadcasts can't supply.`,
+          .join(", ")}) that the campaign doesn't supply.`,
       );
       return;
     }
@@ -1805,9 +1802,9 @@ interface TemplateWireFormat {
   namedHeaderVar?: string;
   /**
    * The footer + buttons every recipient's thread shows under the body (see
-   * lib/templates/sent-snapshot). Built ONCE per run: a campaign only admits
-   * templates whose buttons need no send-time value (a dynamic one fails the
-   * whole broadcast before the claim), so it is identical for every recipient.
+   * lib/templates/sent-snapshot). Built ONCE per run: button values are
+   * campaign-level — one coupon code / URL suffix for every recipient — so it
+   * is identical for every recipient.
    */
   sentSnapshot: TemplateSentSnapshot | null;
   /** The template's media-header kind, for the header-media columns. */
@@ -2872,6 +2869,11 @@ async function processOneRecipient(
         : renderTemplateBody(templateBody, perRecipientVars.body);
       const preview = renderedBody.slice(0, 200);
 
+      const headerColumns = headerMediaColumns(
+        broadcast.workspaceId,
+        wireFormat.headerMediaKind,
+        variables.headerMedia,
+      );
       const created = await createOutboundMessageIdempotent({
         workspaceId: broadcast.workspaceId,
         conversationId,
@@ -2905,10 +2907,8 @@ async function processOneRecipient(
         // customer received — the same two rules the single-send path applies
         // (lib/templates/sent-snapshot). The header uses the campaign's STABLE
         // link, never the run-scoped media id or a presigned url.
-        ...headerMediaColumns(broadcast.workspaceId, wireFormat.headerMediaKind, variables.headerMedia),
-        ...(wireFormat.sentSnapshot
-          ? { structured: wireFormat.sentSnapshot }
-          : {}),
+        ...headerColumns,
+        ...(wireFormat.sentSnapshot ? { structured: wireFormat.sentSnapshot } : {}),
         rawPayload: {
           sentVia: "broadcast",
           broadcastId: broadcast.id,
@@ -2960,6 +2960,24 @@ async function processOneRecipient(
         status: "sent",
         rawPayload: { sentVia: "broadcast", broadcastId: broadcast.id },
         timestamp: send.timestamp.toISOString(),
+        // The frame must carry what the ROW carries. It is what an agent already
+        // watching the thread renders, and the recovery paths dedupe on
+        // externalId — a body-only frame stayed body-only (no header, no
+        // footer, no buttons) until a hard reload, and the LRU cached it so.
+        ...(headerColumns.mediaKind &&
+        headerColumns.mediaMimeType &&
+        headerColumns.mediaSizeBytes !== undefined
+          ? {
+              media: {
+                kind: headerColumns.mediaKind,
+                url: `/api/media/${created.id}`,
+                mimeType: headerColumns.mediaMimeType,
+                sizeBytes: headerColumns.mediaSizeBytes,
+                ...(headerColumns.mediaFilename ? { filename: headerColumns.mediaFilename } : {}),
+              },
+            }
+          : {}),
+        ...(wireFormat.sentSnapshot ? { structured: wireFormat.sentSnapshot } : {}),
       };
 
       await publish({
@@ -4219,6 +4237,10 @@ export async function reconcileCanceledMarkerRecipients(): Promise<void> {
               recipient.channelConnectionId ?? broadcast.channelConnectionId ?? null,
             // Template marker, template sends only — see the send path above.
             ...(broadcast.templateName ? { templateName: broadcast.templateName } : {}),
+            // The same header + footer/buttons the live path writes, through the
+            // same two helpers — otherwise the one recipient recovered here reads
+            // as body-only text while every sibling shows the full template.
+            ...(template ? recoveredTemplateExtras(broadcast.workspaceId, template, variables) : {}),
             rawPayload: {
               sentVia: "broadcast",
               broadcastId: broadcast.id,
@@ -4729,6 +4751,31 @@ async function prepareBroadcastMedia(
     );
   }
   return state;
+}
+
+/**
+ * The header-media columns + footer/buttons snapshot for a recovered recipient's
+ * row — the same `lib/templates/sent-snapshot` rules the live send path applies
+ * through `TemplateWireFormat`, derived here from the template directly because
+ * the recovery path never builds a wire format.
+ */
+function recoveredTemplateExtras(
+  workspaceId: string,
+  template: { components: Prisma.JsonValue; category: string },
+  variables: BroadcastVariables,
+): ReturnType<typeof headerMediaColumns> & { structured?: TemplateSentSnapshot } {
+  const headerKind = templateHeaderMediaKind(template.components);
+  const snapshot = buildTemplateSentSnapshot(
+    template.components,
+    (variables.buttons ?? []).map((b) =>
+      b.subType === "url" ? { ...b, text: encodeUrlButtonValue(b.text) } : b,
+    ),
+    { category: template.category },
+  );
+  return {
+    ...headerMediaColumns(workspaceId, headerKind, variables.headerMedia),
+    ...(snapshot ? { structured: snapshot } : {}),
+  };
 }
 
 function parseVariables(v: Prisma.JsonValue): BroadcastVariables {

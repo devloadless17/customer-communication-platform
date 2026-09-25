@@ -208,6 +208,29 @@ export function requiredTemplateButtonParams(
   return required;
 }
 
+/**
+ * The template's required send-time button values that `supplied` does NOT
+ * cover — empty means every coupon code / dynamic URL suffix has a value.
+ *
+ * ONE definition, because two copies diverged into a real outage: broadcast
+ * CREATION accepted a campaign once `variables.buttons` covered every required
+ * button, while the RUNNER failed any template with a required button at all.
+ * Every coupon or dynamic-link campaign was accepted, then failed before the
+ * claim with zero sends. Both now ask this same function.
+ */
+export function uncoveredTemplateButtonParams(
+  components: unknown,
+  category: string | undefined,
+  supplied: ReadonlyArray<{ index: number; subType: string; text: string }>,
+): RequiredTemplateButtonParam[] {
+  return requiredTemplateButtonParams(components, category).filter(
+    (need) =>
+      !supplied.some(
+        (b) => b.index === need.index && b.subType === need.subType && b.text.trim() !== "",
+      ),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Meta field limits.
 // ---------------------------------------------------------------------------

@@ -119,6 +119,67 @@ describe("inbound unsupported messages", () => {
     expect(msg.structured).toMatchObject({ kind: "unsupported", type: "constructor" });
   });
 
+  /**
+   * The same payload arrives through the Coexistence HISTORY backfill (and the
+   * echo path) too, which build content through a different function. Before
+   * this, those rows kept neither the explanation (it moved out of the body)
+   * nor the card that replaced it.
+   */
+  it("carries the structured card through a history backfill as well", () => {
+    const events = metaProvider.parseWebhook({
+      object: "whatsapp_business_account",
+      entry: [
+        {
+          id: "waba_1",
+          changes: [
+            {
+              field: "history",
+              value: {
+                messaging_product: "whatsapp",
+                metadata: { display_phone_number: "15550783881", phone_number_id: "pn_1" },
+                history: [
+                  {
+                    metadata: { phase: 0, chunk_order: 1, progress: 100 },
+                    threads: [
+                      {
+                        id: "447723442693",
+                        messages: [
+                          {
+                            from: "447723442693",
+                            id: "wamid.HISTORY_UNSUPPORTED_1",
+                            timestamp: "1790000000",
+                            type: "unsupported",
+                            unsupported: { type: "hsm" },
+                            errors: [
+                              {
+                                code: 131051,
+                                title: "Message type unknown",
+                                error_data: { details: "Message type is currently not supported." },
+                              },
+                            ],
+                            history_context: { status: "DELIVERED" },
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const msg = events.find((e) => "externalId" in e && e.externalId === "wamid.HISTORY_UNSUPPORTED_1");
+    expect(msg).toBeTruthy();
+    expect((msg as unknown as { structured?: unknown }).structured).toEqual({
+      kind: "unsupported",
+      type: "hsm",
+      code: 131051,
+      reason: "Message type is currently not supported.",
+    });
+  });
+
   it("still produces a placeholder when Meta sends no type and no error", () => {
     const msg = messageOf(unsupportedEnvelope({}));
     expect(msg.body).toBe("⚠️ Unsupported message");

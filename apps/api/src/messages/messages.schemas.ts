@@ -118,7 +118,7 @@ export const SendTemplateSchema = z.object({
           // the agent's own thread. Optional: a header saved as a template
           // default before this existed has neither, and still sends fine.
           mimeType: z.string().max(255).optional(),
-          sizeBytes: z.number().int().nonnegative().optional(),
+          sizeBytes: z.number().int().nonnegative().max(2_147_483_647).optional(),
         })
         .refine((m) => Boolean(m.link) !== Boolean(m.id), {
           message: "header media needs exactly one of `link` or `id`",

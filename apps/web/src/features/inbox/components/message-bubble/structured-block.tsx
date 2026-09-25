@@ -80,10 +80,11 @@ export function StructuredBlock({
           {explanation && <p className="text-sm">{explanation}</p>}
           {/* Meta's own words and code — the only legible record of e.g. 131060
               once rawPayload is collapsed by the retention sweeper. */}
-          {(structured.reason || structured.code) && (
+          {/* `!= null`, not truthiness: `{0 && …}` renders a literal "0". */}
+          {(structured.reason || structured.code != null) && (
             <p className={cn("text-2xs", sub)}>
               {structured.reason}
-              {structured.code ? ` (${structured.code})` : ""}
+              {structured.code != null ? ` (${structured.code})` : ""}
             </p>
           )}
         </div>

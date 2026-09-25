@@ -96,7 +96,7 @@ export const BroadcastVariablesSchema = z.object({
       // the campaign's header (see lib/templates/sent-snapshot). Optional — a
       // campaign without them sends identically and simply shows as text.
       mimeType: z.string().max(255).optional(),
-      sizeBytes: z.number().int().nonnegative().optional(),
+      sizeBytes: z.number().int().nonnegative().max(2_147_483_647).optional(),
     })
     .optional(),
   /**

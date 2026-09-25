@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, Plus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -47,13 +47,23 @@ export function AssignmentSettings() {
   const [tab, setTab] = useState<TabKey>("policies");
   const [creating, setCreating] = useState(false);
 
+  // Every save ends in a reload, and saves can now overlap (edits are queued
+  // rather than blocked), so several reloads can be in flight at once. Only the
+  // NEWEST one may land: an older response resolving last would put back a
+  // value the server no longer holds — a switch showing the state from before
+  // the save that just succeeded.
+  const loadSeq = useRef(0);
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     try {
       const res = await apiFetch("/api/workspace/assignment");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setData((await res.json()) as AssignmentOverview);
+      const next = (await res.json()) as AssignmentOverview;
+      if (seq !== loadSeq.current) return;
+      setData(next);
       setLoadError(null);
     } catch {
+      if (seq !== loadSeq.current) return;
       setLoadError("Couldn't load assignment settings. Refresh to retry.");
     }
   }, []);

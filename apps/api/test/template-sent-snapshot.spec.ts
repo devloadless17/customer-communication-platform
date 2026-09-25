@@ -67,22 +67,24 @@ describe("buildTemplateSentSnapshot", () => {
     });
   });
 
-  it("resolves a dynamic URL suffix — positional and named", () => {
-    const withSuffix = (url: string) => [
-      { type: "BUTTONS", buttons: [{ type: "URL", text: "Track", url }] },
+  it("keeps a DYNAMIC url's label only — its suffix can be a reset/login token", () => {
+    // A password-reset template: the suffix is a live credential. Resolved and
+    // stored, it would be readable AND clickable by every agent for months.
+    const comps = [
+      { type: "BUTTONS", buttons: [{ type: "URL", text: "Reset password", url: "https://app.example/reset?t={{1}}" }] },
     ];
-    const params = [{ index: 0, subType: "url", text: "A-42" }];
-    expect(
-      buildTemplateSentSnapshot(withSuffix("https://shop.example/track/{{1}}"), params)?.buttons?.[0]
-        ?.url,
-    ).toBe("https://shop.example/track/A-42");
-    expect(
-      buildTemplateSentSnapshot(withSuffix("https://shop.example/o/{{order_id}}"), params)
-        ?.buttons?.[0]?.url,
-    ).toBe("https://shop.example/o/A-42");
+    const snap = buildTemplateSentSnapshot(comps, [{ index: 0, subType: "url", text: "SECRET-TOKEN-123" }]);
+    expect(snap?.buttons).toEqual([{ type: "url", text: "Reset password" }]);
+    expect(JSON.stringify(snap)).not.toContain("SECRET-TOKEN-123");
+    // Named placeholders are dynamic too.
+    const named = buildTemplateSentSnapshot(
+      [{ type: "BUTTONS", buttons: [{ type: "URL", text: "Track", url: "https://shop.example/o/{{order_id}}" }] }],
+      [{ index: 0, subType: "url", text: "A-42" }],
+    );
+    expect(named?.buttons?.[0]).toEqual({ type: "url", text: "Track" });
   });
 
-  it("keys a parameter to its OWN button index, not the first URL button", () => {
+  it("keeps a STATIC url, which is public in the approved template", () => {
     const comps = [
       {
         type: "BUTTONS",
@@ -93,10 +95,43 @@ describe("buildTemplateSentSnapshot", () => {
       },
     ];
     const snap = buildTemplateSentSnapshot(comps, [{ index: 1, subType: "url", text: "77" }]);
-    expect(snap?.buttons?.map((b) => b.url)).toEqual([
-      "https://a.example/help",
-      "https://a.example/o/77",
+    expect(snap?.buttons).toEqual([
+      { type: "url", text: "Static", url: "https://a.example/help" },
+      { type: "url", text: "Dynamic" },
     ]);
+  });
+
+  it("treats an AUTHENTICATION template's buttons as OTP even though Meta rewrote them to URL", () => {
+    // What a SYNCED copy-code auth template looks like: type URL, not OTP.
+    const comps = [
+      { type: "BODY", text: "{{1}} is your verification code." },
+      {
+        type: "BUTTONS",
+        buttons: [
+          {
+            type: "URL",
+            text: "Copy code",
+            url: "https://www.whatsapp.com/otp/code/?otp_type=COPY_CODE&code=otp{{1}}",
+          },
+        ],
+      },
+    ];
+    const snap = buildTemplateSentSnapshot(comps, [{ index: 0, subType: "url", text: "492837" }], {
+      category: "AUTHENTICATION",
+    });
+    expect(snap?.buttons).toEqual([{ type: "otp", text: "Copy code" }]);
+    expect(JSON.stringify(snap)).not.toContain("492837");
+    expect(JSON.stringify(snap)).not.toContain("whatsapp.com/otp");
+  });
+
+  it("never throws on a malformed stored template — it runs after a billed send", () => {
+    expect(
+      buildTemplateSentSnapshot(
+        [null, 7, "x", { type: "BUTTONS", buttons: [null, { type: "URL" }, 3] }, { type: "FOOTER", text: 42 }],
+        [],
+      ),
+    ).toEqual({ kind: "template", buttons: [{ type: "url", text: "" }] });
+    expect(buildTemplateSentSnapshot({ not: "an array" }, [])).toBeNull();
   });
 
   it("NEVER stores an OTP code — label only", () => {
@@ -166,6 +201,22 @@ describe("headerMediaColumns", () => {
   it("refuses a SIBLING tenant's object even though the host is ours", () => {
     const foreign = `${OWN}media/ws_other/2026/09/tpl-hdr-abc-banner.jpg`;
     expect(headerMediaColumns(ws, "image", { link: foreign, mimeType: "image/jpeg" })).toEqual({});
+  });
+
+  it("pins ONLY template-header assets — never another object the workspace owns", () => {
+    // A customer's inbound photo: our bucket, our prefix, but not a template
+    // asset. Pinned to a broadcast's rows, deleting one chat would destroy it.
+    const inboundPhoto = `${OWN}media/${ws}/2026/09/wamid.ABC-image.jpg`;
+    expect(headerMediaColumns(ws, "image", { link: inboundPhoto, mimeType: "image/jpeg" })).toEqual({});
+  });
+
+  it("drops a size that cannot fit the int4 column — the insert runs after Meta billed", () => {
+    const cols = headerMediaColumns(ws, "image", { link, mimeType: "image/jpeg", sizeBytes: 3_000_000_000 });
+    expect(cols.mediaKey).toBeDefined();
+    expect(cols).not.toHaveProperty("mediaSizeBytes");
+    expect(headerMediaColumns(ws, "image", { link, mimeType: "image/jpeg", sizeBytes: -1 })).not.toHaveProperty(
+      "mediaSizeBytes",
+    );
   });
 
   it("writes nothing without a mime — both or neither", () => {

@@ -2173,6 +2173,10 @@ export class WhatsappService {
       });
     }
 
+    // Read once: sent to Meta below AND applied to the stored components, so
+    // the two copies of the business's button values cannot disagree.
+    const libraryButtonInputs: LibraryTemplateButtonInput[] =
+      Array.isArray(obj.buttonInputs) ? (obj.buttonInputs as LibraryTemplateButtonInput[]) : [];
     let created;
     try {
       created = await provider.createFromLibrary(
@@ -2181,9 +2185,7 @@ export class WhatsappService {
           language,
           category: blueprint.category ?? "utility",
           libraryTemplateName,
-          ...(Array.isArray(obj.buttonInputs) && obj.buttonInputs.length > 0
-            ? { buttonInputs: obj.buttonInputs as LibraryTemplateButtonInput[] }
-            : {}),
+          ...(libraryButtonInputs.length > 0 ? { buttonInputs: libraryButtonInputs } : {}),
           ...(obj.bodyInputs && typeof obj.bodyInputs === "object"
             ? { bodyInputs: obj.bodyInputs as LibraryTemplateBodyInput }
             : {}),
@@ -2223,7 +2225,7 @@ export class WhatsappService {
         // The blueprint's own copy, in our component shape, so every existing
         // reader (picker, preview, broadcast composer) works unchanged. The next
         // sync replaces it with exactly what Meta stored.
-        components: libraryComponents(blueprint) as unknown as Prisma.InputJsonValue,
+        components: libraryComponents(blueprint, libraryButtonInputs) as unknown as Prisma.InputJsonValue,
         // Library bodies are positional (`{{1}}`) — Meta authors them.
         parameterFormat: "positional",
         libraryTemplateName,
@@ -2235,7 +2237,7 @@ export class WhatsappService {
         category: created.category ?? blueprint.category ?? "utility",
         status: created.status,
         bodyText: blueprint.body,
-        components: libraryComponents(blueprint) as unknown as Prisma.InputJsonValue,
+        components: libraryComponents(blueprint, libraryButtonInputs) as unknown as Prisma.InputJsonValue,
         parameterFormat: "positional",
         libraryTemplateName,
         bodyParamTypes: blueprint.bodyParamTypes,
@@ -3264,20 +3266,42 @@ function toTemplateDto(row: {
  * instantiated library template is indistinguishable to those readers from any
  * other, and the next catalog sync overwrites it with Meta's own copy anyway.
  */
-function libraryComponents(t: LibraryTemplate): TemplateComponent[] {
+function libraryComponents(
+  t: LibraryTemplate,
+  buttonInputs: readonly LibraryTemplateButtonInput[] = [],
+): TemplateComponent[] {
   const out: TemplateComponent[] = [];
   if (t.header) out.push({ type: "HEADER", format: "TEXT", text: t.header });
   out.push({ type: "BODY", text: t.body });
   if (t.footer) out.push({ type: "FOOTER", text: t.footer });
   if (t.buttons.length > 0) {
+    // The blueprint's url / phone are META'S EXAMPLES. The business's own
+    // values arrive as `buttonInputs` and went only to Meta, so until the next
+    // catalog sync (the refresh sweeper runs it hours later) the stored
+    // template linked to example.com and dialled a sample number — in the
+    // preview, and frozen permanently into every message sent in between.
+    // Inputs match the blueprint's buttons in order WITHIN each type; a URL
+    // input's `base_url` is the final template url (placeholder included).
+    // Whatever this gets wrong, the next sync overwrites with Meta's own copy.
+    const seen = new Map<string, number>();
+    const inputFor = (type: string): LibraryTemplateButtonInput | undefined => {
+      const i = seen.get(type) ?? 0;
+      seen.set(type, i + 1);
+      return buttonInputs.filter((b) => b.type === type)[i];
+    };
     out.push({
       type: "BUTTONS",
-      buttons: t.buttons.map((b) => ({
-        type: b.type as NonNullable<TemplateComponent["buttons"]>[number]["type"],
-        ...(b.text ? { text: b.text } : {}),
-        ...(b.url ? { url: b.url } : {}),
-        ...(b.phone_number ? { phone_number: b.phone_number } : {}),
-      })),
+      buttons: t.buttons.map((b) => {
+        const input = inputFor(b.type);
+        const url = input?.url?.base_url || b.url;
+        const phone = input?.phone_number || b.phone_number;
+        return {
+          type: b.type as NonNullable<TemplateComponent["buttons"]>[number]["type"],
+          ...(b.text ? { text: b.text } : {}),
+          ...(url ? { url } : {}),
+          ...(phone ? { phone_number: phone } : {}),
+        };
+      }),
     });
   }
   return out;

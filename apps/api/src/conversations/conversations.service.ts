@@ -19,6 +19,7 @@ import {
 } from "@/lib/conversations/visibility";
 import { resolveOutboundAccountId } from "@/lib/conversations/account";
 import { blobStorage } from "@/lib/blob-storage";
+import { isSharedTemplateAsset } from "@/lib/templates/sent-snapshot";
 import { getProviderBinding } from "@/lib/providers";
 import { resolveContactChannel } from "@/lib/providers/channel";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
@@ -629,14 +630,6 @@ export class ConversationsService {
     return rows.map((r) => r.blobKey).filter((k): k is string => Boolean(k));
   }
 
-  /**
-   * Template header assets live under the shared `media/` prefix but are owned
-   * by the TEMPLATE, not by any one message — see the call site.
-   */
-  private isSharedTemplateAssetKey(key: string): boolean {
-    return key.includes("/tpl-hdr-");
-  }
-
   private async collectMediaKeys(
     workspaceId: string,
     conversationIds: string[],
@@ -666,7 +659,7 @@ export class ConversationsService {
         // `uploadTemplateHeaderMedia`), the same marker the blob-orphan sweeper
         // uses to spare it — these two exclusions are the pair that keeps a
         // shared object alive, so change them together.
-        if (m.mediaKey && !this.isSharedTemplateAssetKey(m.mediaKey)) keys.push(m.mediaKey);
+        if (m.mediaKey && !isSharedTemplateAsset(m.mediaKey)) keys.push(m.mediaKey);
         if (m.mediaThumbnailKey) keys.push(m.mediaThumbnailKey);
       }
       if (page.length < PAGE) break;

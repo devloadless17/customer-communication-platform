@@ -87,35 +87,46 @@ export function AutomationPanel({
     setSaving(true);
     let version = settings.version;
     try {
-      while (Object.keys(queued.current).length > 0) {
-        const next = queued.current;
-        queued.current = {};
-        const res = await apiFetch("/api/workspace/assignment/settings", {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ ...next, expectedVersion: version }),
-        });
-        if (res.status === 409) {
-          // A genuine conflict: a co-admin saved in between. Whatever is still
-          // queued was built on the view that just went stale, so it is
-          // dropped WITH a message, and the page reloads to the truth.
+      // Drain, refresh, and drain AGAIN until a refresh finishes with nothing
+      // queued. The refresh is an await too: a change made while it runs is
+      // queued (inFlight is still set), and ending the loop there stranded it
+      // — the control snapped back, nothing was sent, and it went out LATER
+      // inside some unrelated save, applying a change the person had watched
+      // revert. On "What agents can see" that flipped the visibility boundary.
+      for (;;) {
+        while (Object.keys(queued.current).length > 0) {
+          const next = queued.current;
           queued.current = {};
-          toast("Someone else changed these settings — reloading");
-          await onChanged();
-          return;
+          const res = await apiFetch("/api/workspace/assignment/settings", {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ ...next, expectedVersion: version }),
+          });
+          if (res.status === 409) {
+            // A genuine conflict: a co-admin saved in between. What is still
+            // queued was built on a view that just went stale, so it is dropped
+            // — with a message, and the page reloads to the truth.
+            toast("Someone else changed these settings — reloading");
+            await onChanged();
+            return;
+          }
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const json = (await res.json().catch(() => null)) as {
+            settings?: { version?: number };
+          } | null;
+          version = json?.settings?.version ?? version;
         }
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const json = (await res.json().catch(() => null)) as {
-          settings?: { version?: number };
-        } | null;
-        version = json?.settings?.version ?? version;
+        await onChanged();
+        if (Object.keys(queued.current).length === 0) break;
       }
-      await onChanged();
     } catch {
-      queued.current = {};
       toast("Couldn't save — reverted");
       await onChanged();
     } finally {
+      // Normal exit: already empty. Conflict / failure exit: whatever arrived
+      // is shown reverted by the reload above, so it is dropped to MATCH — never
+      // kept to be sent later behind the person's back.
+      queued.current = {};
       inFlight.current = false;
       setPending({});
       setSaving(false);
@@ -250,7 +261,10 @@ export function AutomationPanel({
                     Number.isFinite(value) &&
                     value >= 1 &&
                     value <= 1440 &&
-                    value !== settings.reassignOfflineAfterMinutes
+                    // Against the VIEW, not the server copy: typing 45, then
+                    // back to 10 before the first save's refresh lands, is a
+                    // real change the server must receive.
+                    value !== view.reassignOfflineAfterMinutes
                   ) {
                     void patch({ reassignOfflineAfterMinutes: value });
                   }
@@ -306,18 +320,16 @@ function Toggle({
   checked,
   onChange,
   indent,
-  disabled,
 }: {
   label: string;
   hint: string;
   checked: boolean;
   onChange: (v: boolean) => void;
   indent?: boolean;
-  disabled?: boolean;
 }) {
   return (
     <label className={"flex items-start gap-3" + (indent ? " ml-8" : "")}>
-      <Switch checked={checked} onCheckedChange={onChange} disabled={disabled} />
+      <Switch checked={checked} onCheckedChange={onChange} />
       <span className="text-sm">
         {label}
         <span className="mt-0.5 block text-xs text-muted-foreground">{hint}</span>

@@ -3790,6 +3790,9 @@ export interface HistoricalMessageInput {
   contactPhone: string;
   body: string;
   media?: NormalizedOutboundEcho["media"];
+  /** Structured content (an unsupported-message card, a location pin, a
+   *  contact card) — the same payload the live inbound path persists. */
+  structured?: NormalizedOutboundEcho["structured"];
   timestamp: Date;
   direction: "in" | "out";
   rawPayload: Record<string, unknown>;
@@ -3898,6 +3901,7 @@ export async function ingestHistoricalMessage(
     status: msg.direction === "out" ? "sent" : "delivered",
     rawPayload: msg.rawPayload as Prisma.InputJsonValue,
     timestamp: msg.timestamp,
+    ...(msg.structured ? { structured: toJsonColumn(msg.structured) } : {}),
     ...(msg.media
       ? {
           mediaKind: msg.media.kind,

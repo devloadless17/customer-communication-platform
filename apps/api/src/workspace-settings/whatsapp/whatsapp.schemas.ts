@@ -82,7 +82,7 @@ const TemplateDefaultHeaderMediaSchema = z.object({
   link: z.string().url().max(2048),
   filename: z.string().max(255).optional(),
   mimeType: z.string().max(255).optional(),
-  sizeBytes: z.number().int().nonnegative().optional(),
+  sizeBytes: z.number().int().nonnegative().max(2_147_483_647).optional(),
 });
 
 export const UpdateTemplateBindingsSchema = z

@@ -22,16 +22,37 @@ import { db, appAdmin } from "./_helpers/db";
 const RUN = Date.now().toString().slice(-6);
 
 let workspaceId: string;
+/**
+ * The settings row as it was BEFORE this file ran. The workspace is shared by
+ * every e2e spec, and leaving `reassignOnOffline` on puts it on the
+ * offline-rebalance sweeper, which really reassigns conversations under later
+ * specs that never asked for it.
+ */
+let settingsBefore: {
+  reassignOnOffline: boolean;
+  reassignOfflineAfterMinutes: number;
+  reassignOnDeactivate: boolean;
+} | null = null;
 
 test.describe.configure({ mode: "serial" });
 
 test.beforeAll(async () => {
   ({ workspaceId } = await appAdmin());
+  settingsBefore = await db().assignmentSettings.findUnique({
+    where: { workspaceId },
+    select: { reassignOnOffline: true, reassignOfflineAfterMinutes: true, reassignOnDeactivate: true },
+  });
 });
 
 test.afterAll(async () => {
   await db().assignmentRule.deleteMany({ where: { workspaceId, name: { contains: RUN } } });
   await db().team.deleteMany({ where: { workspaceId, name: `Saves E2E ${RUN}` } });
+  if (settingsBefore) {
+    await db().assignmentSettings.update({ where: { workspaceId }, data: settingsBefore });
+  } else {
+    // There was no row: remove the one this file created, back to defaults.
+    await db().assignmentSettings.deleteMany({ where: { workspaceId } });
+  }
 });
 
 test("rules: renaming then toggling in one gesture saves BOTH", async ({ page }) => {

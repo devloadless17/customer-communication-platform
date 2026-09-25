@@ -138,6 +138,26 @@ import { StructuredBlock } from "./message-bubble/structured-block";
 import { TemplateExtras } from "./message-bubble/template-extras";
 
 /**
+ * The structured kinds that REPLACE the bubble with a card — the ones
+ * `StructuredBlock` knows how to draw. Anything else falls through to the body.
+ *
+ * An allowlist, not "any structured": a kind this bundle has never heard of
+ * (added by a newer API, while this tab still runs the old bundle) otherwise
+ * went to a StructuredBlock that returns null — a completely EMPTY bubble, body
+ * and media hidden. `template` is absent on purpose: it ADDS footer + buttons
+ * under the normal body rather than replacing it.
+ */
+const CARD_KINDS: ReadonlySet<string> = new Set([
+  "location",
+  "contacts",
+  "story",
+  "appointment",
+  "comment",
+  "order",
+  "unsupported",
+]);
+
+/**
  * One reaction: an emoji-forward circular badge with a small corner avatar
  * marking WHO reacted (the customer's gradient-initial dot vs. our "team" dot),
  * tucked over the bubble edge — the iMessage/WhatsApp look: compact, unobtrusive,
@@ -565,7 +585,7 @@ function BubbleContent({
               <Ban className="size-3.5 shrink-0" />
               This message was deleted
             </p>
-          ) : message.structured && message.structured.kind !== "template" ? (
+          ) : message.structured && CARD_KINDS.has(message.structured.kind) ? (
             // Location pin / contact card — a dedicated bubble replacing the
             // plain text placeholder (the placeholder body is still stored for
             // search / list preview, just not rendered here). A STORY reply,

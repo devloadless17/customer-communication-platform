@@ -55,6 +55,7 @@ import {
   templateDeletionDaysLeft,
   requiredCarouselCards,
   requiredTemplateButtonParams,
+  uncoveredTemplateButtonParams,
   templateNeedsOfferExpiry,
   templateNamedPlaceholders,
   unsupportedTemplateFeature,
@@ -358,14 +359,11 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       );
       if (requiredButtons.length > 0) {
         const suppliedButtons = variables.buttons ?? [];
-        const missing = requiredButtons.filter(
-          (need) =>
-            !suppliedButtons.some(
-              (b) =>
-                b.index === need.index &&
-                b.subType === need.subType &&
-                b.text.trim() !== "",
-            ),
+        // The same function the runner gates on — the two used to diverge.
+        const missing = uncoveredTemplateButtonParams(
+          template.components,
+          template.category,
+          suppliedButtons,
         );
         if (missing.length > 0) {
           throw new BadRequestException({

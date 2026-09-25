@@ -144,7 +144,7 @@ export const ExternalTopLevelSendMessageSchema = z.object({
               // in the agent's thread. Omit them and the send still succeeds,
               // it simply shows as text, so they stay optional.
               mimeType: z.string().max(255).optional(),
-              sizeBytes: z.number().int().nonnegative().optional(),
+              sizeBytes: z.number().int().nonnegative().max(2_147_483_647).optional(),
             })
             .refine((m) => Boolean(m.link) !== Boolean(m.id), {
               message: "header media needs exactly one of `link` or `id`",

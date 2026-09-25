@@ -584,7 +584,7 @@ function attributionForMessage(m: MetaMessage): MessageAttribution | undefined {
  */
 function extractMetaMessageContent(
   m: MetaMessage,
-): { body: string; media?: NormalizedMediaRef } | null {
+): { body: string; media?: NormalizedMediaRef; structured?: MessageStructured } | null {
   if (m.type === "text") {
     const body = m.text?.body;
     return body ? { body } : null;
@@ -607,7 +607,13 @@ function extractMetaMessageContent(
     return { body: mediaPayload.caption ?? "", media };
   }
   const placeholder = placeholderForUnhandledType(m);
-  return placeholder ? { body: placeholder } : null;
+  if (!placeholder) return null;
+  // The echo and history paths need the same structured payload the live
+  // inbound path attaches — without it an unsupported message backfilled from
+  // the phone app carries neither the explanation (it moved out of the body)
+  // nor the card that replaced it.
+  const structured = structuredForMessage(m);
+  return { body: placeholder, ...(structured ? { structured } : {}) };
 }
 
 export const metaProvider: MessagingProvider<MetaSendConfig> = {
@@ -946,6 +952,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
               contactPhone,
               body: content.body,
               ...(content.media ? { media: content.media } : {}),
+              ...(content.structured ? { structured: content.structured } : {}),
               timestamp: tsFromMeta(m.timestamp),
               rawPayload: payload as Record<string, unknown>,
             } satisfies NormalizedOutboundEcho);
@@ -1038,6 +1045,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
                     contactPhone,
                     body: content.body,
                     ...(content.media ? { media: content.media } : {}),
+                    ...(content.structured ? { structured: content.structured } : {}),
                     ...(historyStatus ? { status: historyStatus } : {}),
                     timestamp: ts,
                     rawPayload: payload as Record<string, unknown>,
@@ -1050,6 +1058,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
                     contactName: null,
                     body: content.body,
                     ...(content.media ? { media: content.media } : {}),
+                    ...(content.structured ? { structured: content.structured } : {}),
                     timestamp: ts,
                     rawPayload: payload as Record<string, unknown>,
                   } satisfies NormalizedInboundMessage);
@@ -1086,6 +1095,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
                 contactPhone,
                 body: content.body,
                 ...(content.media ? { media: content.media } : {}),
+                ...(content.structured ? { structured: content.structured } : {}),
                 ...(historyStatus ? { status: historyStatus } : {}),
                 timestamp: ts,
                 rawPayload: payload as Record<string, unknown>,
@@ -1098,6 +1108,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
                 contactName: null,
                 body: content.body,
                 ...(content.media ? { media: content.media } : {}),
+                ...(content.structured ? { structured: content.structured } : {}),
                 timestamp: ts,
                 rawPayload: payload as Record<string, unknown>,
               } satisfies NormalizedInboundMessage);

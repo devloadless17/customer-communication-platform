@@ -37,7 +37,13 @@ export function RulesPanel({
   members: MemberRow[];
   onChanged: () => Promise<void>;
 }) {
-  const [busy, setBusy] = useState(false);
+  // A COUNT, not a boolean. Rule edits no longer disable anything (see
+  // `pending`), so a queued edit's call can overlap a move/delete/create call.
+  // With one boolean, whichever finished FIRST cleared it and re-enabled
+  // Move/Delete over a rule list the other call's refresh was about to
+  // replace — a second move built on that stale list silently undid the first.
+  const [busyCount, setBusyCount] = useState(0);
+  const busy = busyCount > 0;
   /**
    * The rule edit being saved right now, shown until the re-fetch answers.
    *
@@ -82,7 +88,7 @@ export function RulesPanel({
   }, [allAccounts]);
 
   const call = async (path: string, init: RequestInit, message?: string) => {
-    setBusy(true);
+    setBusyCount((n) => n + 1);
     try {
       const res = await apiFetch(path, init);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -91,7 +97,7 @@ export function RulesPanel({
     } catch {
       toast("That didn't work");
     } finally {
-      setBusy(false);
+      setBusyCount((n) => n - 1);
     }
   };
 
@@ -185,7 +191,9 @@ export function RulesPanel({
               defaultValue={serverRule.name}
               maxLength={80}
               onBlur={(e) => {
-                if (e.target.value.trim() && e.target.value !== serverRule.name) {
+                // Against the overlay, not the server copy: renaming A→B and
+                // back to A before B's refresh lands is a real change.
+                if (e.target.value.trim() && e.target.value !== rule.name) {
                   void patchRule(rule.id, { name: e.target.value.trim() });
                 }
               }}
