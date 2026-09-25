@@ -14,6 +14,7 @@ import {
   emptyCarouselCards,
   type CarouselCardValue,
 } from "@/features/templates/components/carousel-cards-field";
+import { parseVariableBindings } from "@ccp/shared/template-bindings";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import type {
   Contact,
@@ -172,11 +173,20 @@ export function TemplateFillView({
     Array.from({ length: bodyVarCount }, () => ""),
   );
   const [headerVar, setHeaderVar] = useState("");
+  // Meta requires a header asset on EVERY send of a media-header template (the
+  // sample given at creation is only what its reviewers looked at), so a team
+  // whose promo template always carries the same banner was re-attaching that
+  // banner in every conversation. A default saved on the template pre-fills it;
+  // the agent can still replace or clear it per send.
+  const savedHeaderMedia = useMemo(
+    () => parseVariableBindings(template.variableBindings as never).headerMedia ?? null,
+    [template.variableBindings],
+  );
   const [headerMedia, setHeaderMedia] = useState<{
     kind: "image" | "video" | "document";
     link: string;
     filename?: string;
-  } | null>(null);
+  } | null>(savedHeaderMedia);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [location, setLocation] = useState({
@@ -200,13 +210,15 @@ export function TemplateFillView({
   useEffect(() => {
     setBodyVars(Array.from({ length: bodyVarCount }, () => ""));
     setHeaderVar("");
-    setHeaderMedia(null);
+    // The saved default is this template's own, so switching templates lands on
+    // B's banner rather than on A's or on nothing.
+    setHeaderMedia(savedHeaderMedia);
     setUploadError(null);
     setLocation({ latitude: "", longitude: "", name: "", address: "" });
     setButtonVars({});
     setOfferExpiresAt("");
     setCards(emptyCarouselCards(cardRequirements));
-  }, [template.id, bodyVarCount, cardRequirements]);
+  }, [template.id, bodyVarCount, cardRequirements, savedHeaderMedia]);
 
   const uploadHeaderMedia = useCallback(
     async (file: File) => {
@@ -386,6 +398,15 @@ export function TemplateFillView({
                 setUploadError(null);
               }}
             />
+            {/* The default is set on the template itself (Templates → Edit), so
+                it is a template-management decision rather than something one
+                send silently changes for everyone. */}
+            {headerMedia && headerMedia.link === savedHeaderMedia?.link && (
+              <div className="mt-1.5 inline-flex items-center gap-1 text-2xs text-muted-foreground">
+                <Check className="h-3 w-3" aria-hidden />
+                This template&apos;s saved {headerMediaKind} — replace it for a one-off.
+              </div>
+            )}
           </div>
         )}
 

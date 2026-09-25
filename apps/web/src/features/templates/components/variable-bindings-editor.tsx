@@ -6,6 +6,7 @@ import { Check, Loader2, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { HeaderMediaField } from "@/features/templates/components/header-media-field";
 import type { ContactFieldDefinition } from "@ccp/shared/types";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import type {
@@ -99,10 +100,24 @@ export function VariableBindingsEditor({
     return countPlaceholders(header.text) > 0 ? "1" : null;
   }, [isNamed, header?.format, header?.text]);
   const headerHasVar = headerVarKey !== null;
+  // A media header takes no text variable but DOES need an asset on every send
+  // (Meta has no send-time default of its own — the sample given at creation is
+  // only what its reviewers saw). Saving one here is what stops an agent
+  // re-attaching the same banner in every conversation.
+  const headerMediaKind: "image" | "video" | "document" | null =
+    header?.format === "IMAGE"
+      ? "image"
+      : header?.format === "VIDEO"
+        ? "video"
+        : header?.format === "DOCUMENT"
+          ? "document"
+          : null;
 
   const [bindings, setBindings] = useState<VariableBindings>(() =>
     normalize(initialBindings, bodyVarCount, headerHasVar),
   );
+  const [uploadingMedia, setUploadingMedia] = useState(false);
+  const [mediaError, setMediaError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -135,6 +150,55 @@ export function VariableBindingsEditor({
     setSavedAt(null);
   }, []);
 
+  const uploadDefaultHeaderMedia = useCallback(async (file: File) => {
+    setMediaError(null);
+    setUploadingMedia(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      // The SAME endpoint the composer uses: it stores the asset in our blob
+      // storage and hands back a stable object url, which the send path
+      // presigns fresh each time. Deliberately NOT the resumable upload that
+      // template CREATION uses — that yields a review handle, which Meta does
+      // not accept as a send-time parameter.
+      const res = await apiFetch("/api/messages/template-header-media", {
+        method: "POST",
+        body: fd,
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as {
+          detail?: string;
+          error?: string;
+        } | null;
+        setMediaError(data?.detail ?? data?.error ?? "Upload failed");
+        return;
+      }
+      const data = (await res.json()) as {
+        link: string;
+        kind: "image" | "video" | "document";
+        filename?: string;
+      };
+      setBindings((cur) => ({
+        ...cur,
+        headerMedia: { kind: data.kind, link: data.link, ...(data.filename ? { filename: data.filename } : {}) },
+      }));
+      setSavedAt(null);
+    } catch {
+      setMediaError("Upload failed — check your connection and try again.");
+    } finally {
+      setUploadingMedia(false);
+    }
+  }, []);
+
+  const clearDefaultHeaderMedia = useCallback(() => {
+    setBindings((cur) => {
+      const { headerMedia: _drop, ...rest } = cur;
+      return rest;
+    });
+    setMediaError(null);
+    setSavedAt(null);
+  }, []);
+
   const save = useCallback(async () => {
     if (!templateId) return;
     setError(null);
@@ -162,7 +226,7 @@ export function VariableBindingsEditor({
     }
   }, [bindings, templateId, onSaved]);
 
-  if (bodyVarCount === 0 && !headerHasVar) {
+  if (bodyVarCount === 0 && !headerHasVar && !headerMediaKind) {
     return (
       <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-3 text-xs text-muted-foreground">
         This template has no variables.
@@ -172,6 +236,23 @@ export function VariableBindingsEditor({
 
   return (
     <div className="flex flex-col gap-3">
+      {headerMediaKind && (
+        <div className="rounded-md border border-border bg-muted/20 px-3 py-3">
+          <div className="mb-1 text-xs font-medium">Default {headerMediaKind} header</div>
+          <p className="mb-2 text-2xs text-muted-foreground">
+            Sent with every message from this template, so agents don&apos;t attach it each
+            time. They can still replace it for a one-off.
+          </p>
+          <HeaderMediaField
+            kind={headerMediaKind}
+            media={bindings.headerMedia ?? null}
+            uploading={uploadingMedia}
+            error={mediaError}
+            onPick={uploadDefaultHeaderMedia}
+            onClear={clearDefaultHeaderMedia}
+          />
+        </div>
+      )}
       {headerHasVar && bindings.header && (
         <BindingRow
           slot={`Header {{${headerVarKey}}}`}
@@ -331,6 +412,13 @@ function normalize(
   const header = headerHasVar
     ? src.header ?? { label: "", source: { kind: "manual" } }
     : undefined;
-  return header ? { body, header } : { body };
+  // `headerMedia` is not a text variable and has no slot to normalize against —
+  // carry it through untouched. Dropping it here would have made every save
+  // from this editor silently clear the template's saved header asset.
+  return {
+    body,
+    ...(header ? { header } : {}),
+    ...(src.headerMedia ? { headerMedia: src.headerMedia } : {}),
+  };
 }
 

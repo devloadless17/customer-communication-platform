@@ -23,6 +23,7 @@ import {
   flagChannelNeedsReconnect,
 } from "@/lib/providers/channel-health";
 import { normalizeMetaSendError } from "@/lib/providers/meta-send-error";
+import { parseVariableBindings } from "@ccp/shared/template-bindings";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import {
   countTemplatePlaceholders,
@@ -551,8 +552,32 @@ export async function sendTemplateInternal(
       );
     }
   }
+  // A template may carry a DEFAULT header asset (`variableBindings.headerMedia`,
+  // set on Templates → Edit). Meta has no send-time default of its own — the
+  // sample supplied at creation is only what its reviewers looked at — so a
+  // business whose promo template always uses the same banner had to re-attach
+  // it on every send, from every surface. Falling back HERE, at the one choke
+  // point every template send already passes through, covers the inbox, the
+  // broadcast runner, the `send_template` workflow step and `/v1` at once,
+  // instead of each of them growing its own copy of the rule.
+  //
+  // A caller-supplied asset always wins: the default is the fallback for "the
+  // caller said nothing", never an override of a one-off attachment.
+  const defaultHeaderMedia = parseVariableBindings(template.variableBindings).headerMedia;
+  // Typed as the CALLER's shape (which also allows a Meta media `id`) so the
+  // payload build below still sees that field; a stored default never carries
+  // one, by design — media ids expire after 30 days and belong to the number
+  // that uploaded them.
+  const resolvedHeaderMedia: typeof args.variables.headerMedia =
+    args.variables.headerMedia ??
+    // Only when it matches what the template's header actually is — a stale
+    // default left behind by an edit that changed the header format must
+    // surface as the normal "attach one" error, not as a send Meta rejects.
+    (defaultHeaderMedia && defaultHeaderMedia.kind === headerMediaKind
+      ? defaultHeaderMedia
+      : undefined);
   if (headerMediaKind) {
-    const media = args.variables.headerMedia;
+    const media = resolvedHeaderMedia;
     // Either form satisfies the requirement — an id means Meta already has it.
     if (!media || !(media.link || media.id)) {
       throw new SendTemplateValidationError(
@@ -579,8 +604,7 @@ export async function sendTemplateInternal(
   // choke point (direct + workflow + broadcast + external template sends) means
   // the persisted config keeps the never-expiring stable URL and every send gets
   // a valid signature. A foreign link (not ours) passes through untouched.
-  const suppliedMedia =
-    headerMediaKind && args.variables.headerMedia ? args.variables.headerMedia : null;
+  const suppliedMedia = headerMediaKind && resolvedHeaderMedia ? resolvedHeaderMedia : null;
   const headerMediaLink =
     suppliedMedia && !suppliedMedia.id && suppliedMedia.link
       ? blobStorage.isOwnUrl(suppliedMedia.link)

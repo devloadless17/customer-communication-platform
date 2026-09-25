@@ -37,11 +37,36 @@ export interface VariableBinding {
   defaultValue?: string;
 }
 
+/**
+ * The media a template's IMAGE/VIDEO/DOCUMENT header is sent with by default.
+ *
+ * Meta requires a header asset on EVERY send of a media-header template — the
+ * `header_handle` supplied at creation is only the sample its reviewers looked
+ * at ("The example asset will be reviewed as part of template review"), never
+ * a send-time fallback. So a business whose promo template always carries the
+ * same banner had to re-attach that banner for every single conversation.
+ *
+ * `link` is our own stable blob-storage object url, NOT a presigned one: the
+ * send path presigns it fresh (send-template-internal), so a default saved
+ * once keeps working after any presign TTL expires. A Meta media id is
+ * deliberately NOT stored — those expire after 30 days and are scoped to the
+ * phone number that uploaded them, so a saved one would rot and would be wrong
+ * for a sibling number in the same workspace.
+ */
+export interface TemplateHeaderMedia {
+  kind: "image" | "video" | "document";
+  link: string;
+  /** Documents only — what the recipient sees as the file name. */
+  filename?: string;
+}
+
 export interface VariableBindings {
   /** One per body `{{n}}`, in order. Missing entries default to `manual`. */
   body: VariableBinding[];
   /** Single header `{{1}}` if the template's HEADER component has a placeholder. */
   header?: VariableBinding;
+  /** Default asset for a media header — see TemplateHeaderMedia. */
+  headerMedia?: TemplateHeaderMedia;
 }
 
 const EMPTY: VariableBindings = { body: [] };
@@ -59,7 +84,28 @@ export function parseVariableBindings(v: Prisma.JsonValue | null | undefined): V
     ? obj.body.map(parseOne).filter((x): x is VariableBinding => x !== null)
     : [];
   const header = parseOne(obj.header);
-  return header ? { body, header } : { body };
+  const headerMedia = parseHeaderMedia(obj.headerMedia);
+  return {
+    body,
+    ...(header ? { header } : {}),
+    ...(headerMedia ? { headerMedia } : {}),
+  };
+}
+
+/**
+ * Same generosity as `parseOne`: a malformed saved default degrades to "no
+ * default" (the agent attaches one, exactly as before) rather than throwing
+ * somewhere down the send path.
+ */
+function parseHeaderMedia(v: unknown): TemplateHeaderMedia | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const obj = v as Record<string, unknown>;
+  const kind = obj.kind;
+  if (kind !== "image" && kind !== "video" && kind !== "document") return null;
+  const link = typeof obj.link === "string" ? obj.link.trim() : "";
+  if (!link) return null;
+  const filename = typeof obj.filename === "string" ? obj.filename : undefined;
+  return { kind, link, ...(filename ? { filename } : {}) };
 }
 
 function parseOne(v: unknown): VariableBinding | null {
