@@ -131,6 +131,20 @@ test.describe("the email-verification gate", () => {
         where: { id: user.id },
         data: { emailVerified: user.emailVerified },
       });
+      // Restoring the ROW is not restoring the USER. The API caches each
+      // session snapshot — `emailVerified` included — for its TTL (15s,
+      // session.guard.ts), and this account's session is shared with every
+      // other spec through the app-admin storage state. So the next spec in
+      // the batch (workspace-isolation) could start inside that window and get
+      // 403 `email_not_verified` on every request: it passed or failed on
+      // timing alone. Hand the account back only once the API itself sees it
+      // verified again — that waits exactly as long as the cache needs.
+      await expect
+        .poll(async () => (await page.request.get("/api/workspace/stages")).status(), {
+          timeout: 30_000,
+          intervals: [500],
+        })
+        .toBeLessThan(400);
     }
   });
 });

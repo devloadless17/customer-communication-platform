@@ -13,6 +13,7 @@
  */
 import { test, expect, type Page } from "@playwright/test";
 import { createTestUser, db, appAdmin } from "../_helpers/db";
+import { waitForHydrated } from "../_helpers/hydration";
 
 test.describe.configure({ mode: "serial" });
 
@@ -130,7 +131,13 @@ test("a long unbroken string wraps instead of running out of the column", async 
 test("the composer emoji panel opens inside the viewport", async ({ page }) => {
   await openTeam(page);
   await composer(page).waitFor({ timeout: 30_000 });
-  await page.getByLabel("Insert emoji").click();
+  // Two races this used to lose: the click could land before React hydrated
+  // the button (lost — see _helpers/hydration), and the panel was measured the
+  // instant after the click, before it had rendered at all.
+  const emojiButton = page.getByLabel("Insert emoji");
+  await waitForHydrated(emojiButton);
+  await emojiButton.click();
+  await page.locator(".w-72.overflow-hidden.rounded-xl").first().waitFor({ timeout: 15_000 });
 
   const rect = await page.evaluate(() => {
     const el = document.querySelector(".w-72.overflow-hidden.rounded-xl");

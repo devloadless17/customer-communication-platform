@@ -13,6 +13,7 @@ import { test, expect } from "@playwright/test";
 
 import { generateApiKey } from "../../apps/api/src/auth/api-key";
 import { db, appAdmin, wipeTestData, E2E_APP_WS_ID } from "./_helpers/db";
+import { waitForHydrated } from "./_helpers/hydration";
 
 // Unique per run so a crashed run's leftovers can't collide on the
 // [workspaceId, key] unique or the duplicate-label guard.
@@ -111,7 +112,11 @@ test("drawer: the pill picker sets the value and stores the OPTION ID", async ({
   test.setTimeout(120_000);
 
   await page.goto("/contacts");
-  await page.getByText(CONTACT_NAME, { exact: true }).first().click();
+  // Click only once React has hydrated the row — an earlier click is lost and
+  // the drawer never opens (see _helpers/hydration).
+  const contactName = page.getByText(CONTACT_NAME, { exact: true }).first();
+  await waitForHydrated(contactName);
+  await contactName.click();
 
   // The drawer renders the select field as a picker, not a text input. The
   // empty pill reads "Set…" (the stage picker's says "Set stage…", so the

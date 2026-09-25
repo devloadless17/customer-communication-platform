@@ -316,12 +316,32 @@ test.describe("contact transfer — lifecycle invariants", () => {
     ]);
     const created = [a, b].filter((r) => r.status() === 201);
     const refused = [a, b].filter((r) => r.status() === 409);
-    expect(created.length, "at most one transfer may start").toBeLessThanOrEqual(1);
     expect(created.length + refused.length, "no 500s from a lost race").toBe(2);
 
+    const jobs: Array<Record<string, unknown>> = [];
     for (const r of created) {
       const { jobId } = (await r.json()) as { jobId: string };
-      await waitForJob(request, jobId);
+      jobs.push(await waitForJob(request, jobId));
+    }
+
+    // The invariant the partial unique index guarantees is "never two ACTIVE
+    // transfers in one workspace" — NOT "at most one of two requests succeeds".
+    // An export of a near-empty directory can finish in milliseconds; when the
+    // first job completes before the second request is even processed, the
+    // second starts legitimately and both answer 201. This spec used to demand
+    // at most one 201 and so failed on timing alone (seen on a cold server,
+    // whose request skew is widest). What must hold is that the two jobs'
+    // active windows never overlapped: the earlier one finished no later than
+    // the later one was created.
+    if (jobs.length === 2) {
+      const [first, second] = jobs.sort(
+        (x, y) => Date.parse(String(x.createdAt)) - Date.parse(String(y.createdAt)),
+      );
+      expect(first!.finishedAt, "the first transfer finished").toBeTruthy();
+      expect(
+        Date.parse(String(first!.finishedAt)),
+        "two transfers were never active at the same time",
+      ).toBeLessThanOrEqual(Date.parse(String(second!.createdAt)));
     }
   });
 

@@ -11,6 +11,7 @@
  */
 import { test, expect } from "@playwright/test";
 import { db, appAdmin, wipeTestData } from "../_helpers/db";
+import { waitForHydrated } from "../_helpers/hydration";
 
 test.describe.configure({ mode: "serial" });
 
@@ -62,7 +63,11 @@ test.describe("A. Contacts numbered pagination", () => {
       page.locator('[aria-label^="Select Pageus Contact"]'),
     ).toHaveCount(25);
 
-    await page.getByRole("button", { name: "Next page" }).click();
+    // "1–25 of 30" is server-rendered, so it is visible BEFORE hydration — a
+    // click on Next in that window is lost (see _helpers/hydration).
+    const next = page.getByRole("button", { name: "Next page" });
+    await waitForHydrated(next);
+    await next.click();
 
     await expect(page.getByText(/26[–-]30 of 30/)).toBeVisible();
     await expect(
