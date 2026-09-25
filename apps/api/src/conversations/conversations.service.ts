@@ -629,6 +629,14 @@ export class ConversationsService {
     return rows.map((r) => r.blobKey).filter((k): k is string => Boolean(k));
   }
 
+  /**
+   * Template header assets live under the shared `media/` prefix but are owned
+   * by the TEMPLATE, not by any one message — see the call site.
+   */
+  private isSharedTemplateAssetKey(key: string): boolean {
+    return key.includes("/tpl-hdr-");
+  }
+
   private async collectMediaKeys(
     workspaceId: string,
     conversationIds: string[],
@@ -649,7 +657,16 @@ export class ConversationsService {
         ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
       });
       for (const m of page) {
-        if (m.mediaKey) keys.push(m.mediaKey);
+        // A template's header asset is SHARED — one object referenced by the
+        // template's saved default and by every message ever sent from it, in
+        // every thread. Deleting one conversation must not destroy it: the
+        // other threads would 404 and every future send of that template would
+        // presign a dead key, silently, since `blobStorage.delete` never
+        // throws. Its key carries the stable `/tpl-hdr-` marker (see
+        // `uploadTemplateHeaderMedia`), the same marker the blob-orphan sweeper
+        // uses to spare it — these two exclusions are the pair that keeps a
+        // shared object alive, so change them together.
+        if (m.mediaKey && !this.isSharedTemplateAssetKey(m.mediaKey)) keys.push(m.mediaKey);
         if (m.mediaThumbnailKey) keys.push(m.mediaThumbnailKey);
       }
       if (page.length < PAGE) break;

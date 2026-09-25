@@ -307,6 +307,8 @@ export function NewBroadcastForm({
   const [offerExpiresAt, setOfferExpiresAt] = useState("");
   // Values for TOP-LEVEL buttons, keyed `${index}:${subType}`.
   const [buttonVals, setButtonVals] = useState<Record<string, string>>({});
+  // Which template the header slot was last seeded for — see the reset effect.
+  const seededTemplateIdRef = useRef<string | null>(null);
   const [headerMediaUploading, setHeaderMediaUploading] = useState(false);
   const [headerMediaError, setHeaderMediaError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -590,14 +592,37 @@ export function NewBroadcastForm({
     }
     // A media-header template needs an asset on EVERY send, so a campaign to
     // 10k people needs it once here — the runner uploads it to Meta once for
-    // the whole run and reuses that id per recipient. Seeding it from the
-    // template's saved default means the common campaign (same banner every
-    // time) is one less step, and a CLONE — which carries body variables but
-    // never the asset — stops arriving with an empty header slot.
+    // the whole run and reuses that id per recipient. Seed it from the
+    // template's saved default so the common campaign (same banner every time)
+    // is one less step.
+    //
+    // Seeded ONLY when the selected template actually CHANGED. This effect also
+    // re-runs on identity churn its deps cannot avoid — `cardRequirements`
+    // derives from `templates`, which `loadTemplates()` replaces on mount and
+    // whenever the sending account changes — and an unconditional seed there
+    // would swap an operator's uploaded one-off creative for last month's saved
+    // banner with no visible change beyond a 48px thumbnail, while `variablesDone`
+    // stayed true and Send stayed enabled. A 10k campaign shipping the wrong
+    // image is billed and irreversible, so the seed must never overwrite a
+    // deliberate upload.
     const templateBindings = parseVariableBindings(
       selectedTemplate.variableBindings as never,
     );
-    setHeaderMedia(templateBindings.headerMedia ?? null);
+    if (seededTemplateIdRef.current !== selectedTemplateId) {
+      seededTemplateIdRef.current = selectedTemplateId;
+      // The default is the template's generic asset. A CLONE is continuing a
+      // specific campaign whose real creative the composer is never given
+      // (there is no `cloneHeaderMedia` prop), so filling its slot with the
+      // evergreen banner would silently re-send a different image to the whole
+      // audience. Leave it empty: Send stays disabled until a human attaches
+      // one, which is what the pre-clone behaviour forced.
+      const isClone = Boolean(cloneTemplateId && selectedTemplateId === cloneTemplateId);
+      const seed =
+        !isClone && templateBindings.headerMedia?.kind === headerMediaKind
+          ? templateBindings.headerMedia
+          : null;
+      setHeaderMedia(seed);
+    }
     // Clone: on the FIRST reset for the cloned template, use the source's saved
     // values instead of binding tokens. One-shot — a later manual switch falls
     // through to the normal binding-token prefill.

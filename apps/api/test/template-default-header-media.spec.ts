@@ -95,6 +95,74 @@ describe("template default header media", () => {
     expect(parsed.headerMedia).not.toHaveProperty("id");
   });
 
+
+  /**
+   * The shared-asset rule. One object is referenced by the template's default
+   * AND by every message ever sent from it, in every thread — so the
+   * conversation-delete path must skip it. Pinned as the marker contract the
+   * two exclusions (conversations.service `collectMediaKeys`, blob-orphan's
+   * `URL_ONLY_KEY_MARKERS`) both key on.
+   */
+  it("a template header key is recognisable as shared, and a normal one is not", () => {
+    const isShared = (key: string) => key.includes("/tpl-hdr-");
+    expect(isShared("media/ws_1/2026/09/tpl-hdr-abc-banner.jpg")).toBe(true);
+    // An ordinary inbound/outbound attachment is owned by its message and MUST
+    // still be reclaimed when the conversation is deleted.
+    expect(isShared("media/ws_1/2026/09/wamid.ABC-image.jpg")).toBe(false);
+  });
+
+  /**
+   * The link is the one binding field that leaves the app — Meta fetches it and
+   * it becomes an object key — so it gets the same gate every sibling send
+   * schema applies, plus a read-side guard for rows written before that.
+   */
+  it("rejects a non-https, over-long or non-string link at parse time", () => {
+    const link = (v: string) =>
+      parseVariableBindings({ body: [], headerMedia: { kind: "image", link: v } })
+        .headerMedia;
+    expect(link("http://r2.example/x.jpg")).toBeUndefined(); // not https
+    expect(link("javascript:alert(1)")).toBeUndefined();
+    expect(link("/relative/path.jpg")).toBeUndefined();
+    expect(link(`https://r2.example/${"a".repeat(2100)}`)).toBeUndefined(); // > 2048
+    expect(link("https://r2.example/ok.jpg")).toEqual({
+      kind: "image",
+      link: "https://r2.example/ok.jpg",
+    });
+  });
+
+  /**
+   * The persisted asset must belong to the SENDING workspace. `isOwnUrl` vets
+   * only the bucket host, and `/api/media/:id` scopes the message, never the
+   * key — so without a team-prefix check a workspace could point a default at a
+   * sibling tenant's object and read it same-origin.
+   */
+  it("only accepts a header key under the sending workspace's own prefix", () => {
+    const accept = (key: string | null, workspaceId: string) =>
+      key && key.startsWith(`media/${workspaceId}/`) ? key : null;
+    expect(accept("media/ws_mine/2026/09/tpl-hdr-a.jpg", "ws_mine")).toBe(
+      "media/ws_mine/2026/09/tpl-hdr-a.jpg",
+    );
+    expect(accept("media/ws_other/2026/09/tpl-hdr-a.jpg", "ws_mine")).toBeNull();
+    expect(accept("contact-exports/ws_mine/x.csv", "ws_mine")).toBeNull();
+  });
+
+  /**
+   * `mapMessage` emits the media DTO only when `mediaKind && mediaMimeType`, so
+   * a row written without a mime renders NOWHERE while still consuming a
+   * Files-tab slot and drawing a quoted-reply thumbnail. Write both or neither.
+   */
+  it("writes media columns only when the mime is known", () => {
+    const columns = (media: { mimeType?: string } | null, key: string | null) =>
+      key && media?.mimeType ? { mediaKind: "image", mediaKey: key, mediaMimeType: media.mimeType } : {};
+    expect(columns({ mimeType: "image/jpeg" }, "media/ws/1-tpl-hdr-a.jpg")).toMatchObject({
+      mediaMimeType: "image/jpeg",
+    });
+    // A default saved before mime capture, a /v1 or workflow send that omits
+    // it: no half-media row.
+    expect(columns({}, "media/ws/1-tpl-hdr-a.jpg")).toEqual({});
+    expect(columns({ mimeType: "image/jpeg" }, null)).toEqual({});
+  });
+
   /**
    * The resolution rule the send path applies, stated as data. Kept in lockstep
    * with `resolvedHeaderMedia` in lib/messaging/send-template-internal.ts.

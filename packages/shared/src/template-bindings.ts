@@ -106,7 +106,11 @@ function parseHeaderMedia(v: unknown): TemplateHeaderMedia | null {
   const kind = obj.kind;
   if (kind !== "image" && kind !== "video" && kind !== "document") return null;
   const link = typeof obj.link === "string" ? obj.link.trim() : "";
-  if (!link) return null;
+  // Defense in depth for rows written before the write site validated this, and
+  // for anything that reaches the column another way: the value is handed to
+  // Meta and turned into an object key, so a non-https or absurd string must
+  // degrade to "no default" rather than travel further.
+  if (!link || link.length > 2048 || !link.startsWith("https://")) return null;
   const filename = typeof obj.filename === "string" ? obj.filename : undefined;
   const mimeType = typeof obj.mimeType === "string" ? obj.mimeType : undefined;
   const sizeBytes =

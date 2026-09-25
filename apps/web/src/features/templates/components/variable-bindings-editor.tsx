@@ -244,7 +244,13 @@ export function VariableBindingsEditor({
 
   return (
     <div className="flex flex-col gap-3">
-      {headerMediaKind && (
+      {/* Edit mode only. The create wizard owns its own persistence and builds
+          its payload as `{body, header}` (template-form.tsx), so a default
+          uploaded here during creation would be dropped on submit and leave an
+          unreferenced object behind — the same silent clear the normalize()
+          carry-through above exists to prevent. The template is saved first,
+          then its default is set from the drawer. */}
+      {headerMediaKind && templateId && (
         <div className="rounded-md border border-border bg-muted/20 px-3 py-3">
           <div className="mb-1 text-xs font-medium">Default {headerMediaKind} header</div>
           <p className="mb-2 text-2xs text-muted-foreground">

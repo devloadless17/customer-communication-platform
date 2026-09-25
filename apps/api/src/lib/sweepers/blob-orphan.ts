@@ -104,12 +104,20 @@ const URL_ONLY_KEY_PREFIXES = [
 ] as const;
 // URL-only categories that DON'T have a distinguishing key prefix. Template
 // header media (messages.service.ts `uploadTemplateHeaderMedia`) lives under the
-// shared `media/` prefix, but its stable URL is the only persisted reference —
-// it's stored in workflow `send_template` step config, Broadcast variables, and
-// Message.rawPayload, never in a `mediaKey` column — so the cross-check below
-// would classify every one as an orphan and permanently delete it, silently
-// breaking all media-header automations. Its key segment is
+// shared `media/` prefix and is referenced mostly by URL — workflow
+// `send_template` step config, Broadcast variables, `MessageTemplate`'s saved
+// default in `variableBindings.headerMedia`, and Message.rawPayload — so the
+// cross-check below would classify every one as an orphan and permanently
+// delete it, silently breaking all media-header automations. Its key segment is
 // `sanitizeSeg('tpl-hdr-<uuid>')`, so the `/tpl-hdr-` marker is stable.
+//
+// A template send ALSO writes this key to `Message.mediaKey` now (so the sent
+// bubble can render its header), which does not change the rule here: ONE
+// object is shared by the template and by every message ever sent from it, in
+// every thread. That is why `ConversationsService.collectMediaKeys` skips the
+// same marker — deleting one conversation must not destroy an asset the
+// template and 40 other threads still point at. The two exclusions are a pair;
+// change them together.
 const URL_ONLY_KEY_MARKERS = ["/tpl-hdr-"] as const;
 // NOTE: video poster thumbnails (key `...-video.jpg` under `media/`, stored on
 // Message.mediaThumbnailKey) are NOT excluded here — they ARE db-keyed, so the

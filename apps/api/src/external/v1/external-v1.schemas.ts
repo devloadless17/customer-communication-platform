@@ -139,10 +139,18 @@ export const ExternalTopLevelSendMessageSchema = z.object({
               link: z.string().url().max(2048).optional(),
               id: z.string().min(1).max(255).optional(),
               filename: z.string().max(255).optional(),
+              // Parity with the inbox composer (a locked rule for /v1): these
+              // never reach Meta — they let the SENT message render its header
+              // in the agent's thread. Omit them and the send still succeeds,
+              // it simply shows as text, so they stay optional.
+              mimeType: z.string().max(255).optional(),
+              sizeBytes: z.number().int().nonnegative().optional(),
             })
             .refine((m) => Boolean(m.link) !== Boolean(m.id), {
               message: "header media needs exactly one of `link` or `id`",
             })
+            // Omit it entirely and a template whose header is media falls back
+            // to the default saved on the template, exactly as the inbox does.
             .optional(),
           // The pin for a LOCATION template header. The component is declared
           // with no parameters at template-create time, so the whole pin is

@@ -460,6 +460,19 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         ? HEADER_MEDIA_FORMATS[headerComp.format]
         : undefined;
       if (headerMediaKind) {
+        // Fall back to the template's SAVED DEFAULT before refusing. The inbox
+        // and the broadcast composer both seed it, and /v1 keeping its own
+        // stricter rule is exactly the UI-vs-API divergence CLAUDE.md §12 locks
+        // out: a partner creating the identical campaign would 400 where the UI
+        // succeeds. Applied here, at create time, so the stored campaign owns a
+        // concrete asset and the runner's upload-once-per-run optimization is
+        // unchanged. Kind-matched, for the same reason the send path is: a
+        // stale default from an edited header must surface as "attach one",
+        // not as a rejection from Meta.
+        const savedDefault = parseVariableBindings(template.variableBindings as never).headerMedia;
+        if (!variables.headerMedia?.link && savedDefault?.kind === headerMediaKind) {
+          variables.headerMedia = savedDefault;
+        }
         if (!variables.headerMedia?.link) {
           throw new BadRequestException({
             error: "header_media_required",

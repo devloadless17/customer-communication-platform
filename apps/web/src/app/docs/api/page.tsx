@@ -1791,8 +1791,13 @@ export default function ApiDocsPage() {
           mutually exclusive with <code>body</code>; the template&apos;s stored{" "}
           <code>parameter_format</code> decides which is read),{" "}
           <code>header</code> (a text header&apos;s one value),{" "}
-          <code>headerMedia</code> (<code>{`{ kind, link, filename? }`}</code> for
-          an image/video/document header — Meta fetches <code>link</code>),{" "}
+          <code>headerMedia</code> (
+          <code>{`{ kind, link, filename?, mimeType?, sizeBytes? }`}</code> for an
+          image/video/document header — Meta fetches <code>link</code>;{" "}
+          <code>mimeType</code>/<code>sizeBytes</code> never reach Meta and only
+          let the sent message render its header in the agent&apos;s inbox.{" "}
+          <strong>Omit it entirely</strong> and the template&apos;s saved default
+          header asset is used, if one is set and its kind matches),{" "}
           <code>headerLocation</code> (
           <code>{`{ latitude, longitude, name, address }`}</code> for a map
           header), and <code>buttons</code> (

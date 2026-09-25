@@ -153,6 +153,14 @@ function reconcileOptimisticAgainst(
     // Server media rows have a real (non-blob) media url; an optimistic copy
     // that leaked into `fresh` would still carry blob: — exclude those.
     if (!kind || m.media?.url?.startsWith("blob:")) continue;
+    // …and only EMPTY-BODY rows, which is the exact case this branch exists
+    // for (a captioned send is matched by body in (1)). Template sends now
+    // carry a media block too — their header asset — but they always have
+    // rendered body text, and counting one here let it consume the
+    // confirmation slot of a genuinely pending image send by the same agent:
+    // the real optimistic bubble was filtered out of the thread and its
+    // watchdog cleared with it, so a later failure surfaced nowhere.
+    if (m.body) continue;
     const k = senderKey(m.senderUserId, kind);
     freshMediaByKind.set(k, (freshMediaByKind.get(k) ?? 0) + 1);
   }

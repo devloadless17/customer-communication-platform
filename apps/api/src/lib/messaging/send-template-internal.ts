@@ -863,13 +863,29 @@ export async function sendTemplateInternal(
   // bytes already sit in our storage, so this streams same-origin like any
   // other attachment and costs no extra fetch.
   //
-  // Only OUR OWN storage: a foreign link has no object key to stream from, and
-  // the customer's server is not ours to proxy. `suppliedMedia.link` is the
-  // STABLE url deliberately — `headerMediaLink` above is presigned for Meta and
-  // expires, which would leave a broken image in the thread days later.
+  // THREE gates, each load-bearing:
+  //
+  //  1. Our own bucket AND under `media/{workspaceId}/` — `isOwnUrl` vets only
+  //     the HOST, and `/api/media/:id` scopes the MESSAGE, never the key. A
+  //     link is caller-supplied (send body, or a template default an admin
+  //     typed), so without the team-prefix check a workspace could point at a
+  //     sibling tenant's object and read it same-origin. Same rule, same
+  //     reasoning as `isOwnTeamMediaUrl` on the preview route.
+  //  2. The STABLE url, never `headerMediaLink` — that one is presigned for
+  //     Meta and expires, which would leave a broken image in the thread days
+  //     later.
+  //  3. A known mimeType (below) — `mapMessage` only emits the media DTO when
+  //     `mediaKind && mediaMimeType`, so writing the columns without a mime
+  //     produces a row that renders NOWHERE while still occupying a slot in the
+  //     Files tab and drawing a thumbnail on a quoted reply.
+  const ownTeamHeaderKey = (link: string): string | null => {
+    if (!blobStorage.isOwnUrl(link)) return null;
+    const key = blobStorage.keyFromUrl(link);
+    return key && key.startsWith(`media/${args.workspaceId}/`) ? key : null;
+  };
   const headerMediaBlobKey =
-    suppliedMedia && !suppliedMedia.id && suppliedMedia.link && blobStorage.isOwnUrl(suppliedMedia.link)
-      ? blobStorage.keyFromUrl(suppliedMedia.link)
+    suppliedMedia && !suppliedMedia.id && suppliedMedia.link
+      ? ownTeamHeaderKey(suppliedMedia.link)
       : null;
   const headerMediaColumns: {
     mediaKind?: "image" | "video" | "document";
@@ -879,13 +895,13 @@ export async function sendTemplateInternal(
     mediaMimeType?: string;
     mediaSizeBytes?: number;
   } =
-    headerMediaKind && headerMediaBlobKey && suppliedMedia?.link
+    headerMediaKind && headerMediaBlobKey && suppliedMedia?.link && suppliedMedia.mimeType
       ? {
           mediaKind: headerMediaKind,
           mediaKey: headerMediaBlobKey,
           mediaUrl: suppliedMedia.link,
           ...(suppliedMedia.filename ? { mediaFilename: suppliedMedia.filename } : {}),
-          ...(suppliedMedia.mimeType ? { mediaMimeType: suppliedMedia.mimeType } : {}),
+          mediaMimeType: suppliedMedia.mimeType,
           ...(suppliedMedia.sizeBytes !== undefined
             ? { mediaSizeBytes: suppliedMedia.sizeBytes }
             : {}),
@@ -957,11 +973,11 @@ export async function sendTemplateInternal(
       templateName: template.name,
     },
     timestamp: messageTimestamp.toISOString(),
-    // Only when the mime + size are known: `MediaAttachment` requires both, and
-    // a header saved as a template default before those were captured has
-    // neither. The row still carries the media columns either way, so the image
-    // appears once the thread refetches — the frame is the fast path, not the
-    // source of truth.
+    // `MediaAttachment` requires both, and the columns above are written only
+    // when the mime is known, so frame and row agree: either the header renders
+    // everywhere, or it renders nowhere and the bubble is exactly what it was
+    // before this feature. A partial row would render nowhere while still
+    // consuming a Files-tab slot and drawing a quoted-reply thumbnail.
     ...(headerMediaColumns.mediaKind && suppliedMedia?.mimeType && suppliedMedia.sizeBytes !== undefined
       ? {
           media: {

@@ -354,15 +354,25 @@ function placeholderForUnhandledType(m: MetaMessage): string | null {
       const err = m.errors?.[0];
       const reason = err?.error_data?.details?.trim() || err?.title?.trim();
       const kind = m.unsupported?.type?.trim();
-      const hint = kind ? UNSUPPORTED_KIND_HINTS[kind] : undefined;
-      // 131060 means "currently unavailable", a DIFFERENT thing from 131051
-      // "type not supported" — Meta's own sentence wins there. For 131051 the
-      // details line is generic boilerplate the hint already says better.
-      if (hint && err?.code !== 131060) return `⚠️ Unsupported message — ${hint}`;
+      // `Object.hasOwn`, not a bare index: `kind` comes off the wire, so
+      // `constructor` / `toString` / `valueOf` would otherwise resolve down the
+      // prototype chain to a truthy non-string and get stringified into the
+      // persisted body ("⚠️ Unsupported message — function Object() { … }").
+      // The `Record<string, string>` annotation hides that from the compiler.
+      const hint = kind && Object.hasOwn(UNSUPPORTED_KIND_HINTS, kind)
+        ? UNSUPPORTED_KIND_HINTS[kind]
+        : undefined;
       const label = kind
         ? `⚠️ Unsupported message (${kind.replace(/_/g, " ")})`
         : "⚠️ Unsupported message";
-      return reason ? `${label} — ${reason}` : label;
+      // Meta's own sentence is ALWAYS kept: it is the only place an error code
+      // like 131060 ("currently unavailable" — a different thing from 131051
+      // "type not supported") is legible, and it is recoverable nowhere else
+      // once rawPayload is collapsed by the retention sweeper. The hint is
+      // additive — it explains the KIND, which is developer jargon, and never
+      // replaces what Meta said.
+      const tail = [reason, hint].filter(Boolean).join(" — ");
+      return tail ? `${label} — ${tail}` : label;
     }
     case "system": {
       // A system NOTICE about the account. `user_changed_number` is
@@ -407,7 +417,7 @@ function placeholderForUnhandledType(m: MetaMessage): string | null {
  * number") is not guessable from anything on screen.
  */
 const UNSUPPORTED_KIND_HINTS: Record<string, string> = {
-  hsm: "a template message from another business (e.g. a verification code). WhatsApp never delivers a received template's content to the API, so it cannot be read here — use another number or email for codes",
+  hsm: "a template message from another business (e.g. a verification code); WhatsApp never delivers a received template's content to the API",
   unknown: "a message type WhatsApp doesn't deliver to the API",
   keep_in_chat: "a view-once message the sender kept",
   media_placeholder: "media still uploading on the sender's device",

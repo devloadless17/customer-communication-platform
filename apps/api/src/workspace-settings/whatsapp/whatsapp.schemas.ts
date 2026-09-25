@@ -68,11 +68,40 @@ export const TemplateLabelsSchema = z
   .array(z.string().trim().min(1).max(40))
   .max(20, "at most 20 labels per template");
 
+/**
+ * The ONE key inside `variableBindings` that is not an inert UI label: the
+ * default header asset is handed to Meta on every send of the template and its
+ * url becomes an object key on the message row. The rest of the object stays an
+ * opaque record (a bad label degrades to `manual`, never worse), but this field
+ * gets the same gate every sibling send schema applies — `messages.schemas.ts`,
+ * `external-v1.schemas.ts` and `broadcasts.schemas.ts` all use
+ * `z.string().url().max(2048)` for exactly this value.
+ */
+const TemplateDefaultHeaderMediaSchema = z.object({
+  kind: z.enum(["image", "video", "document"]),
+  link: z.string().url().max(2048),
+  filename: z.string().max(255).optional(),
+  mimeType: z.string().max(255).optional(),
+  sizeBytes: z.number().int().nonnegative().optional(),
+});
+
 export const UpdateTemplateBindingsSchema = z
   .object({
     variableBindings: z
       .record(z.string(), z.unknown())
       .refine((v) => !Array.isArray(v), { message: "expected an object" })
+      .superRefine((v, ctx) => {
+        const hm = (v as Record<string, unknown>).headerMedia;
+        if (hm === undefined || hm === null) return;
+        const parsed = TemplateDefaultHeaderMediaSchema.safeParse(hm);
+        if (!parsed.success) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["headerMedia"],
+            message: "headerMedia must be { kind, link (https url), filename?, mimeType?, sizeBytes? }",
+          });
+        }
+      })
       .optional(),
     labels: TemplateLabelsSchema.optional(),
   })

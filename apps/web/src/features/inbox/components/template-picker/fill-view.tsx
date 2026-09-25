@@ -185,10 +185,17 @@ export function TemplateFillView({
   // whose promo template always carries the same banner was re-attaching that
   // banner in every conversation. A default saved on the template pre-fills it;
   // the agent can still replace or clear it per send.
-  const savedHeaderMedia = useMemo(
-    () => parseVariableBindings(template.variableBindings as never).headerMedia ?? null,
-    [template.variableBindings],
-  );
+  // Only when the saved default still MATCHES the header the template declares.
+  // A template edited from an IMAGE header to a DOCUMENT one leaves a stale
+  // default behind; seeding it would defeat the server's wrong-kind guard,
+  // because a caller-supplied asset always wins over the default — the send
+  // would fail with "expects a document, not a image", naming a field the agent
+  // never touched. Left null, the agent simply attaches one, which is the
+  // actionable path the server intends.
+  const savedHeaderMedia = useMemo(() => {
+    const saved = parseVariableBindings(template.variableBindings as never).headerMedia;
+    return saved && saved.kind === headerMediaKind ? saved : null;
+  }, [template.variableBindings, headerMediaKind]);
   const [headerMedia, setHeaderMedia] = useState<{
     kind: "image" | "video" | "document";
     link: string;
