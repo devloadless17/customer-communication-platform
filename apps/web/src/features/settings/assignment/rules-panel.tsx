@@ -1,9 +1,10 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, Loader2, Plus, Trash2 } from "lucide-react";
 
 import { LIVE_CHANNELS } from "@ccp/shared/providers/capabilities";
+import type { Channel } from "@ccp/shared/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
@@ -37,6 +38,22 @@ export function RulesPanel({
   onChanged: () => Promise<void>;
 }) {
   const [busy, setBusy] = useState(false);
+  /**
+   * The rule edit being saved right now, shown until the re-fetch answers.
+   *
+   * Same defect as AutomationPanel's `pending` (read that note): every control
+   * here is bound to the SERVER's copy of the rule, so React snapped it back to
+   * the old value for the whole PATCH + re-fetch round trip, then it flipped by
+   * itself. Worse here than there, because rule PATCHes carry no version: the
+   * multi-selects build the next `conditions` from the rule on screen, so a
+   * second ⌘-click inside the window was built on the snapped-back selection
+   * and SUCCEEDED — silently dropping the first pick. The controls are disabled
+   * while a save runs, and whatever the server answers replaces this.
+   */
+  const [pending, setPending] = useState<{ id: string; body: Partial<RuleRow> } | null>(null);
+  const inFlight = useRef(false);
+  const shown = (rule: RuleRow): RuleRow =>
+    pending?.id === rule.id ? { ...rule, ...pending.body } : rule;
   const defaultPolicy = policies.find((p) => p.isDefault) ?? policies[0];
 
   // Accounts worth offering as a routing condition: only on channels that
@@ -94,12 +111,21 @@ export function RulesPanel({
     });
   };
 
-  const patchRule = (id: string, body: Record<string, unknown>) =>
-    call(`/api/workspace/assignment/rules/${id}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
+  const patchRule = async (id: string, body: Partial<RuleRow>) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setPending({ id, body });
+    try {
+      await call(`/api/workspace/assignment/rules/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } finally {
+      inFlight.current = false;
+      setPending(null);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -119,7 +145,9 @@ export function RulesPanel({
         </div>
       )}
 
-      {rules.map((rule, index) => (
+      {rules.map((serverRule, index) => {
+        const rule = shown(serverRule);
+        return (
         <section key={rule.id} className="space-y-3 rounded-lg border border-border px-4 py-3">
           <div className="flex items-center gap-2">
             <span className="w-6 shrink-0 text-xs tabular-nums text-muted-foreground">
@@ -127,16 +155,18 @@ export function RulesPanel({
             </span>
             <Input
               className="flex-1"
-              defaultValue={rule.name}
+              defaultValue={serverRule.name}
               maxLength={80}
+              disabled={busy}
               onBlur={(e) => {
-                if (e.target.value.trim() && e.target.value !== rule.name) {
+                if (e.target.value.trim() && e.target.value !== serverRule.name) {
                   void patchRule(rule.id, { name: e.target.value.trim() });
                 }
               }}
             />
             <Switch
               checked={rule.enabled}
+              disabled={busy}
               onCheckedChange={(v) => void patchRule(rule.id, { enabled: v })}
             />
             <Button
@@ -160,6 +190,7 @@ export function RulesPanel({
             <Button
               size="sm"
               variant="ghost"
+              disabled={busy}
               onClick={() =>
                 void call(
                   `/api/workspace/assignment/rules/${rule.id}`,
@@ -180,11 +211,14 @@ export function RulesPanel({
                 multiple
                 className="h-auto min-h-24"
                 value={rule.conditions.channels ?? []}
+                disabled={busy}
                 onChange={(e) =>
                   void patchRule(rule.id, {
                     conditions: {
                       ...rule.conditions,
-                      channels: selectedValues(e.target),
+                      // Options are rendered from LIVE_CHANNELS, so every
+                      // selected value is a Channel by construction.
+                      channels: selectedValues(e.target) as Channel[],
                     },
                   })
                 }
@@ -211,6 +245,7 @@ export function RulesPanel({
                   multiple
                   className="h-auto min-h-24"
                   value={rule.conditions.channelAccountIds ?? []}
+                  disabled={busy}
                   onChange={(e) =>
                     void patchRule(rule.id, {
                       conditions: {
@@ -238,7 +273,8 @@ export function RulesPanel({
                 When the message contains
               </label>
               <Input
-                defaultValue={(rule.conditions.keywords ?? []).join(", ")}
+                defaultValue={(serverRule.conditions.keywords ?? []).join(", ")}
+                disabled={busy}
                 placeholder="refund, cancel, urgent"
                 onBlur={(e) =>
                   void patchRule(rule.id, {
@@ -259,6 +295,7 @@ export function RulesPanel({
               <label className="text-xs font-medium">Then route with</label>
               <Select
                 value={rule.policyId}
+                disabled={busy}
                 onChange={(e) => void patchRule(rule.id, { policyId: e.target.value })}
               >
                 {policies.map((p) => (
@@ -270,7 +307,8 @@ export function RulesPanel({
             </div>
           </div>
         </section>
-      ))}
+        );
+      })}
 
       <Button size="sm" variant="outline" onClick={() => void createRule()} disabled={busy}>
         {busy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}

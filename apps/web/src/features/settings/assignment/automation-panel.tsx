@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
@@ -31,8 +31,42 @@ export function AutomationPanel({
   onChanged: () => Promise<void>;
 }) {
   const [saving, setSaving] = useState(false);
+  /**
+   * The change being saved right now, shown until the server's answer lands.
+   *
+   * Every control here is bound to the SERVER's copy, and a save is a PATCH
+   * followed by a re-fetch of the whole page. React holds a controlled
+   * <select> or switch to its `value`/`checked` prop — the moment the person
+   * changes it, React snaps it straight back — so for that entire round trip
+   * the control showed the option they had just REJECTED, then flipped by
+   * itself when the re-fetch landed. On a fast connection that is invisible;
+   * over a real one it is a second or more (measured 1.3s at a 700ms leg).
+   *
+   * On macOS it turns into genuinely wrong picks: the native pop-up menu opens
+   * with the CURRENTLY SHOWN item under the pointer, so a re-click during the
+   * window re-selects the snapped-back value — no change event at all — and the
+   * in-flight save then lands on the option they had just clicked away from.
+   * Reported as "when he clicks one it takes the other" (2026-09-25).
+   *
+   * Not optimistic state in the sense the parent deliberately avoids: nothing
+   * assumes success. It lives only for the round trip, and whatever the server
+   * answers — the saved value, a co-admin's value on a 409, the old value on a
+   * failure (with its toast) — replaces it.
+   */
+  const [pending, setPending] = useState<Partial<AssignmentSettingsRow>>({});
+  const inFlight = useRef(false);
+  const view: AssignmentSettingsRow = { ...settings, ...pending };
 
-  const patch = async (body: Record<string, unknown>) => {
+  const patch = async (body: Partial<AssignmentSettingsRow>) => {
+    // One save at a time. Each PATCH carries `settings.version`, which only
+    // advances when the re-fetch lands — so a second change inside the window
+    // went out with a STALE version, earned a 409, and told the person that
+    // "someone else changed these settings" when nobody had. The controls are
+    // disabled while saving; this covers a change that slips in before that
+    // render commits.
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setPending(body);
     setSaving(true);
     try {
       const res = await apiFetch("/api/workspace/assignment/settings", {
@@ -51,18 +85,26 @@ export function AutomationPanel({
       toast("Couldn't save — reverted");
       await onChanged();
     } finally {
+      inFlight.current = false;
+      setPending({});
       setSaving(false);
     }
   };
 
   return (
     <div className="space-y-6">
-      {saving && (
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <Loader2 className="size-3 animate-spin" />
-          Saving…
-        </div>
-      )}
+      {/* Always rendered, only HIDDEN when idle: inserting it on save pushed
+          every control below down by a line mid-interaction, moving the next
+          click target out from under the pointer. */}
+      <div
+        aria-live="polite"
+        className={
+          "flex h-4 items-center gap-2 text-xs text-muted-foreground" + (saving ? "" : " invisible")
+        }
+      >
+        <Loader2 className="size-3 animate-spin" />
+        Saving…
+      </div>
 
       <Group
         title="New conversations"
@@ -71,22 +113,25 @@ export function AutomationPanel({
         <Toggle
           label="Assign new conversations automatically"
           hint="A brand-new conversation is routed through your teams as soon as the first message arrives. Off means every new chat waits in the Unassigned queue for someone to claim it."
-          checked={settings.autoAssignOnNewConversation}
+          checked={view.autoAssignOnNewConversation}
+          disabled={saving}
           onChange={(v) => void patch({ autoAssignOnNewConversation: v })}
         />
-        {settings.autoAssignOnNewConversation && (
+        {view.autoAssignOnNewConversation && (
           <Toggle
             indent
             label="Let the AI handle it first"
             hint="While the AI assistant is answering, don't spend an agent's capacity on the conversation. A human is routed in the moment the AI escalates. Turn this off if you want every conversation to have a named owner from the first message, even while the AI replies."
-            checked={settings.skipWhenAiHandling}
+            checked={view.skipWhenAiHandling}
+            disabled={saving}
             onChange={(v) => void patch({ skipWhenAiHandling: v })}
           />
         )}
         <Toggle
           label="Assign when an unassigned conversation gets a new message"
           hint="Covers reopened threads and ones a teammate deliberately unassigned. A conversation that already has an owner is never touched."
-          checked={settings.autoAssignOnReopen}
+          checked={view.autoAssignOnReopen}
+          disabled={saving}
           onChange={(v) => void patch({ autoAssignOnReopen: v })}
         />
       </Group>
@@ -97,16 +142,19 @@ export function AutomationPanel({
       >
         <div className="space-y-1.5">
           <Select
-            value={settings.agentConversationVisibility}
+            value={view.agentConversationVisibility}
+            disabled={saving}
             onChange={(e) =>
-              void patch({ agentConversationVisibility: e.target.value })
+              void patch({
+                agentConversationVisibility: e.target.value as AssignmentSettingsRow["agentConversationVisibility"],
+              })
             }
           >
             <option value="team">Agents see every conversation</option>
             <option value="assigned">Agents see only conversations assigned to them</option>
           </Select>
           <p className="text-xs text-muted-foreground">
-            {settings.agentConversationVisibility === "assigned" ? (
+            {view.agentConversationVisibility === "assigned" ? (
               <>
                 Agents see only their own conversations — in the list, in search,
                 in counts and in notifications. Handing a conversation over works
@@ -130,7 +178,8 @@ export function AutomationPanel({
       >
         <div className="space-y-1.5">
           <Select
-            value={settings.aiHandoffPolicyId ?? ""}
+            value={view.aiHandoffPolicyId ?? ""}
+            disabled={saving}
             onChange={(e) => void patch({ aiHandoffPolicyId: e.target.value || null })}
           >
             <option value="">Use my routing rules (default)</option>
@@ -156,10 +205,11 @@ export function AutomationPanel({
         <Toggle
           label="Reassign when an agent goes offline"
           hint="Conversations sitting with someone who has closed the app get re-routed. Only conversations where no agent has replied yet are moved by default, so nobody is pulled out of a live exchange."
-          checked={settings.reassignOnOffline}
+          checked={view.reassignOnOffline}
+          disabled={saving}
           onChange={(v) => void patch({ reassignOnOffline: v })}
         />
-        {settings.reassignOnOffline && (
+        {view.reassignOnOffline && (
           <>
             <div className="ml-11 flex items-center gap-2">
               <span className="text-sm">Wait</span>
@@ -169,6 +219,7 @@ export function AutomationPanel({
                 max={1440}
                 className="w-20 text-right"
                 defaultValue={settings.reassignOfflineAfterMinutes}
+                disabled={saving}
                 onBlur={(e) => {
                   const value = Number(e.target.value);
                   if (
@@ -189,7 +240,8 @@ export function AutomationPanel({
               indent
               label="Only move conversations nobody has replied to yet"
               hint="Strongly recommended. A conversation an agent is mid-exchange on carries context; handing it to someone else mid-sentence is worse for the customer than a short wait."
-              checked={settings.reassignOfflineOnlyPending}
+              checked={view.reassignOfflineOnlyPending}
+              disabled={saving}
               onChange={(v) => void patch({ reassignOfflineOnlyPending: v })}
             />
           </>
@@ -197,7 +249,8 @@ export function AutomationPanel({
         <Toggle
           label="Reassign when a teammate is deactivated"
           hint="Their open conversations are routed to someone else immediately. Without this they sit with an account that can no longer log in, and never appear in anyone's queue."
-          checked={settings.reassignOnDeactivate}
+          checked={view.reassignOnDeactivate}
+          disabled={saving}
           onChange={(v) => void patch({ reassignOnDeactivate: v })}
         />
       </Group>
@@ -231,16 +284,18 @@ function Toggle({
   checked,
   onChange,
   indent,
+  disabled,
 }: {
   label: string;
   hint: string;
   checked: boolean;
   onChange: (v: boolean) => void;
   indent?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <label className={"flex items-start gap-3" + (indent ? " ml-8" : "")}>
-      <Switch checked={checked} onCheckedChange={onChange} />
+      <Switch checked={checked} onCheckedChange={onChange} disabled={disabled} />
       <span className="text-sm">
         {label}
         <span className="mt-0.5 block text-xs text-muted-foreground">{hint}</span>

@@ -151,6 +151,16 @@ export function TicketDetailClient({
   // under it, so the server's clear (below) must not make it jump away.
   const [unreadAnchor] = useState(seedUnread);
   const [busy, setBusy] = useState(false);
+  /**
+   * The field change being saved right now. The status / priority / assignee
+   * selects are bound to the SERVER's ticket, so React held them on the OLD
+   * value for the whole PATCH round trip — the person picked "Solved" and
+   * watched "Open" sit there until the response flipped it. They're disabled
+   * meanwhile, so no wrong pick lands, but it reads as "it didn't take" (same
+   * defect as the assignment settings page, 2026-09-25). Whatever the server
+   * answers replaces this.
+   */
+  const [pendingPatch, setPendingPatch] = useState<Record<string, unknown>>({});
   const [subject, setSubject] = useState(seed.subject ?? "");
   // The cause — why this ticket exists. Seeded once and saved on blur when it
   // actually changed, same posture as the subject field above.
@@ -333,6 +343,7 @@ export function TicketDetailClient({
 
   const patch = async (body: Record<string, unknown>) => {
     setBusy(true);
+    setPendingPatch(body);
     try {
       const res = await apiFetch(`/api/tickets/${ticket.id}`, {
         method: "PATCH",
@@ -355,6 +366,7 @@ export function TicketDetailClient({
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Couldn't update this ticket");
     } finally {
+      setPendingPatch({});
       setBusy(false);
     }
   };
@@ -731,7 +743,7 @@ export function TicketDetailClient({
       <section className="grid gap-3 rounded-xl border bg-card p-4 sm:grid-cols-2">
         <Field label="Status">
           <select
-            value={ticket.status}
+            value={(pendingPatch.status as TicketStatus | undefined) ?? ticket.status}
             disabled={busy}
             onChange={(e) => void patch({ status: e.target.value as TicketStatus })}
             className="h-8 w-full rounded-md border bg-background px-2 text-xs"
@@ -746,7 +758,7 @@ export function TicketDetailClient({
 
         <Field label="Priority">
           <select
-            value={ticket.priority}
+            value={(pendingPatch.priority as TicketPriority | undefined) ?? ticket.priority}
             disabled={busy}
             onChange={(e) => void patch({ priority: e.target.value as TicketPriority })}
             className="h-8 w-full rounded-md border bg-background px-2 text-xs capitalize"
@@ -768,7 +780,11 @@ export function TicketDetailClient({
             the column the guest wrote was not the one being rendered. */}
         <Field label={mySideLabel}>
           <select
-            value={mySideAssignee ?? ""}
+            value={
+              "assignedUserId" in pendingPatch
+                ? ((pendingPatch.assignedUserId as string | null) ?? "")
+                : (mySideAssignee ?? "")
+            }
             disabled={busy}
             onChange={(e) => void patch({ assignedUserId: e.target.value || null })}
             className="h-8 w-full rounded-md border bg-background px-2 text-xs"

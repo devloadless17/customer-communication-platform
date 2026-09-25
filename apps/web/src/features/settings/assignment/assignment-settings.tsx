@@ -36,7 +36,10 @@ type TabKey = (typeof TABS)[number]["key"];
  * The whole page is driven by one GET, and every mutation re-fetches it. This
  * is a low-traffic admin screen where a stale weight is worse than a round
  * trip, so there's no optimistic-state machinery to get wrong — a deliberate
- * contrast with the inbox.
+ * contrast with the inbox. One caveat that is NOT optimism: a control still
+ * SHOWS the value being saved until the re-fetch answers (AutomationPanel's
+ * `pending`). Holding a controlled control to the old server value made it
+ * display the option just rejected for the whole round trip.
  */
 export function AssignmentSettings() {
   const [data, setData] = useState<AssignmentOverview | null>(null);
