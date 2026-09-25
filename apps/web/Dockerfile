@@ -31,7 +31,7 @@ RUN apt-get update \
 # Pin pnpm via corepack to match package.json's `packageManager` field.
 # Avoids the "lockfile written by pnpm X, can't be read by pnpm Y" class
 # of bug.
-RUN corepack enable && corepack prepare pnpm@10.34.4 --activate
+RUN corepack enable && corepack prepare pnpm@10.34.5 --activate
 
 # -----------------------------------------------------------------------------
 # deps — workspace-aware install. Only package.json + lockfile + Prisma
@@ -190,7 +190,7 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 # instead of root's private ~/.cache/node/corepack (mode 700). The runtime
 # stage switches to `USER node` and the deploy job runs `docker exec app pnpm
 # run db:seed:superadmin` as that user — with root's private cache, the pnpm
-# shim finds an empty cache under /home/node and re-downloads pnpm@10.34.4 from
+# shim finds an empty cache under /home/node and re-downloads pnpm@10.34.5 from
 # registry.npmjs.org BEFORE the seed can run, putting an external network
 # dependency (npmjs/DNS availability, corepack signature-key rotation) in the
 # path of the post-deploy Bootstrap-superadmin step. A world-readable cache
@@ -199,7 +199,7 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 ENV COREPACK_HOME=/opt/corepack
 RUN corepack enable \
  && mkdir -p /opt/corepack \
- && corepack prepare pnpm@10.34.4 --activate \
+ && corepack prepare pnpm@10.34.5 --activate \
  && chmod -R a+rX /opt/corepack
 
 # Standalone bundle: server.js + minimal traced node_modules.

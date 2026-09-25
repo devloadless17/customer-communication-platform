@@ -38,7 +38,7 @@
 # use `configDependencies`. Revisit when we migrate to pnpm 11.x.
 CVE-2026-55697
 
-# corepack's BUNDLED pnpm distribution (/opt/corepack/v1/pnpm/10.34.4/dist/
+# corepack's BUNDLED pnpm distribution (/opt/corepack/v1/pnpm/10.34.5/dist/
 # node_modules/) vendors its own copies of these. They are NOT in our lockfile,
 # so `pnpm.overrides` cannot reach them — the only real fixes are a pnpm release
 # that re-bundles them, or dropping corepack from the runtime image (which the
@@ -68,7 +68,7 @@ CVE-2026-13149
 # the old note called unfixable.
 #
 # What remains is ONE copy, and only the one: brace-expansion 2.1.1 vendored
-# inside corepack's own pnpm bundle (/opt/corepack/v1/pnpm/10.34.4/dist/
+# inside corepack's own pnpm bundle (/opt/corepack/v1/pnpm/10.34.5/dist/
 # node_modules/), which is not in our lockfile and cannot be reached by
 # pnpm.overrides — the same situation as the entries above it.
 #
@@ -80,8 +80,13 @@ CVE-2026-13149
 #
 # DROP BOTH LINES once corepack ships a pnpm bundle with a patched copy.
 # Re-check on every pnpm bump. (Checked 2026-08-28: pnpm 10.34.5 moves the
-# bundled copy to 2.1.2, still short of the fixed 2.1.4 — bumping clears
-# nothing, so we stay on 10.34.4.)
+# bundled copy to 2.1.2, still short of the fixed 2.1.4, so bumping cleared
+# nothing HERE and we stayed on 10.34.4. SUPERSEDED 2026-09-25: we are on
+# 10.34.5 now, for a different reason — it fixes CVE-2026-82392 (arbitrary
+# code execution) and GHSA-vx52-2968-3vc6 (environment secrets exfiltrated
+# via env expansion in proxy settings), both flagged HIGH against the 10.34.4
+# bundle and blocking the deploy. These two lines still apply unchanged: the
+# 10.34.5 bundle still vendors brace-expansion 2.1.2.)
 CVE-2026-14257
 CVE-2026-69152
 
@@ -108,7 +113,7 @@ CVE-2026-69192
 # Same shape as the corepack entries above, and verified to be so rather than
 # assumed: `tar` appears nowhere in pnpm-lock.yaml and nowhere in node_modules —
 # the only copy is 7.5.16 vendored inside corepack's pnpm bundle
-# (/opt/corepack/v1/pnpm/10.34.4/dist/node_modules/tar), which pnpm.overrides
+# (/opt/corepack/v1/pnpm/10.34.5/dist/node_modules/tar), which pnpm.overrides
 # cannot reach. It is in the WEB image too for the same reason, not via that
 # image's second npm dep tree.
 #
