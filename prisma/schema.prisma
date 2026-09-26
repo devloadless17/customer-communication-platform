@@ -5813,6 +5813,14 @@ model AiAssistantConfig {
   // "opening" (ask up front in the first reply of a new conversation) or
   // "natural" (ask once it has answered what the customer came for).
   collectTiming         String          @default("natural")
+  // RETIRED 2026-09-26 — superseded by `collectFields`, which its value migrated
+  // into. Nothing reads it any more; it is KEPT only because the previous
+  // release does, and the deploy migrates while that release is still serving
+  // (and auto-rollback swaps code, never schema) — dropping it in the same
+  // release failed every AI reply with P2022 (expand-contract, see the
+  // 20260901120000 migration). The settings API withholds it, like
+  // `customInstructions`. Drop it in a later release.
+  collectCustomerEmail  Boolean         @default(true)
   // Seconds to WAIT after a customer's last message before replying, so a
   // burst of chunked messages gets ONE considered answer. The timer resets on
   // each new inbound. 0 = reply immediately (no debounce).
@@ -5909,6 +5917,10 @@ model AiConversationState {
   // in practice either way. Superseded `emailRequestedAt DateTime?`, whose
   // value migrates forward under the `email` key.
   requestedDetails Json                  @default("{}")
+  // RETIRED 2026-09-26 — superseded by `requestedDetails` (its value migrated in
+  // under the `email` key). Kept only for the previous release, exactly like
+  // AiAssistantConfig.collectCustomerEmail; drop it in a later release.
+  emailRequestedAt DateTime?
   updatedAt        DateTime              @updatedAt
 
   @@index([workspaceId])

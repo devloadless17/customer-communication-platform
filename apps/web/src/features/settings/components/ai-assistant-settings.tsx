@@ -355,7 +355,9 @@ export function AiAssistantSettings({
             <SwitchRow label="Match customer tone" checked={bool("matchCustomerTone")} onChange={(v) => set("matchCustomerTone", v)} />
             <Field label="Details to collect from customers" full>
               <CollectFieldsEditor
-                rows={parseCollectFields(form.collectFields)}
+                // As typed: this re-parses on every keystroke, and the default
+                // trims — which removed each space the moment it was typed.
+                rows={parseCollectFields(form.collectFields, { asTyped: true })}
                 contactFields={contactFields}
                 timing={str("collectTiming") === "opening" ? "opening" : "natural"}
                 onChange={(rows) => set("collectFields", rows)}

@@ -82,8 +82,17 @@ export function detailKey(spec: CollectFieldSpec): string {
  *
  * Duplicates collapse to the first occurrence, so the ordering stays a strict
  * priority with no repeated asks.
+ *
+ * `asTyped` is for the settings EDITOR only, which renders its rows through
+ * this parser on every keystroke: it keeps each `purpose` exactly as typed.
+ * Trimming there removed every space the moment it was typed, so a sentence
+ * could not be written at all. Everything that USES the purpose (the prompt)
+ * reads it trimmed, via the default.
  */
-export function parseCollectFields(value: unknown): CollectFieldSpec[] {
+export function parseCollectFields(
+  value: unknown,
+  opts: { asTyped?: boolean } = {},
+): CollectFieldSpec[] {
   if (!Array.isArray(value)) return [];
   const out: CollectFieldSpec[] = [];
   const seen = new Set<string>();
@@ -92,7 +101,8 @@ export function parseCollectFields(value: unknown): CollectFieldSpec[] {
     const row = raw as Record<string, unknown>;
     const target = typeof row.target === "string" ? row.target : "";
     const key = typeof row.key === "string" ? row.key.trim() : "";
-    const purpose = typeof row.purpose === "string" ? row.purpose.trim().slice(0, 200) : "";
+    const rawPurpose = typeof row.purpose === "string" ? row.purpose : "";
+    const purpose = (opts.asTyped ? rawPurpose : rawPurpose.trim()).slice(0, 200);
 
     let spec: CollectFieldSpec;
     if (target === "custom") {

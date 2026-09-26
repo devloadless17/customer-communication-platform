@@ -70,6 +70,24 @@ export const DEFAULT_AI_CONFIG = {
   replyModelTier: "reply",
 } as const;
 
+/**
+ * The config row as the settings surface may see it: the RETIRED columns
+ * withheld (see prisma/schema.prisma — `customInstructions`, and
+ * `collectCustomerEmail`, kept only for the previous release).
+ *
+ * EVERY return path goes through this, not only the read. The settings form
+ * keeps whatever a save returns as its new state and sends all of it back on
+ * the next save, into a `.strict()` body — so a retired key leaking out of
+ * `updateConfig` failed the SECOND save of every page load with
+ * `unrecognized_keys`, until a reload.
+ */
+function withoutRetired<T extends { customInstructions: unknown; collectCustomerEmail: unknown }>(
+  row: T,
+): Omit<T, "customInstructions" | "collectCustomerEmail"> {
+  const { customInstructions: _instructions, collectCustomerEmail: _email, ...config } = row;
+  return config;
+}
+
 @Injectable()
 export class AiAssistantService {
   constructor(private readonly db: DbService) {}
@@ -77,18 +95,16 @@ export class AiAssistantService {
   /**
    * Read the team's config, or synthesized defaults when nothing is saved yet.
    *
-   * `customInstructions` is stripped rather than returned: the column is
-   * RETIRED (see prisma/schema.prisma) and nothing reads it, but the settings
-   * form round-trips whatever it is handed straight back into the PUT — and
-   * that body is `.strict()`, so leaving the key in would fail every save with
-   * `unrecognized_keys`. Withholding it here is also the enforcement that no
-   * surface can quietly start using it again.
+   * The RETIRED columns are withheld rather than returned (`withoutRetired`):
+   * nothing reads them, but the settings form round-trips whatever it is handed
+   * straight back into the PUT — and that body is `.strict()`, so leaving a key
+   * in would fail every save with `unrecognized_keys`. Withholding it here is
+   * also the enforcement that no surface can quietly start using it again.
    */
   async getConfig(workspaceId: string) {
     const row = await this.db.aiAssistantConfig.findUnique({ where: { workspaceId } });
     if (!row) return { ...DEFAULT_AI_CONFIG, workspaceId };
-    const { customInstructions: _retired, ...config } = row;
-    return config;
+    return withoutRetired(row);
   }
 
   /**
@@ -117,10 +133,12 @@ export class AiAssistantService {
         // No guard asked for — last write wins, but the bump is still atomic so
         // two saves can't land on the same configVersion (it stamps every
         // AiAssistantInteraction).
-        return this.db.aiAssistantConfig.update({
-          where: { workspaceId },
-          data: { ...data, configVersion: { increment: 1 } },
-        });
+        return withoutRetired(
+          await this.db.aiAssistantConfig.update({
+            where: { workspaceId },
+            data: { ...data, configVersion: { increment: 1 } },
+          }),
+        );
       }
       // The version travels in the WHERE, not a JS compare after the read: a
       // read-then-write lets two concurrent saves both pass the check and the
@@ -140,21 +158,27 @@ export class AiAssistantService {
           currentVersion: current?.configVersion ?? existing.configVersion,
         });
       }
-      return this.db.aiAssistantConfig.findUniqueOrThrow({ where: { workspaceId } });
+      return withoutRetired(
+        await this.db.aiAssistantConfig.findUniqueOrThrow({ where: { workspaceId } }),
+      );
     }
 
     try {
-      return await this.db.aiAssistantConfig.create({
-        data: { workspaceId, ...data, configVersion: 1 },
-      });
+      return withoutRetired(
+        await this.db.aiAssistantConfig.create({
+          data: { workspaceId, ...data, configVersion: 1 },
+        }),
+      );
     } catch (err) {
       // Lost a create race (unique workspaceId) — fall through to an update.
       // Increment rather than read-then-set, same reason as above.
       if ((err as { code?: string })?.code === "P2002") {
-        return this.db.aiAssistantConfig.update({
-          where: { workspaceId },
-          data: { ...data, configVersion: { increment: 1 } },
-        });
+        return withoutRetired(
+          await this.db.aiAssistantConfig.update({
+            where: { workspaceId },
+            data: { ...data, configVersion: { increment: 1 } },
+          }),
+        );
       }
       throw err;
     }
