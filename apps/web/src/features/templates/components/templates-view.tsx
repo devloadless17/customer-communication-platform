@@ -27,6 +27,7 @@ import { Switch } from "@/components/ui/switch";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { LocalTime } from "@/components/local-time";
 import { TemplatePreview } from "@/features/templates/components/template-preview";
+import { headerMediaPreviewSrc } from "@/features/templates/components/header-media-field";
 import { VariableBindingsEditor } from "@/features/templates/components/variable-bindings-editor";
 import { apiFetch } from "@/lib/api/client-fetch";
 import type { ContactFieldDefinition, TemplateDto } from "@ccp/shared/types";
@@ -916,6 +917,35 @@ function CategoryPill({ category }: { category: string }) {
 // Detail drawer
 // ---------------------------------------------------------------------------
 
+/**
+ * The template's saved default header (see "Variable bindings" below) as
+ * preview props, so the drawer shows the picture every send will carry instead
+ * of a placeholder. Only while it still matches the header the template
+ * declares — the same kind check the send dialog applies before pre-filling it.
+ */
+function savedHeaderPreview(template: TemplateDto): {
+  headerMediaUrl: string | null;
+  headerMediaFilename: string | null;
+} {
+  const components = Array.isArray(template.components)
+    ? (template.components as TemplateComponent[])
+    : [];
+  const format = components.find((c) => c.type === "HEADER")?.format;
+  const kind =
+    format === "IMAGE"
+      ? "image"
+      : format === "VIDEO"
+        ? "video"
+        : format === "DOCUMENT"
+          ? "document"
+          : null;
+  const saved = parseVariableBindings(template.variableBindings as never).headerMedia;
+  if (!saved || saved.kind !== kind) return { headerMediaUrl: null, headerMediaFilename: null };
+  return saved.kind === "document"
+    ? { headerMediaUrl: null, headerMediaFilename: saved.filename ?? "Document" }
+    : { headerMediaUrl: headerMediaPreviewSrc(saved.link), headerMediaFilename: null };
+}
+
 function DetailDrawer({
   template,
   allTemplates,
@@ -1099,6 +1129,7 @@ function DetailDrawer({
                           ? (template.components as TemplateComponent[])
                           : []
                       }
+                      {...savedHeaderPreview(template)}
                     />
                   </div>
                 </section>

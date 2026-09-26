@@ -3,11 +3,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { GhostSafeDateInput, localDateTimeValue } from "@/components/ui/ghost-safe-date-input";
-import { AlertTriangle, Check, FileText, Loader2, Send } from "lucide-react";
+import { AlertTriangle, Check, Loader2, Send } from "lucide-react";
 
 import { apiFetch } from "@/lib/api/client-fetch";
 import { Button } from "@/components/ui/button";
 import { HeaderMediaField, headerMediaPreviewSrc } from "@/features/templates/components/header-media-field";
+import { TemplatePreview } from "@/features/templates/components/template-preview";
 import {
   CarouselCardsField,
   carouselCardsComplete,
@@ -34,7 +35,6 @@ import { TokenHighlightInput } from "@/features/templates/components/token-highl
 
 import {
   templateNamedPlaceholders,
-  renderTemplateBodyNamed,
   requiredCarouselCards,
   requiredTemplateButtonParams,
   templateNeedsOfferExpiry,
@@ -45,7 +45,6 @@ import {
   countPlaceholders,
   extractExample,
   firstEmptyIndex,
-  renderPlaceholders,
 } from "./utils";
 
 export function TemplateFillView({
@@ -116,7 +115,6 @@ export function TemplateFillView({
   );
   const headerComp = components.find((c) => c.type === "HEADER");
   const bodyComp = components.find((c) => c.type === "BODY");
-  const footerComp = components.find((c) => c.type === "FOOTER");
   const buttonsComp = components.find((c) => c.type === "BUTTONS");
 
   // A body is EITHER positional (`{{1}}`) or NAMED (`{{order_id}}`), and WHICH
@@ -139,6 +137,11 @@ export function TemplateFillView({
         ? templateNamedPlaceholders(headerComp.text).length
         : countPlaceholders(headerComp.text)
       : 0;
+  // The preview substitutes the header value by this name on a named template.
+  const headerNamedVar =
+    isNamed && headerComp?.format === "TEXT" && headerComp.text
+      ? (templateNamedPlaceholders(headerComp.text)[0] ?? null)
+      : null;
   // A LOCATION header carries its whole pin at send time.
   const needsLocation = headerComp?.format === "LOCATION";
   // A limited-time offer renders a live countdown, so the expiry INSTANT is a
@@ -618,16 +621,23 @@ export function TemplateFillView({
             <span>Preview</span>
             <span className="h-px flex-1 bg-border" />
           </div>
-          <PreviewBubble
-            headerComp={headerComp}
-            headerValue={resolvedHeaderVar}
-            headerMedia={headerMedia}
-            bodyText={template.bodyText}
-            bodyVars={resolvedBodyVars}
-            bodyNames={isNamed ? bodyNamedVars : null}
-            footerComp={footerComp}
-            buttonsComp={buttonsComp}
-          />
+          <div className="rounded-lg border border-border bg-muted/30 p-3">
+            <TemplatePreview
+              components={components}
+              bodyValues={resolvedBodyVars}
+              bodyNames={isNamed ? bodyNamedVars : null}
+              headerValue={resolvedHeaderVar}
+              headerName={headerNamedVar}
+              headerMediaUrl={
+                headerMedia && headerMedia.kind !== "document"
+                  ? headerMediaPreviewSrc(headerMedia.link)
+                  : null
+              }
+              headerMediaFilename={
+                headerMedia?.kind === "document" ? (headerMedia.filename ?? "Document") : null
+              }
+            />
+          </div>
         </div>
       </div>
 
@@ -769,113 +779,3 @@ function VarField({
     </label>
   );
 }
-
-function PreviewBubble({
-  headerComp,
-  headerValue,
-  headerMedia,
-  bodyText,
-  bodyVars,
-  bodyNames,
-  footerComp,
-  buttonsComp,
-}: {
-  headerComp: TemplateComponent | undefined;
-  headerValue: string;
-  headerMedia: { kind: "image" | "video" | "document"; link: string; filename?: string } | null;
-  bodyText: string;
-  bodyVars: string[];
-  /** Placeholder names, positionally aligned with `bodyVars`, for a NAMED
-   *  template; null for a positional one. */
-  bodyNames: string[] | null;
-  footerComp: TemplateComponent | undefined;
-  buttonsComp: TemplateComponent | undefined;
-}) {
-  const renderedBody = bodyNames
-    ? renderTemplateBodyNamed(
-        bodyText,
-        bodyNames.map((name, i) => ({ name, text: bodyVars[i] ?? "" })),
-      )
-    : renderPlaceholders(bodyText, bodyVars);
-  const renderedHeader =
-    headerComp?.format === "TEXT" && headerComp.text
-      ? // A named header substitutes by name; `renderPlaceholders` only knows
-        // `{{1}}`, so it left `{{customer_name}}` visible in the preview.
-        renderTemplateBodyNamed(renderPlaceholders(headerComp.text, [headerValue]), [
-          ...templateNamedPlaceholders(headerComp.text).map((name) => ({
-            name,
-            text: headerValue,
-          })),
-        ])
-      : null;
-
-  return (
-    <div className="rounded-lg border border-border bg-card p-3 shadow-xs">
-      <div className="rounded-md bg-success-bg/50 p-3 ring-1 ring-success-border">
-        {/* Header */}
-        {headerComp?.format === "TEXT" && renderedHeader && (
-          <div className="mb-1 text-sm font-semibold text-foreground">
-            {renderedHeader}
-          </div>
-        )}
-        {headerComp && headerComp.format !== "TEXT" && (
-          headerMedia ? (
-            headerMedia.kind === "image" ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={headerMediaPreviewSrc(headerMedia.link)}
-                alt="Header preview"
-                className="mb-2 max-h-40 w-full rounded-md object-cover"
-              />
-            ) : headerMedia.kind === "video" ? (
-              <video
-                src={headerMediaPreviewSrc(headerMedia.link)}
-                className="mb-2 max-h-40 w-full rounded-md"
-                controls
-                muted
-              />
-            ) : (
-              <div className="mb-2 flex items-center gap-2 rounded-md border border-success-border bg-success-bg/50 px-3 py-2 text-xs text-foreground">
-                <FileText className="size-4 shrink-0 text-success-fg" />
-                <span className="truncate">{headerMedia.filename ?? "Document"}</span>
-              </div>
-            )
-          ) : (
-            <div className="mb-2 flex h-20 items-center justify-center rounded-md border border-dashed border-success-border bg-success-bg/50 text-2xs text-muted-foreground">
-              {headerComp.format ?? "MEDIA"} header
-            </div>
-          )
-        )}
-
-        {/* Body */}
-        <div className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
-          {renderedBody || (
-            <span className="text-muted-foreground">No body</span>
-          )}
-        </div>
-
-        {/* Footer */}
-        {footerComp?.text && (
-          <div className="mt-2 text-2xs text-muted-foreground">
-            {footerComp.text}
-          </div>
-        )}
-      </div>
-
-      {/* Buttons */}
-      {buttonsComp?.buttons && buttonsComp.buttons.length > 0 && (
-        <div className="mt-2 flex flex-col gap-1">
-          {buttonsComp.buttons.map((b, i) => (
-            <div
-              key={i}
-              className="rounded-md border border-border bg-background px-2 py-1.5 text-center text-xs font-medium text-primary"
-            >
-              {b.text}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-

@@ -24,8 +24,11 @@ import {
 
 /**
  * Rendered WhatsApp message bubble for a template — header, body, footer and
- * buttons in the shape Meta dispatches them. Used by both the templates list
- * (preview drawer) and the create wizard (live preview pane).
+ * buttons in the shape Meta dispatches them. The ONE template preview: the
+ * templates page (preview drawer + create wizard), the inbox send dialog and
+ * the broadcast composer all render it. Each of the last two used to keep a
+ * private copy, and they drifted — the broadcast one never showed the header
+ * image and never filled a named variable.
  *
  * Placeholders are filled by the caller: `bodyValues[i]` plugs into `{{i+1}}`.
  * When a value is empty we leave the placeholder as `{{n}}` so the agent sees
@@ -43,6 +46,11 @@ export function TemplatePreview({
    */
   headerMediaUrl,
   /**
+   * A DOCUMENT header's file name — the customer's phone shows it on the
+   * document card, so the preview does too.
+   */
+  headerMediaFilename,
+  /**
    * Variable NAMES in fill order for a NAMED-format template (`["first_name",
    * "order_id"]`), or null/omitted for the positional default.
    *
@@ -59,6 +67,7 @@ export function TemplatePreview({
   bodyValues?: string[];
   headerValue?: string;
   headerMediaUrl?: string | null;
+  headerMediaFilename?: string | null;
   bodyNames?: string[] | null;
   headerName?: string | null;
   className?: string;
@@ -79,6 +88,7 @@ export function TemplatePreview({
             value={headerValue}
             name={headerName ?? null}
             mediaUrl={headerMediaUrl ?? null}
+            filename={headerMediaFilename ?? null}
           />
         )}
         <div className="px-3 py-2.5">
@@ -168,11 +178,13 @@ function HeaderBlock({
   value,
   name,
   mediaUrl,
+  filename,
 }: {
   header: TemplateComponent;
   value: string;
   name: string | null;
   mediaUrl: string | null;
+  filename: string | null;
 }) {
   if (header.format === "TEXT") {
     const text = header.text ?? "";
@@ -208,6 +220,16 @@ function HeaderBlock({
   if (mediaUrl && fmt === "VIDEO") {
     return <HeaderVideo url={mediaUrl} />;
   }
+  if (filename && fmt === "DOCUMENT") {
+    return (
+      <div className="p-1">
+        <div className="flex items-center gap-2 rounded-xl bg-emerald-500/8 px-3 py-2.5 text-xs text-foreground">
+          <FileTextIcon className="size-4 shrink-0 text-muted-foreground" />
+          <span className="truncate">{filename}</span>
+        </div>
+      </div>
+    );
+  }
   const Icon =
     fmt === "IMAGE" ? ImageIcon : fmt === "VIDEO" ? Video : FileTextIcon;
   return (
@@ -239,7 +261,12 @@ function HeaderImage({ url }: { url: string }) {
     );
   }
   return (
-    <div className="bg-muted/40">
+    // The picture at its OWN shape, across the bubble's full width, inset with
+    // rounded corners — how the customer's phone shows it, and how the sent
+    // bubble in the inbox shows it. A fixed-height box with object-cover cut a
+    // square banner down to a thin slice of its middle: a preview of something
+    // the customer never sees. max-h caps a very tall portrait, as phones do.
+    <div className="p-1">
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
         ref={ref}
@@ -248,7 +275,7 @@ function HeaderImage({ url }: { url: string }) {
         onError={() => setErrored(true)}
         loading="lazy"
         decoding="async"
-        className="h-44 w-full object-cover"
+        className="block h-auto max-h-96 w-full rounded-xl bg-muted/40 object-cover"
       />
     </div>
   );
@@ -270,14 +297,18 @@ function HeaderVideo({ url }: { url: string }) {
       </div>
     );
   }
+  // Same reasoning as HeaderImage: the whole frame at its own shape, not a
+  // fixed-height crop of it.
   return (
-    <video
-      ref={ref}
-      src={url}
-      controls
-      onError={() => setErrored(true)}
-      className="h-44 w-full bg-black object-cover"
-    />
+    <div className="p-1">
+      <video
+        ref={ref}
+        src={url}
+        controls
+        onError={() => setErrored(true)}
+        className="block h-auto max-h-96 w-full rounded-xl bg-black"
+      />
+    </div>
   );
 }
 

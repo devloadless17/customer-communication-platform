@@ -27,6 +27,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { cn } from "@ccp/shared/utils";
 import {
+  renderTemplateBody,
+  renderTemplateBodyNamed,
   requiredCarouselCards,
   requiredTemplateButtonParams,
   templateNamedPlaceholders,
@@ -67,7 +69,8 @@ import { toast } from "@/lib/toast";
 import { AudiencePicker, type AudienceState } from "@/features/broadcasts/components/audience-picker";
 import { RecipientsPreviewDialog } from "@/features/broadcasts/components/recipients-preview-dialog";
 import { FieldTokenPicker } from "@/features/templates/components/field-token-picker";
-import { HeaderMediaField } from "@/features/templates/components/header-media-field";
+import { HeaderMediaField, headerMediaPreviewSrc } from "@/features/templates/components/header-media-field";
+import { TemplatePreview } from "@/features/templates/components/template-preview";
 import {
   CarouselCardsField,
   carouselCardsComplete,
@@ -471,8 +474,6 @@ export function NewBroadcastForm({
   }, [selectedTemplate]);
 
   const headerComp = components.find((c) => c.type === "HEADER");
-  const footerComp = components.find((c) => c.type === "FOOTER");
-  const buttonsComp = components.find((c) => c.type === "BUTTONS");
 
   // NAMED vs POSITIONAL comes from Meta's stored `parameter_format`, never from
   // a regex over the body: a positional template containing `{{order_id}}` as
@@ -1239,14 +1240,18 @@ export function NewBroadcastForm({
       // a scheduled broadcast can be canceled/deleted before it fires.
       if (!scheduledAtIso) {
         // Resolve a one-line preview of the body the same way the live
-        // PreviewBubble does (renderPlaceholders + resolveFieldTokens over the
-        // sample contact) so the confirm shows exactly what the agent saw, then
-        // truncate it to keep the dialog body one line.
+        // TemplatePreview does (the shared renderers + resolveFieldTokens over
+        // the sample contact) so the confirm shows exactly what the agent saw,
+        // then truncate it to keep the dialog body one line.
+        const sampleValues = bodyVars.map((v) => resolveFieldTokens(v, SAMPLE_CONTACT));
         const resolvedBody = usesBody
           ? freeformBody.replace(/\s+/g, " ").trim()
-          : renderPlaceholders(
-              selectedTemplate!.bodyText,
-              bodyVars.map((v) => resolveFieldTokens(v, SAMPLE_CONTACT)),
+          : (isNamedTemplate
+              ? renderTemplateBodyNamed(
+                  selectedTemplate!.bodyText,
+                  namedBodyVars.map((name, i) => ({ name, text: sampleValues[i] ?? "" })),
+                )
+              : renderTemplateBody(selectedTemplate!.bodyText, sampleValues)
             )
               .replace(/\s+/g, " ")
               .trim();
@@ -1842,14 +1847,23 @@ export function NewBroadcastForm({
               <span>Preview</span>
               <span className="h-px flex-1 bg-border" />
             </div>
-            <PreviewBubble
-              headerComp={headerComp}
-              headerValue={resolveFieldTokens(headerVar, SAMPLE_CONTACT)}
-              bodyText={selectedTemplate.bodyText}
-              bodyVars={bodyVars.map((v) => resolveFieldTokens(v, SAMPLE_CONTACT))}
-              footerComp={footerComp}
-              buttonsComp={buttonsComp}
-            />
+            <div className="rounded-lg border border-border bg-muted/30 p-3">
+              <TemplatePreview
+                components={components}
+                bodyValues={bodyVars.map((v) => resolveFieldTokens(v, SAMPLE_CONTACT))}
+                bodyNames={isNamedTemplate ? namedBodyVars : null}
+                headerValue={resolveFieldTokens(headerVar, SAMPLE_CONTACT)}
+                headerName={namedHeaderVar ?? null}
+                headerMediaUrl={
+                  headerMedia && headerMedia.kind !== "document"
+                    ? headerMediaPreviewSrc(headerMedia.link)
+                    : null
+                }
+                headerMediaFilename={
+                  headerMedia?.kind === "document" ? (headerMedia.filename ?? "Document") : null
+                }
+              />
+            </div>
           </div>
         </StepCard>
       )}
@@ -2566,60 +2580,6 @@ function tokenForBinding(binding: VariableBinding | undefined): string {
   return "";
 }
 
-function PreviewBubble({
-  headerComp,
-  headerValue,
-  bodyText,
-  bodyVars,
-  footerComp,
-  buttonsComp,
-}: {
-  headerComp: TemplateComponent | undefined;
-  headerValue: string;
-  bodyText: string;
-  bodyVars: string[];
-  footerComp: TemplateComponent | undefined;
-  buttonsComp: TemplateComponent | undefined;
-}) {
-  const renderedBody = renderPlaceholders(bodyText, bodyVars);
-  const renderedHeader =
-    headerComp?.format === "TEXT" && headerComp.text
-      ? renderPlaceholders(headerComp.text, [headerValue])
-      : null;
-  return (
-    <div className="rounded-lg border border-border bg-card p-3 shadow-xs">
-      <div className="rounded-md bg-success-bg p-3 ring-1 ring-emerald-500/10">
-        {headerComp?.format === "TEXT" && renderedHeader && (
-          <div className="mb-1 text-sm font-semibold text-foreground">{renderedHeader}</div>
-        )}
-        {headerComp && headerComp.format !== "TEXT" && (
-          <div className="mb-2 flex h-20 items-center justify-center rounded-md border border-dashed border-success-border bg-success-bg text-2xs text-muted-foreground">
-            {headerComp.format ?? "MEDIA"} header
-          </div>
-        )}
-        <div className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
-          {renderedBody || <span className="text-muted-foreground">No body</span>}
-        </div>
-        {footerComp?.text && (
-          <div className="mt-2 text-2xs text-muted-foreground">{footerComp.text}</div>
-        )}
-      </div>
-      {buttonsComp?.buttons && buttonsComp.buttons.length > 0 && (
-        <div className="mt-2 flex flex-col gap-1">
-          {buttonsComp.buttons.map((b, i) => (
-            <div
-              key={i}
-              className="rounded-md border border-border bg-background px-2 py-1.5 text-center text-xs font-medium text-primary"
-            >
-              {b.text}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function CategoryPill({ category }: { category: string }) {
   const tone =
     category === "marketing"
@@ -2665,14 +2625,6 @@ function localDatetimeNow(): string {
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
   return text.slice(0, max - 1).trimEnd() + "…";
-}
-
-function renderPlaceholders(text: string, vars: string[]): string {
-  return text.replace(/\{\{(\d+)\}\}/g, (_match, idxStr) => {
-    const idx = Number(idxStr) - 1;
-    const v = vars[idx];
-    return v && v.length > 0 ? v : `{{${idxStr}}}`;
-  });
 }
 
 async function safeReadError(res: Response): Promise<string> {

@@ -290,8 +290,35 @@ function ImageBlock({
         // keeps it polite inside the bubble's max-w-[70%]. The <img> uses
         // object-cover, so the slot is filled edge-to-edge with NO letterbox
         // bands — non-4:3 photos crop rather than show black margins.
-        className="relative block h-65 min-w-40 max-w-full overflow-hidden rounded-xl bg-muted"
+        //
+        // w-full: the slot spans the WHOLE bubble, which a caption, a sent
+        // template's body/footer/buttons or a quoted reply can make wider than
+        // the photo (a square photo is only 260px wide at this height). A
+        // percentage width adds nothing to the bubble's intrinsic width, so the
+        // bubble is exactly as wide as before — only the slot stops leaving a
+        // bare strip beside the picture. `isolate` keeps the blurred backdrop
+        // below clipped to the rounded corners (Safari leaks a filtered child
+        // past overflow-hidden + border-radius without a stacking context).
+        className="relative isolate block h-65 w-full min-w-40 max-w-full overflow-hidden rounded-xl bg-muted"
       >
+        {/* The strip beside a narrower photo: the photo itself, blurred and
+            scaled past the edges — the way Telegram fills it. Not the photo
+            stretched (object-cover across the full width crops a square to a
+            thin band of its middle) and not a flat fill (still reads as a gap).
+            Out of flow, so it never sizes anything; fully hidden behind a photo
+            that already spans the slot. Same URL as the photo, so it costs no
+            second download. */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={thumbSrc}
+          alt=""
+          aria-hidden
+          decoding="async"
+          className={cn(
+            "pointer-events-none absolute inset-0 size-full scale-125 object-cover blur-xl transition-opacity duration-150",
+            loaded ? "opacity-100" : "opacity-0",
+          )}
+        />
         {/* CALM static placeholder (NOT animate-pulse) fills the fixed slot
             until the photo decodes. A PULSING shimmer was the visible
             "flicker": with loading="lazy" a cached image isn't `complete`
@@ -327,8 +354,13 @@ function ImageBlock({
           // images get `loaded` set synchronously in the mount effect (img
           // already `complete`), so they paint at opacity-100 with NO visible
           // fade. Only genuinely-loading images animate in.
+          //
+          // `relative` paints it ABOVE the absolutely-positioned backdrop (a
+          // positioned sibling otherwise paints over in-flow content);
+          // `mx-auto` centres it when the slot is wider; its own `bg-muted`
+          // shows behind a transparent PNG instead of the blurred backdrop.
           className={cn(
-            "block h-65 w-auto max-w-full object-cover transition-opacity duration-150 hover:opacity-95",
+            "relative mx-auto block h-65 w-auto max-w-full bg-muted object-cover transition-opacity duration-150 hover:opacity-95",
             loaded ? "opacity-100" : "opacity-0",
           )}
         />
@@ -378,28 +410,34 @@ function VideoBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }
   if (errored) {
     return <MediaUnavailable kind="video" isOut={isOut} />;
   }
+  // The black band spans the whole bubble, which a caption or a sent
+  // template's body can make wider than the fixed 320px player — the same bare
+  // strip ImageBlock fills. A player letterboxed in black is the familiar look;
+  // the band adds no width of its own (percentage), only the video does.
   return (
-    <video
-      ref={videoRef}
-      src={media.url}
-      controls
-      // `preload="none"` (was "metadata") — `metadata` fires a HEAD + range
-      // fetch per <video> on mount. On a thread with N videos that's N
-      // round-trips through /api/media/<id> just to learn the duration; the
-      // user usually never plays most of them. The browser fetches on demand
-      // when the user clicks the play control.
-      //
-      // `poster` (when present): server-extracted first-frame JPEG, fetched
-      // through the same auth-redirect path as the video (/api/media/:id/thumb).
-      // Inbound video bubbles get this; outbound + legacy rows leave it
-      // undefined and fall back to the bg-black slot.
-      {...(media.thumbnailUrl ? { poster: media.thumbnailUrl } : {})}
-      preload="none"
-      onError={() => setErrored(true)}
-      // Same fixed-width reasoning as ImageBlock — shrink-to-fit bubble
-      // parent collapses w-full to 0 without an intrinsic width source.
-      className="block aspect-4/3 max-h-65 w-80 max-w-full rounded-xl bg-black object-cover"
-    />
+    <div className="w-full overflow-hidden rounded-xl bg-black">
+      <video
+        ref={videoRef}
+        src={media.url}
+        controls
+        // `preload="none"` (was "metadata") — `metadata` fires a HEAD + range
+        // fetch per <video> on mount. On a thread with N videos that's N
+        // round-trips through /api/media/<id> just to learn the duration; the
+        // user usually never plays most of them. The browser fetches on demand
+        // when the user clicks the play control.
+        //
+        // `poster` (when present): server-extracted first-frame JPEG, fetched
+        // through the same auth-redirect path as the video (/api/media/:id/thumb).
+        // Inbound video bubbles get this; outbound + legacy rows leave it
+        // undefined and fall back to the bg-black slot.
+        {...(media.thumbnailUrl ? { poster: media.thumbnailUrl } : {})}
+        preload="none"
+        onError={() => setErrored(true)}
+        // Same fixed-width reasoning as ImageBlock — shrink-to-fit bubble
+        // parent collapses w-full to 0 without an intrinsic width source.
+        className="mx-auto block aspect-4/3 max-h-65 w-80 max-w-full bg-black object-cover"
+      />
+    </div>
   );
 }
 
