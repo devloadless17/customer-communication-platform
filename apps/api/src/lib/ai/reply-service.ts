@@ -25,6 +25,7 @@ export interface GenerateReplyInput {
   memory: MemoryItem[];
   recentMessages: RecentMessage[];
   details: ContactDetails;
+  hasRepliedBefore: boolean;
   now?: Date;
 }
 
@@ -51,6 +52,7 @@ export async function generateReply(input: GenerateReplyInput): Promise<Generate
     latestText: input.latestText,
     isVoice: input.isVoice,
     details: input.details,
+    hasRepliedBefore: input.hasRepliedBefore,
   });
 
   // ONE engine. Both replyText and the spoken ttsText come from this single
@@ -107,8 +109,21 @@ function normalize(p: ReplyPayload): ReplyPayload {
     complaintConfidence: clamp01(
       typeof p.complaintConfidence === "number" ? p.complaintConfidence : 0,
     ),
-    customerEmail: (p.customerEmail ?? "").trim().slice(0, 254),
-    askedForEmail: p.askedForEmail === true,
+    // Shape-only normalisation. WHICH keys are acceptable and whether a value
+    // is usable is `captureContactDetails`' job — it is the one place that
+    // knows the workspace's configured list, so validating here too would be a
+    // second copy of that rule drifting out of step with it.
+    collectedDetails: Array.isArray(p.collectedDetails)
+      ? p.collectedDetails
+          .filter((d): d is { key: string; value: string } => !!d && typeof d === "object")
+          .map((d) => ({
+            key: String(d.key ?? "").trim().slice(0, 120),
+            value: String(d.value ?? "").trim().slice(0, 500),
+          }))
+          .filter((d) => d.key && d.value)
+          .slice(0, 12)
+      : [],
+    askedForDetail: (p.askedForDetail ?? "").trim().slice(0, 120),
   };
 }
 

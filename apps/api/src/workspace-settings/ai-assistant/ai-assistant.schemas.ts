@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+import {
+  COLLECT_BUILTIN_TARGETS,
+  type CollectBuiltinTarget,
+} from "@ccp/shared/ai/collect-details";
+
 /**
  * Zod schemas for the AI Assistant configuration surface (the 7 settings tabs)
  * and knowledge-file management. Every field is optional so the PUT is a merge
@@ -20,6 +25,61 @@ export const ReplyChannelModeSchema = z.enum([
   "match_customer",
   "text_and_voice",
 ]);
+
+/**
+ * One entry in the ordered "details to collect" list. The target vocabulary is
+ * shared with the settings UI (@ccp/shared/ai/collect-details) so the picker
+ * and this validator can never offer different things — and so PHONE stays out
+ * of both: `Contact.phoneNumber` is an auto-merge strong key and a typed number
+ * is not vendor-verified (see that file's header).
+ *
+ * `key` is required for a `custom` entry and rejected on a built-in one, so a
+ * saved row is unambiguous about where an answer lands. The referenced
+ * `ContactFieldDefinition` is NOT verified here: an admin can delete a field
+ * afterwards either way, so the runtime already has to tolerate a dangling key
+ * (loadContactDetails drops it) and a save-time check would only add a query
+ * that guarantees nothing.
+ */
+// Annotated first, then asserted to the non-empty tuple `z.enum` wants — a
+// spread of a mapped array is not itself assignable to that tuple shape.
+const COLLECT_TARGETS: Array<CollectBuiltinTarget | "custom"> = [
+  ...COLLECT_BUILTIN_TARGETS.map((t) => t.target),
+  "custom",
+];
+const CollectTargetSchema = z.enum(
+  COLLECT_TARGETS as [CollectBuiltinTarget | "custom", ...Array<CollectBuiltinTarget | "custom">],
+);
+
+export const CollectFieldSchema = z
+  .object({
+    target: CollectTargetSchema,
+    key: z.string().min(1).max(64).optional(),
+    purpose: z.string().max(200).optional(),
+  })
+  .strict()
+  .superRefine((row, ctx) => {
+    if (row.target === "custom" && !row.key) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["key"],
+        message: "custom_field_key_required",
+      });
+    }
+    if (row.target !== "custom" && row.key) {
+      // A built-in target already names its column; a stray key would make the
+      // saved row ambiguous about where an answer lands.
+      ctx.addIssue({ code: "custom", path: ["key"], message: "key_not_allowed" });
+    }
+  })
+  .array()
+  .max(12)
+  // Order is priority and duplicates would mean asking twice for one thing.
+  .refine(
+    (rows) =>
+      new Set(rows.map((r) => (r.target === "custom" ? `custom:${r.key}` : r.target))).size ===
+      rows.length,
+    { message: "duplicate_collect_field" },
+  );
 
 // --- Structured JSON field shapes ---
 const TimeRange = z.object({ open: z.string().max(8), close: z.string().max(8) });
@@ -93,13 +153,13 @@ export const UpdateAiConfigSchema = z
     tone: z.string().max(60).optional(),
     matchCustomerTone: z.boolean().optional(),
     replyLength: z.enum(["short", "balanced", "detailed"]).optional(),
-    customInstructions: longText.nullish(),
     autoReplyMode: AutoReplyModeSchema.optional(),
     confidenceThreshold: z.number().min(0).max(1).optional(),
     maxAutoRepliesPerConv: z.number().int().min(0).max(1000).optional(),
     humanTakeoverBehavior: z.string().max(64).optional(),
     replyWaitSeconds: z.number().int().min(0).max(120).optional(),
-    collectCustomerEmail: z.boolean().optional(),
+    collectFields: CollectFieldSchema.optional(),
+    collectTiming: z.enum(["opening", "natural"]).optional(),
 
     // Voice
     incomingTranscription: z.boolean().optional(),

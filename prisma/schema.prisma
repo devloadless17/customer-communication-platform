@@ -5784,6 +5784,12 @@ model AiAssistantConfig {
   tone                  String          @default("friendly")
   matchCustomerTone     Boolean         @default(true)
   replyLength           String          @default("balanced") // short | balanced | detailed
+  // RETIRED 2026-09-01 — removed from the settings surface and no longer read
+  // by the prompt builder. The column is kept (not dropped) only so the text
+  // admins already wrote is recoverable; nothing in application code reads it,
+  // and it must stay that way: a free-text instruction that steers every reply
+  // while being invisible in the UI is unattributable behaviour. Drop the
+  // column once no workspace has a value worth exporting.
   customInstructions    String?         @db.Text
   autoReplyMode         AiAutoReplyMode @default(auto_send)
   // Below this model-reported confidence the assistant DRAFTS instead of
@@ -5793,11 +5799,20 @@ model AiAssistantConfig {
   // after N consecutive AI turns without a human, to bound runaway loops.
   maxAutoRepliesPerConv Int             @default(0)
   humanTakeoverBehavior String          @default("cancel_and_yield")
-  // Ask a customer we have no email for, once, for their email address, and
-  // store it on the Contact when they give it. Contact detail only — a
-  // self-typed address is NEVER treated as an identity key (a typo or a shared
-  // family address would silently merge two people); see docs/identity.md.
-  collectCustomerEmail  Boolean         @default(true)
+  // Contact details the assistant may ask a customer for, as an ORDERED list of
+  // `CollectFieldSpec` (@ccp/shared/ai/collect-details) — `[{ target, key?,
+  // purpose? }]`. Order is priority: it asks for the first entry not already on
+  // file, ONE per reply. `[]` (the default) means it never asks.
+  //
+  // Superseded `collectCustomerEmail Boolean`, whose value migrates forward as
+  // `[{"target":"email"}]`. Contact detail only — a self-asserted value is NEVER
+  // treated as an identity key, and PHONE is deliberately not a collectible
+  // target at all (see the header of collect-details.ts: `Contact.phoneNumber`
+  // IS an unconditional merge key, and a typed number is not vendor-verified).
+  collectFields         Json            @default("[]")
+  // "opening" (ask up front in the first reply of a new conversation) or
+  // "natural" (ask once it has answered what the customer came for).
+  collectTiming         String          @default("natural")
   // Seconds to WAIT after a customer's last message before replying, so a
   // burst of chunked messages gets ONE considered answer. The timer resets on
   // each new inbound. 0 = reply immediately (no debounce).
@@ -5883,14 +5898,17 @@ model AiConversationState {
   // Consecutive AI auto-replies since the last human/customer break — enforces
   // AiAssistantConfig.maxAutoRepliesPerConv.
   autoReplyCount   Int                   @default(0)
-  // When the assistant last asked this customer for their email address (see
-  // AiAssistantConfig.collectCustomerEmail). ASKED, not answered — it exists so
-  // the question is asked ONCE. Nagging someone who declined on every thread
-  // they open is the failure mode this prevents, so it is deliberately not
-  // cleared when they ignore it. Lives here rather than on Contact because it
-  // is assistant bookkeeping, not a property of the person; one conversation
-  // per contact makes it per-person in practice either way.
-  emailRequestedAt DateTime?
+  // Which collectible details the assistant has ALREADY asked this customer
+  // for: `{ "<detailKey>": "<ISO timestamp>" }`, keyed by `detailKey()`
+  // (@ccp/shared/ai/collect-details). ASKED, not answered — it exists so each
+  // question is asked ONCE. Nagging someone who declined is the failure mode
+  // this prevents, so an entry is deliberately not cleared when they ignore it.
+  //
+  // Lives here rather than on Contact because it is assistant bookkeeping, not
+  // a property of the person; one conversation per contact makes it per-person
+  // in practice either way. Superseded `emailRequestedAt DateTime?`, whose
+  // value migrates forward under the `email` key.
+  requestedDetails Json                  @default("{}")
   updatedAt        DateTime              @updatedAt
 
   @@index([workspaceId])

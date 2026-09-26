@@ -53,12 +53,12 @@ export const DEFAULT_AI_CONFIG = {
   tone: "friendly",
   matchCustomerTone: true,
   replyLength: "balanced",
-  customInstructions: null,
   autoReplyMode: "auto_send",
   confidenceThreshold: 0.55,
   maxAutoRepliesPerConv: 0,
   humanTakeoverBehavior: "cancel_and_yield",
-  collectCustomerEmail: true,
+  collectFields: [] as unknown[],
+  collectTiming: "natural",
   incomingTranscription: true,
   saveTranscript: true,
   replyChannelMode: "text",
@@ -74,10 +74,21 @@ export const DEFAULT_AI_CONFIG = {
 export class AiAssistantService {
   constructor(private readonly db: DbService) {}
 
-  /** Read the team's config, or synthesized defaults when nothing is saved yet. */
+  /**
+   * Read the team's config, or synthesized defaults when nothing is saved yet.
+   *
+   * `customInstructions` is stripped rather than returned: the column is
+   * RETIRED (see prisma/schema.prisma) and nothing reads it, but the settings
+   * form round-trips whatever it is handed straight back into the PUT — and
+   * that body is `.strict()`, so leaving the key in would fail every save with
+   * `unrecognized_keys`. Withholding it here is also the enforcement that no
+   * surface can quietly start using it again.
+   */
   async getConfig(workspaceId: string) {
     const row = await this.db.aiAssistantConfig.findUnique({ where: { workspaceId } });
-    return row ?? { ...DEFAULT_AI_CONFIG, workspaceId };
+    if (!row) return { ...DEFAULT_AI_CONFIG, workspaceId };
+    const { customInstructions: _retired, ...config } = row;
+    return config;
   }
 
   /**

@@ -5,7 +5,7 @@ import { publish } from "@/lib/events/bus";
 
 import { arabicToArabizi } from "./arabizi";
 import { claimInbound, legacyAutopilotOwnsTeam } from "./automation-claim";
-import { captureCustomerEmail, markEmailRequested } from "./contact-details";
+import { captureContactDetails, markDetailRequested } from "./contact-details";
 import { getState, handoffToHuman, incrementAutoReply, onCustomerInbound } from "./conversation-state";
 import { decideMode } from "./decide-mode";
 import { HALLUCINATION_FLAG_THRESHOLD } from "./hallucination";
@@ -83,9 +83,10 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
   if (!won) return; // already claimed → no double reply
 
   const startedAt = Date.now();
-  const { memory, recentMessages: recent, details } = await loadReplyContext(
+  const { memory, recentMessages: recent, details, hasRepliedBefore } = await loadReplyContext(
     workspaceId,
     conversationId,
+    config.collectFields,
   );
 
   let generated;
@@ -97,6 +98,7 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
       memory,
       recentMessages: recent,
       details,
+      hasRepliedBefore,
     });
   } catch (err) {
     await audit(workspaceId, conversationId, inboundMessageId, config.configVersion, {
@@ -136,10 +138,15 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
   }
 
   // Also about the CUSTOMER's message, not the reply — so it lands whether we
-  // send, draft, or escalate. They gave us their address; losing it because the
+  // send, draft, or escalate. They gave us the detail; losing it because the
   // reply happened to need approval would mean asking them again.
-  if (config.collectCustomerEmail && payload.customerEmail) {
-    await captureCustomerEmail(workspaceId, conversationId, payload.customerEmail).catch(() => {});
+  if (payload.collectedDetails.length) {
+    await captureContactDetails(
+      workspaceId,
+      conversationId,
+      details.details,
+      payload.collectedDetails,
+    ).catch(() => {});
   }
 
   const openNow = openingStatus(config, new Date()).open;
@@ -182,8 +189,12 @@ export async function runAiReply(job: AiReplyJob): Promise<void> {
     // Mark the ask only once it has actually GONE OUT. A drafted question the
     // customer never saw must not burn the one ask we allow ourselves; the
     // human approving that draft is the backstop against a repeat.
-    if (payload.askedForEmail && config.collectCustomerEmail) {
-      await markEmailRequested(workspaceId, conversationId);
+    //
+    // Only a detail we actually put in front of the model counts — the marker
+    // is keyed by detail id, and an id the model invented would silently
+    // suppress a real question later.
+    if (payload.askedForDetail && details.details.some((d) => d.key === payload.askedForDetail)) {
+      await markDetailRequested(workspaceId, conversationId, payload.askedForDetail);
     }
 
     const outIds = [delivery.textMessageId, delivery.voiceMessageId].filter(
