@@ -89,6 +89,12 @@ CVE-2026-13149
 # 10.34.5 bundle still vendors brace-expansion 2.1.2.)
 CVE-2026-14257
 CVE-2026-69152
+# Added 2026-10-01: two more DoS CVEs against the SAME corepack-bundled
+# brace-expansion 2.1.2 (Trivy flagged exactly 2.1.2). Our lockfile copies are
+# 1.1.21 / 2.1.7 — patched. Same reachability argument as above; drop these
+# with the two lines above once the pnpm bundle ships a fixed copy.
+CVE-2026-102276
+CVE-2026-102278
 
 # ip-address — inconsistent IP parsing leading to SSRF. Fixed in 10.3.1, and
 # 10.2.0 is present ONLY inside corepack's pnpm bundle (pnpm vendors it via
