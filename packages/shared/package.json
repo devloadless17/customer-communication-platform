@@ -53,7 +53,7 @@
     "better-auth": "^1.6.13",
     "clsx": "^2.1.1",
     "libphonenumber-js": "^1.12.43",
-    "nodemailer": "^9.1.0",
+    "nodemailer": "^10.0.6",
     "tailwind-merge": "^3.6.0",
     "zod": "^4.4.3"
   },
